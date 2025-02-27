@@ -1,0 +1,32 @@
+architecture_overview.md
+file_structure.md
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
+*.pyc~
+*.pyo~
+*.pyd~
+*.pyw~
+
+# Environment variables
+.env
+
+
+# Logs
+logs/
+
+# Data
+data/
+
+# Virtual environment
+venv/
+
+# IDE files
+.idea/
+.vscode/

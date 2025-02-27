@@ -1,0 +1,15 @@
+# Core dependencies
+python-socketio>=5.7.2
+eventlet>=0.33.3
+python-dotenv>=1.0.0
+
+# LiteLLM for model interaction
+litellm>=1.0.0
+
+# Utility libraries
+pydantic>=2.0.0
+jsonschema>=4.17.3
+requests>=2.28.2
+
+# Optional - Redis for storage (if using Redis storage backend)
+# redis>=4.5.4 
