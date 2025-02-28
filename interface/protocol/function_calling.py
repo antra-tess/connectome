@@ -7,9 +7,9 @@ import logging
 import json
 from typing import Dict, Any, List, Tuple, Optional
 
-from agent.protocol.base_protocol import BaseProtocol
+from interface.protocol.base_protocol import BaseProtocol
 from utils.llm import get_model_info
-from agent.prompt_library.protocol_prompts import (
+from interface.prompt_library.protocol_prompts import (
     FUNCTION_CALLING_PROMPT_FORMAT,
     format_tool_description
 )

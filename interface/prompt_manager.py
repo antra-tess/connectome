@@ -7,12 +7,12 @@ import logging
 from typing import Dict, Any, Optional
 
 from config import AGENT_NAME, AGENT_DESCRIPTION
-from agent.prompt_library.base_prompts import (
+from interface.prompt_library.base_prompts import (
     DEFAULT_SYSTEM_PROMPT,
     CONVERSATION_GUIDELINES,
     SAFETY_GUARDRAILS
 )
-from agent.prompt_library.tool_prompts import TOOL_USAGE_GUIDELINES
+from interface.prompt_library.tool_prompts import TOOL_USAGE_GUIDELINES
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')

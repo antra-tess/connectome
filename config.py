@@ -8,15 +8,34 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
-# Socket.IO Server Settings
-SOCKET_HOST = os.getenv('SOCKET_HOST', '0.0.0.0')
-SOCKET_PORT = int(os.getenv('SOCKET_PORT', 5000))
+# Adapter Connection Settings
+# Default adapter settings (can be overridden or extended via environment variables)
+DEFAULT_ADAPTERS = [
+    {
+        "id": "default",
+        "name": "Default Adapter",
+        "url": os.getenv('DEFAULT_ADAPTER_URL', 'http://localhost:5000'),
+        "auth_token": os.getenv('DEFAULT_ADAPTER_TOKEN', ''),
+        "platforms": ["default"]
+    }
+]
+
+# Additional adapters can be configured via environment variables or config files
+# Example format in .env: ADAPTERS='[{"id":"slack","name":"Slack Adapter","url":"http://slack-adapter:5001","auth_token":"token123","platforms":["slack"]}]'
+ADDITIONAL_ADAPTERS = os.getenv('ADAPTERS', '[]')
+
+# Socket.IO Client Settings
+SOCKET_RECONNECTION_ATTEMPTS = int(os.getenv('SOCKET_RECONNECTION_ATTEMPTS', 5))
+SOCKET_RECONNECTION_DELAY = int(os.getenv('SOCKET_RECONNECTION_DELAY', 1000))
+SOCKET_TIMEOUT = int(os.getenv('SOCKET_TIMEOUT', 5000))
 
 # LiteLLM Settings
 LLM_API_KEY = os.getenv('LLM_API_KEY', '')
 LLM_MODEL = os.getenv('LLM_MODEL', 'gpt-4')
 LLM_PROVIDER = os.getenv('LLM_PROVIDER', 'openai')
 LLM_BASE_URL = os.getenv('LLM_BASE_URL', '')
+LLM_TEMPERATURE = float(os.getenv('LLM_TEMPERATURE', 0.7))
+LLM_MAX_TOKENS = int(os.getenv('LLM_MAX_TOKENS', 1000))
 
 # Storage Settings
 STORAGE_TYPE = os.getenv('STORAGE_TYPE', 'file')  # 'file', 'redis', etc.

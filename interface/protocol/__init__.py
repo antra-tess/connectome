@@ -7,7 +7,7 @@ import importlib
 import logging
 from typing import Dict, Any
 
-from agent.protocol.base_protocol import BaseProtocol
+from interface.protocol.base_protocol import BaseProtocol
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -50,7 +50,7 @@ def get_protocol(protocol_name: str) -> BaseProtocol:
     try:
         # Assume the protocol module is named like 'react_protocol.py'
         module_name = f"{protocol_name}_protocol"
-        module_path = f"agent.protocol.{module_name}"
+        module_path = f"interface.protocol.{module_name}"
         
         # Import the module
         module = importlib.import_module(module_path)
@@ -113,13 +113,13 @@ def list_available_protocols() -> Dict[str, str]:
 
 # Import and register built-in protocols
 try:
-    from agent.protocol.react_protocol import ReactProtocol
+    from interface.protocol.react_protocol import ReactProtocol
     register_protocol("react", ReactProtocol)
 except ImportError:
     logger.warning("ReactProtocol not found")
 
 try:
-    from agent.protocol.function_calling import FunctionCallingProtocol
+    from interface.protocol.function_calling import FunctionCallingProtocol
     register_protocol("function_calling", FunctionCallingProtocol)
 except ImportError:
     logger.warning("FunctionCallingProtocol not found") 

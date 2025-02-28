@@ -9,7 +9,7 @@ import logging
 from typing import Dict, Any, List, Optional
 
 from config import MAX_HISTORY_MESSAGES, STORAGE_PATH
-from context.formatter import format_multi_user_chat
+from bot_framework.interface.formatter import format_multi_user_chat
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')

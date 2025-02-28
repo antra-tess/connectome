@@ -7,8 +7,8 @@ import re
 import logging
 from typing import Dict, Any, List, Tuple, Optional
 
-from agent.protocol.base_protocol import BaseProtocol
-from agent.prompt_library.protocol_prompts import (
+from interface.protocol.base_protocol import BaseProtocol
+from interface.prompt_library.protocol_prompts import (
     REACT_PROMPT_FORMAT,
     format_tool_description
 )

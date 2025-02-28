@@ -1,118 +1,126 @@
 # Bot Framework
 
-A modular architecture for an open-source system that enables a single LLM-based agent to participate in multi-user conversations across different platforms while utilizing various tools.
-
-## Core Features
-
-- **Multi-Platform Support**: Connect to multiple messaging platforms through platform-specific normalizing layers
-- **Pluggable Tool-Usage Protocols**: Support for ReAct, Function Calling, and custom protocols
-- **Tool Registry**: Easy registration and execution of tools via a decorator pattern
-- **Context Management**: Intelligent handling of conversation context for the agent
-- **Socket.IO Communication**: Lightweight message passing between the agent and normalizing layers
+A modular, extensible framework for building conversational AI agents with environment-based architecture.
 
 ## Architecture Overview
 
-The system is designed with these major components:
+The Bot Framework is built around an environment-based architecture that provides a flexible and extensible way to organize capabilities and tools. The core components include:
 
-1. **System Prompt Engineering**: Configurable prompts with pluggable tool-usage protocols
-2. **Message Handling**: Socket.IO listener for receiving messages from normalizing layers
-3. **Context Management**: Organizes messages in proper sequence for the agent
-4. **Tool Infrastructure**: Extensible tool registry and execution management
-5. **Agent Capabilities**: Multi-user chat, document editing, memory management, etc.
+### Environment System
 
-## Installation
+The environment system is the foundation of the Bot Framework, allowing for a hierarchical organization of capabilities:
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/yourusername/bot_framework.git
-   cd bot_framework
-   ```
+- **Environment Manager**: Orchestrates all environments, keeps track of registered environments, and facilitates communication between them.
+- **Interface Layer**: Provides a unified API for agents to interact with the environment system, abstracting away the details of environment mounting and tool execution.
+- **System Environment**: The root environment that mounts and manages other environments, providing a centralized entry point.
+- **Specialized Environments**: Purpose-specific environments that encapsulate related tools and functionalities:
+  - **Context Environment**: Manages conversation context and message history.
+  - **Messaging Environment**: Handles communication with various messaging platforms.
+  - **Web Environment**: Provides tools for web browsing, search, and HTTP requests.
+  - **File Environment**: Manages file system operations like reading, writing, listing, and deleting files.
 
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+### Agent System
 
-3. Create a `.env` file with your configuration:
-   ```
-   # Socket.IO Server
-   SOCKET_HOST=0.0.0.0
-   SOCKET_PORT=5000
-   
-   # LiteLLM Settings
-   LLM_API_KEY=your_api_key_here
-   LLM_MODEL=gpt-4
-   LLM_PROVIDER=openai
-   
-   # Agent Settings
-   DEFAULT_PROTOCOL=react
-   ```
+The agent system leverages the environment-based architecture:
 
-## Usage
+- **Agent**: Processes user messages, uses the interface layer to execute tools, and generates responses.
+- **Message Handler**: Routes messages to the appropriate agent and manages the processing flow.
+- **Adapters**: Normalize messages from different platforms into a standard format.
 
-### Starting the Server
+## Key Features
+
+- **Hierarchical Environment Structure**: Environments can be mounted within other environments, creating a flexible tool inheritance system.
+- **Dynamic Tool Availability**: Tools become available or unavailable based on the mounting status of their parent environments.
+- **Unified Interface**: The interface layer provides a consistent API for tool execution across all environments.
+- **Modular Design**: Easy to extend with new environments and tools without modifying existing code.
+- **Context Management**: Integrated context handling through the environment system.
+
+## Getting Started
+
+### Installation
 
 ```bash
-python main.py
+pip install -r requirements.txt
 ```
 
-### Creating Custom Tools
+### Running the Demo
 
-Create tools by using the `register_tool` decorator:
+```bash
+python -m bot_framework.examples.context_demo
+```
+
+### Running Tests
+
+```bash
+python -m unittest bot_framework.tests.test_integration
+```
+
+## Example Usage
 
 ```python
-from tools.registry import register_tool
+from bot_framework.environments.manager import EnvironmentManager
+from bot_framework.environments.system import SystemEnvironment
+from bot_framework.environments.messaging import MessagingEnvironment
+from bot_framework.interface.layer import InterfaceLayer
 
-@register_tool(
-    name="send_email",
-    description="Send an email to a specified recipient",
-    parameter_descriptions={
-        "recipient": "Email address of the recipient",
-        "subject": "Subject line of the email",
-        "body": "Content of the email"
-    }
-)
-def send_email(recipient, subject, body):
-    # Implementation details here
-    return f"Email sent to {recipient}"
+# Initialize environment system
+environment_manager = EnvironmentManager()
+system_env = SystemEnvironment()
+messaging_env = MessagingEnvironment()
+
+# Register environments
+environment_manager.register_environment(system_env)
+environment_manager.register_environment(messaging_env)
+
+# Mount environments
+system_env.mount_environment("messaging")
+
+# Create interface layer (which includes agent functionality)
+interface_layer = InterfaceLayer(environment_manager)
+
+# Now you can use the interface layer to process messages
+response = interface_layer.process_message({
+    'chat_id': 'example_chat',
+    'user_id': 'user123',
+    'content': 'Hello, can you help me?',
+    'role': 'user'
+})
+
+print(response['content'])
 ```
 
-### Implementing a Custom Protocol
+## Extending the Framework
 
-Extend the `BaseProtocol` class to create a custom tool-usage protocol:
+### Creating a New Environment
 
 ```python
-from agent.protocol.base_protocol import BaseProtocol
+from bot_framework.environments.base import Environment
+from typing import Dict, Any
 
-class MyCustomProtocol(BaseProtocol):
-    def format_system_prompt(self, base_prompt, tools):
-        # Your implementation here
-        pass
+class MyCustomEnvironment(Environment):
+    def __init__(self):
+        super().__init__(
+            environment_id="custom",
+            name="Custom Environment",
+            description="A custom environment with specialized tools"
+        )
+        self._register_custom_tools()
     
-    def extract_tool_calls(self, llm_response):
-        # Your implementation here
-        pass
+    def _register_custom_tools(self):
+        self.register_tool(
+            "my_custom_tool",
+            self.my_custom_tool,
+            "Performs a custom operation",
+            {
+                "param1": "Description of parameter 1",
+                "param2": "Description of parameter 2"
+            }
+        )
     
-    def format_tool_result(self, tool_name, result):
-        # Your implementation here
-        pass
-    
-    def extract_final_response(self, llm_response):
-        # Your implementation here
-        pass
-    
-    def format_for_litellm(self, base_prompt, messages, tools):
-        # Your implementation here
-        pass
+    def my_custom_tool(self, param1: str, param2: int) -> Dict[str, Any]:
+        # Tool implementation
+        return {"result": f"Processed {param1} {param2} times"}
 ```
-
-## Normalizing Layers
-
-The Bot Framework communicates with platform-specific normalizing layers via Socket.IO. Each normalizing layer is responsible for:
-
-1. Converting platform-specific message formats to a standard format
-2. Sending normalized messages to the Bot Framework
-3. Receiving responses from the Bot Framework and delivering them to the platform
 
 ## Contributing
 
