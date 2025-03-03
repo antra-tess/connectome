@@ -1,39 +1,69 @@
 # Bot Framework
 
-A modular, extensible framework for building conversational AI agents with environment-based architecture.
+A modular, extensible framework for building conversational AI agents with a three-layer architecture supporting dynamic environments, privileged and environment-specific tools, and context management.
 
 ## Architecture Overview
 
-The Bot Framework is built around an environment-based architecture that provides a flexible and extensible way to organize capabilities and tools. The core components include:
+Bot Framework implements a three-layer architecture that separates concerns between external connections, environment representation, and agent cognition:
 
-### Environment System
+### 1. Activity Layer
+The foundation that connects to external systems like messaging platforms and APIs:
 
-The environment system is the foundation of the Bot Framework, allowing for a hierarchical organization of capabilities:
+- **SocketIO Adapters**: Normalize different messaging platforms (Slack, Discord, etc.)
+- **Message Handling**: Routes normalized messages to appropriate environments
+- **Activity Client**: Maintains connections to external services
 
-- **Environment Manager**: Orchestrates all environments, keeps track of registered environments, and facilitates communication between them.
-- **Interface Layer**: Provides a unified API for agents to interact with the environment system, abstracting away the details of environment mounting and tool execution.
-- **System Environment**: The root environment that mounts and manages other environments, providing a centralized entry point.
-- **Specialized Environments**: Purpose-specific environments that encapsulate related tools and functionalities:
-  - **Context Environment**: Manages conversation context and message history.
-  - **Messaging Environment**: Handles communication with various messaging platforms.
-  - **Web Environment**: Provides tools for web browsing, search, and HTTP requests.
-  - **File Environment**: Manages file system operations like reading, writing, listing, and deleting files.
+### 2. Environment Layer
+The contextual layer that creates coherent representations of activities and states:
 
-### Agent System
+- **Environment Manager**: Orchestrates registered environments and their hierarchical relationships
+- **Environment Types**:
+  - **System Environment**: Root environment that provides access to all mounted environments
+  - **Messaging Environment**: Handles chat conversations across platforms
+  - **File Environment**: File system operations and management
+  - **Web Environment**: Internet browsing, API access, and search capabilities
+  - **Custom Environments**: Extensible to add domain-specific capabilities
 
-The agent system leverages the environment-based architecture:
+- **Environment Hierarchy**:
+  - Environments can be mounted inside other environments
+  - Tools become available through the mounting hierarchy
+  - Each environment maintains its own state and context
 
-- **Agent**: Processes user messages, uses the interface layer to execute tools, and generates responses.
-- **Message Handler**: Routes messages to the appropriate agent and manages the processing flow.
-- **Adapters**: Normalize messages from different platforms into a standard format.
+### 3. Interface Layer
+The cognitive layer that manages how the agent perceives and interacts with environments:
+
+- **LLM Processor**: Handles interactions with language models
+- **Message Processor**: Processes messages and executes tools
+- **Context Handler**: Manages conversation history and environment state
+- **Tool Manager**: Registers and manages privileged tools
+- **Environment Renderer**: Formats environment states for agent consumption
 
 ## Key Features
 
-- **Hierarchical Environment Structure**: Environments can be mounted within other environments, creating a flexible tool inheritance system.
-- **Dynamic Tool Availability**: Tools become available or unavailable based on the mounting status of their parent environments.
-- **Unified Interface**: The interface layer provides a consistent API for tool execution across all environments.
-- **Modular Design**: Easy to extend with new environments and tools without modifying existing code.
-- **Context Management**: Integrated context handling through the environment system.
+### Environment-Based Architecture
+- **Hierarchical Structure**: Environments can mount other environments, creating a tree structure
+- **Dynamic Tool Availability**: Tools become available based on mounted environments
+- **Environment State**: Each environment maintains its own state and context
+- **Mount Points**: Environments attach to one another at specific points in the hierarchy
+
+### Two-Tier Tool System
+- **Privileged Tools** (Interface Layer):
+  - Manage context and memory
+  - Control environment rendering
+  - Handle system-level operations
+  - Independent of specific environments
+
+- **Environment Tools** (Environment Layer):
+  - Specific to particular environments
+  - Provide domain-specific capabilities
+  - Subject to environment permissions
+  - Accessible through environment mounting
+
+### Context Management
+- **Conversation History**: Maintains chronological record of interactions
+- **Environment States**: Captures current state of all environments
+- **Context Summarization**: Compresses older context to maintain relevance
+- **Multi-Environment Context**: Aggregates context from mounted environments
 
 ## Getting Started
 
@@ -43,84 +73,116 @@ The agent system leverages the environment-based architecture:
 pip install -r requirements.txt
 ```
 
-### Running the Demo
+### Running the Framework
 
 ```bash
-python -m bot_framework.examples.context_demo
+python -m bot_framework.main
 ```
 
-### Running Tests
+### Configuration
 
-```bash
-python -m unittest bot_framework.tests.test_integration
+The framework uses a central `config.py` file for core settings:
+
+```python
+# bot_framework/config.py
+LLM_API_KEY = "your-api-key"
+LLM_MODEL = "your-model"
+DEFAULT_PROTOCOL = "openai"  # or "anthropic", "llama" etc.
 ```
 
 ## Example Usage
 
+### Basic Setup
+
 ```python
 from bot_framework.environments.manager import EnvironmentManager
 from bot_framework.environments.system import SystemEnvironment
-from bot_framework.environments.messaging import MessagingEnvironment
-from bot_framework.interface.layer import InterfaceLayer
+from bot_framework.interface.layer.interface_layer import InterfaceLayer
 
 # Initialize environment system
-environment_manager = EnvironmentManager()
+env_manager = EnvironmentManager()
 system_env = SystemEnvironment()
-messaging_env = MessagingEnvironment()
 
-# Register environments
-environment_manager.register_environment(system_env)
-environment_manager.register_environment(messaging_env)
+# Register the root environment
+env_manager.register_environment(system_env)
 
-# Mount environments
-system_env.mount_environment("messaging")
+# Create interface layer
+interface = InterfaceLayer(env_manager)
 
-# Create interface layer (which includes agent functionality)
-interface_layer = InterfaceLayer(environment_manager)
-
-# Now you can use the interface layer to process messages
-response = interface_layer.process_message({
-    'chat_id': 'example_chat',
-    'user_id': 'user123',
-    'content': 'Hello, can you help me?',
-    'role': 'user'
-})
-
-print(response['content'])
+# Process a message
+response = interface.process_message(
+    user_id="user123",
+    message_text="Hello, can you help me?",
+    env_id="system"  # Specify the environment ID
+)
 ```
 
-## Extending the Framework
-
-### Creating a New Environment
+### Creating a Custom Environment
 
 ```python
 from bot_framework.environments.base import Environment
 from typing import Dict, Any
 
 class MyCustomEnvironment(Environment):
-    def __init__(self):
-        super().__init__(
-            environment_id="custom",
-            name="Custom Environment",
-            description="A custom environment with specialized tools"
-        )
-        self._register_custom_tools()
+    def __init__(self, env_id: str = "custom_env", name: str = "Custom Environment"):
+        super().__init__(env_id=env_id, name=name)
+        self._register_tools()
     
-    def _register_custom_tools(self):
-        self.register_tool(
-            "my_custom_tool",
-            self.my_custom_tool,
-            "Performs a custom operation",
-            {
-                "param1": "Description of parameter 1",
-                "param2": "Description of parameter 2"
+    def _register_tools(self):
+        @self.register_tool(
+            name="custom_tool",
+            description="Performs a specialized operation",
+            parameter_descriptions={
+                "param1": "First parameter",
+                "param2": "Second parameter"
             }
         )
-    
-    def my_custom_tool(self, param1: str, param2: int) -> Dict[str, Any]:
-        # Tool implementation
-        return {"result": f"Processed {param1} {param2} times"}
+        def custom_tool(param1: str, param2: int) -> Dict[str, Any]:
+            # Tool implementation
+            return {"result": f"Processed {param1} {param2} times"}
 ```
+
+### Mounting Environments
+
+```python
+# Create environments
+messaging_env = MessagingEnvironment(env_id="messaging")
+file_env = FileEnvironment(env_id="file_system")
+
+# Register with manager
+env_manager.register_environment(messaging_env)
+env_manager.register_environment(file_env)
+
+# Mount to system environment
+system_env.mount(messaging_env, mount_point="messaging")
+system_env.mount(file_env, mount_point="files")
+```
+
+## Architecture Principles
+
+### Environment Hierarchy
+- System environments contain mounted representations of other environments
+- An agent can participate in multiple environments simultaneously
+- The system environment mediates all interactions with mounted environments
+
+### Separation of Concerns
+- Activity layer handles external world interfaces
+- Environment layer manages state representation and hierarchy
+- Interface layer manages agent cognition and experience
+
+### Message Routing
+- Messages are associated with specific environments using `env_id`
+- Tools execute within the context of specific environments
+- Updates propagate through the environment hierarchy
+
+## Extending the Framework
+
+The framework is designed for extension at multiple levels:
+
+1. **Custom Environments**: Create specialized environments for domain-specific functionality
+2. **Custom Tools**: Register tools within environments or as privileged tools
+3. **Custom Protocols**: Implement support for different LLM APIs
+4. **Custom Adapters**: Connect to additional messaging platforms or external services
 
 ## Contributing
 

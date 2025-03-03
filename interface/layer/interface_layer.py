@@ -10,7 +10,7 @@ import time
 
 from interface.prompt_manager import PromptManager
 from interface.protocol import get_protocol
-from config import STORAGE_PATH, AGENT_NAME, DEFAULT_PROTOCOL, PROTOCOLS
+from config import DEFAULT_PROTOCOL
 
 from bot_framework.interface.layer.tool_manager import PrivilegedToolManager
 from bot_framework.interface.layer.context_handler import ContextHandler
