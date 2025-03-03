@@ -3,8 +3,10 @@ Base Protocol for Tool Usage
 Provides an abstract base class for implementing different tool-usage protocols.
 """
 
+import logging
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Tuple, Optional
+from interface.prompt_library.protocol_prompts import format_tool_description
 
 
 class BaseProtocol(ABC):
@@ -15,7 +17,21 @@ class BaseProtocol(ABC):
     as subclasses of this class, ensuring a consistent interface.
     """
     
-    @abstractmethod
+    def __init__(self, model_info: Dict[str, Any] = None):
+        """
+        Initialize the protocol with model information.
+        
+        Args:
+            model_info: Dictionary containing information about the LLM model being used
+        """
+        self.model_info = model_info or {}
+        self._setup_logging()
+        
+    def _setup_logging(self):
+        """Set up logging for this protocol instance."""
+        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+        self.logger.info(f"Initialized {self.__class__.__name__} with model {self.model_info.get('model', 'unknown')}")
+    
     def format_system_prompt(self, base_prompt: str, tools: List[Dict[str, Any]]) -> str:
         """
         Format the system prompt with tool descriptions according to the protocol.
@@ -25,9 +41,16 @@ class BaseProtocol(ABC):
             tools: List of available tools with their descriptions
             
         Returns:
-            Formatted system prompt with tool descriptions
+            Formatted system prompt with protocol instructions and tool descriptions
         """
-        pass
+        # Format tool descriptions for the prompt
+        tool_descriptions = "\n\n".join([format_tool_description(tool) for tool in tools])
+        
+        # Format the protocol instructions with tool descriptions
+        protocol_instructions = self.protocol_prompt_format.format(tool_descriptions=tool_descriptions)
+        
+        # Combine base prompt with protocol instructions
+        return f"{base_prompt}\n\n{protocol_instructions}"
     
     @abstractmethod
     def extract_tool_calls(self, llm_response: str) -> List[Dict[str, Any]]:
@@ -85,3 +108,11 @@ class BaseProtocol(ABC):
             may include protocol-specific parameters for the LLM call
         """
         pass 
+
+    @abstractmethod
+    @property
+    def protocol_prompt_format(self) -> str:
+        """
+        Get the prompt format for the protocol.
+        """
+        pass

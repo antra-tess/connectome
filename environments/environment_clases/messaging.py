@@ -5,6 +5,7 @@ Environment for messaging functionality, providing tools for sending messages.
 
 import logging
 from typing import Dict, Any, Optional, List
+from datetime import datetime
 
 from environments.base import Environment
 from activity.sender import send_response, send_typing_indicator
@@ -150,6 +151,23 @@ class MessagingEnvironment(Environment):
         max_history = 100  # Configurable
         if len(self._message_history[chat_id]) > max_history:
             self._message_history[chat_id] = self._message_history[chat_id][-max_history:]
+        
+        # Only notify observers for user messages, not for agent messages
+        # This prevents circular notification loops when the agent sends a message
+        if role == "user":
+            # Create update data for the new message
+            update_data = {
+                'type': 'new_message',
+                'chat_id': chat_id,
+                'message_id': len(self._message_history[chat_id]) - 1,  # Index of the new message
+                'user_id': user_id,
+                'adapter_id': adapter_id,
+                'role': role
+            }
+            
+            # Notify observers about the new message
+            logger.debug(f"Notifying observers about new message in chat {chat_id} from user {user_id}")
+            self.notify_observers(update_data)
             
     def render_state_for_context(self) -> Dict[str, Any]:
         """
@@ -278,53 +296,122 @@ class MessagingEnvironment(Environment):
     
     def _format_multi_user_chat(self, messages: List[Dict[str, Any]]) -> str:
         """
-        Format a list of messages from multiple users into a text format
-        suitable for inclusion in the agent's context.
+        Format a list of messages into a multi-user chat representation.
+        
+        This formats messages for presentation in the agent's context window,
+        clearly showing each user's identity and the message content.
         
         Args:
             messages: List of message dictionaries
-                
+            
         Returns:
-            Formatted multi-user chat as a string
+            Formatted chat string
         """
+        if not messages:
+            return "No messages in this conversation yet."
+            
         formatted_lines = []
         
-        # Group consecutive messages from the same user
-        current_user = None
-        current_content_lines = []
+        # Group messages by day for better readability
+        current_day = None
         
         for msg in messages:
-            user_id = msg.get('user_id', 'unknown')
-            content = msg.get('content', '')
-            role = msg.get('role', 'user')
+            # Extract message data
+            user_id = msg.get("user_id", "unknown")
+            content = msg.get("content", "")
+            role = msg.get("role", "user")
+            timestamp = msg.get("timestamp")
             
-            # Skip empty messages
-            if not content.strip():
-                continue
+            # Add date separator if this is a new day
+            if timestamp:
+                msg_day = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d")
+                if msg_day != current_day:
+                    current_day = msg_day
+                    formatted_lines.append(f"\n--- {current_day} ---\n")
             
-            # Handle tool results differently
-            if role == 'tool_result':
-                formatted_lines.append(f"[Tool Result]: {content}")
-                continue
-                
-            # If this is a new user, flush the previous user's messages
-            if user_id != current_user and current_content_lines:
-                if current_user == 'agent':
-                    formatted_lines.append(f"[Assistant]: {' '.join(current_content_lines)}")
-                else:
-                    formatted_lines.append(f"[User {current_user}]: {' '.join(current_content_lines)}")
-                current_content_lines = []
-            
-            # Set current user and add this content
-            current_user = user_id
-            current_content_lines.append(content)
-        
-        # Flush the last user's messages
-        if current_content_lines:
-            if current_user == 'agent':
-                formatted_lines.append(f"[Assistant]: {' '.join(current_content_lines)}")
+            # Format the message based on role
+            prefix = ""
+            if role == "user":
+                prefix = f"[User: {user_id}]"
+            elif role == "assistant":
+                prefix = "[Assistant]"
+            elif role == "system":
+                prefix = "[System]"
             else:
-                formatted_lines.append(f"[User {current_user}]: {' '.join(current_content_lines)}")
+                prefix = f"[{role.capitalize()}: {user_id}]"
+                
+            # Format content (handle multi-line messages)
+            content_lines = content.split("\n")
+            if len(content_lines) > 1:
+                # For multi-line messages, format with the prefix on first line
+                formatted_content = f"{prefix} {content_lines[0]}\n"
+                # And indent subsequent lines
+                for line in content_lines[1:]:
+                    formatted_content += f"    {line}\n"
+                formatted_lines.append(formatted_content.rstrip())
+            else:
+                # Single line message
+                formatted_lines.append(f"{prefix} {content}")
         
-        # Join all lines with newlines
-        return "\n".join(formatted_lines) 
+        return "\n".join(formatted_lines)
+
+    def format_update_for_agent(self, update_data: Dict[str, Any]) -> str:
+        """
+        Format a messaging environment update in a way that's optimized for the agent.
+        
+        Specializes the base Environment.format_update_for_agent method to provide
+        messaging-specific formatting, particularly for new messages.
+        
+        Args:
+            update_data: Data about the update from notify_observers
+            
+        Returns:
+            Formatted string describing the update that can be sent directly to the agent
+        """
+        update_type = update_data.get('type', 'generic_update')
+        
+        # For new messages, use a chat-optimized format
+        if update_type == 'new_message':
+            chat_id = update_data.get('chat_id')
+            if not chat_id or chat_id not in self._message_history:
+                # Fallback to base formatting if we can't find the chat
+                return super().format_update_for_agent(update_data)
+            
+            # Get the newest message (should be the one that triggered this update)
+            messages = self._message_history[chat_id]
+            if not messages:
+                return super().format_update_for_agent(update_data)
+            
+            latest_message = messages[-1]
+            
+            # Create a specialized format for new messages that looks like a chat interface
+            formatted_update = f'<chat id="{chat_id}" update_type="new_message">\n'
+            
+            # Add user info section
+            user_id = latest_message.get('user_id', 'unknown')
+            formatted_update += f'  <user id="{user_id}">\n'
+            
+            # Add the message content, preserving formatting
+            content = latest_message.get('content', '')
+            formatted_update += f'    <message timestamp="{latest_message.get("timestamp", "unknown")}">\n'
+            
+            # Format the content with proper indentation
+            content_lines = content.split("\n")
+            for line in content_lines:
+                formatted_update += f'      {line}\n'
+            
+            formatted_update += '    </message>\n'
+            formatted_update += '  </user>\n'
+            
+            # Add context info - how many previous messages in this chat
+            previous_count = len(messages) - 1
+            if previous_count > 0:
+                formatted_update += f'  <context>\n'
+                formatted_update += f'    <previous_messages_count>{previous_count}</previous_messages_count>\n'
+                formatted_update += f'  </context>\n'
+            
+            formatted_update += '</chat>'
+            return formatted_update
+        
+        # For other update types, use the base implementation
+        return super().format_update_for_agent(update_data) 

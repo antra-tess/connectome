@@ -49,3 +49,73 @@ CONTEXT_WINDOW_TOKENS = int(os.getenv('CONTEXT_WINDOW_TOKENS', 8192))
 DEFAULT_PROTOCOL = os.getenv('DEFAULT_PROTOCOL', 'react')  # 'react', 'function_calling', 'custom'
 AGENT_NAME = os.getenv('AGENT_NAME', 'BotFramework Assistant')
 AGENT_DESCRIPTION = os.getenv('AGENT_DESCRIPTION', 'A helpful assistant that can participate in multi-user conversations.') 
+
+# Protocol Configuration
+# Format: List of dictionaries with 'name', 'class', 'enabled' keys
+# - name: Unique identifier for the protocol
+# - class: The class name (must be importable)
+# - enabled: Whether this protocol should be available (only one protocol is used at a time)
+DEFAULT_PROTOCOLS = [
+    {
+        "name": "react",
+        "class": "ReactProtocol",
+        "enabled": True
+    },
+    {
+        "name": "function_calling",
+        "class": "FunctionCallingProtocol", 
+        "enabled": True
+    }
+]
+
+# Parse protocol configuration from environment variables
+# Example format in .env: PROTOCOLS='[{"name":"custom","class":"CustomProtocol","enabled":true}]'
+PROTOCOLS_CONFIG = os.getenv('PROTOCOLS', '[]')
+
+# Combined protocol configuration (default + any from environment variables)
+try:
+    import json
+    additional_protocols = json.loads(PROTOCOLS_CONFIG)
+    PROTOCOLS = DEFAULT_PROTOCOLS + additional_protocols
+except (json.JSONDecodeError, TypeError):
+    PROTOCOLS = DEFAULT_PROTOCOLS
+
+# Environment Configuration
+# Default set of environments to initialize and mount to the system environment
+# Format: List of dictionaries with 'id', 'class', 'enabled', and 'mount_point' keys
+# - id: Unique identifier for the environment
+# - class: The class name (must be importable)
+# - enabled: Whether to initialize this environment
+# - mount_point: Optional mount point in the system environment (if None, uses the environment id)
+DEFAULT_ENVIRONMENTS = [
+    {
+        "id": "web",
+        "class": "WebEnvironment",
+        "enabled": True,
+        "mount_point": None  # Will use the id as mount point
+    },
+    {
+        "id": "messaging",
+        "class": "MessagingEnvironment",
+        "enabled": True,
+        "mount_point": None
+    },
+    {
+        "id": "file",
+        "class": "FileEnvironment",
+        "enabled": True,
+        "mount_point": None
+    }
+]
+
+# Parse environment-specific configuration from environment variables
+# Example format in .env: ENVIRONMENTS='[{"id":"custom","class":"CustomEnvironment","enabled":true,"mount_point":"custom_mount"}]'
+ENVIRONMENTS_CONFIG = os.getenv('ENVIRONMENTS', '[]')
+
+# Combined environment configuration (default + any from environment variables)
+try:
+    import json
+    additional_envs = json.loads(ENVIRONMENTS_CONFIG)
+    ENVIRONMENTS = DEFAULT_ENVIRONMENTS + additional_envs
+except (json.JSONDecodeError, TypeError):
+    ENVIRONMENTS = DEFAULT_ENVIRONMENTS 

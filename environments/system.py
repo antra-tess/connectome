@@ -75,74 +75,67 @@ class SystemEnvironment(Environment):
             parameter_descriptions={}
         )
         
-        # Remove context management references as they're now in InterfaceLayer
-        
     def mount_environment(self, env_id: str, mount_point: Optional[str] = None) -> Dict[str, Any]:
         """
-        Mount an environment to make its tools available.
+        Mount an environment to the system environment.
         
         Args:
             env_id: ID of the environment to mount
             mount_point: Optional name for the mount point
             
         Returns:
-            Dictionary with operation result
+            Result of the operation
         """
         if not self._environment_manager:
-            logger.error("Environment manager not set")
-            return {
-                "success": False,
-                "error": "Environment manager not set"
-            }
+            return {"status": "error", "message": "Environment manager not set"}
             
-        # Get the environment from the manager
+        # Get the environment to mount
         environment = self._environment_manager.get_environment(env_id)
         if not environment:
-            logger.error(f"Environment not found: {env_id}")
-            return {
-                "success": False,
-                "error": f"Environment not found: {env_id}"
-            }
+            return {"status": "error", "message": f"Environment {env_id} not found"}
             
-        # Mount the environment
-        mount_success = self.mount(environment, mount_point)
-        if not mount_success:
-            logger.error(f"Failed to mount environment: {env_id}")
-            return {
-                "success": False,
-                "error": f"Failed to mount environment: {env_id}"
-            }
+        # Check if already mounted
+        if env_id in self.children:
+            return {"status": "error", "message": f"Environment {env_id} already mounted"}
             
-        logger.info(f"Mounted environment {env_id}")
+        # Mount the environment - this will handle observer notifications
+        # since we've implemented it in the base class
+        mount_result = self.mount(environment, mount_point)
+        if not mount_result:
+            return {"status": "error", "message": f"Failed to mount environment {env_id}"}
+                
         return {
-            "success": True,
-            "environment_id": env_id,
-            "mount_point": mount_point or env_id,
-            "available_tools": list(environment.get_all_tools().keys())
+            "status": "success", 
+            "message": f"Environment {env_id} mounted successfully",
+            "mount_point": mount_point or environment.name
         }
-    
+        
     def unmount_environment(self, env_id: str) -> Dict[str, Any]:
         """
-        Unmount an environment, removing access to its tools.
+        Unmount an environment from the system environment.
         
         Args:
             env_id: ID of the environment to unmount
             
         Returns:
-            Dictionary with operation result
+            Result of the operation
         """
-        unmount_success = self.unmount(env_id)
-        if not unmount_success:
-            logger.error(f"Failed to unmount environment: {env_id}")
-            return {
-                "success": False,
-                "error": f"Failed to unmount environment: {env_id}"
-            }
+        if not self._environment_manager:
+            return {"status": "error", "message": "Environment manager not set"}
             
-        logger.info(f"Unmounted environment {env_id}")
+        # Check if mounted
+        if env_id not in self.children:
+            return {"status": "error", "message": f"Environment {env_id} not mounted"}
+            
+        # Unmount the environment - this will handle observer notifications
+        # since we've implemented it in the base class
+        unmount_result = self.unmount(env_id)
+        if not unmount_result:
+            return {"status": "error", "message": f"Failed to unmount environment {env_id}"}
+                
         return {
-            "success": True,
-            "environment_id": env_id
+            "status": "success", 
+            "message": f"Environment {env_id} unmounted successfully"
         }
     
     def list_environments(self) -> Dict[str, Any]:

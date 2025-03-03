@@ -37,6 +37,7 @@ class Environment:
         self.parent = None
         self.children: Dict[str, 'Environment'] = {}
         self.metadata: Dict[str, Any] = {}
+        self.observers: List[Any] = []  # List of observers for this environment
         logger.info(f"Created environment: {self.name} ({self.id})")
     
     def register_tool(self, tool_func: Callable, name: Optional[str] = None, 
@@ -91,6 +92,85 @@ class Environment:
         logger.info(f"Registered tool {tool_name} in environment {self.name}")
         return tool_name
         
+    def register_observer(self, observer) -> bool:
+        """
+        Register an observer for this environment.
+        
+        Args:
+            observer: Observer object to notify of state changes
+            
+        Returns:
+            True if registration was successful
+        """
+        if observer in self.observers:
+            logger.debug(f"Observer already registered for environment {self.id}")
+            return False
+            
+        self.observers.append(observer)
+        logger.debug(f"Registered observer for environment {self.id}")
+        
+        # Notify the observer of the current state
+        try:
+            self._notify_observer_of_initial_state(observer)
+        except Exception as e:
+            logger.error(f"Error sending initial state to observer: {str(e)}")
+            
+        return True
+        
+    def unregister_observer(self, observer) -> bool:
+        """
+        Unregister an observer from this environment.
+        
+        Args:
+            observer: Observer object to remove
+            
+        Returns:
+            True if unregistration was successful
+        """
+        if observer not in self.observers:
+            logger.debug(f"Observer not registered for environment {self.id}")
+            return False
+            
+        self.observers.remove(observer)
+        logger.debug(f"Unregistered observer from environment {self.id}")
+        return True
+        
+    def notify_observers(self, update_data: Dict[str, Any]) -> None:
+        """
+        Notify all observers of a state change.
+        
+        Args:
+            update_data: Data about the update
+        """
+        env_state = self.render_state_for_context()
+        
+        for observer in self.observers:
+            try:
+                observer.observe_environment_update(self.id, env_state, update_data)
+                logger.debug(f"Notified observer about update to environment {self.id}")
+            except Exception as e:
+                logger.error(f"Error notifying observer about environment update: {str(e)}")
+                
+    def _notify_observer_of_initial_state(self, observer) -> None:
+        """
+        Notify a specific observer of the current state.
+        
+        Args:
+            observer: Observer to notify
+        """
+        env_state = self.render_state_for_context()
+        
+        # Create initial state update data
+        update_data = {
+            "type": "initial_state",
+            "env_id": self.id,
+            "is_initial": True
+        }
+        
+        # Notify the observer
+        observer.observe_environment_update(self.id, env_state, update_data)
+        logger.debug(f"Sent initial state to observer for environment {self.id}")
+        
     def mount(self, environment: 'Environment', mount_point: Optional[str] = None) -> bool:
         """
         Mount a child environment.
@@ -120,7 +200,22 @@ class Environment:
         
         # Add to children
         self.children[environment.id] = environment
+                
+        # Create mount event data
+        mount_event = {
+            "type": "environment_mounted",
+            "env_id": environment.id,
+            "mount_point": mount_point or environment.name,
+            "environment_state": environment.render_state_for_context()
+        }
         
+        # Notify observers about the mount
+        self.notify_observers(mount_event)
+        
+        # Register all our observers with the child environment
+        for observer in self.observers:
+            environment.register_observer(observer)
+            
         logger.info(f"Mounted environment {environment.name} to {self.name}")
         return True
         
@@ -137,12 +232,30 @@ class Environment:
         if env_id not in self.children:
             logger.error(f"Environment {env_id} is not mounted in {self.name}")
             return False
+        
+        # Get the environment and its mount point before unmounting
+        environment = self.children[env_id]
+        mount_point = environment.metadata.get('mount_point', environment.name)
+            
+        # Create unmount event data
+        unmount_event = {
+            "type": "environment_unmounted",
+            "env_id": env_id,
+            "mount_point": mount_point
+        }
+        
+        # Unregister all our observers from the child environment
+        for observer in self.observers:
+            environment.unregister_observer(observer)
             
         # Clear parent reference
         self.children[env_id].parent = None
         
         # Remove from children
         del self.children[env_id]
+        
+        # Notify observers about the unmount
+        self.notify_observers(unmount_event)
         
         logger.info(f"Unmounted environment {env_id} from {self.name}")
         return True
@@ -230,6 +343,56 @@ class Environment:
             ]
         }
     
+    def update_state(self, update_data: Dict[str, Any]) -> bool:
+        """
+        Update the state of this environment based on activity data.
+        
+        This base implementation simply updates the metadata with the provided data.
+        Subclasses should override this method to provide environment-specific state updates.
+        
+        Args:
+            update_data: Data to update the environment state with
+            
+        Returns:
+            True if the update was successful, False otherwise
+        """
+        try:
+            # Default implementation just updates metadata
+            update_type = update_data.get('type', 'generic_update')
+            
+            # Store the update in the environment's history
+            if 'history' not in self.metadata:
+                self.metadata['history'] = []
+                
+            # Add timestamp if not present
+            if 'timestamp' not in update_data:
+                import time
+                update_data['timestamp'] = time.time()
+                
+            # Add to history
+            self.metadata['history'].append(update_data)
+            
+            # Limit history size to prevent unbounded growth
+            max_history = 100  # Configurable
+            if len(self.metadata['history']) > max_history:
+                self.metadata['history'] = self.metadata['history'][-max_history:]
+                
+            # Update current state based on update type
+            if 'current_state' not in self.metadata:
+                self.metadata['current_state'] = {}
+                
+            # Store the latest update of each type
+            self.metadata['current_state'][update_type] = update_data
+            
+            # Notify observers about the state change
+            self.notify_observers(update_data)
+            
+            logger.info(f"Updated state of environment {self.id} with {update_type}")
+            return True
+        except Exception as e:
+            logger.error(f"Error updating environment state: {str(e)}")
+            return False
+    
     def get_all_tools(self) -> Dict[str, Dict[str, Any]]:
         """
         Get all tools available in this environment and its children.
@@ -303,6 +466,42 @@ class Environment:
             "state_summary": "Default environment with no specialized state",
             "formatted_state_text": f"Environment '{self.name}' has no specialized state information."
         }
+        
+    def format_update_for_agent(self, update_data: Dict[str, Any]) -> str:
+        """
+        Format an environment update in a way that is informative and useful for the agent.
+        
+        This method converts environment update data into a structured string format
+        that can be passed directly to the agent as part of a message. Environments
+        should override this method to provide specialized formatting for their updates.
+        
+        Args:
+            update_data: Data about the update from notify_observers
+            
+        Returns:
+            Formatted string describing the update in a way optimized for the agent
+        """
+        # Base implementation provides a simple XML-style format
+        update_type = update_data.get('type', 'generic_update')
+        
+        # Start with environment identification
+        formatted_update = f'<environment id="{self.id}" name="{self.name}" update_type="{update_type}">\n'
+        
+        # Add update details
+        formatted_update += '  <update_details>\n'
+        for key, value in update_data.items():
+            if key != 'type' and not isinstance(value, (dict, list)):
+                formatted_update += f'    <{key}>{value}</{key}>\n'
+        formatted_update += '  </update_details>\n'
+        
+        # Add current state summary
+        state = self.render_state_for_context()
+        formatted_update += f'  <current_state>{state.get("state_summary", "No state summary available")}</current_state>\n'
+        
+        # End environment tag
+        formatted_update += '</environment>'
+        
+        return formatted_update
         
     def _is_ancestor_of(self, env: 'Environment') -> bool:
         """

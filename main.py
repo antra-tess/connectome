@@ -8,24 +8,14 @@ import signal
 import sys
 import time
 import logging
+import json
+import os
+import importlib
+import inspect
 from threading import Event
 
-from config import DEFAULT_ADAPTERS
-from utils.llm import initialize_litellm
-# Agent functionality is now part of InterfaceLayer
-from activity.client import SocketIOClient
-from activity.listener import create_message_handler
-from activity.sender import initialize_sender
-
-# Import environment-related components
-from environments.base import Environment
-from environments.system import SystemEnvironment
-from environments.web import WebEnvironment
-from environments.messaging import MessagingEnvironment
-from environments.file import FileEnvironment
-from environments.manager import EnvironmentManager
-from interface.layer import InterfaceLayer
-# ContextEnvironment is now handled by InterfaceLayer
+# Import configuration
+from config import ENVIRONMENTS, PROTOCOLS, DEFAULT_PROTOCOL
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -33,6 +23,54 @@ logger = logging.getLogger(__name__)
 
 # Global flag for graceful shutdown
 shutdown_event = Event()
+
+# Import modules
+from activity.client import SocketIOClient
+from activity.listener import MessageHandler
+from environments.system import SystemEnvironment
+from environments.manager import EnvironmentManager
+from bot_framework.interface.layer import InterfaceLayer
+
+from environments.base import Environment
+
+
+def discover_environment_classes():
+    """
+    Dynamically discover all environment classes from the environments directory.
+    
+    Returns:
+        dict: A dictionary mapping class names to environment classes
+    """
+    env_classes = {}
+    environments_dir = os.path.join(os.path.dirname(__file__), 'environments/environment_classes/')
+    
+    logger.info(f"Discovering environment classes from: {environments_dir}")
+    
+    # List all Python files in the environments directory
+    try:
+        for filename in os.listdir(environments_dir):
+            if filename.endswith('.py') and not filename.startswith('__'):
+                module_name = filename[:-3]  # Remove the .py extension
+                
+                try:
+                    # Import the module dynamically
+                    module_path = f"environments.{module_name}"
+                    module = importlib.import_module(module_path)
+                    
+                    # Find all classes in the module that inherit from Environment
+                    for name, obj in inspect.getmembers(module):
+                        if (inspect.isclass(obj) and 
+                            issubclass(obj, Environment) and 
+                            obj is not Environment):
+                            logger.info(f"Discovered environment class: {name}")
+                            env_classes[name] = obj
+                            
+                except Exception as e:
+                    logger.error(f"Error importing module {module_name}: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error scanning environments directory: {str(e)}")
+    
+    return env_classes
 
 
 def signal_handler(sig, frame):
@@ -45,7 +83,7 @@ def signal_handler(sig, frame):
 
 def initialize_environments():
     """
-    Initialize the environment system.
+    Initialize the environment system based on configuration.
     
     Returns:
         Tuple of (environment_manager, interface_layer)
@@ -53,27 +91,86 @@ def initialize_environments():
     # Create environment manager
     environment_manager = EnvironmentManager()
     
-    # Create system environment (root)
+    # Create system environment (root) - this is always required
     system_env = SystemEnvironment()
     environment_manager.register_environment(system_env)
     
-    # Create and register other environments
-    web_env = WebEnvironment()
-    environment_manager.register_environment(web_env)
+    # Dictionary to store created environments by ID for later mounting
+    created_environments = {"system": system_env}
     
-    messaging_env = MessagingEnvironment()
-    environment_manager.register_environment(messaging_env)
+    # Create and register configured environments
+    logger.info("Initializing configured environments...")
     
-    file_env = FileEnvironment()
-    environment_manager.register_environment(file_env)
+    # Dynamically discover available environment classes
+    env_classes = discover_environment_classes()
+    
+    # Always ensure SystemEnvironment is available
+    env_classes["SystemEnvironment"] = SystemEnvironment
+    
+    # Initialize environments from configuration
+    for env_config in ENVIRONMENTS:
+        env_id = env_config.get("id")
+        env_class_name = env_config.get("class")
+        enabled = env_config.get("enabled", True)
+        
+        if not enabled:
+            logger.info(f"Environment '{env_id}' is disabled in configuration, skipping...")
+            continue
+            
+        if env_class_name not in env_classes:
+            logger.warning(f"Unknown environment class '{env_class_name}' for '{env_id}', skipping... Available classes: {list(env_classes.keys())}")
+            continue
+            
+        try:
+            # Create the environment instance
+            logger.info(f"Creating environment: {env_id} ({env_class_name})")
+            env_class = env_classes[env_class_name]
+            environment = env_class(env_id=env_id)
+            
+            # Register with the manager
+            environment_manager.register_environment(environment)
+            created_environments[env_id] = environment
+        except Exception as e:
+            logger.error(f"Failed to initialize environment '{env_id}': {str(e)}")
     
     # Mount environments to the system environment
-    system_env.mount_environment("web")
-    system_env.mount_environment("messaging")
-    system_env.mount_environment("file")
+    logger.info("Mounting environments to system environment...")
+    for env_config in ENVIRONMENTS:
+        env_id = env_config.get("id")
+        enabled = env_config.get("enabled", True)
+        mount_point = env_config.get("mount_point")
+        
+        if not enabled or env_id not in created_environments:
+            continue
+            
+        try:
+            logger.info(f"Mounting environment '{env_id}' to system environment")
+            system_env.mount_environment(env_id, mount_point)
+        except Exception as e:
+            logger.error(f"Failed to mount environment '{env_id}': {str(e)}")
     
-    # Create interface layer with context management capabilities
-    interface_layer = InterfaceLayer(environment_manager)
+    # Determine which protocol to use based on configuration
+    protocol_name = DEFAULT_PROTOCOL
+    
+    # Check if the default protocol is enabled in configuration
+    default_protocol_enabled = False
+    for protocol_config in PROTOCOLS:
+        if protocol_config.get("name") == DEFAULT_PROTOCOL and protocol_config.get("enabled", True):
+            default_protocol_enabled = True
+            break
+    
+    # If default protocol is not enabled, use the first enabled protocol
+    if not default_protocol_enabled:
+        for protocol_config in PROTOCOLS:
+            if protocol_config.get("enabled", True):
+                protocol_name = protocol_config.get("name")
+                logger.info(f"Default protocol '{DEFAULT_PROTOCOL}' not enabled, using '{protocol_name}' instead")
+                break
+    
+    logger.info(f"Using protocol: {protocol_name}")
+    
+    # Create interface layer with context management capabilities and the selected protocol
+    interface_layer = InterfaceLayer(environment_manager, protocol_name=protocol_name)
     
     # Set the environment manager in the system environment
     system_env.set_environment_manager(environment_manager)
@@ -87,26 +184,34 @@ if __name__ == '__main__':
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    # Initialize LiteLLM
-    initialize_litellm()
-    
-    # Initialize environment system
+    # Initialize environment system (LLMProcessor will handle LiteLLM initialization)
     environment_manager, interface_layer = initialize_environments()
-    
-    # Create message handler function that uses the environment manager instead of interface layer
-    message_handler = create_message_handler(environment_manager)
-    
-    # Initialize Socket.IO client
+
+    # Create message handler with the environment manager
+    message_handler = MessageHandler(environment_manager)
+
+    # Initialize Socket.IO client with the message handler
     socket_client = SocketIOClient(message_handler)
-    
-    # Initialize message sender
-    initialize_sender(socket_client)
-    
-    # Set up response callback in the environment manager
-    # This allows sending responses back through the Activity Layer
+
+    # Define the response callback function and set it on the environment manager
     def response_callback(response_data):
-        socket_client.send_message(response_data)
-    
+        # Extract data from the response
+        user_id = response_data.get('user_id')
+        message = response_data.get('message')
+        message_id = response_data.get('message_id')
+        platform = response_data.get('platform')
+        adapter_id = response_data.get('adapter_id')
+        
+        # Use the send_response method which handles formatting
+        socket_client.send_response(
+            user_id=user_id,
+            message_text=message,
+            message_id=message_id,
+            platform=platform,
+            adapter_id=adapter_id
+        )
+
+    # Set response callback directly on the environment manager
     environment_manager.set_response_callback(response_callback)
     
     # Connect to adapters

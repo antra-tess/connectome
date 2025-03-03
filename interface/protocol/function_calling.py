@@ -8,11 +8,6 @@ import json
 from typing import Dict, Any, List, Tuple, Optional
 
 from interface.protocol.base_protocol import BaseProtocol
-from utils.llm import get_model_info
-from interface.prompt_library.protocol_prompts import (
-    FUNCTION_CALLING_PROMPT_FORMAT,
-    format_tool_description
-)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -26,28 +21,6 @@ class FunctionCallingProtocol(BaseProtocol):
     This protocol leverages the model's built-in function calling capabilities
     instead of parsing text-based tool calls like the ReAct pattern.
     """
-    
-    def format_system_prompt(self, base_prompt: str, tools: List[Dict[str, Any]]) -> str:
-        """
-        Format the system prompt for function calling protocol.
-        
-        Args:
-            base_prompt: The base system prompt
-            tools: List of available tools with their descriptions
-            
-        Returns:
-            Formatted system prompt
-        """
-        # Format tool descriptions for the prompt
-        tool_descriptions = "\n\n".join([format_tool_description(tool) for tool in tools])
-        
-        # Format the function calling instructions with tool descriptions
-        function_calling_instructions = FUNCTION_CALLING_PROMPT_FORMAT.format(
-            tool_descriptions=tool_descriptions
-        )
-        
-        # Combine base prompt with function calling instructions
-        return f"{base_prompt}\n\n{function_calling_instructions}"
     
     def extract_tool_calls(self, llm_response: str) -> List[Dict[str, Any]]:
         """
@@ -337,24 +310,17 @@ class FunctionCallingProtocol(BaseProtocol):
         Returns:
             True if the model prefers the 'tools' format, False otherwise
         """
-        model_info = get_model_info()
-        model_name = model_info.get('model', '').lower()
+        model_name = self.model_info.get('model', '').lower()
         
         # Models known to use the newer 'tools' format
         tool_format_models = [
             'gpt-4-1106-preview',
             'gpt-4-vision-preview',
-            'gpt-4-0125-preview',
             'gpt-4-turbo',
-            'gpt-3.5-turbo-1106'
+            'gpt-4-0125-preview',
         ]
         
-        for model_pattern in tool_format_models:
-            if model_pattern in model_name:
-                return True
-                
-        # Default to False (use functions format)
-        return False
+        return any(model in model_name for model in tool_format_models)
     
     def _prefers_tool_role(self) -> bool:
         """
@@ -363,21 +329,32 @@ class FunctionCallingProtocol(BaseProtocol):
         Returns:
             True if the model supports the 'tool' role, False otherwise
         """
-        model_info = get_model_info()
-        model_name = model_info.get('model', '').lower()
+        model_name = self.model_info.get('model', '').lower()
         
         # Only certain models support the 'tool' role
         tool_role_models = [
             'gpt-4-1106-preview',
             'gpt-4-vision-preview',
-            'gpt-4-0125-preview',
             'gpt-4-turbo',
-            'gpt-3.5-turbo-1106'
+            'gpt-4-0125-preview',
         ]
         
-        for model_pattern in tool_role_models:
-            if model_pattern in model_name:
-                return True
-                
-        # Default to False (use assistant role for tool results)
-        return False 
+        return any(model in model_name for model in tool_role_models)
+    
+    @property
+    def protocol_prompt_format(self) -> str:
+        return """TOOL USAGE INSTRUCTIONS:
+You have access to various tools to assist users. The system will handle the formatting of tool calls.
+
+{tool_descriptions}
+
+When you need to use a tool:
+1. Clearly indicate that you need to call a specific tool
+2. The system will execute the tool and provide the result
+3. Use the tool result to inform your final response
+
+IMPORTANT:
+- Only call tools when necessary to fulfill the user's request
+- You can call multiple tools if needed
+- Make sure to provide a final response that addresses the user's request
+"""

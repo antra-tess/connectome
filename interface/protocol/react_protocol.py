@@ -8,10 +8,6 @@ import logging
 from typing import Dict, Any, List, Tuple, Optional
 
 from interface.protocol.base_protocol import BaseProtocol
-from interface.prompt_library.protocol_prompts import (
-    REACT_PROMPT_FORMAT,
-    format_tool_description
-)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -30,26 +26,6 @@ class ReactProtocol(BaseProtocol):
     ...
     Final Answer: Final response to the user
     """
-    
-    def format_system_prompt(self, base_prompt: str, tools: List[Dict[str, Any]]) -> str:
-        """
-        Format the system prompt with ReAct pattern instructions and tool descriptions.
-        
-        Args:
-            base_prompt: The base system prompt
-            tools: List of available tools with their descriptions
-            
-        Returns:
-            Formatted system prompt with ReAct instructions and tool descriptions
-        """
-        # Format tool descriptions for the prompt
-        tool_descriptions = "\n\n".join([format_tool_description(tool) for tool in tools])
-        
-        # Format the ReAct instructions with tool descriptions
-        react_instructions = REACT_PROMPT_FORMAT.format(tool_descriptions=tool_descriptions)
-        
-        # Combine base prompt with ReAct instructions
-        return f"{base_prompt}\n\n{react_instructions}"
     
     def extract_tool_calls(self, llm_response: str) -> List[Dict[str, Any]]:
         """
@@ -225,3 +201,30 @@ class ReactProtocol(BaseProtocol):
             params.append(current_param.strip())
             
         return params 
+    
+    @property
+    def protocol_prompt_format(self) -> str:
+        return """TOOL USAGE INSTRUCTIONS:
+You have access to the following tools to assist users:
+
+{tool_descriptions}
+
+To use these tools, follow this format exactly:
+
+Thought: Think step-by-step about how to respond to the user's request and whether any tools can help.
+
+Action: tool_name(param1=value1, param2=value2, ...)
+[Use this format to call a tool. Only call one tool at a time. Provide parameter values exactly as required.]
+
+Observation: [Tool output will appear here]
+
+Continue this pattern of Thought, Action, Observation until you have all the information needed.
+
+Final Answer: [Your final response to the user's request]
+
+IMPORTANT:
+- Always start with a Thought.
+- Always end with a Final Answer after you have the information you need.
+- If you don't need to use a tool, provide your response directly as a Final Answer.
+- Call tools exactly as specified with their correct parameters.
+"""

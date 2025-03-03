@@ -31,12 +31,12 @@ class SocketIOClient:
     - Registering event handlers for incoming messages
     """
     
-    def __init__(self, message_handler: Callable):
+    def __init__(self, message_handler):
         """
         Initialize the Socket.IO client manager.
         
         Args:
-            message_handler: Callback function to handle incoming events
+            message_handler: MessageHandler instance to process incoming messages
         """
         self.message_handler = message_handler
         self.clients: Dict[str, socketio.Client] = {}
@@ -150,27 +150,27 @@ class SocketIOClient:
         
         @client.on("chat_message")
         def on_chat_message(data):
-            logger.info(f"Received message from adapter {adapter_id}")
-            # Add adapter ID to the message data
-            if isinstance(data, dict):
-                data["adapter_id"] = adapter_id
-            # Process the message and get a response
-            response = self.message_handler("message", data)
-            # If there's a response, send it back
-            if response:
-                self.send_message(response)
+            # Add adapter info to the data
+            data['adapter_id'] = adapter_id
+            
+            # Call the message handler's handle_message method directly
+            result = self.message_handler.handle_message(data)
+            
+            # Process the result if needed
+            if result:
+                logger.info(f"Message handled: {result}")
         
         @client.on("clear_context")
         def on_clear_context(data):
-            logger.info(f"Received clear context request from adapter {adapter_id}")
-            # Add adapter ID to the data
-            if isinstance(data, dict):
-                data["adapter_id"] = adapter_id
-            # Process the request and get a response
-            response = self.message_handler("clear_context", data)
-            # If there's a response, send it back
-            if response:
-                self.send_message(response)
+            # Add adapter info to the data
+            data['adapter_id'] = adapter_id
+            
+            # Call the message handler's handle_clear_context method directly
+            result = self.message_handler.handle_clear_context(data)
+            
+            # Process the result if needed
+            if result:
+                logger.info(f"Context cleared: {result}")
         
         @client.on("registration_success")
         def on_registration_success(data):
@@ -212,13 +212,16 @@ class SocketIOClient:
     
     def send_message(self, message: Dict[str, Any]) -> bool:
         """
-        Send a message to the appropriate adapter.
+        Send a message to an adapter server.
         
         Args:
-            message: Message data to send, including adapter_id
-            
+            message: Dictionary containing message data including:
+                - adapter_id: Identifier for the target adapter
+                - event: Event type (defaults to 'bot_response')
+                - data: Message data
+                
         Returns:
-            True if message was sent successfully, False otherwise
+            True if the message was sent successfully, False otherwise
         """
         adapter_id = message.get("adapter_id")
         if not adapter_id:
@@ -237,6 +240,93 @@ class SocketIOClient:
         except Exception as e:
             logger.error(f"Failed to send message to adapter {adapter_id}: {str(e)}")
             return False
+    
+    def send_response(self, user_id: str, message_text: str, message_id: Optional[str] = None, 
+                    platform: Optional[str] = None, adapter_id: Optional[str] = None) -> bool:
+        """
+        Send a response message to a user through an adapter.
+        
+        Args:
+            user_id: ID of the user to send the response to
+            message_text: Content of the response
+            message_id: Optional ID for the message (for threading)
+            platform: Optional platform identifier
+            adapter_id: Optional adapter ID (if not provided, tries to determine from platform)
+            
+        Returns:
+            True if the response was sent successfully, False otherwise
+        """
+        # Determine adapter ID if not provided
+        if not adapter_id and platform:
+            # Find adapter for this platform
+            for aid, config in self.adapters.items():
+                if config.get('platform') == platform:
+                    adapter_id = aid
+                    break
+        
+        if not adapter_id:
+            logger.error(f"No adapter found for response to user {user_id}")
+            return False
+        
+        # Create response data
+        response_data = {
+            "adapter_id": adapter_id,
+            "event": "bot_response",
+            "data": {
+                "user_id": user_id,
+                "message": message_text,
+                "message_id": message_id
+            }
+        }
+        
+        # Send the response
+        return self.send_message(response_data)
+    
+    def send_error(self, adapter_id: str, chat_id: str, error_message: str) -> bool:
+        """
+        Send an error message to an adapter.
+        
+        Args:
+            adapter_id: ID of the adapter
+            chat_id: ID of the chat/conversation
+            error_message: Error message to send
+            
+        Returns:
+            True if the error was sent successfully, False otherwise
+        """
+        error_data = {
+            "adapter_id": adapter_id,
+            "event": "error",
+            "data": {
+                "chat_id": chat_id,
+                "error": error_message
+            }
+        }
+        
+        return self.send_message(error_data)
+    
+    def send_typing_indicator(self, adapter_id: str, chat_id: str, is_typing: bool = True) -> bool:
+        """
+        Send a typing indicator to an adapter.
+        
+        Args:
+            adapter_id: ID of the adapter
+            chat_id: ID of the chat/conversation
+            is_typing: Whether the bot is typing (True) or not (False)
+            
+        Returns:
+            True if the indicator was sent successfully, False otherwise
+        """
+        typing_data = {
+            "adapter_id": adapter_id,
+            "event": "typing_indicator",
+            "data": {
+                "chat_id": chat_id,
+                "is_typing": is_typing
+            }
+        }
+        
+        return self.send_message(typing_data)
     
     def close_connections(self) -> None:
         """

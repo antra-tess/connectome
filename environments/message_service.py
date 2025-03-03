@@ -5,6 +5,7 @@ Handles the flow of messages between the Activity Layer and the Environment Laye
 
 import logging
 from typing import Dict, Any, List, Callable, Optional
+import time
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -36,7 +37,7 @@ class MessageService:
             self.observers.remove(observer)
             logger.debug(f"Removed message observer: {observer}")
     
-    def process_message(self, user_id, message_text, message_id=None, platform=None):
+    def process_message(self, user_id, message_text, message_id=None, platform=None, env_id=None):
         """
         Process an incoming message and notify all observers
         
@@ -45,16 +46,19 @@ class MessageService:
             message_text: Content of the message
             message_id: Optional ID for the message
             platform: Optional platform identifier (e.g., 'telegram', 'slack')
+            env_id: Optional environment ID where the message is processed
             
         Returns:
             Dict containing status information
         """
+        # Create a message object
         message_data = {
             "user_id": user_id,
             "message_text": message_text,
             "message_id": message_id,
             "platform": platform,
-            "timestamp": None  # Could add timestamp here if needed
+            "env_id": env_id,
+            "timestamp": time.time()
         }
         
         logger.info(f"MessageService processing message from user {user_id}")
@@ -68,7 +72,21 @@ class MessageService:
         """Notify all observers about a new message"""
         for observer in self.observers:
             try:
-                observer.observe_message(message_data)
-                logger.debug(f"Notified observer {observer} about new message")
+                # Try the standard observe_message interface
+                if hasattr(observer, 'observe_message'):
+                    observer.observe_message(message_data)
+                    logger.debug(f"Notified observer {observer} about new message using observe_message")
+                # Try the process_message interface as a fallback
+                elif hasattr(observer, 'process_message'):
+                    observer.process_message(
+                        user_id=message_data.get("user_id"),
+                        message_text=message_data.get("message_text"),
+                        message_id=message_data.get("message_id"),
+                        platform=message_data.get("platform"),
+                        env_id=message_data.get("env_id")
+                    )
+                    logger.debug(f"Notified observer {observer} about new message using process_message")
+                else:
+                    logger.warning(f"Observer {observer} has no compatible message handling method")
             except Exception as e:
                 logger.error(f"Error notifying observer {observer}: {str(e)}") 
