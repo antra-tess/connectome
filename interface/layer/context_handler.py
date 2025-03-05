@@ -16,16 +16,10 @@ logger = logging.getLogger(__name__)
 
 class ContextHandler:
     """
-    Interface layer component responsible for agent's cognitive context management.
+    Handles conversation context and history.
     
-    This class handles higher-level context operations such as:
-    1. Building composite context from multiple environments
-    2. Summarizing and analyzing context needs
-    3. Managing context window limits
-    4. Providing privileged context management tools
-    
-    This component is environment-aware and builds context based on the
-    environment hierarchy (system, shared, remote environments).
+    Responsible for storing, retrieving, and formatting conversation context.
+    Acts as the single source of truth for all context-related operations.
     """
     
     def __init__(self, storage_path=None):
@@ -33,16 +27,34 @@ class ContextHandler:
         Initialize the context handler.
         
         Args:
-            storage_path: Optional path for persistent storage (if needed)
+            storage_path: Optional path to store context data
         """
-        self.storage_path = storage_path
-        self.environment_manager = None
-        self.message_store = {}  # In-memory message store
-        self.metadata_store = {}  # In-memory metadata store
+        # Initialize message store - format: Dict[env_id, List[message_data]]
+        self.message_store = {}
         
+        # Initialize metadata store - format: Dict[env_id, Dict[metadata_key, value]]
+        self.metadata_store = {}
+        
+        # Reference to environment manager (set later)
+        self.environment_manager = None
+        
+        # Reference to prompt manager (set later)
+        self.prompt_manager = None
+        
+        # Storage path for persistence (optional)
+        self.storage_path = storage_path
+        
+        logger.info("Context handler initialized")
+    
     def set_environment_manager(self, environment_manager):
-        """Set the environment manager reference for environment context collection"""
+        """Set the environment manager reference"""
         self.environment_manager = environment_manager
+        logger.debug("Environment manager reference set in context handler")
+    
+    def set_prompt_manager(self, prompt_manager):
+        """Set the prompt manager reference"""
+        self.prompt_manager = prompt_manager
+        logger.debug("Prompt manager reference set in context handler")
     
     def register_privileged_tools(self, tool_manager):
         """
@@ -303,85 +315,59 @@ class ContextHandler:
                 "env_id": env_id
             }
     
-    def build_agent_context(self) -> List[Dict[str, Any]]:
+    def build_agent_context(self, env_id: Optional[str] = None, max_tokens: int = 8000) -> List[Dict[str, Any]]:
         """
-        Build a comprehensive context for the agent across all environments.
+        Build the complete context for the agent in a provider-agnostic format.
         
-        This method:
-        1. Collects system environment state
-        2. Gathers context from all relevant mounted environments
-        3. Organizes it in a structured way for the agent
+        Args:
+            env_id: Optional environment ID to focus context on
+            max_tokens: Maximum tokens to include in context
         
         Returns:
-            List of context elements in priority order
+            Formatted context messages ready for LLM
         """
-        try:
-            if not self.environment_manager:
-                return [{"type": "error", "content": "Environment manager not set"}]
-                
-            context_elements = []
-            
-            # 1. Add system instructions and agent identity
-            context_elements.append({
-                "type": "system",
-                "content": self._get_system_instructions()
+        context = []
+        
+        # 1. Start with system prompt if prompt manager is available
+        # Note: The system prompt now includes environment capabilities via the EnvironmentRenderer
+        if self.prompt_manager:
+            system_prompt = self.prompt_manager.get_system_prompt()
+            context.append({
+                "role": "system",
+                "content": system_prompt
             })
-            
-            # 2. Get the system environment (container for all environments)
+        
+        # 2. Get mounted environments
+        mounted_envs = []
+        if self.environment_manager:
             system_env = self.environment_manager.get_environment("system")
-            if not system_env:
-                return [{"type": "error", "content": "System environment not found"}]
-                
-            # 3. Add the system environment state
-            sys_env_state = system_env.render_state_for_context()
-            context_elements.append({
-                "type": "system_environment",
-                "content": sys_env_state
-            })
+            if system_env and hasattr(system_env, 'children'):
+                mounted_envs = list(system_env.children.keys())
+        
+        # 4. Add messages from environments (prioritizing specified env_id)
+        if env_id and env_id != "system":
+            # Focus more context on the specified environment
+            env_context = self.get_environment_context(env_id)
             
-            # 4. Get all mounted environments from the system environment
-            mounted_envs = system_env.get_mounted_environments()
+            # Add recent messages from this environment
+            messages = env_context.get("messages", [])
+            context.extend(self._format_messages_for_llm(messages))
             
-            # 5. For each mounted environment, add its context
+            # Include fewer messages from other environments
+            for other_env_id in mounted_envs:
+                if other_env_id != env_id:
+                    other_env_context = self.get_environment_context(other_env_id, max_messages=5)
+                    other_messages = other_env_context.get("messages", [])
+                    context.extend(self._format_messages_for_llm(other_messages))
+        else:
+            # Add recent messages from all environments
             for env_id in mounted_envs:
                 env_context = self.get_environment_context(env_id)
-                
-                # Add summary if available
-                if env_context.get("summarized"):
-                    metadata = env_context.get("metadata", {})
-                    if "summary" in metadata:
-                        context_elements.append({
-                            "type": "environment_summary",
-                            "env_id": env_id,
-                            "content": metadata["summary"]
-                        })
-                
-                # Add recent messages from this environment
                 messages = env_context.get("messages", [])
-                if messages:
-                    context_elements.append({
-                        "type": "environment_messages",
-                        "env_id": env_id,
-                        "content": messages
-                    })
-                    
-                # Add environment state
-                state = env_context.get("state")
-                if state:
-                    context_elements.append({
-                        "type": "environment_state",
-                        "env_id": env_id,
-                        "content": state
-                    })
-            
-            return context_elements
-            
-        except Exception as e:
-            logger.error(f"Error building agent context: {str(e)}")
-            return [{
-                "type": "error",
-                "content": f"Failed to build agent context: {str(e)}"
-            }]
+                context.extend(self._format_messages_for_llm(messages))
+        
+        # 5. Optimize token usage if needed
+        return self._optimize_context_tokens(context, max_tokens)
     
     def analyze_context_needs(self, env_id: str, threshold_messages: int = 20) -> Dict[str, Any]:
         """
@@ -547,11 +533,68 @@ class ContextHandler:
         # In a real implementation, this would call your LLM processor
         return f"This is a placeholder summary of {len(formatted_text)} characters of conversation."
     
-    def _get_system_instructions(self) -> str:
-        """Get the system instructions for the agent"""
-        # This is a placeholder - implement your actual system instructions
-        return "You are a helpful AI assistant with access to multiple environments."
+    def _format_messages_for_llm(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Format messages for LLM consumption in a provider-agnostic format.
+        
+        Args:
+            messages: List of message dictionaries
+            
+        Returns:
+            Formatted messages for LLM
+        """
+        formatted_messages = []
+        
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            
+            # Convert to standard format
+            formatted_messages.append({
+                "role": role,
+                "content": content
+            })
+        
+        return formatted_messages
     
-    def _sanitize_env_id(self, env_id: str) -> str:
-        """Sanitize an environment ID to ensure it's safe to use as a key"""
-        return env_id.replace(" ", "_").replace("/", "_").replace("\\", "_") 
+    def _optimize_context_tokens(self, context: List[Dict[str, Any]], max_tokens: int = 8000) -> List[Dict[str, Any]]:
+        """
+        Optimize context to fit within token limits.
+        
+        Args:
+            context: The full context list
+            max_tokens: Maximum tokens to include
+            
+        Returns:
+            Optimized context list
+        """
+        # Simple token estimation function (average 4 chars per token)
+        def estimate_tokens(text):
+            return len(text) / 4
+        
+        # Always include system messages
+        system_messages = [msg for msg in context if msg.get("role") == "system"]
+        
+        # Get conversation messages (non-system)
+        conversation = [msg for msg in context if msg.get("role") != "system"]
+        
+        # Calculate token usage of system messages
+        system_tokens = sum(estimate_tokens(msg.get("content", "")) for msg in system_messages)
+        
+        # Calculate available tokens for conversation
+        available_tokens = max_tokens - system_tokens
+        
+        # Select messages to fit in available tokens, prioritizing recent messages
+        selected_conversation = []
+        token_count = 0
+        
+        for msg in reversed(conversation):
+            msg_tokens = estimate_tokens(msg.get("content", ""))
+            if token_count + msg_tokens <= available_tokens:
+                selected_conversation.insert(0, msg)
+                token_count += msg_tokens
+            else:
+                break
+        
+        # Combine system messages and selected conversation
+        return system_messages + selected_conversation 

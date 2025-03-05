@@ -204,27 +204,65 @@ class ReactProtocol(BaseProtocol):
     
     @property
     def protocol_prompt_format(self) -> str:
-        return """TOOL USAGE INSTRUCTIONS:
-You have access to the following tools to assist users:
+        """
+        Get the prompt format for ReAct protocol.
+        
+        Returns:
+            Tool usage instructions for ReAct protocol
+        """
+        return """
+REASONING AND ACTING INSTRUCTIONS:
+- First, think through a problem step by step.
+- Use the Action/Observation pattern when you need to use tools.
+- Format for using tools:
+  Action: tool_name(param1="value1", param2="value2")
+  
+- After each Action, wait for an Observation with the tool result.
+- Once you have all the information, provide your Final Answer.
 
-{tool_descriptions}
-
-To use these tools, follow this format exactly:
-
-Thought: Think step-by-step about how to respond to the user's request and whether any tools can help.
-
-Action: tool_name(param1=value1, param2=value2, ...)
-[Use this format to call a tool. Only call one tool at a time. Provide parameter values exactly as required.]
-
-Observation: [Tool output will appear here]
-
-Continue this pattern of Thought, Action, Observation until you have all the information needed.
-
-Final Answer: [Your final response to the user's request]
-
-IMPORTANT:
-- Always start with a Thought.
-- Always end with a Final Answer after you have the information you need.
-- If you don't need to use a tool, provide your response directly as a Final Answer.
-- Call tools exactly as specified with their correct parameters.
+Example:
+Thought: I need to find information about X.
+Action: search_web(query="information about X")
+Observation: [Result from search tool]
+Thought: Now I know about X. The user asked about Y which relates to X...
+Final Answer: Based on the information, Y is...
 """
+
+    def format_tools(self, tools: List[Dict[str, Any]]) -> str:
+        """
+        Format tools for the ReAct protocol (descriptive text format).
+        
+        Args:
+            tools: List of tool descriptions
+            
+        Returns:
+            Formatted tool descriptions as a string for ReAct prompting
+        """
+        if not tools:
+            return ""
+        
+        descriptions = ["# Available Tools\n"]
+        
+        for tool in tools:
+            tool_name = tool.get("name", "")
+            tool_desc = tool.get("description", "")
+            
+            descriptions.append(f"## {tool_name}\n{tool_desc}")
+            
+            parameters = tool.get("parameters", {})
+            if parameters:
+                descriptions.append("\nParameters:")
+                for param_name, param_desc in parameters.items():
+                    descriptions.append(f"- {param_name}: {param_desc}")
+            
+            # Add usage example
+            param_names = list(parameters.keys())
+            if param_names:
+                param_str = ", ".join([f"{param}='value'" for param in param_names])
+                descriptions.append(f"\nUsage: Action: {tool_name}({param_str})")
+            else:
+                descriptions.append(f"\nUsage: Action: {tool_name}()")
+            
+            descriptions.append("\n")
+        
+        return "\n".join(descriptions)

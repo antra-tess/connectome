@@ -50,22 +50,14 @@ class MessageHandler:
             Response data if a response should be sent, None otherwise
         """
         try:
-            # Validate message data
-            required_fields = ['chat_id', 'user_id', 'content', 'adapter_id']
-            for field in required_fields:
-                if field not in data:
-                    logger.error(f"Missing required field '{field}'")
-                    return None
-            env_id = data['env_id']
-            
             # Handle the message for this environment
-            environment = self.environment_manager.get_environment(env_id)
+            environment = self.environment_manager.get_environment(data['event_type'])
             if not environment:
-                logger.info(f"Environment {env_id} not found, might need to be created")
-                return {"status": "failure", "env_id": env_id}
+                logger.info(f"Environment for event type {data['event_type']} not found, might need to be created")
+                return {"status": "failure"}
             # Update the environment state
-            self.environment_manager.update_environment_state(env_id, data)
-            return {"status": "success", "env_id": env_id}
+            self.environment_manager.update_environment_state(environment.id, data)
+            return {"status": "success"}
 
         except Exception as e:
             logger.error(f"Error handling message: {str(e)}")

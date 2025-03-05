@@ -20,6 +20,8 @@ The contextual layer that creates coherent representations of activities and sta
 - **Environment Types**:
   - **System Environment**: Root environment that provides access to all mounted environments
   - **Messaging Environment**: Handles chat conversations across platforms
+    - Publishes messages and typing indicators to registered observers
+    - Maintains conversation state across different platforms
   - **File Environment**: File system operations and management
   - **Web Environment**: Internet browsing, API access, and search capabilities
   - **Custom Environments**: Extensible to add domain-specific capabilities
@@ -174,6 +176,12 @@ system_env.mount(file_env, mount_point="files")
 - Messages are associated with specific environments using `env_id`
 - Tools execute within the context of specific environments
 - Updates propagate through the environment hierarchy
+
+### Observer Pattern for Layer Communication
+- Environments publish events rather than directly calling external services
+- Activity layer components register as observers for environment events
+- Maintains clean separation between architectural layers
+- Allows for flexible replacement of component implementations
 
 ## Extending the Framework
 

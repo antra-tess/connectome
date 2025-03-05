@@ -74,33 +74,71 @@ class LLMProcessor:
     def format_for_litellm(self, context: List[Dict[str, Any]], 
                           tool_descriptions: List[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-        Format the prompt for LiteLLM.
+        Format context and tools for the specific LLM protocol.
         
         Args:
-            context: Context messages
-            tool_descriptions: Tool descriptions to include
+            context: Pre-formatted context from the ContextHandler
+            tool_descriptions: Available tools for the LLM
             
         Returns:
-            Formatted data for LiteLLM
+            Formatted request for the LLM protocol
         """
-        if tool_descriptions is None:
-            tool_descriptions = []
-        
-        # Use the protocol to format the messages and get additional parameters
-        formatted_messages, additional_params = self.protocol.format_for_litellm(
-            messages=context,
-            tool_descriptions=tool_descriptions
-        )
-        
-        # Combine with standard parameters
+        # Initialize parameters for LiteLLM
         params = {
-            "messages": formatted_messages,
+            "messages": context.copy() if context else [],  # Create a copy to avoid modifying the original
+            "model": LLM_MODEL,
             "temperature": LLM_TEMPERATURE,
             "max_tokens": LLM_MAX_TOKENS
         }
         
-        # Add any additional parameters from the protocol
-        params.update(additional_params)
+        # No tools to format
+        if not tool_descriptions or not self.protocol.supports_tools():
+            return params
+        
+        # Get a copy of messages to possibly modify
+        messages = params["messages"]
+        
+        # Get system message if it exists
+        system_message = None
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "system":
+                system_message = msg
+                system_idx = i
+                break
+        
+        # Use the protocol's format_tools method to get protocol-specific tool formatting
+        formatted_tools = self.protocol.format_tools(tool_descriptions)
+        
+        # Handle based on what format_tools returns
+        if isinstance(formatted_tools, list):
+            # For protocols that return structured tool data (like OpenAI function calling)
+            params["tools"] = formatted_tools
+            
+            # If we have a system message, enhance it with protocol instructions
+            if system_message:
+                # Add protocol instructions to system message
+                original_content = system_message["content"]
+                system_message["content"] = self.protocol.format_system_prompt(original_content, tool_descriptions)
+                messages[system_idx] = system_message  # Update the message in place
+            
+        elif isinstance(formatted_tools, str):
+            # For protocols that return textual tool descriptions (like ReAct)
+            if system_message:
+                # Add protocol instructions and tool descriptions to system message
+                original_content = system_message["content"]
+                system_message["content"] = self.protocol.format_system_prompt(original_content, tool_descriptions)
+                messages[system_idx] = system_message  # Update the message in place
+            else:
+                # Create a new system message with protocol instructions and tool descriptions
+                base_prompt = "You are a helpful AI assistant."
+                system_content = self.protocol.format_system_prompt(base_prompt, tool_descriptions)
+                messages.insert(0, {"role": "system", "content": system_content})
+        
+        # Update the messages in the params
+        params["messages"] = messages
+        
+        # Log the request for debugging
+        self._log_request_to_file(params)
         
         return params
     
@@ -317,29 +355,25 @@ class LLMProcessor:
             logger.error(f"Error generating summary: {str(e)}")
             return f"Error generating summary: {str(e)}"
 
-    def process_with_context(self, prompt: str, context: List[Dict[str, Any]], tools: List[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def process_with_context(self, context: List[Dict[str, Any]], tools: List[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-        Process a prompt with context and tools using the LLM.
+        Process a request with pre-built context and available tools.
         
         Args:
-            prompt: The main prompt to send
-            context: The conversation context
-            tools: Optional list of tools to include
+            context: Formatted context messages from the ContextHandler
+            tools: Available tools for the LLM to use
             
         Returns:
-            Dictionary with response and tool calls
+            Processed result including response text and any tool calls
         """
-        if tools is None:
-            tools = []
-        
         try:
-            # Format the prompt and context for the LLM
+            # Format the context and tools for the specific LLM protocol
             formatted_data = self.format_for_litellm(context, tools)
             
             # Send to the LLM
             llm_response = self.send_to_llm(formatted_data)
             
-            # Process the LLM output
+            # Process the LLM's output
             processed = self.process_llm_output(llm_response)
             
             return {
@@ -356,28 +390,31 @@ class LLMProcessor:
                 "error": str(e)
             }
 
-    def generate_final_response(self, prompt: str, context: List[Dict[str, Any]]) -> str:
+    def generate_final_response(self, context: List[Dict[str, Any]]) -> str:
         """
-        Generate a final response after tool calls.
+        Generate a final response after tool execution.
         
         Args:
-            prompt: The main prompt
-            context: Updated context including tool results
+            context: Complete context including tool results
             
         Returns:
             Final response from the LLM
         """
         try:
-            # Format for LiteLLM
+            # Format the context for the LLM
             formatted_data = self.format_for_litellm(context)
             
-            # Send to LLM
-            response = self.send_to_llm(formatted_data)
+            # Send to the LLM
+            llm_response = self.send_to_llm(formatted_data)
             
-            # Process output (just extract the text response)
-            processed = self.process_llm_output(response)
+            # Extract the final response using the protocol
+            final_response = self.protocol.extract_final_response(llm_response)
+            if not final_response:
+                # Fallback in case response extraction fails
+                processed = self.process_llm_output(llm_response)
+                return processed.get("response_text", "I've processed the information, but encountered an issue generating a cohesive response.")
             
-            return processed.get("response_text", "")
+            return final_response
             
         except Exception as e:
             logger.error(f"Error generating final response: {str(e)}")

@@ -12,7 +12,6 @@ from interface.prompt_library.base_prompts import (
     CONVERSATION_GUIDELINES,
     SAFETY_GUARDRAILS
 )
-from interface.prompt_library.tool_prompts import TOOL_USAGE_GUIDELINES
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -35,19 +34,40 @@ class PromptManager:
             custom_prompt: Optional custom system prompt to use instead of the default
         """
         self.custom_prompt = custom_prompt
+        self.environment_renderer = None  # Will be set by set_environment_renderer
         logger.info("Prompt manager initialized")
+    
+    def set_environment_renderer(self, environment_renderer):
+        """
+        Set the environment renderer for adding environment capabilities to prompts.
+        
+        Args:
+            environment_renderer: The environment renderer instance
+        """
+        self.environment_renderer = environment_renderer
+        logger.debug("Environment renderer set in prompt manager")
     
     def get_system_prompt(self) -> str:
         """
         Get the system prompt for the agent.
         
+        This combines the base prompt with environment capabilities if available.
+        
         Returns:
             Formatted system prompt
         """
-        if self.custom_prompt:
-            return self.custom_prompt
+        # Start with either custom or default prompt
+        base_prompt = self.custom_prompt if self.custom_prompt else self._build_default_prompt()
         
-        return self._build_default_prompt()
+        # Enhance with environment capabilities if available
+        if self.environment_renderer:
+            # Use the environment renderer to add capabilities information
+            enhanced_prompt = self.environment_renderer.format_prompt_with_environment(base_prompt)
+            logger.debug("Enhanced system prompt with environment capabilities")
+            return enhanced_prompt
+        
+        # Return the base prompt if no environment renderer is available
+        return base_prompt
     
     def _build_default_prompt(self) -> str:
         """
@@ -60,7 +80,6 @@ class PromptManager:
             agent_name=AGENT_NAME,
             agent_description=AGENT_DESCRIPTION,
             conversation_guidelines=CONVERSATION_GUIDELINES,
-            tool_usage_guidelines=TOOL_USAGE_GUIDELINES,
             safety_guardrails=SAFETY_GUARDRAILS
         )
     

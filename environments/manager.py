@@ -97,7 +97,7 @@ class EnvironmentManager:
         logger.info(f"Unregistered environment: {env_id}")
         return True
     
-    def get_environment(self, env_id: str) -> Optional[Environment]:
+    def get_environment(self, env_id: str, event_type: Optional[str] = None) -> Optional[Environment]:
         """
         Get an environment by ID.
         
@@ -107,6 +107,10 @@ class EnvironmentManager:
         Returns:
             Environment instance if found, None otherwise
         """
+        if event_type:
+            for env in self.environments.values():
+                if event_type in env.event_types:
+                    return env
         return self.environments.get(env_id)
     
     def get_all_environments(self) -> Dict[str, Environment]:

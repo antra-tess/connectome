@@ -3,22 +3,21 @@ Base Prompts
 Core system prompts and instruction templates for the agent.
 """
 
-# Main system prompt template
-DEFAULT_SYSTEM_PROMPT = """You are {agent_name}, {agent_description}
+# Default system prompt without tool usage instructions
+DEFAULT_SYSTEM_PROMPT = """
+You are {agent_name}, a helpful and intelligent AI assistant.
 
+ROLE AND CAPABILITIES:
+{agent_description}
+
+CONVERSATION GUIDELINES:
 {conversation_guidelines}
 
-{tool_usage_guidelines}
-
+SAFETY GUARDRAILS:
 {safety_guardrails}
+""".strip()
 
-ADDITIONAL INFORMATION:
-- You can participate in conversations across multiple platforms.
-- You have a memory management system to maintain relevant context.
-- You can understand and respond to messages from multiple users in a conversation.
-
-When providing assistance or information, be accurate, helpful, and respectful.
-"""
+# Note: Tool-specific instructions have been removed as they are now handled by protocol classes
 
 # Conversation guidelines that define how the agent should interact
 CONVERSATION_GUIDELINES = """CONVERSATION GUIDELINES:

@@ -343,18 +343,59 @@ class FunctionCallingProtocol(BaseProtocol):
     
     @property
     def protocol_prompt_format(self) -> str:
-        return """TOOL USAGE INSTRUCTIONS:
-You have access to various tools to assist users. The system will handle the formatting of tool calls.
-
-{tool_descriptions}
-
-When you need to use a tool:
-1. Clearly indicate that you need to call a specific tool
-2. The system will execute the tool and provide the result
-3. Use the tool result to inform your final response
-
-IMPORTANT:
-- Only call tools when necessary to fulfill the user's request
-- You can call multiple tools if needed
-- Make sure to provide a final response that addresses the user's request
+        """
+        Get the prompt format for Function Calling protocol.
+        
+        Returns:
+            Tool usage format instructions
+        """
+        return """
+TOOL USAGE INSTRUCTIONS:
+- You have access to tools that you can use to assist with tasks.
+- To use a tool, call it with the required parameters.
+- Wait for the tool result before providing your final answer.
+- Always use tools when they would be helpful to complete the task.
+- If a tool returns an error, try to adjust your approach accordingly.
 """
+
+    def format_tools(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Format tools for the function calling protocol (OpenAI-style).
+        
+        Args:
+            tools: List of tool descriptions
+            
+        Returns:
+            List of formatted tools in OpenAI function calling format
+        """
+        formatted_tools = []
+        
+        for tool in tools:
+            formatted_tool = {
+                "type": "function",
+                "function": {
+                    "name": tool.get("name", ""),
+                    "description": tool.get("description", ""),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": []
+                    }
+                }
+            }
+            
+            # Process parameters
+            parameters = tool.get("parameters", {})
+            for param_name, param_desc in parameters.items():
+                # Default to string type if not specified
+                formatted_tool["function"]["parameters"]["properties"][param_name] = {
+                    "type": "string",
+                    "description": param_desc
+                }
+                
+                # Add to required list (all parameters are required by default)
+                formatted_tool["function"]["parameters"]["required"].append(param_name)
+            
+            formatted_tools.append(formatted_tool)
+        
+        return formatted_tools

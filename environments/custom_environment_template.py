@@ -13,7 +13,7 @@ Your environment will be automatically discovered by the framework.
 """
 
 from environments.base import Environment
-from typing import Dict, Any, Optional, Callable
+from typing import Dict, Any, Optional
 
 
 class CustomEnvironmentTemplate(Environment):
@@ -22,6 +22,9 @@ class CustomEnvironmentTemplate(Environment):
     
     This class serves as a starting point for creating new environment types.
     """
+    ATTENTION_SIGNALS = []
+    EVENT_TYPES = []
+    IGNORE_MARKERS = []
     
     def __init__(self, env_id: Optional[str] = None, name: str = "Custom Environment",
                  description: str = "A custom environment template"):

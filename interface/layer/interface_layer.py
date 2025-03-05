@@ -48,20 +48,31 @@ class InterfaceLayer:
         self.environment_manager = environment_manager
         self.protocol_name = protocol_name
         
+        # Initialize context handler
         self.context_handler = ContextHandler()
+        self.context_handler.set_environment_manager(environment_manager)
+        
+        # Set up environment manager to use context handler
+        self.environment_manager.set_context_manager(self.context_handler)
         
         # Get protocol instance
         protocol_instance = get_protocol(protocol_name)
-
+        
+        # Initialize environment renderer first (needed by prompt manager)
+        self.environment_renderer = EnvironmentRenderer(self.environment_manager)
+        
         # Initialize prompt manager
-        prompt_manager = PromptManager()
-
-        self.llm_processor = LLMProcessor(protocol_instance, prompt_manager)
+        self.prompt_manager = PromptManager(protocol_instance.protocol_prompt_format)
         
+        # Connect prompt manager with context handler and environment renderer
+        self.context_handler.set_prompt_manager(self.prompt_manager)
+        self.prompt_manager.set_environment_renderer(self.environment_renderer)
+        
+        # Initialize LLM processor with protocol
+        self.llm_processor = LLMProcessor(protocol_instance, self.prompt_manager)
+        
+        # Initialize tool manager
         self.tool_manager = PrivilegedToolManager(self.environment_manager)
-        
-        # Initialize environment renderer
-        self.environment_renderer = EnvironmentRenderer()
         
         # Initialize message processor
         self.message_processor = MessageProcessor(
@@ -72,29 +83,29 @@ class InterfaceLayer:
             self.environment_renderer
         )
         
+        # Initialize mounted environments tracking
+        self.mounted_environments = set()
+        
         # Register as an observer for messages from the Environment Layer
         self.environment_manager.register_message_observer(self)
         
-        # Track mounted environments and register as observer for each
-        self.mounted_environments = set()
-        self._register_for_system_environment()
+        # Register as observer for the system environment
+        system_env = self.environment_manager.get_environment("system")
+        if system_env:
+            self.environment_manager.register_environment_observer("system", self)
+            self.mounted_environments.add("system")
+        
+        # Register privileged tools with the context handler
+        self._register_privileged_tools()
         
         logger.info(f"Interface layer initialized with protocol: {protocol_name}")
     
-    def _register_for_system_environment(self):
+    def _register_privileged_tools(self):
         """
-        Register as an observer for the system environment and any mounted environments.
+        Register privileged tools with the context handler.
         """
-        # Get the system environment
-        system_env = self.environment_manager.system_environment
-        if system_env:
-            # Register for the system environment
-            self.environment_manager.register_environment_observer(system_env.id, self)
-            self.mounted_environments.add(system_env.id)
-            
-            # The base class observer system will automatically register us for child environments
-            # No need to register for each child separately as it's now handled by the mount mechanism
-            logger.info(f"Registered as observer for system environment and its children")
+        # Implement the logic to register privileged tools with the context handler
+        pass
     
     def observe_message(self, message_data):
         """
@@ -188,6 +199,14 @@ class InterfaceLayer:
         """
         Observe an update to an environment and determine if a notification is needed.
         
+        Requires standardized event format:
+        {
+          "event": "eventType",
+          "data": {
+            // Event-specific data
+          }
+        }
+        
         Args:
             env_id: ID of the environment that was updated
             env_state: Current state of the environment
@@ -198,12 +217,18 @@ class InterfaceLayer:
         """
         logger.debug(f"Observed update for environment {env_id}: {update_data}")
         
-        # Handle special administrative update types
-        update_type = update_data.get('type', 'generic_update')
-        
+        # Extract event type and data from standardized format
+        if 'event' not in update_data or 'data' not in update_data:
+            logger.error(f"Invalid update format: missing 'event' or 'data' fields in {update_data}")
+            return None
+            
+        event_type = update_data['event']
+        event_data = update_data['data']
+            
+        # Handle special administrative events
         # Handle environment mounting
-        if update_type == 'environment_mounted':
-            mounted_env_id = update_data.get('env_id')
+        if event_type == 'environmentMounted':
+            mounted_env_id = event_data.get('envId')
             if mounted_env_id and mounted_env_id not in self.mounted_environments:
                 # Register as observer for the newly mounted environment
                 self.environment_manager.register_environment_observer(mounted_env_id, self)
@@ -211,15 +236,15 @@ class InterfaceLayer:
                 logger.info(f"Registered as observer for newly mounted environment {mounted_env_id}")
             
         # Handle environment unmounting
-        elif update_type == 'environment_unmounted':
-            unmounted_env_id = update_data.get('env_id')
+        elif event_type == 'environmentUnmounted':
+            unmounted_env_id = event_data.get('envId')
             if unmounted_env_id and unmounted_env_id in self.mounted_environments:
                 # Unregister as observer for the unmounted environment
                 self.mounted_environments.remove(unmounted_env_id)
                 logger.info(f"Unregistered as observer for unmounted environment {unmounted_env_id}")
         
         # Handle initial state (we need to add the environment regardless)
-        elif update_type == 'initial_state':
+        elif event_type == 'initialState':
             # Make sure the environment is in our tracked set
             if env_id not in self.mounted_environments:
                 self.mounted_environments.add(env_id)
@@ -232,6 +257,11 @@ class InterfaceLayer:
         
         # Get the environment to format its update data for the agent
         formatted_update = environment.format_update_for_agent(update_data) if hasattr(environment, 'format_update_for_agent') else str(update_data)
+        
+        # Only process the update if it requires the agent's attention
+        if not self._update_requires_attention(env_id, update_data):
+            logger.debug(f"Update for environment {env_id} does not require attention, skipping notification")
+            return None
         
         # Create a synthetic message from the environment update
         system_prefix = f"Environment '{env_id}' has been updated. The following information represents this update:"
@@ -254,6 +284,17 @@ class InterfaceLayer:
         """
         Determine if an environment update requires the agent's attention.
         
+        Delegates the decision to the environment's own requires_attention method,
+        allowing each environment to implement its own rules.
+        
+        Requires standardized format:
+        {
+          "event": "eventType",
+          "data": {
+            // Event-specific data
+          }
+        }
+        
         Args:
             env_id: ID of the environment
             update_data: Data about the update
@@ -261,22 +302,24 @@ class InterfaceLayer:
         Returns:
             True if the agent should be notified, False otherwise
         """
-        # By default, these update types always require attention
-        attention_types = [
-            'new_message', 
-            'document_change', 
-            'email_received',
-            'environment_mounted',
-            'environment_unmounted'
-        ]
-        
-        update_type = update_data.get('type', '')
-        if update_type in attention_types:
-            return True
+        # Ensure we have the required format
+        if 'event' not in update_data or 'data' not in update_data:
+            logger.error(f"Invalid update format: missing 'event' or 'data' fields in {update_data}")
+            return False
             
-        # Check for explicit attention flag
-        if update_data.get('requires_attention', False):
-            return True
+        # Get the environment
+        environment = self.environment_manager.get_environment(env_id)
+        if not environment:
+            logger.error(f"Cannot find environment {env_id} to check attention requirements")
+            return False
             
-        # Otherwise, don't bother the agent
-        return False 
+        # Delegate decision to the environment
+        try:
+            return environment.requires_attention(update_data)
+        except Exception as e:
+            logger.error(f"Error checking if update requires attention: {str(e)}")
+            logger.exception("Full exception details:")
+            
+            # Default to requiring attention if there's an error
+            # This is safer than potentially missing important updates
+            return True 

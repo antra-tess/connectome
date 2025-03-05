@@ -19,6 +19,17 @@ class Environment:
     Environments provide a way to organize tools and represent external systems.
     They can be nested to create hierarchical structures.
     """
+    # Events that should cause the agent to pay attention and potentially respond
+    # Subclasses should override this with environment-specific events that require attention
+    ATTENTION_SIGNALS = []
+    
+    # Event types supported by this environment
+    # Subclasses should override this with their specific supported event types
+    EVENT_TYPES = []
+    
+    # Markers that cause messages/updates to be ignored (e.g., "." for private messages)
+    # Subclasses can override this to define content that should be hidden from the agent
+    IGNORE_MARKERS = []
     
     def __init__(self, env_id: Optional[str] = None, name: str = "Unnamed Environment", 
                  description: str = ""):
@@ -160,11 +171,13 @@ class Environment:
         """
         env_state = self.render_state_for_context()
         
-        # Create initial state update data
+        # Create initial state update data in standardized format
         update_data = {
-            "type": "initial_state",
-            "env_id": self.id,
-            "is_initial": True
+            "event": "initialState",
+            "data": {
+                "envId": self.id,
+                "isInitial": True
+            }
         }
         
         # Notify the observer
@@ -201,12 +214,14 @@ class Environment:
         # Add to children
         self.children[environment.id] = environment
                 
-        # Create mount event data
+        # Create mount event data in standardized format
         mount_event = {
-            "type": "environment_mounted",
-            "env_id": environment.id,
-            "mount_point": mount_point or environment.name,
-            "environment_state": environment.render_state_for_context()
+            "event": "environmentMounted",
+            "data": {
+                "envId": environment.id,
+                "mountPoint": mount_point or environment.name,
+                "environmentState": environment.render_state_for_context()
+            }
         }
         
         # Notify observers about the mount
@@ -237,11 +252,13 @@ class Environment:
         environment = self.children[env_id]
         mount_point = environment.metadata.get('mount_point', environment.name)
             
-        # Create unmount event data
+        # Create unmount event data in standardized format
         unmount_event = {
-            "type": "environment_unmounted",
-            "env_id": env_id,
-            "mount_point": mount_point
+            "event": "environmentUnmounted",
+            "data": {
+                "envId": env_id,
+                "mountPoint": mount_point
+            }
         }
         
         # Unregister all our observers from the child environment
@@ -347,7 +364,14 @@ class Environment:
         """
         Update the state of this environment based on activity data.
         
-        This base implementation simply updates the metadata with the provided data.
+        Requires standardized format:
+        {
+          "event": "eventType",
+          "data": {
+            // Event-specific data
+          }
+        }
+        
         Subclasses should override this method to provide environment-specific state updates.
         
         Args:
@@ -357,37 +381,50 @@ class Environment:
             True if the update was successful, False otherwise
         """
         try:
-            # Default implementation just updates metadata
-            update_type = update_data.get('type', 'generic_update')
+            # Validate the standardized format
+            if 'event' not in update_data or 'data' not in update_data:
+                logger.error(f"Invalid update format: missing 'event' or 'data' fields in {update_data}")
+                return False
+                
+            event_type = update_data['event']
+            event_data = update_data['data']
+            
+            # Create a flattened version for internal storage
+            # This simplifies storage and retrieval
+            flattened_data = {
+                "type": event_type,  # Keep type for backward compatibility with internal code
+                **{k: v for k, v in update_data.items() if k != 'event' and k != 'data'},
+                **event_data
+            }
             
             # Store the update in the environment's history
             if 'history' not in self.metadata:
                 self.metadata['history'] = []
                 
             # Add timestamp if not present
-            if 'timestamp' not in update_data:
+            if 'timestamp' not in flattened_data:
                 import time
-                update_data['timestamp'] = time.time()
+                flattened_data['timestamp'] = time.time()
                 
             # Add to history
-            self.metadata['history'].append(update_data)
+            self.metadata['history'].append(flattened_data)
             
             # Limit history size to prevent unbounded growth
             max_history = 100  # Configurable
             if len(self.metadata['history']) > max_history:
                 self.metadata['history'] = self.metadata['history'][-max_history:]
                 
-            # Update current state based on update type
+            # Update current state based on event type
             if 'current_state' not in self.metadata:
                 self.metadata['current_state'] = {}
                 
             # Store the latest update of each type
-            self.metadata['current_state'][update_type] = update_data
+            self.metadata['current_state'][event_type] = flattened_data
             
             # Notify observers about the state change
             self.notify_observers(update_data)
             
-            logger.info(f"Updated state of environment {self.id} with {update_type}")
+            logger.info(f"Updated state of environment {self.id} with {event_type}")
             return True
         except Exception as e:
             logger.error(f"Error updating environment state: {str(e)}")
@@ -475,24 +512,53 @@ class Environment:
         that can be passed directly to the agent as part of a message. Environments
         should override this method to provide specialized formatting for their updates.
         
+        Requires standardized format:
+        {
+          "event": "eventType",
+          "data": {
+            // Event-specific data
+          }
+        }
+        
         Args:
             update_data: Data about the update from notify_observers
             
         Returns:
             Formatted string describing the update in a way optimized for the agent
         """
-        # Base implementation provides a simple XML-style format
-        update_type = update_data.get('type', 'generic_update')
+        # Validate the standardized format
+        if 'event' not in update_data or 'data' not in update_data:
+            logger.error(f"Invalid update format: missing 'event' or 'data' fields in {update_data}")
+            return f"<error>Invalid update format: {update_data}</error>"
+            
+        event_type = update_data['event']
+        event_data = update_data['data']
         
         # Start with environment identification
-        formatted_update = f'<environment id="{self.id}" name="{self.name}" update_type="{update_type}">\n'
+        formatted_update = f'<environment id="{self.id}" name="{self.name}" event="{event_type}">\n'
         
-        # Add update details
-        formatted_update += '  <update_details>\n'
-        for key, value in update_data.items():
-            if key != 'type' and not isinstance(value, (dict, list)):
+        # Add event data details
+        if event_data:
+            formatted_update += '  <event_data>\n'
+            for key, value in event_data.items():
+                if not isinstance(value, (dict, list)):
+                    formatted_update += f'    <{key}>{value}</{key}>\n'
+                elif isinstance(value, dict):
+                    formatted_update += f'    <{key}>\n'
+                    for sub_key, sub_value in value.items():
+                        if not isinstance(sub_value, (dict, list)):
+                            formatted_update += f'      <{sub_key}>{sub_value}</{sub_key}>\n'
+                    formatted_update += f'    </{key}>\n'
+            formatted_update += '  </event_data>\n'
+        
+        # Add any top-level fields from update_data that aren't event or data
+        other_fields = {k: v for k, v in update_data.items() 
+                      if k != 'event' and k != 'data' and not isinstance(v, (dict, list))}
+        if other_fields:
+            formatted_update += '  <additional_fields>\n'
+            for key, value in other_fields.items():
                 formatted_update += f'    <{key}>{value}</{key}>\n'
-        formatted_update += '  </update_details>\n'
+            formatted_update += '  </additional_fields>\n'
         
         # Add current state summary
         state = self.render_state_for_context()

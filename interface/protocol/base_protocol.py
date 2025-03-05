@@ -37,20 +37,29 @@ class BaseProtocol(ABC):
         Format the system prompt with tool descriptions according to the protocol.
         
         Args:
-            base_prompt: The base system prompt
+            base_prompt: The base system prompt (without tool instructions)
             tools: List of available tools with their descriptions
             
         Returns:
-            Formatted system prompt with protocol instructions and tool descriptions
+            Formatted system prompt with protocol-specific tool instructions
         """
-        # Format tool descriptions for the prompt
-        tool_descriptions = "\n\n".join([format_tool_description(tool) for tool in tools])
+        if not tools:
+            return base_prompt
         
-        # Format the protocol instructions with tool descriptions
-        protocol_instructions = self.protocol_prompt_format.format(tool_descriptions=tool_descriptions)
+        # Format tools for this specific protocol
+        tool_instructions = self.protocol_prompt_format
         
-        # Combine base prompt with protocol instructions
-        return f"{base_prompt}\n\n{protocol_instructions}"
+        # If the protocol returns tool formatting as a string, append it
+        tool_descriptions = ""
+        if isinstance(tools, list) and tools:
+            # Format tool descriptions as text (each protocol may override this)
+            tool_descriptions = self.format_tools(tools)
+            if isinstance(tool_descriptions, str):
+                # Only append if it's a string (some protocols like OpenAI return structured data)
+                return f"{base_prompt}\n\n{tool_instructions}\n\n{tool_descriptions}"
+        
+        # For protocols that don't return strings from format_tools
+        return f"{base_prompt}\n\n{tool_instructions}"
     
     @abstractmethod
     def extract_tool_calls(self, llm_response: str) -> List[Dict[str, Any]]:
@@ -116,3 +125,25 @@ class BaseProtocol(ABC):
         Get the prompt format for the protocol.
         """
         pass
+
+    @abstractmethod
+    def format_tools(self, tools: List[Dict[str, Any]]) -> Any:
+        """
+        Format the tool descriptions according to the protocol.
+        
+        Args:
+            tools: List of tool descriptions
+            
+        Returns:
+            Protocol-specific formatted tools structure
+        """
+        pass
+
+    def supports_tools(self) -> bool:
+        """
+        Indicates whether this protocol supports tool/function calling.
+        
+        Returns:
+            True if the protocol supports tools, False otherwise
+        """
+        return True  # Default to True for backward compatibility

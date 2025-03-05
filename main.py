@@ -193,6 +193,23 @@ if __name__ == '__main__':
     # Initialize Socket.IO client with the message handler
     socket_client = SocketIOClient(message_handler)
 
+    # Connect messaging environments to socket client using the observer pattern
+    for env_id, environment in environment_manager.get_all_environments().items():
+        if hasattr(environment, 'register_message_observer') and env_id.startswith('messaging'):
+            logger.info(f"Registering message observers for messaging environment: {env_id}")
+            
+            # Register a message observer that uses the socket client's send_message method
+            def message_callback(message_data):
+                return socket_client.send_message(message_data)
+            
+            environment.register_message_observer(message_callback)
+            
+            # Register a typing indicator observer that uses the socket client's send_typing_indicator method
+            def typing_callback(adapter_id, chat_id, is_typing):
+                return socket_client.send_typing_indicator(adapter_id, chat_id, is_typing)
+            
+            environment.register_typing_observer(typing_callback)
+
     # Define the response callback function and set it on the environment manager
     def response_callback(response_data):
         # Extract data from the response

@@ -51,7 +51,7 @@ class MessageProcessor:
             message_text: Content of the message
             message_id: Optional message ID
             platform: Optional platform identifier
-            env_id: Optional environment ID where the message is being processed
+            env_id: Optional environment ID where the message is processed
             
         Returns:
             Processing result including the agent's response
@@ -74,25 +74,20 @@ class MessageProcessor:
                 "message_id": message_id or str(uuid.uuid4())
             })
             
-            # Create the base prompt
-            base_prompt = self._create_base_prompt()
+            # 1. Build the context from the context handler
+            context = self.context_handler.build_agent_context(env_id)
             
-            # Enrich prompt with environment information
-            prompt = self.environment_renderer.format_prompt_with_environment(base_prompt)
-            
-            # Get conversation context
-            context = self.context_handler.build_agent_context()
-            
-            # Build the full prompt with context
+            # 2. Collect available tools separately (tools aren't part of the context)
             available_tools = self._get_available_tools()
             
-            # Process with LLM
-            processed = self.llm_processor.process_with_context(prompt, context, available_tools)
+            # 3. Process with LLM (the LLMProcessor will apply protocol-specific formatting)
+            processed = self.llm_processor.process_with_context(context, available_tools)
             
             # Extract the agent's response
             response_text = processed["response"]
             temp_context = []
-            # Save the assistant's response to context
+            
+            # Cache the assistant's initial response
             temp_context.append({
                 "env_id": env_id,
                 "user_id": "assistant",
@@ -102,7 +97,6 @@ class MessageProcessor:
             
             # Execute any tool calls
             final_response = None
-            
             
             if processed["tool_calls"]:
                 # Execute each tool call in sequence
@@ -119,7 +113,7 @@ class MessageProcessor:
                             # Format the result according to the protocol
                             tool_result = self.llm_processor.format_tool_result(tool_name, result)
                             
-                            # Save the tool call and result to context
+                            # Cache the tool result
                             temp_context.append({
                                 "env_id": env_id,
                                 "content": tool_result,
@@ -134,7 +128,7 @@ class MessageProcessor:
                             # Format the error according to the protocol
                             tool_result = self.llm_processor.format_tool_result(tool_name, error_message)
                             
-                            # Save the error message to context
+                            # Cache the error message
                             temp_context.append({
                                 "env_id": env_id,
                                 "content": tool_result,
@@ -149,7 +143,7 @@ class MessageProcessor:
                             # Format the result according to the protocol
                             tool_result = self.llm_processor.format_tool_result(tool_name, result)
                             
-                            # Save the tool result to context
+                            # Cache the tool result
                             temp_context.append({
                                 "env_id": env_id,
                                 "content": tool_result,
@@ -163,7 +157,7 @@ class MessageProcessor:
                             # Format the error according to the protocol
                             tool_result = self.llm_processor.format_tool_result(tool_name, error_message)
                             
-                            # Save the error message to context
+                            # Cache the error message
                             temp_context.append({
                                 "env_id": env_id,
                                 "content": tool_result,
@@ -171,10 +165,14 @@ class MessageProcessor:
                                 "user_id": "system"
                             })
                 
-                # After executing all tools, we might want to let the LLM generate a final response
-                # This is optional and depends on your protocol
-                final_response = self.llm_processor.generate_final_response(prompt, context + temp_context)
+                # After executing all tools, generate a final response
+                # Create a new context that includes the tool results
+                final_context = context + temp_context
+                
+                # Generate the final response (without passing tools again)
+                final_response = self.llm_processor.generate_final_response(final_context)
 
+            # Save the FINAL assistant's response to context (not the initial one)
             self.context_handler.save_message({
                 "env_id": env_id,
                 "user_id": "assistant",
@@ -199,19 +197,6 @@ class MessageProcessor:
                 "status": "error",
                 "message": error_message
             }
-    
-    def _create_base_prompt(self) -> str:
-        """
-        Create the base system prompt.
-        
-        Returns:
-            Base system prompt
-        """
-        # Create the system prompt from the prompt manager
-        base_prompt = "You are a helpful AI assistant capable of interacting with various environments.\n"
-        base_prompt += "You can use tools to perform actions in these environments."
-        
-        return base_prompt
     
     def _get_available_tools(self) -> List[Dict[str, Any]]:
         """
