@@ -192,10 +192,49 @@ The framework is designed for extension at multiple levels:
 3. **Custom Protocols**: Implement support for different LLM APIs
 4. **Custom Adapters**: Connect to additional messaging platforms or external services
 
-## Contributing
+## Interaction diagram
+sequenceDiagram
+    participant User
+    participant Adapter as Normalizing Adapter
+    participant Activity as Activity Layer
+    participant Environment as Environment Layer
+    participant Interface as Interface Layer
+    participant LLM as Language Model
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+    User->>Adapter: Send message
+    Adapter->>Activity: Emit "chat_message" event
+    Note over Adapter,Activity: Standardized message format
 
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details. 
+    Activity->>Environment: handle_message()
+    Environment->>Environment: Update environment state
+    Environment->>Interface: observe_message()
+    
+    Interface->>Interface: save_message()
+    Interface->>Environment: build_agent_context()
+    Environment->>Interface: Return environment context
+    
+    Interface->>Interface: Get available tools
+    Interface->>LLM: process_with_context()
+    LLM->>Interface: Return response
+    
+    Interface->>Interface: Parse tool calls (if any)
+    
+    alt Tool Execution
+        Interface->>Environment: execute_tool()
+        Environment->>Interface: Return tool result
+        Interface->>LLM: process_with_tool_result()
+        LLM->>Interface: Return updated response
+    end
+    
+    Interface->>Environment: save_message() (assistant)
+    Environment->>Activity: publish_message()
+    
+    Activity->>Adapter: Emit "bot_response" event
+    Adapter->>User: Display response
+    
+    opt Typing Indicator
+        Interface->>Environment: publish_typing_indicator()
+        Environment->>Activity: send_typing_indicator()
+        Activity->>Adapter: Emit "typing_indicator" event
+        Adapter->>User: Show typing indicator
+    end
