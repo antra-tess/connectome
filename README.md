@@ -193,6 +193,8 @@ The framework is designed for extension at multiple levels:
 4. **Custom Adapters**: Connect to additional messaging platforms or external services
 
 ## Interaction diagram
+
+```mermaid
 sequenceDiagram
     participant User
     participant Adapter as Normalizing Adapter
@@ -238,3 +240,4 @@ sequenceDiagram
         Activity->>Adapter: Emit "typing_indicator" event
         Adapter->>User: Show typing indicator
     end
+```
