@@ -27,11 +27,11 @@ shutdown_event = Event()
 # Import modules
 from activity.client import SocketIOClient
 from activity.listener import MessageHandler
-from environments.system import SystemEnvironment
-from environments.manager import EnvironmentManager
+from elements.system import SystemEnvironment
+from bot_framework.elements.space_registry import EnvironmentManager, SpaceRegistry
 from bot_framework.interface.layer import InterfaceLayer
 
-from environments.base import Environment
+from elements.base import Environment
 
 
 def discover_environment_classes():
@@ -187,29 +187,24 @@ if __name__ == '__main__':
     # Initialize environment system (LLMProcessor will handle LiteLLM initialization)
     environment_manager, interface_layer = initialize_environments()
 
-    # Create message handler with the environment manager
-    message_handler = MessageHandler(environment_manager)
+    # Initialize SpaceRegistry if not already initialized
+    space_registry = SpaceRegistry()
+
+    # Create message handler with the space registry
+    message_handler = MessageHandler(space_registry)
 
     # Initialize Socket.IO client with the message handler
     socket_client = SocketIOClient(message_handler)
-
-    # Connect messaging environments to socket client using the observer pattern
+    
+    # Connect the socket client to the space registry
+    space_registry.set_socket_client(socket_client)
+    
+    # Set space registry on all elements that need to send outgoing messages
     for env_id, environment in environment_manager.get_all_environments().items():
-        if hasattr(environment, 'register_message_observer') and env_id.startswith('messaging'):
-            logger.info(f"Registering message observers for messaging environment: {env_id}")
-            
-            # Register a message observer that uses the socket client's send_message method
-            def message_callback(message_data):
-                return socket_client.send_message(message_data)
-            
-            environment.register_message_observer(message_callback)
-            
-            # Register a typing indicator observer that uses the socket client's send_typing_indicator method
-            def typing_callback(adapter_id, chat_id, is_typing):
-                return socket_client.send_typing_indicator(adapter_id, chat_id, is_typing)
-            
-            environment.register_typing_observer(typing_callback)
-
+        if hasattr(environment, 'set_registry'):
+            logger.info(f"Setting space registry for environment: {env_id}")
+            environment.set_registry(space_registry)
+    
     # Define the response callback function and set it on the environment manager
     def response_callback(response_data):
         # Extract data from the response

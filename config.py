@@ -70,12 +70,6 @@ DEFAULT_ENVIRONMENTS = [
         "enabled": True,
         "mount_point": None
     },
-    {
-        "id": "file",
-        "class": "FileEnvironment",
-        "enabled": True,
-        "mount_point": None
-    }
 ]
 
 # Parse environment-specific configuration from environment variables

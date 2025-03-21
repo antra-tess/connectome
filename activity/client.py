@@ -148,38 +148,46 @@ class SocketIOClient:
             logger.error(f"Connection error with adapter {adapter_id}: {data}")
             self.connected_adapters[adapter_id] = False
         
-        @client.on("chat_message")
-        def on_chat_message(data):
+        @client.on("bot_request")
+        def on_bot_request(data):
             # Add adapter info to the data
-            data['adapter_id'] = adapter_id
-            
-            # Call the message handler's handle_message method directly
-            result = self.message_handler.handle_message(data)
-            
-            # Process the result if needed
-            if result:
-                logger.info(f"Message handled: {result}")
+            if isinstance(data, dict):
+                # Add adapter_id to the event data
+                if 'data' in data:
+                    data['data']['adapter_id'] = adapter_id
+                else:
+                    logger.warning(f"Received malformed bot_request from adapter {adapter_id}, missing 'data' field")
+                    return
+                
+                # Handle different event types
+                logger.debug(f"Received {data.get('event_type', 'unknown')} event from adapter {adapter_id}")
+                
+                # Pass the event to the message handler
+                self.message_handler.handle_message(data)
+            else:
+                logger.warning(f"Received non-dict data from adapter {adapter_id}: {type(data)}")
         
         @client.on("clear_context")
         def on_clear_context(data):
             # Add adapter info to the data
-            data['adapter_id'] = adapter_id
-            
-            # Call the message handler's handle_clear_context method directly
-            result = self.message_handler.handle_clear_context(data)
-            
-            # Process the result if needed
-            if result:
-                logger.info(f"Context cleared: {result}")
-        
-        @client.on("registration_success")
-        def on_registration_success(data):
-            logger.info(f"Successfully registered with adapter {adapter_id}: {data}")
-        
-        @client.on("registration_error")
-        def on_registration_error(data):
-            logger.error(f"Failed to register with adapter {adapter_id}: {data}")
-    
+            if isinstance(data, dict):
+                # Add adapter_id to the event data
+                if 'data' in data:
+                    data['data']['adapter_id'] = adapter_id
+                else:
+                    data['data'] = {'adapter_id': adapter_id}
+                
+                # Pass to the message handler
+                logger.debug(f"Received clear_context request from adapter {adapter_id}")
+                result = self.message_handler.handle_clear_context(data)
+                
+                if result:
+                    logger.info(f"Context cleared for adapter {adapter_id}")
+                else:
+                    logger.warning(f"Failed to clear context for adapter {adapter_id}")
+            else:
+                logger.warning(f"Received non-dict data from adapter {adapter_id}: {type(data)}")
+
     def _register_with_adapter(self, adapter_id: str, adapter_config: Dict[str, Any]) -> None:
         """
         Register with the adapter after connecting.
@@ -212,13 +220,18 @@ class SocketIOClient:
     
     def send_message(self, message: Dict[str, Any]) -> bool:
         """
-        Send a message to an adapter server.
+        Send a message to an adapter.
         
         Args:
-            message: Dictionary containing message data including:
-                - adapter_id: Identifier for the target adapter
-                - event: Event type (defaults to 'bot_response')
-                - data: Message data
+            message: Message data with format:
+                {
+                    "event_type": "send_message", # or other event types
+                    "data": {
+                        "conversation_id": "...",
+                        # Other message-specific fields
+                    },
+                    "adapter_id": "..." # ID of the adapter to send through
+                }
                 
         Returns:
             True if the message was sent successfully, False otherwise
@@ -233,12 +246,12 @@ class SocketIOClient:
             return False
         
         try:
-            # Send the message to the adapter
+            # Send the message to the adapter as is
             self.clients[adapter_id].emit("bot_response", message)
-            logger.info(f"Sent message to adapter {adapter_id}")
+            logger.debug(f"Sent message to adapter {adapter_id}: {message['event_type']}")
             return True
         except Exception as e:
-            logger.error(f"Failed to send message to adapter {adapter_id}: {str(e)}")
+            logger.error(f"Failed to send message to adapter {adapter_id}: {e}")
             return False
     
     def send_response(self, user_id: str, message_text: str, message_id: Optional[str] = None, 
@@ -319,9 +332,9 @@ class SocketIOClient:
         """
         typing_data = {
             "adapter_id": adapter_id,
-            "event": "typing_indicator",
+            "event_type": "typing_indicator",
             "data": {
-                "chat_id": chat_id,
+                "conversation_id": chat_id,
                 "is_typing": is_typing
             }
         }

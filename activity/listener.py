@@ -1,15 +1,16 @@
 """
 Message Listener
-Handles incoming messages from normalizing adapters.
+
+Handles incoming messages and routes them to the appropriate space.
 """
 
 import logging
-from typing import Dict, Any, Callable, Optional
-import time
+import json
+from typing import Dict, Any, Optional, List, Callable
 import uuid
-import traceback
+import time
 
-from config import SOCKET_HOST, SOCKET_PORT
+from ..elements.space_registry import SpaceRegistry
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -18,90 +19,168 @@ logger = logging.getLogger(__name__)
 
 class MessageHandler:
     """
-    Handles incoming messages from normalizing adapters.
+    Handles incoming messages and determines their timeline context.
     
-    Validates message data, processes messages through the environment layer,
-    and handles the responses.
+    This class is responsible for:
+    1. Receiving incoming messages
+    2. Determining the timeline context
+    3. Passing the message and context to the SpaceRegistry for routing
+    
+    The MessageHandler does not determine how messages are routed to spaces -
+    that is the responsibility of the SpaceRegistry.
     """
     
-    def __init__(self, environment_manager):
+    def __init__(self, space_registry: SpaceRegistry):
         """
         Initialize the message handler.
         
         Args:
-            environment_manager: EnvironmentManager instance to handle messages
+            space_registry: Registry of available spaces
         """
-        self.environment_manager = environment_manager
-        logger.info("Message handler initialized")
+        self.space_registry = space_registry
+        logger.info("Initialized MessageHandler")
     
-    def handle_message(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _determine_timeline_context(self, event_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Handle an incoming message from an adapter.
+        Determine the timeline context for an incoming message.
+        
+        This method extracts relevant context information from the event data
+        and constructs a unique timeline identifier.
         
         Args:
-            data: Message data dictionary including:
-                - chat_id: Identifier for the conversation
-                - user_id: Identifier for the user
-                - content: Message content
-                - adapter_id: Identifier for the source adapter
-                - event_type: Type of event (e.g., 'chat_message', 'document_update', 'email')
-                
+            event_data: The event data received
+            
         Returns:
-            Response data if a response should be sent, None otherwise
+            Dictionary containing timeline context information
+        """
+        # Extract relevant fields for timeline context
+        adapter_type = event_data.get('adapter_type')
+        conversation_id = event_data.get('conversation_id')
+        thread_id = event_data.get('thread_id')
+        
+        # Generate a timeline ID if adapter_type and conversation_id are available
+        timeline_id = None
+        if adapter_type and conversation_id:
+            timeline_id = f"{adapter_type}_{conversation_id}"
+        else:
+            # Fallback to a random timeline ID if required fields are missing
+            timeline_id = f"timeline_{str(uuid.uuid4())[:8]}"
+            logger.warning(f"Missing required fields for timeline context. Generated random ID: {timeline_id}")
+        
+        # Construct the timeline context
+        timeline_context = {
+            "timeline_id": timeline_id,
+            "timestamp": int(time.time() * 1000)
+        }
+        
+        # Add thread ID if available
+        if thread_id:
+            timeline_context["thread_id"] = thread_id
+            
+        logger.debug(f"Determined timeline context: {timeline_context}")
+        return timeline_context
+    
+    def handle_message(self, message_data: Dict[str, Any]) -> bool:
+        """
+        Handle an incoming message.
+        
+        Args:
+            message_data: Raw message data received from an adapter
+            
+        Returns:
+            True if the message was handled successfully, False otherwise
         """
         try:
-            # Handle the message for this environment
-            environment = self.environment_manager.get_environment(data['event_type'])
-            if not environment:
-                logger.info(f"Environment for event type {data['event_type']} not found, might need to be created")
-                return {"status": "failure"}
-            # Update the environment state
-            self.environment_manager.update_environment_state(environment.id, data)
-            return {"status": "success"}
-
+            # Validate message format
+            if not isinstance(message_data, dict):
+                logger.error(f"Invalid message format: {message_data}")
+                return False
+            
+            # Convert to standard event format if needed
+            event_data = self._standardize_message_format(message_data)
+            
+            # Determine timeline context
+            timeline_context = self._determine_timeline_context(event_data)
+            
+            # Route the message through the space registry
+            success = self.space_registry.route_message(event_data, timeline_context)
+            
+            if not success:
+                logger.warning(f"Failed to route message: {event_data.get('event_type')}")
+                
+            return success
+            
         except Exception as e:
-            logger.error(f"Error handling message: {str(e)}")
-            logger.error(traceback.format_exc())
-            return None
+            logger.error(f"Error handling message: {e}", exc_info=True)
+            return False
     
-    def handle_clear_context(self, data: Dict[str, Any]) -> bool:
+    def handle_clear_context(self, clear_data: Dict[str, Any]) -> bool:
         """
-        Handle context clearing request from an adapter.
+        Handle a clear context request.
         
         Args:
-            data: Request data including:
-                - chat_id: Identifier for the conversation to clear
-                - adapter_id: Identifier for the source adapter
-                
+            clear_data: Data specifying which context to clear
+            
         Returns:
             True if context was cleared successfully, False otherwise
         """
         try:
-            env_id = data['env_id']
-            # Use the environment manager to execute the clear_environment_context tool
-            # This assumes the tool is registered in one of the environments
-            try:
-                success = self.environment_manager.execute_tool("clear_environment_context", env_id=env_id)
-                return success.get('success', False) if isinstance(success, dict) else bool(success)
-            except ValueError:
-                logger.error("clear_environment_context tool not found in any environment")
-                return False
-                
+            # Extract fields for context identification
+            adapter_type = clear_data.get('adapter_type')
+            conversation_id = clear_data.get('conversation_id')
+            
+            # Create event data for context clearing
+            event_data = {
+                "event_type": "clear_context",
+                "adapter_type": adapter_type,
+                "conversation_id": conversation_id,
+                "timestamp": int(time.time() * 1000)
+            }
+            
+            # Determine timeline context
+            timeline_context = self._determine_timeline_context(event_data)
+            
+            # Route the clear context request
+            return self.space_registry.route_message(event_data, timeline_context)
+            
         except Exception as e:
-            logger.error(f"Error clearing context: {str(e)}")
+            logger.error(f"Error handling clear context: {e}", exc_info=True)
             return False
     
-    def _send_response(self, response_data: Dict[str, Any]) -> None:
+    def _standardize_message_format(self, message_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Callback method for sending responses.
-        
-        This will be called by the Environment Layer when a response is ready.
-        In a real implementation, this would send the response through Socket.IO.
+        Standardize message format to ensure consistent processing.
         
         Args:
-            response_data: Dictionary containing response data
+            message_data: Raw message data from an adapter
+            
+        Returns:
+            Standardized event data
         """
-        # This is a placeholder - in the real implementation, this would send
-        # the response through the Socket.IO client or other mechanism
-        logger.info(f"Sending response to adapter {response_data.get('adapter_id')}")
-        # In a real implementation: socket_client.send_message(response_data)
+        # If the message already has an event_type, it's likely already standardized
+        if 'event_type' in message_data:
+            return message_data
+            
+        # Extract common fields
+        message_type = message_data.get('type', 'message')
+        sender = message_data.get('sender', {})
+        content = message_data.get('content', '')
+        adapter_type = message_data.get('adapter_type', 'unknown')
+        
+        # Create standardized event data
+        event_data = {
+            "event_type": f"message_{message_type}",
+            "adapter_type": adapter_type,
+            "conversation_id": message_data.get('conversation_id', str(uuid.uuid4())),
+            "sender": sender,
+            "content": content,
+            "timestamp": message_data.get('timestamp', int(time.time() * 1000)),
+            "raw_data": message_data
+        }
+        
+        # Add optional fields if present
+        for field in ['thread_id', 'attachments', 'metadata']:
+            if field in message_data:
+                event_data[field] = message_data[field]
+                
+        return event_data
