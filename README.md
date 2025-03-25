@@ -62,7 +62,7 @@ For those interested in exploring further:
 To explore Connectome's architecture:
 
 1. Start with the [Ontology document](docs/ontology.md) to understand the basic concepts
-2. Review [Sequence 1](seq1.md) to see how information flows through the system
+2. Review [Sequence 1](docs/sequence.md) to see how information flows through the system
 3. Examine the mockup XML for an example of how interactions look in practice
 
 ## Development Status
