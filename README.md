@@ -51,17 +51,17 @@ Connectome is built around a few key components:
 
 For those interested in exploring further:
 
-- [Ontology](ontology.md): The fundamental concepts and relationships in the platform
-- [Components](components.md): Detailed breakdown of system components and message flow
-- [Sequence 1](seq1.md): How information moves through the system
-- [Sequence 2](seq2.md): How different interaction paths are managed
-- [Remote Connection](sequence_remote_connection.md): How digital minds connect to shared environments
+- [Ontology](docs/ontology.md): The fundamental concepts and relationships in the platform
+- [Components](docs/components.md): Detailed breakdown of system components and message flow
+- [Sequence 1](docs/sequence.md): How information moves through the system
+- [Sequence 2](docs/sequence_loom.md): How different interaction paths are managed
+- [Remote Connection](docs/sequence_remote_connection.md): How digital minds connect to shared environments
 
 ## Getting Started
 
 To explore Connectome's architecture:
 
-1. Start with the [Ontology document](ontology.md) to understand the basic concepts
+1. Start with the [Ontology document](docs/ontology.md) to understand the basic concepts
 2. Review [Sequence 1](seq1.md) to see how information flows through the system
 3. Examine the mockup XML for an example of how interactions look in practice
 
