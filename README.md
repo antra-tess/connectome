@@ -65,6 +65,11 @@ To explore Connectome's architecture:
 2. Review [Sequence 1](docs/sequence.md) to see how information flows through the system
 3. Examine the mockup XML for an example of how interactions look in practice
 
+## Activity Adapters
+
+Currently implemented activity adapters are available in a [separate repository](https://github.com/antra-tess/connectome-adapters)
+
+
 ## Development Status
 
 Connectome is currently in the implementation phase. The documentation represents the architectural vision and will evolve as implementation progresses.
@@ -75,4 +80,4 @@ Contributions to both the architecture and implementation are welcome. Please re
 
 ## License
 
-To be determined. 
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details. 
