@@ -312,20 +312,26 @@ class RenderingContext:
                  root_node: SceneNode,
                  options: RenderingOptions,
                  timeline_id: Optional[str] = None,
-                 cache: Dict[str, RenderingResult] = None):
+                 timeline_context: Dict[str, Any] = None,
+                 cache: Dict[str, RenderingResult] = None,
+                 space_registry = None):
         """
         Initialize a rendering context.
         
         Args:
             root_node: Root node of the scene graph
             options: Rendering options
-            timeline_id: Optional timeline context
+            timeline_id: Optional timeline ID
+            timeline_context: Optional timeline context dictionary
             cache: Optional cache of previous renderings
+            space_registry: Optional registry for finding spaces
         """
         self.root_node = root_node
         self.options = options
         self.timeline_id = timeline_id
+        self.timeline_context = timeline_context or {}
         self.cache = cache or {}
+        self.space_registry = space_registry
     
     def add_to_cache(self, element_id: str, result: RenderingResult) -> None:
         """Add a rendering result to the cache."""
@@ -349,6 +355,50 @@ class RenderingContext:
             return None
         
         return _find_recursive(self.root_node)
+        
+    def find_referenced_nodes(self, element_id: str) -> List[SceneNode]:
+        """
+        Find all nodes referenced by a specific element.
+        
+        Args:
+            element_id: ID of the element to find references for
+            
+        Returns:
+            List of referenced nodes
+        """
+        node = self.find_node(element_id)
+        if not node or not node.references:
+            return []
+            
+        referenced_nodes = []
+        for ref_id in node.references:
+            ref_node = self.find_node(ref_id)
+            if ref_node:
+                referenced_nodes.append(ref_node)
+                
+        return referenced_nodes
+        
+    def find_referencing_nodes(self, element_id: str) -> List[SceneNode]:
+        """
+        Find all nodes that reference a specific element.
+        
+        Args:
+            element_id: ID of the element to find references to
+            
+        Returns:
+            List of nodes that reference the specified element
+        """
+        referencing_nodes = []
+        
+        def _find_referencing(node: SceneNode) -> None:
+            if element_id in node.references:
+                referencing_nodes.append(node)
+                
+            for child in node.children:
+                _find_referencing(child)
+                
+        _find_referencing(self.root_node)
+        return referencing_nodes
 
 
 # Type for rendering functions

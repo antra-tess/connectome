@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Bot Framework Main Entry Point
-Initializes the Socket.IO clients and connects to normalizing adapters.
+Initializes the components and connects to normalizing adapters.
 """
 
 import signal
@@ -15,7 +15,20 @@ import inspect
 from threading import Event
 
 # Import configuration
-from config import ENVIRONMENTS, PROTOCOLS, DEFAULT_PROTOCOL
+from config import (
+    SOCKET_RECONNECTION_ATTEMPTS, 
+    SOCKET_RECONNECTION_DELAY,
+    SOCKET_TIMEOUT,
+    LLM_API_KEY,
+    LLM_MODEL,
+    LLM_PROVIDER,
+    LLM_BASE_URL,
+    LLM_TEMPERATURE,
+    LLM_MAX_TOKENS,
+    DEFAULT_ADAPTERS,
+    AGENT_NAME,
+    AGENT_DESCRIPTION
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -27,50 +40,14 @@ shutdown_event = Event()
 # Import modules
 from activity.client import SocketIOClient
 from activity.listener import MessageHandler
-from elements.system import SystemEnvironment
-from bot_framework.elements.space_registry import EnvironmentManager, SpaceRegistry
-from bot_framework.interface.layer import InterfaceLayer
-
-from elements.base import Environment
-
-
-def discover_environment_classes():
-    """
-    Dynamically discover all environment classes from the environments directory.
-    
-    Returns:
-        dict: A dictionary mapping class names to environment classes
-    """
-    env_classes = {}
-    environments_dir = os.path.join(os.path.dirname(__file__), 'environments/environment_classes/')
-    
-    logger.info(f"Discovering environment classes from: {environments_dir}")
-    
-    # List all Python files in the environments directory
-    try:
-        for filename in os.listdir(environments_dir):
-            if filename.endswith('.py') and not filename.startswith('__'):
-                module_name = filename[:-3]  # Remove the .py extension
-                
-                try:
-                    # Import the module dynamically
-                    module_path = f"environments.{module_name}"
-                    module = importlib.import_module(module_path)
-                    
-                    # Find all classes in the module that inherit from Environment
-                    for name, obj in inspect.getmembers(module):
-                        if (inspect.isclass(obj) and 
-                            issubclass(obj, Environment) and 
-                            obj is not Environment):
-                            logger.info(f"Discovered environment class: {name}")
-                            env_classes[name] = obj
-                            
-                except Exception as e:
-                    logger.error(f"Error importing module {module_name}: {str(e)}")
-    except Exception as e:
-        logger.error(f"Error scanning environments directory: {str(e)}")
-    
-    return env_classes
+from bot_framework.elements.space_registry import SpaceRegistry
+from bot_framework.elements.elements.inner_space import InnerSpace
+from bot_framework.elements.elements.chat_space import ChatSpace
+from bot_framework.elements.elements.messaging import ChatElement
+from bot_framework.shell import SinglePhaseShell, TwoPhaseShell
+from bot_framework.shell.hud import HUD
+from bot_framework.shell.context_manager import ContextManager
+from bot_framework.rendering import RenderingFormat, RenderingImportance
 
 
 def signal_handler(sig, frame):
@@ -81,102 +58,135 @@ def signal_handler(sig, frame):
     shutdown_event.set()
 
 
-def initialize_environments():
+def configure_llm():
     """
-    Initialize the environment system based on configuration.
+    Configure the LLM provider based on environment variables.
     
     Returns:
-        Tuple of (environment_manager, interface_layer)
+        dict: LLM configuration
     """
-    # Create environment manager
-    environment_manager = EnvironmentManager()
+    # Create LLM configuration
+    llm_config = {
+        "type": LLM_PROVIDER,
+        "default_model": LLM_MODEL,
+        "api_key": LLM_API_KEY,
+        "temperature": LLM_TEMPERATURE,
+        "max_tokens": LLM_MAX_TOKENS,
+        "max_sequential_tool_calls": 5,
+    }
     
-    # Create system environment (root) - this is always required
-    system_env = SystemEnvironment()
-    environment_manager.register_environment(system_env)
+    # Add base URL if provided
+    if LLM_BASE_URL:
+        llm_config["base_url"] = LLM_BASE_URL
     
-    # Dictionary to store created environments by ID for later mounting
-    created_environments = {"system": system_env}
+    logger.info(f"Configured LLM provider: {LLM_PROVIDER}, model: {LLM_MODEL}")
+    return llm_config
+
+
+def initialize_shell(shell_type=None):
+    """
+    Initialize the Shell and supporting components.
     
-    # Create and register configured environments
-    logger.info("Initializing configured environments...")
-    
-    # Dynamically discover available environment classes
-    env_classes = discover_environment_classes()
-    
-    # Always ensure SystemEnvironment is available
-    env_classes["SystemEnvironment"] = SystemEnvironment
-    
-    # Initialize environments from configuration
-    for env_config in ENVIRONMENTS:
-        env_id = env_config.get("id")
-        env_class_name = env_config.get("class")
-        enabled = env_config.get("enabled", True)
+    Args:
+        shell_type: Type of shell to initialize ("single_phase" or "two_phase")
         
-        if not enabled:
-            logger.info(f"Environment '{env_id}' is disabled in configuration, skipping...")
-            continue
-            
-        if env_class_name not in env_classes:
-            logger.warning(f"Unknown environment class '{env_class_name}' for '{env_id}', skipping... Available classes: {list(env_classes.keys())}")
-            continue
-            
-        try:
-            # Create the environment instance
-            logger.info(f"Creating environment: {env_id} ({env_class_name})")
-            env_class = env_classes[env_class_name]
-            environment = env_class(env_id=env_id)
-            
-            # Register with the manager
-            environment_manager.register_environment(environment)
-            created_environments[env_id] = environment
-        except Exception as e:
-            logger.error(f"Failed to initialize environment '{env_id}': {str(e)}")
+    Returns:
+        BaseShell: The initialized shell instance
+    """
+    # Get shell type from environment variable if not provided
+    if shell_type is None:
+        shell_type = os.getenv('SHELL_TYPE', 'single_phase')
     
-    # Mount environments to the system environment
-    logger.info("Mounting environments to system environment...")
-    for env_config in ENVIRONMENTS:
-        env_id = env_config.get("id")
-        enabled = env_config.get("enabled", True)
-        mount_point = env_config.get("mount_point")
+    # Create SpaceRegistry
+    space_registry = SpaceRegistry()
+    logger.info("Space registry initialized")
+    
+    # Create HUD
+    hud = HUD()
+    logger.info("HUD initialized")
+    
+    # Create context manager
+    context_manager = ContextManager()
+    logger.info("Context manager initialized")
+    
+    # Configure LLM
+    llm_config = configure_llm()
+    
+    # Model info for the shell
+    model_info = {
+        "name": AGENT_NAME,
+        "description": AGENT_DESCRIPTION,
+        "capabilities": ["text", "tool_use", "memory"],
+    }
+    
+    # Initialize the appropriate shell type
+    if shell_type.lower() == "two_phase":
+        logger.info("Initializing TwoPhaseShell")
+        shell = TwoPhaseShell(
+            registry=space_registry,
+            hud=hud,
+            context_manager=context_manager,
+            model_info=model_info,
+            llm_config=llm_config
+        )
+    else:  # Default to single phase
+        logger.info("Initializing SinglePhaseShell")
+        shell = SinglePhaseShell(
+            registry=space_registry,
+            hud=hud,
+            context_manager=context_manager,
+            model_info=model_info,
+            llm_config=llm_config
+        )
+    
+    # Initialize a ChatSpace for user interactions
+    chat_space = ChatSpace("chat_space", "User Chat Space", space_registry)
+    space_registry.register_space(chat_space)
+    
+    # Initialize a ChatElement for handling messages
+    chat_element = ChatElement("chat_element", "Chat Interface", "Handle user messages")
+    chat_space.mount_element(chat_element)
+    
+    # Mount the chat space in the inner space
+    shell.inner_space.mount_element(chat_space)
+    
+    logger.info(f"Shell and spaces initialized (using {shell_type} shell)")
+    return shell, space_registry
+
+
+def process_message(message_data, shell):
+    """
+    Process an incoming message through the shell.
+    
+    Args:
+        message_data: Message data from the activity layer
+        shell: The shell instance to process the message
         
-        if not enabled or env_id not in created_environments:
-            continue
-            
-        try:
-            logger.info(f"Mounting environment '{env_id}' to system environment")
-            system_env.mount_environment(env_id, mount_point)
-        except Exception as e:
-            logger.error(f"Failed to mount environment '{env_id}': {str(e)}")
+    Returns:
+        dict: Result of message processing
+    """
+    logger.info(f"Processing message: {message_data.get('message_id')} from {message_data.get('user_id')}")
     
-    # Determine which protocol to use based on configuration
-    protocol_name = DEFAULT_PROTOCOL
+    # Create event data for shell processing
+    event = {
+        "type": "user_message",
+        "event_type": "message_received",
+        "user_id": message_data.get("user_id"),
+        "message_id": message_data.get("message_id"),
+        "content": message_data.get("message"),
+        "platform": message_data.get("platform"),
+        "timestamp": int(time.time() * 1000),
+        "metadata": {
+            "adapter_id": message_data.get("adapter_id"),
+            "raw_event": message_data.get("raw_event", {})
+        }
+    }
     
-    # Check if the default protocol is enabled in configuration
-    default_protocol_enabled = False
-    for protocol_config in PROTOCOLS:
-        if protocol_config.get("name") == DEFAULT_PROTOCOL and protocol_config.get("enabled", True):
-            default_protocol_enabled = True
-            break
+    # Process through shell
+    result = shell.handle_external_event(event)
+    logger.debug(f"Shell processing result: {result}")
     
-    # If default protocol is not enabled, use the first enabled protocol
-    if not default_protocol_enabled:
-        for protocol_config in PROTOCOLS:
-            if protocol_config.get("enabled", True):
-                protocol_name = protocol_config.get("name")
-                logger.info(f"Default protocol '{DEFAULT_PROTOCOL}' not enabled, using '{protocol_name}' instead")
-                break
-    
-    logger.info(f"Using protocol: {protocol_name}")
-    
-    # Create interface layer with context management capabilities and the selected protocol
-    interface_layer = InterfaceLayer(environment_manager, protocol_name=protocol_name)
-    
-    # Set the environment manager in the system environment
-    system_env.set_environment_manager(environment_manager)
-    
-    logger.info("Environment system initialized")
-    return environment_manager, interface_layer
+    return result
 
 
 if __name__ == '__main__':
@@ -184,60 +194,62 @@ if __name__ == '__main__':
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    # Initialize environment system (LLMProcessor will handle LiteLLM initialization)
-    environment_manager, interface_layer = initialize_environments()
-
-    # Initialize SpaceRegistry if not already initialized
-    space_registry = SpaceRegistry()
-
-    # Create message handler with the space registry
-    message_handler = MessageHandler(space_registry)
-
-    # Initialize Socket.IO client with the message handler
-    socket_client = SocketIOClient(message_handler)
-    
-    # Connect the socket client to the space registry
-    space_registry.set_socket_client(socket_client)
-    
-    # Set space registry on all elements that need to send outgoing messages
-    for env_id, environment in environment_manager.get_all_environments().items():
-        if hasattr(environment, 'set_registry'):
-            logger.info(f"Setting space registry for environment: {env_id}")
-            environment.set_registry(space_registry)
-    
-    # Define the response callback function and set it on the environment manager
-    def response_callback(response_data):
-        # Extract data from the response
-        user_id = response_data.get('user_id')
-        message = response_data.get('message')
-        message_id = response_data.get('message_id')
-        platform = response_data.get('platform')
-        adapter_id = response_data.get('adapter_id')
-        
-        # Use the send_response method which handles formatting
-        socket_client.send_response(
-            user_id=user_id,
-            message_text=message,
-            message_id=message_id,
-            platform=platform,
-            adapter_id=adapter_id
-        )
-
-    # Set response callback directly on the environment manager
-    environment_manager.set_response_callback(response_callback)
-    
-    # Connect to adapters
-    logger.info(f"Connecting to {len(DEFAULT_ADAPTERS)} normalizing adapters...")
-    socket_client.connect_to_adapters()
-    
     try:
-        # Keep the main thread running
+        # Initialize shell and space registry
+        shell, space_registry = initialize_shell()
+        
+        # Create message handler with the space registry
+        message_handler = MessageHandler(space_registry, shell)
+        
+        # Initialize Socket.IO client with the message handler
+        socket_client = SocketIOClient(
+            message_handler, 
+            reconnection_attempts=SOCKET_RECONNECTION_ATTEMPTS,
+            reconnection_delay=SOCKET_RECONNECTION_DELAY,
+            timeout=SOCKET_TIMEOUT
+        )
+        
+        # Connect the socket client to the space registry
+        space_registry.set_socket_client(socket_client)
+        
+        # Define the message processing callback
+        def message_callback(message_data):
+            try:
+                # Process message through shell
+                result = process_message(message_data, shell)
+                
+                # Check for responses in the result
+                if "actions_executed" in result:
+                    for action in result["actions_executed"]:
+                        if action.get("type") == "message" and action.get("success"):
+                            # Format and send response
+                            socket_client.send_response(
+                                user_id=message_data.get("user_id"),
+                                message_text=action.get("content", ""),
+                                message_id=message_data.get("message_id"),
+                                platform=message_data.get("platform"),
+                                adapter_id=message_data.get("adapter_id")
+                            )
+            except Exception as e:
+                logger.error(f"Error processing message: {e}", exc_info=True)
+        
+        # Set message callback on message handler
+        message_handler.set_message_callback(message_callback)
+        
+        # Connect to adapters
+        logger.info(f"Connecting to {len(DEFAULT_ADAPTERS)} normalizing adapters...")
+        socket_client.connect_to_adapters(DEFAULT_ADAPTERS)
+        
         logger.info("Bot Framework is running. Press Ctrl+C to exit.")
         while not shutdown_event.is_set():
             time.sleep(1)
+            
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received, shutting down...")
+    except Exception as e:
+        logger.error(f"Error in main loop: {e}", exc_info=True)
     finally:
         # Clean up connections
-        socket_client.close_connections()
+        if 'socket_client' in locals():
+            socket_client.close_connections()
         logger.info("Bot Framework shutdown complete.") 

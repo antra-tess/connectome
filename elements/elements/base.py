@@ -86,8 +86,15 @@ class BaseElement:
             "active_timelines": set(),  # Set of active timeline IDs
             "timeline_metadata": {},  # timeline_id -> metadata
             "timeline_relationships": {},  # timeline_id -> {parent_id, is_primary, fork_point}
-            "primary_timeline": None  # ID of the primary timeline
+            "primary_timeline": None,  # ID of the primary timeline
+            "element_states": {},  # timeline_id -> {event_id: event_data}
+            "entangled_timelines": set()  # Set of entangled timeline IDs
         }
+        
+        # Attention tracking
+        self._attention_requested = False
+        self._attention_request_data = None
+        self._last_attention_request_time = None
         
         # Initialize observer callbacks
         self._observers: List[Callable] = []
@@ -128,10 +135,12 @@ class BaseElement:
     
     def open(self) -> bool:
         """
-        Open the element, making its interior accessible.
+        Open the element.
+        
+        This makes the element fully active and provides access to its interior.
         
         Returns:
-            True if the element was opened successfully, False otherwise
+            True if the operation was successful, False otherwise
         """
         if not self.SUPPORTS_OPEN_CLOSE:
             logger.warning(f"Element {self.id} does not support open/close operations")
@@ -141,29 +150,55 @@ class BaseElement:
             logger.debug(f"Element {self.id} is already open")
             return True
             
-        # Perform opening actions
-        try:
-            self._on_open()
-            self._state = ElementState.OPEN
-            
-            # Notify observers
-            self.notify_observers({
-                "type": "element_opened",
-                "element_id": self.id
-            })
-            
-            logger.info(f"Opened element: {self.id}")
-            return True
-        except Exception as e:
-            logger.error(f"Error opening element {self.id}: {e}")
-            return False
+        prev_state = self._state
+        self._state = ElementState.OPEN
+        
+        # Create a state change event
+        event_data = {
+            "event_type": "element_opened",
+            "prev_state": prev_state.value,
+            "new_state": self._state.value,
+            "timestamp": int(time.time() * 1000)
+        }
+        
+        # Get primary timeline if available
+        timeline_id = self._timeline_state.get("primary_timeline")
+        if timeline_id:
+            # Update state in timeline
+            self.update_state(event_data, {"timeline_id": timeline_id})
+        
+        # Notify any observers
+        self.notify_observers({
+            "type": "element_state_changed",
+            "element_id": self.id,
+            "state_change": "opened",
+            "prev_state": prev_state.value,
+            "new_state": self._state.value,
+            "timestamp": int(time.time() * 1000)
+        })
+        
+        # Open any included elements
+        if self.IS_SPACE:
+            for mount_id, mount_info in self._mounted_elements.items():
+                if mount_info.get("mount_type") == MountType.INCLUSION:
+                    element = mount_info.get("element")
+                    if element and element.SUPPORTS_OPEN_CLOSE:
+                        element.open()
+        
+        # Execute custom open logic
+        self._on_open()
+        
+        logger.info(f"Opened element {self.id}")
+        return True
     
     def close(self) -> bool:
         """
-        Close the element, limiting access to its exterior.
+        Close the element.
+        
+        This reduces the element's functionality and only exposes its exterior.
         
         Returns:
-            True if the element was closed successfully, False otherwise
+            True if the operation was successful, False otherwise
         """
         if not self.SUPPORTS_OPEN_CLOSE:
             logger.warning(f"Element {self.id} does not support open/close operations")
@@ -173,49 +208,147 @@ class BaseElement:
             logger.debug(f"Element {self.id} is already closed")
             return True
             
-        # Perform closing actions
-        try:
-            self._on_close()
-            self._state = ElementState.CLOSED
-            
-            # Notify observers
-            self.notify_observers({
-                "type": "element_closed",
-                "element_id": self.id
-            })
-            
-            logger.info(f"Closed element: {self.id}")
-            return True
-        except Exception as e:
-            logger.error(f"Error closing element {self.id}: {e}")
-            return False
+        prev_state = self._state
+        self._state = ElementState.CLOSED
+        
+        # Create a state change event
+        event_data = {
+            "event_type": "element_closed",
+            "prev_state": prev_state.value,
+            "new_state": self._state.value,
+            "timestamp": int(time.time() * 1000)
+        }
+        
+        # Get primary timeline if available
+        timeline_id = self._timeline_state.get("primary_timeline")
+        if timeline_id:
+            # Update state in timeline
+            self.update_state(event_data, {"timeline_id": timeline_id})
+        
+        # Notify any observers
+        self.notify_observers({
+            "type": "element_state_changed",
+            "element_id": self.id,
+            "state_change": "closed",
+            "prev_state": prev_state.value,
+            "new_state": self._state.value,
+            "timestamp": int(time.time() * 1000)
+        })
+        
+        # Close any included elements
+        if self.IS_SPACE:
+            for mount_id, mount_info in self._mounted_elements.items():
+                if mount_info.get("mount_type") == MountType.INCLUSION:
+                    element = mount_info.get("element")
+                    if element and element.SUPPORTS_OPEN_CLOSE:
+                        element.close()
+        
+        # Execute custom close logic
+        self._on_close()
+        
+        logger.info(f"Closed element {self.id}")
+        return True
     
     def hide(self) -> bool:
         """
         Hide the element.
         
+        This makes the element invisible but still mounted.
+        
         Returns:
-            True if the element was hidden successfully, False otherwise
+            True if the operation was successful, False otherwise
+        """
+        if self._state == ElementState.HIDDEN:
+            logger.debug(f"Element {self.id} is already hidden")
+            return True
+            
+        prev_state = self._state
+        self._state = ElementState.HIDDEN
+        
+        # Create a state change event
+        event_data = {
+            "event_type": "element_hidden",
+            "prev_state": prev_state.value,
+            "new_state": self._state.value,
+            "timestamp": int(time.time() * 1000)
+        }
+        
+        # Get primary timeline if available
+        timeline_id = self._timeline_state.get("primary_timeline")
+        if timeline_id:
+            # Update state in timeline
+            self.update_state(event_data, {"timeline_id": timeline_id})
+        
+        # Notify any observers
+        self.notify_observers({
+            "type": "element_state_changed",
+            "element_id": self.id,
+            "state_change": "hidden",
+            "prev_state": prev_state.value,
+            "new_state": self._state.value,
+            "timestamp": int(time.time() * 1000)
+        })
+        
+        logger.info(f"Hidden element {self.id}")
+        return True
+    
+    def show(self) -> bool:
+        """
+        Show the element (make it visible again).
+        
+        This reverses the hide operation.
+        
+        Returns:
+            True if the operation was successful, False otherwise
         """
         if self._state != ElementState.HIDDEN:
-            self._state = ElementState.HIDDEN
-            logger.debug(f"Element {self.id} hidden")
+            logger.debug(f"Element {self.id} is not hidden")
             return True
-        return False
+            
+        # Restore previous state (default to closed)
+        prev_state = self._state
+        self._state = ElementState.CLOSED
+        
+        # Create a state change event
+        event_data = {
+            "event_type": "element_shown",
+            "prev_state": prev_state.value,
+            "new_state": self._state.value,
+            "timestamp": int(time.time() * 1000)
+        }
+        
+        # Get primary timeline if available
+        timeline_id = self._timeline_state.get("primary_timeline")
+        if timeline_id:
+            # Update state in timeline
+            self.update_state(event_data, {"timeline_id": timeline_id})
+        
+        # Notify any observers
+        self.notify_observers({
+            "type": "element_state_changed",
+            "element_id": self.id,
+            "state_change": "shown",
+            "prev_state": prev_state.value,
+            "new_state": self._state.value,
+            "timestamp": int(time.time() * 1000)
+        })
+        
+        logger.info(f"Showed element {self.id}")
+        return True
     
     def _on_open(self) -> None:
         """
-        Hook called when the element is opened.
+        Custom logic to execute when element is opened.
         
-        Override in subclasses to perform specific actions.
+        Override in subclasses to provide specific open behavior.
         """
         pass
-    
+        
     def _on_close(self) -> None:
         """
-        Hook called when the element is closed.
+        Custom logic to execute when element is closed.
         
-        Override in subclasses to perform specific actions.
+        Override in subclasses to provide specific close behavior.
         """
         pass
     
@@ -656,6 +789,10 @@ class BaseElement:
         """
         Update the element state based on incoming event data.
         
+        This method handles the core state updates and timeline recording logic.
+        It should not be overridden by subclasses directly - instead override
+        _update_state_internal for custom state update logic.
+        
         Args:
             update_data: Event data to update with
             timeline_context: Optional timeline context for the update
@@ -664,55 +801,258 @@ class BaseElement:
             True if update was successful, False otherwise
         """
         try:
-            # Check if we're closed and this is an external event
-            if (self._state == ElementState.CLOSED and 
-                update_data.get('event_type') not in ['element_opened', 'element_closed'] and
-                not update_data.get('is_internal', False)):
-                logger.warning(f"Element {self.id} is closed and cannot process external events")
+            # Validate timeline context
+            validated_timeline_context = self._validate_timeline_context(timeline_context)
+            
+            # Check for timeline entanglement - verify if this element is entangled with events in this timeline
+            if not self._can_update_in_timeline(validated_timeline_context):
+                logger.warning(f"Element {self.id} cannot update state in timeline {validated_timeline_context.get('timeline_id')}: Timeline entanglement check failed")
                 return False
-                
-            # Get or create timeline context
-            timeline_id = timeline_context.get('timeline_id') if timeline_context else None
+            
+            # Get timeline ID from context
+            timeline_id = validated_timeline_context.get('timeline_id')
             if not timeline_id:
                 timeline_id = update_data.get('timeline_id')
                 
-            if timeline_id:
-                # Initialize timeline if needed
-                if timeline_id not in self._timeline_state["events"]:
-                    self._timeline_state["events"][timeline_id] = []
-                    self._timeline_state["active_timelines"].add(timeline_id)
-                    self._timeline_state["timeline_metadata"][timeline_id] = {
-                        "created_at": int(time.time() * 1000),
-                        "last_updated": int(time.time() * 1000)
+            if not timeline_id:
+                logger.warning(f"No timeline ID provided for element {self.id} update")
+                # Use primary timeline as fallback
+                timeline_id = self._timeline_state.get("primary_timeline")
+                if not timeline_id:
+                    # Generate a new timeline ID as last resort
+                    timeline_id = f"timeline_{str(uuid.uuid4())[:8]}"
+                    logger.warning(f"Generated new timeline ID for element {self.id}: {timeline_id}")
+            
+            # Initialize timeline state if needed
+            self._ensure_timeline_exists(timeline_id, validated_timeline_context)
+            
+            # Handle standard element state transitions from event
+            event_type = update_data.get('event_type')
+            
+            # Process explicit state transition events
+            if event_type == 'element_opened':
+                if self._state != ElementState.OPEN and self.SUPPORTS_OPEN_CLOSE:
+                    prev_state = self._state
+                    self._state = ElementState.OPEN
+                    logger.debug(f"Element {self.id} state changed to OPEN via event")
+                    self._on_open()
+                    
+                    # Add state transition metadata to update_data if not present
+                    if 'state_transition' not in update_data:
+                        update_data['state_transition'] = {
+                            'prev_state': prev_state.value,
+                            'new_state': self._state.value
+                        }
+            
+            elif event_type == 'element_closed':
+                if self._state != ElementState.CLOSED and self.SUPPORTS_OPEN_CLOSE:
+                    prev_state = self._state
+                    self._state = ElementState.CLOSED
+                    logger.debug(f"Element {self.id} state changed to CLOSED via event")
+                    self._on_close()
+                    
+                    # Add state transition metadata to update_data if not present
+                    if 'state_transition' not in update_data:
+                        update_data['state_transition'] = {
+                            'prev_state': prev_state.value,
+                            'new_state': self._state.value
+                        }
+            
+            elif event_type == 'element_hidden':
+                if self._state != ElementState.HIDDEN:
+                    prev_state = self._state
+                    self._state = ElementState.HIDDEN
+                    logger.debug(f"Element {self.id} state changed to HIDDEN via event")
+                    
+                    # Add state transition metadata to update_data if not present
+                    if 'state_transition' not in update_data:
+                        update_data['state_transition'] = {
+                            'prev_state': prev_state.value,
+                            'new_state': self._state.value
+                        }
+            
+            elif event_type == 'element_shown' and self._state == ElementState.HIDDEN:
+                prev_state = self._state
+                self._state = ElementState.CLOSED  # Default to closed when shown
+                logger.debug(f"Element {self.id} state changed to CLOSED via show event")
+                
+                # Add state transition metadata to update_data if not present
+                if 'state_transition' not in update_data:
+                    update_data['state_transition'] = {
+                        'prev_state': prev_state.value,
+                        'new_state': self._state.value
                     }
+            
+            # If we're closed and this is an external event that's not a state transition event,
+            # then we should reject it unless it's marked as internal
+            closed_state_events = ['element_opened', 'element_closed', 'element_hidden', 'element_shown']
+            if (self._state == ElementState.CLOSED and 
+                event_type not in closed_state_events and
+                not update_data.get('is_internal', False)):
+                # Check if the element explicitly allows this event type while closed
+                if not hasattr(self, 'ALLOWED_CLOSED_EVENTS') or event_type not in self.ALLOWED_CLOSED_EVENTS:
+                    logger.warning(f"Element {self.id} is closed and cannot process external event: {event_type}")
+                    return False
+            
+            # Handle attention request/clear events
+            if event_type == 'attention_requested' or update_data.get('state_change') == 'attention_needed':
+                self._attention_requested = True
+                self._attention_request_data = update_data
+                self._last_attention_request_time = int(time.time() * 1000)
+                logger.debug(f"Attention requested for element {self.id}")
+            elif event_type == 'attention_cleared':
+                self._attention_requested = False
+                self._attention_request_data = None
+                logger.debug(f"Attention cleared for element {self.id}")
+            
+            # Record in timeline
+            if timeline_id and event_type:
+                # Generate a unique event ID if not provided
+                event_id = update_data.get('event_id') or f"evt_{str(uuid.uuid4())[:8]}"
                 
-                # Update timeline metadata
-                self._timeline_state["timeline_metadata"][timeline_id]["last_updated"] = int(time.time() * 1000)
+                # Make sure we have the events structure
+                if 'events' not in self._timeline_state:
+                    self._timeline_state['events'] = {}
+                if timeline_id not in self._timeline_state['events']:
+                    self._timeline_state['events'][timeline_id] = []
                 
-                # Record the event
-                event = {
-                    "id": str(uuid.uuid4()),
-                    "timestamp": int(time.time() * 1000),
-                    "data": update_data
-                }
-                self._timeline_state["events"][timeline_id].append(event)
+                # Add the event ID to the timeline
+                self._timeline_state['events'][timeline_id].append(event_id)
                 
-                # Notify observers
-                self.notify_observers({
-                    "type": "state_updated",
-                    "element_id": self.id,
-                    "timeline_id": timeline_id,
-                    "event": event
-                })
+                # Store the complete event data
+                if 'event_data' not in self._timeline_state:
+                    self._timeline_state['event_data'] = {}
+                if timeline_id not in self._timeline_state['event_data']:
+                    self._timeline_state['event_data'][timeline_id] = {}
                 
-                return True
-            else:
-                logger.error("Missing timeline_id in update data")
-                return False
+                # Store event data with timestamp
+                if 'timestamp' not in update_data:
+                    update_data['timestamp'] = int(time.time() * 1000)
+                self._timeline_state['event_data'][timeline_id][event_id] = update_data.copy()
                 
+                # Mark this element as entangled with this timeline
+                if 'entangled_timelines' not in self._timeline_state:
+                    self._timeline_state['entangled_timelines'] = set()
+                self._timeline_state['entangled_timelines'].add(timeline_id)
+                
+                logger.debug(f"Added event {event_id} of type {event_type} to timeline {timeline_id} for element {self.id}")
+            
+            # Call subclass-specific update logic
+            self._update_state_internal(update_data, validated_timeline_context)
+            
+            # Notify observers of state change
+            notification = {
+                "type": "element_state_changed",
+                "element_id": self.id,
+                "event_type": event_type,
+                "state_change": update_data.get('state_change', event_type),
+                "element_state": self._state.value,
+                "attention_state": {
+                    "needs_attention": self._attention_requested,
+                    "request_data": self._attention_request_data
+                },
+                "timestamp": update_data.get('timestamp', int(time.time() * 1000)),
+                "timeline_context": validated_timeline_context
+            }
+            
+            # Include state transition data if present
+            if 'state_transition' in update_data:
+                notification['state_transition'] = update_data['state_transition']
+            
+            # Notify observers
+            try:
+                self.notify_observers(notification)
+            except Exception as e:
+                logger.error(f"Error notifying observers for element {self.id}: {e}")
+            
+            return True
         except Exception as e:
-            logger.error(f"Error updating state: {e}")
+            logger.error(f"Error updating element {self.id} state: {e}", exc_info=True)
             return False
+    
+    def _update_state_internal(self, update_data: Dict[str, Any], timeline_context: Dict[str, Any]) -> None:
+        """
+        Internal method for custom state update logic.
+        
+        This should be overridden by subclasses to implement their specific
+        state update behavior.
+        
+        Args:
+            update_data: Event data to update with
+            timeline_context: Timeline context for the update
+        """
+        pass
+    
+    def signal_attention_need(self, request_data: Dict[str, Any], timeline_context: Optional[Dict[str, Any]] = None) -> bool:
+        """
+        Signal that this element needs attention from the agent.
+        
+        Unlike the previous request_attention method, this creates a proper state update
+        that will flow through the standard event processing mechanism.
+        
+        Args:
+            request_data: Data about the attention need
+            timeline_context: Timeline context for this update
+            
+        Returns:
+            True if the signal was processed, False otherwise
+        """
+        attention_event = {
+            "event_type": "needs_attention",
+            "request_data": request_data,
+            "timestamp": int(time.time() * 1000)
+        }
+        return self.update_state(attention_event, timeline_context)
+    
+    def clear_attention_need(self, timeline_context: Optional[Dict[str, Any]] = None) -> bool:
+        """
+        Clear any pending attention need.
+        
+        Args:
+            timeline_context: Timeline context for this update
+            
+        Returns:
+            True if the clear operation was processed, False otherwise
+        """
+        clear_event = {
+            "event_type": "attention_cleared",
+            "timestamp": int(time.time() * 1000)
+        }
+        return self.update_state(clear_event, timeline_context)
+        
+    def has_attention_need(self) -> bool:
+        """Check if this element has a pending attention need."""
+        return self._attention_requested
+    
+    def get_attention_data(self) -> Optional[Dict[str, Any]]:
+        """Get data associated with the attention need."""
+        return self._attention_request_data if self._attention_requested else None
+    
+    def _validate_timeline_context(self, timeline_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Validate and normalize timeline context.
+        
+        Args:
+            timeline_context: Timeline context to validate
+            
+        Returns:
+            Validated timeline context
+        """
+        context = timeline_context or {}
+        if "timeline_id" not in context:
+            # Use primary timeline if available
+            if self._timeline_state["primary_timeline"]:
+                context["timeline_id"] = self._timeline_state["primary_timeline"]
+            else:
+                context["timeline_id"] = f"timeline_{str(uuid.uuid4())[:8]}"
+        
+        if "is_primary" not in context:
+            context["is_primary"] = (context["timeline_id"] == self._timeline_state["primary_timeline"])
+            
+        if "last_event_id" not in context:
+            context["last_event_id"] = None
+            
+        return context
     
     def create_timeline_fork(self, source_timeline_id: str, fork_point_event_id: str, is_primary: bool = False) -> Optional[str]:
         """

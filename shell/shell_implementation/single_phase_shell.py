@@ -7,6 +7,7 @@ Implements a shell that uses a single-phase interaction model.
 import logging
 from typing import Dict, Any, List, Optional, Tuple
 import json
+import time
 import re
 
 from bot_framework.shell.base_shell import BaseShell
@@ -62,7 +63,7 @@ class SinglePhaseShell(BaseShell):
         # Render context
         context = self.render_context(timeline_context)
         
-        # Present context with single-phase prompt
+        # Prepare context for agent
         prepared_context = self._prepare_context(context)
         
         # Use multi-turn tool execution
@@ -70,6 +71,30 @@ class SinglePhaseShell(BaseShell):
             prepared_context, 
             timeline_context
         )
+        
+        # Record the agent's final response as an event if appropriate
+        if agent_response.content and timeline_context.get("is_primary", False):
+            # Create response event for recording in timeline
+            response_event = {
+                "type": "agent_response",
+                "content": agent_response.content,
+                "in_response_to": event.get("id"),
+                "timestamp": int(time.time() * 1000)
+            }
+            
+            # Add to timeline in inner space
+            self.inner_space.add_event_to_timeline(response_event, timeline_context)
+            
+            # If this event needs a response, update the requesting element
+            if event.get("needs_response") and event.get("response_target"):
+                # Update the element that requested attention
+                target_element_id = event.get("response_target")
+                self.update_element_with_response(
+                    target_element_id, 
+                    agent_response.content, 
+                    event, 
+                    timeline_context
+                )
         
         return {
             "agent_response": agent_response.content,
@@ -243,3 +268,17 @@ class SinglePhaseShell(BaseShell):
                     pass  # Keep as string if not valid JSON
                     
             params_dict[key] = value 
+
+    def _should_send_external_message(self, event: Dict[str, Any]) -> bool:
+        """
+        Determine if the agent's response should be sent as an external message.
+        
+        Args:
+            event: The event that triggered the response
+            
+        Returns:
+            True if response should be sent externally, False otherwise
+        """
+        # Check if this was a message event that expects a response
+        event_type = event.get("type")
+        return event_type in ["message_received", "user_message", "message_text"] 

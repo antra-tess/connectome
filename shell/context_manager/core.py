@@ -82,55 +82,55 @@ class ContextManager:
         """
         self.logger.info("Assembling context for agent interaction")
         
-        # Get the rendering results from the HUD
-        rendering_results = request.rendering_response.results
+        # Get the rendering response from the HUD
+        rendering_response = request.rendering_response
         
-        # Apply any memory hooks (plugins can register to modify the context)
-        for hook in self.memory_hooks:
-            rendering_results = hook(rendering_results, request.timeline_context)
-        
-        # Sort rendering results by priority/importance
-        sorted_results = sorted(
-            rendering_results,
-            key=lambda x: x.metadata.importance.value,
-            reverse=True  # Highest importance first
-        )
-        
-        # Assemble full context while respecting token limits
+        # Create a list to hold content sections
         context_sections = []
         total_tokens = 0
         has_truncations = False
         
         # Add important metadata from the rendering response
-        if request.rendering_response.metadata:
-            metadata_text = self._format_metadata(request.rendering_response.metadata)
+        if rendering_response.metadata:
+            metadata_text = self._format_metadata(rendering_response.metadata)
             metadata_tokens = self._estimate_tokens(metadata_text)
             context_sections.append(metadata_text)
             total_tokens += metadata_tokens
         
-        # Add each rendering result in order of importance
-        for result in sorted_results:
-            # Get text and estimate tokens
-            text = result.text
-            tokens = self._estimate_tokens(text)
-            
-            # Check if adding this would exceed our token limit
-            if total_tokens + tokens > self.token_limit:
-                # Try to add a truncated version
-                available_tokens = self.token_limit - total_tokens
-                if available_tokens > 100:  # Only add if we can include something meaningful
-                    truncated_text = self._truncate_text(text, available_tokens)
-                    context_sections.append(truncated_text)
-                    context_sections.append("\n[Content truncated due to token limits]\n")
+        # Add the main content
+        main_content = rendering_response.content
+        main_content_tokens = self._estimate_tokens(main_content)
+        
+        # Check if adding this would exceed our token limit
+        if total_tokens + main_content_tokens > self.token_limit:
+            # Try to add a truncated version
+            available_tokens = self.token_limit - total_tokens
+            if available_tokens > 100:  # Only add if we can include something meaningful
+                truncated_text = self._truncate_text(main_content, available_tokens)
+                context_sections.append(truncated_text)
+                context_sections.append("\n[Content truncated due to token limits]\n")
+                has_truncations = True
+                total_tokens += self._estimate_tokens(truncated_text) + 10  # Approximate for truncation message
+            else:
+                has_truncations = True
+        else:
+            # Add the full content
+            context_sections.append(main_content)
+            total_tokens += main_content_tokens
+        
+        # Add sections if present
+        if rendering_response.sections:
+            for section_name, section_content in rendering_response.sections.items():
+                section_text = f"\n## {section_name}\n{section_content}"
+                section_tokens = self._estimate_tokens(section_text)
+                
+                # Check if adding this would exceed our token limit
+                if total_tokens + section_tokens > self.token_limit:
                     has_truncations = True
-                    total_tokens += self._estimate_tokens(truncated_text) + 10  # Approximate for truncation message
-                else:
-                    has_truncations = True
-                break
-            
-            # Add the full text
-            context_sections.append(text)
-            total_tokens += tokens
+                    continue
+                
+                context_sections.append(section_text)
+                total_tokens += section_tokens
         
         # Add any additional context provided in the request
         if request.additional_context:
@@ -248,23 +248,25 @@ class ContextManager:
             Truncated text
         """
         # Simple approximation: 4 chars ≈ 1 token
-        char_limit = max_tokens * 4
+        max_chars = max_tokens * 4
         
-        if len(text) <= char_limit:
+        if len(text) <= max_chars:
             return text
             
-        # Try to truncate at a natural break point
-        truncated = text[:char_limit]
+        # Try to truncate at paragraph boundaries first
+        paragraphs = text.split("\n\n")
+        truncated = ""
         
-        # Find the last sentence break
-        last_period = truncated.rfind(". ")
-        if last_period > char_limit * 0.5:  # Only use if it's not cutting off too much
-            return truncated[:last_period + 1] + " [...]"
+        for para in paragraphs:
+            if len(truncated) + len(para) + 2 <= max_chars:  # +2 for "\n\n"
+                if truncated:
+                    truncated += "\n\n"
+                truncated += para
+            else:
+                break
+                
+        if truncated:
+            return truncated
             
-        # Find the last paragraph break
-        last_newline = truncated.rfind("\n\n")
-        if last_newline > char_limit * 0.5:
-            return truncated[:last_newline] + "\n\n[...]"
-            
-        # Just truncate at the char limit with an indicator
-        return truncated + " [...]" 
+        # If we can't truncate at paragraph boundaries, just truncate at max_chars
+        return text[:max_chars] + "..." 

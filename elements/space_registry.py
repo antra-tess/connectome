@@ -6,6 +6,8 @@ Manages the lifecycle of spaces and routes messages to appropriate spaces in the
 import logging
 from typing import Dict, Any, Optional, List, Callable, Type
 import traceback
+import time
+import uuid
 
 from elements.elements.base import BaseElement
 from .elements.space import Space
@@ -198,35 +200,55 @@ class SpaceRegistry:
         
         Args:
             event_data: Event data to route
-            timeline_context: Timeline context for the event
+            timeline_context: Timeline context for this message
             
         Returns:
-            True if the message was successfully routed, False otherwise
+            True if routing was successful, False otherwise
         """
-        # Extract the event type
-        event_type = event_data.get("event_type")
-        if not event_type:
-            logger.error("Missing event_type in event data")
-            return False
+        try:
+            event_type = event_data.get("event_type")
             
-        # Try to route to inner space first if it's an inner space event
-        inner_space_events = ["agent_thought", "agent_action", "internal_event"]
-        if event_type in inner_space_events and self.inner_space:
-            return self.route_to_inner_space(event_data, timeline_context)
-            
-        # Route to the appropriate space based on event type
-        for space_id, space in self.spaces.items():
-            if event_type in space.EVENT_TYPES:
-                return self.update_space_state(space_id, event_data, timeline_context)
+            # Validate timeline context
+            if not timeline_context.get("timeline_id"):
+                timeline_context["timeline_id"] = f"timeline_{str(uuid.uuid4())[:8]}"
+                logger.warning(f"Generated random timeline ID: {timeline_context['timeline_id']}")
                 
-        # If no space handles this event type, log and notify
-        logger.warning(f"No space found to handle event type: {event_type}")
-        self._notify_observers("unhandled_event", {
-            "event_type": event_type,
-            "timeline_context": timeline_context
-        })
-        
-        return False
+            if "is_primary" not in timeline_context:
+                timeline_context["is_primary"] = True
+                
+            logger.info(f"Routing {event_type} event in timeline {timeline_context['timeline_id']}")
+            
+            # Special handling for clear context events
+            if event_type == "clear_context":
+                return self._handle_clear_context(event_data, timeline_context)
+                
+            # Route to the appropriate space(s)
+            routed = False
+            
+            # First try to route to a specific space if adapter_type and conversation_id exist
+            adapter_type = event_data.get("adapter_type")
+            conversation_id = event_data.get("conversation_id")
+            
+            if adapter_type and conversation_id:
+                # Check if we have a space for this conversation
+                for space_id, space in self.spaces.items():
+                    # Spaces will have methods for checking if they handle specific conversations
+                    if hasattr(space, "handles_conversation") and space.handles_conversation(adapter_type, conversation_id):
+                        # Route to this space with timeline context
+                        space.receive_event(event_data, timeline_context)
+                        routed = True
+                        break
+                        
+            # If not routed to a specific space, route to inner space
+            if not routed and self.inner_space:
+                self.inner_space.receive_event(event_data, timeline_context)
+                routed = True
+                
+            return routed
+            
+        except Exception as e:
+            logger.error(f"Error routing message: {e}")
+            return False
     
     def route_to_inner_space(self, event_data: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
         """
@@ -336,53 +358,97 @@ class SpaceRegistry:
     
     def add_observer(self, event_type: str, callback: Callable) -> None:
         """
-        Add an observer for registry events.
+        Add an observer for specific event types.
         
         Args:
             event_type: Type of event to observe
-            callback: Callback function to call when the event occurs
+            callback: Function to call when the event occurs
         """
         if event_type not in self.space_observers:
             self.space_observers[event_type] = []
             
-        self.space_observers[event_type].append(callback)
-        logger.debug(f"Added observer for {event_type} events")
+        if callback not in self.space_observers[event_type]:
+            self.space_observers[event_type].append(callback)
+            logger.debug(f"Added observer for event type: {event_type}")
     
-    def remove_observer(self, event_type: str, callback: Callable) -> bool:
+    def remove_observer(self, event_type: str, callback: Callable) -> None:
         """
-        Remove an observer for registry events.
+        Remove an observer for a specific event type.
         
         Args:
-            event_type: Type of event to stop observing
-            callback: Callback function to remove
-            
-        Returns:
-            True if the observer was removed, False otherwise
+            event_type: Type of event
+            callback: Function to remove
         """
-        if event_type not in self.space_observers:
-            return False
-            
-        try:
+        if event_type in self.space_observers and callback in self.space_observers[event_type]:
             self.space_observers[event_type].remove(callback)
-            logger.debug(f"Removed observer for {event_type} events")
-            return True
-        except ValueError:
-            return False
+            logger.debug(f"Removed observer for event type: {event_type}")
     
     def _notify_observers(self, event_type: str, event_data: Dict[str, Any]) -> None:
         """
-        Notify observers of an event.
+        Notify all observers of a specific event type.
         
         Args:
-            event_type: Type of event that occurred
-            event_data: Data for the event
+            event_type: Type of event
+            event_data: Data about the event
         """
         if event_type in self.space_observers:
             for callback in self.space_observers[event_type]:
                 try:
                     callback(event_data)
                 except Exception as e:
-                    logger.error(f"Error in observer callback: {e}")
+                    logger.error(f"Error in observer callback for {event_type}: {e}")
+        
+        # Special handling for attention-related events to notify the Shell
+        if event_type in ["attention_requested", "attention_cleared", 
+                          "inner_space_attention_requested", "inner_space_attention_cleared"]:
+            self._propagate_attention_event(event_type, event_data)
+    
+    def _propagate_attention_event(self, event_type: str, event_data: Dict[str, Any]) -> None:
+        """
+        Propagate attention-related events to the Shell.
+        
+        This method handles all attention events from Spaces and the InnerSpace,
+        ensuring they reach the Shell through the proper channel.
+        
+        Args:
+            event_type: Type of attention event
+            event_data: Data about the event
+        """
+        # Shell is typically connected via the response_callback
+        if self.response_callback:
+            # Normalize the event to a format that Shell understands
+            shell_event = {
+                "type": "attention_event",
+                "event_type": event_type,
+                "timestamp": int(time.time() * 1000)
+            }
+            
+            # Include source element ID for proper routing
+            if "source_element_id" in event_data:
+                shell_event["source_element_id"] = event_data["source_element_id"]
+            elif "element_id" in event_data:
+                shell_event["source_element_id"] = event_data["element_id"]
+            
+            # Include space information
+            if "space_id" in event_data:
+                shell_event["space_id"] = event_data["space_id"]
+            elif "inner_space_id" in event_data:
+                shell_event["space_id"] = event_data["inner_space_id"]
+                shell_event["is_inner_space"] = True
+            
+            # Include timeline context if available
+            if "timeline_context" in event_data:
+                shell_event["timeline_context"] = event_data["timeline_context"]
+            
+            # Include the original event data
+            shell_event["event_data"] = event_data
+            
+            # Notify the Shell
+            try:
+                self.response_callback(shell_event)
+                logger.debug(f"Propagated attention event to Shell: {event_type}")
+            except Exception as e:
+                logger.error(f"Error propagating attention event to Shell: {e}")
     
     def set_socket_client(self, socket_client) -> None:
         """
@@ -470,54 +536,29 @@ class SpaceRegistry:
     
     def propagate_message(self, message: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
         """
-        Propagate a message from the inner space to external systems.
-        
-        This is called by InnerSpace.send_message() when a message needs to be 
-        propagated externally. It handles routing the message to the appropriate 
-        external adapter based on message type.
+        Propagate a message from an element to the activity layer.
         
         Args:
-            message: The message to propagate
-            timeline_context: The timeline context for this message
+            message: Message to propagate
+            timeline_context: Timeline context for this message
             
         Returns:
-            True if the message was propagated successfully, False otherwise
+            True if propagation was successful, False otherwise
         """
-        logger.info(f"Propagating message externally: {message.get('type')}")
-        
-        message_type = message.get("type")
-        
-        # Format message based on type
-        if message_type == "agent_message":
-            # Agent message should be sent to external adapter
-            conversation_id = message.get("conversationId")
-            text = message.get("content", "")
-            adapter_id = message.get("adapterId")
+        # Only propagate from primary timeline
+        if not timeline_context.get("is_primary", False):
+            logger.info(f"Not propagating message from non-primary timeline: {timeline_context.get('timeline_id')}")
+            return False
             
-            # Build external message format
-            external_message = {
-                "event_type": "send_message",
-                "data": {
-                    "conversation_id": conversation_id,
-                    "text": text,
-                    "message_id": message.get("id")
-                },
-                "adapter_id": adapter_id
-            }
-            
-            # Send through external message system
-            return self.send_external_message(external_message)
-            
-        elif message_type == "tool_call":
-            # Tool call is handled internally by the Shell
-            # Just notify observers
-            self._notify_observers("tool_call", {
-                "tool_name": message.get("toolName"),
-                "tool_args": message.get("toolArgs"),
-                "message_id": message.get("id")
-            })
-            return True
-            
+        # Send to socket client if available
+        if self.socket_client:
+            try:
+                self.socket_client.send_message(message)
+                logger.info("Propagated message to activity layer")
+                return True
+            except Exception as e:
+                logger.error(f"Error propagating message: {e}")
+                return False
         else:
-            logger.warning(f"Unknown message type for propagation: {message_type}")
+            logger.warning("No socket client available for message propagation")
             return False

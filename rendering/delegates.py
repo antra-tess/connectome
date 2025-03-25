@@ -57,6 +57,51 @@ class ElementDelegate(ABC):
         """
         pass
     
+    def render_exterior(self, state: Dict[str, Any], options: RenderingOptions) -> RenderingResult:
+        """
+        Render the element's exterior view (when closed).
+        
+        Args:
+            state: Current state of the element
+            options: Rendering options
+            
+        Returns:
+            Rendering result containing the exterior view
+        """
+        # Default implementation returns a compact representation
+        element_id = self.get_element_id()
+        element_type = self.get_element_type()
+        
+        if options.format == RenderingFormat.MARKDOWN:
+            content = f"**{element_type}**: {element_id}"
+        else:
+            content = f"{element_type}: {element_id}"
+            
+        metadata = self.create_metadata(
+            importance=RenderingImportance.LOW,
+            format=options.format,
+            compression_hint=CompressionHint.OMIT
+        )
+        
+        return RenderingResult(
+            content=content,
+            metadata=metadata
+        )
+    
+    def render_interior(self, state: Dict[str, Any], options: RenderingOptions) -> RenderingResult:
+        """
+        Render the element's interior view (when open).
+        
+        Args:
+            state: Current state of the element
+            options: Rendering options
+            
+        Returns:
+            Rendering result containing the interior view
+        """
+        # Default implementation calls the main render method
+        return self.render(state, options)
+    
     def get_element_id(self) -> str:
         """Get the ID of the associated element."""
         if self.element and hasattr(self.element, 'id'):
@@ -103,6 +148,13 @@ class ElementDelegate(ABC):
         element_type = self.get_element_type()
         
         def renderer_func(state: Dict[str, Any], options: RenderingOptions) -> RenderingResult:
+            # Check if element is open/closed
+            if self.element and hasattr(self.element, 'is_open'):
+                if self.element.is_open():
+                    return self.render_interior(state, options)
+                else:
+                    return self.render_exterior(state, options)
+            # Fall back to main render method if state not available
             return self.render(state, options)
             
         registry.register_renderer(element_type, renderer_func)
@@ -220,6 +272,46 @@ class DefaultDelegate(ElementDelegate):
             importance=RenderingImportance.LOW,
             format=options.format,
             compression_hint=CompressionHint.SUMMARIZE
+        )
+        
+        return RenderingResult(
+            content=content,
+            metadata=metadata
+        )
+    
+    def render_exterior(self, state: Dict[str, Any], options: RenderingOptions) -> RenderingResult:
+        """
+        Render a compact exterior view of the element.
+        
+        Args:
+            state: Current state of the element
+            options: Rendering options
+            
+        Returns:
+            Rendering result with compact representation
+        """
+        element_id = self.get_element_id()
+        element_type = self.get_element_type()
+        
+        # Get a brief summary of state if available
+        state_summary = ""
+        if state:
+            # Try to get a meaningful summary field
+            summary_fields = ["name", "description", "status", "type"]
+            for field in summary_fields:
+                if field in state:
+                    state_summary = f" - {state[field]}"
+                    break
+        
+        if options.format == RenderingFormat.MARKDOWN:
+            content = f"**{element_type}**: {element_id}{state_summary}"
+        else:
+            content = f"{element_type}: {element_id}{state_summary}"
+        
+        metadata = self.create_metadata(
+            importance=RenderingImportance.LOW,
+            format=options.format,
+            compression_hint=CompressionHint.OMIT
         )
         
         return RenderingResult(

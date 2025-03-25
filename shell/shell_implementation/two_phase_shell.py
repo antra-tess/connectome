@@ -7,7 +7,7 @@ Implements a shell that uses a two-phase interaction model (contemplation and en
 import logging
 from typing import Dict, Any, List, Optional, Tuple
 import json
-import re
+import time
 
 from bot_framework.shell.base_shell import BaseShell
 from bot_framework.elements.space_registry import SpaceRegistry
@@ -121,6 +121,16 @@ class TwoPhaseShell(BaseShell):
             self.contemplation_result = contemplation_response.content or "No specific conclusions reached during contemplation."
             self.current_phase = "engagement"
         
+        # Record contemplation as an event in the timeline
+        if timeline_context.get("is_primary", False):
+            contemplation_event = {
+                "type": "agent_contemplation", 
+                "content": self.contemplation_result,
+                "in_response_to": event.get("id"),
+                "timestamp": int(time.time() * 1000)
+            }
+            self.inner_space.add_event_to_timeline(contemplation_event, timeline_context)
+        
         # --- Engagement Phase ---
         
         # Present context with engagement prompt and contemplation result
@@ -131,6 +141,28 @@ class TwoPhaseShell(BaseShell):
             engagement_context, 
             timeline_context
         )
+        
+        # Record engagement response as an event in the timeline
+        if engagement_response.content and timeline_context.get("is_primary", False):
+            engagement_event = {
+                "type": "agent_response",
+                "content": engagement_response.content,
+                "preceded_by_contemplation": True,
+                "in_response_to": event.get("id"),
+                "timestamp": int(time.time() * 1000)
+            }
+            self.inner_space.add_event_to_timeline(engagement_event, timeline_context)
+            
+            # If this event needs a response, update the requesting element
+            if event.get("needs_response") and event.get("response_target"):
+                # Update the element that requested attention
+                target_element_id = event.get("response_target")
+                self.update_element_with_response(
+                    target_element_id, 
+                    engagement_response.content, 
+                    event, 
+                    timeline_context
+                )
         
         # Combine all tool results
         all_tool_results = contemplation_tool_results + engagement_tool_results
@@ -285,3 +317,17 @@ class TwoPhaseShell(BaseShell):
             })
         
         return actions 
+
+    def _should_send_external_message(self, event: Dict[str, Any]) -> bool:
+        """
+        Determine if the agent's response should be sent as an external message.
+        
+        Args:
+            event: The event that triggered the response
+            
+        Returns:
+            True if response should be sent externally, False otherwise
+        """
+        # Check if this was a message event that expects a response
+        event_type = event.get("type")
+        return event_type in ["message_received", "user_message", "message_text"] 

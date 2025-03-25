@@ -12,7 +12,6 @@ import inspect
 
 from .space import Space
 from .base import BaseElement, MountType
-from bot_framework.elements.space_registry import SpaceRegistry
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -41,31 +40,29 @@ class InnerSpace(Space):
         "state_update"
     ]
     
-    def __init__(self, element_id: str, name: str, registry: Optional[SpaceRegistry] = None, description: str = "Agent's Inner Space"):
+    def __init__(self, element_id: str, name: str, registry):
         """
         Initialize the inner space.
         
         Args:
             element_id: Unique identifier for this inner space
             name: Human-readable name for this inner space
-            registry: Optional SpaceRegistry to register with
-            description: Description of this inner space's purpose
+            registry: SpaceRegistry instance
         """
-        super().__init__(element_id, name, description)
+        super().__init__(element_id, name, "Agent's Inner Space")
         
-        # Element registry for managing available element types
+        # Register with registry
+        self._registry = registry
+        registry.register_inner_space(self)
+        
+        # Element registry for creating new elements
         self._element_registry: Dict[str, Type[BaseElement]] = {}
         
-        # Initialize inner space-specific tools
-        self._register_inner_space_tools()
+        # Register standard element types
+        self._register_standard_element_types()
         
-        # Register with SpaceRegistry if provided
-        self.registry = registry
-        if registry:
-            registry.register_inner_space(self)
-        
-        # Store reference to other spaces
-        self.spaces = {}
+        # Track elements requesting attention across all spaces
+        self._attention_requests: Dict[str, Dict[str, Any]] = {}
         
         logger.info(f"Created inner space: {name} ({element_id})")
     
@@ -84,8 +81,8 @@ class InnerSpace(Space):
             return self.spaces[space_id]
             
         # If not found, try to get from registry
-        if self.registry:
-            space = self.registry.get_space(space_id)
+        if self._registry:
+            space = self._registry.get_space(space_id)
             if space:
                 self.spaces[space_id] = space
                 return space
@@ -457,7 +454,7 @@ class InnerSpace(Space):
             event: The event to receive
             timeline_context: The timeline context for this event
         """
-        logger.info(f"Receiving event in timeline {timeline_context.get('branchId')}: {event.get('type')}")
+        logger.info(f"Receiving event in timeline {timeline_context.get('timeline_id')}: {event.get('type')}")
         
         # Store the event in the timeline DAG
         self.add_event_to_timeline(event, timeline_context)
@@ -491,44 +488,40 @@ class InnerSpace(Space):
         Returns:
             ID of the newly created event
         """
-        logger.info(f"Adding event to timeline {timeline_context.get('branchId')}: {event.get('type')}")
+        logger.info(f"Adding event to timeline {timeline_context.get('timeline_id')}: {event.get('type')}")
         
-        # Generate event ID if not present
-        if "id" not in event:
-            event["id"] = f"evt-{uuid.uuid4()}"
-            
-        # Add timestamp if not present
-        if "timestamp" not in event:
-            event["timestamp"] = int(time.time() * 1000)
-            
+        # Create event object with metadata
+        event_id = event.get("id", str(uuid.uuid4()))
+        event["id"] = event_id
+        event["timestamp"] = event.get("timestamp", int(time.time() * 1000))
+        
         # Get branch ID from context
-        branch_id = timeline_context.get("branchId")
+        branch_id = timeline_context.get("timeline_id")
         if not branch_id:
             logger.warning("No branch ID in timeline context, using primary branch")
             branch_id = "primary-branch-001"
-            
-        # Get parent event ID from context
-        parent_event_id = timeline_context.get("lastEventId")
         
-        # Add to timeline (in a real implementation, this would use a proper DAG)
-        # For now, we just store events in memory
-        if not hasattr(self, "_timeline_events"):
-            self._timeline_events = {}
-            
-        if branch_id not in self._timeline_events:
-            self._timeline_events[branch_id] = []
-            
-        # Create event entry with metadata
-        event_entry = {
-            "event": event,
-            "branch_id": branch_id,
-            "parent_id": parent_event_id
-        }
+        # Link to parent event if available
+        parent_event_id = timeline_context.get("last_event_id")
+        if parent_event_id:
+            event["parent_id"] = parent_event_id
         
-        self._timeline_events[branch_id].append(event_entry)
+        # Store in timeline state
+        if branch_id not in self._timeline_state["events"]:
+            self._timeline_state["events"][branch_id] = {}
+            
+        self._timeline_state["events"][branch_id][event_id] = event
         
-        # Update the timeline context with the new event ID
-        timeline_context["lastEventId"] = event["id"]
+        # Update timeline context with this event as the new last event
+        timeline_context["last_event_id"] = event["id"]
+        
+        # Notify any observers
+        self._notify_observers("timeline_updated", {
+            "element_id": self.id,
+            "event_id": event_id,
+            "event_type": event.get("type"),
+            "timeline_id": branch_id
+        })
         
         return event["id"]
     
@@ -542,19 +535,19 @@ class InnerSpace(Space):
             message: The message to send
             timeline_context: The timeline context for this message
         """
-        logger.info(f"Sending message in timeline {timeline_context.get('branchId')}: {message.get('type')}")
+        logger.info(f"Sending message in timeline {timeline_context.get('timeline_id')}: {message.get('type')}")
         
         # Add the message to the timeline as an event
         message_id = self.add_event_to_timeline(message, timeline_context)
         
         # Only propagate externally if in primary timeline
-        if timeline_context.get("isPrimary", False):
+        if timeline_context.get("is_primary", False):
             # In a real implementation, this would call Activity Layer to propagate externally
             logger.info(f"Propagating message externally: {message_id}")
             
             # If we have an associated registry, propagate through it
-            if self.registry:
-                self.registry.propagate_message(message, timeline_context)
+            if self._registry:
+                self._registry.propagate_message(message, timeline_context)
         else:
             logger.info(f"Message not propagated externally (non-primary timeline): {message_id}")
     
@@ -627,3 +620,108 @@ class InnerSpace(Space):
         
         # Update the element's parent reference
         element.parent = self 
+
+    def _on_element_state_changed(self, element_id: str, state_data: Dict[str, Any]) -> None:
+        """
+        Handle element state change notification.
+        
+        Args:
+            element_id: ID of the element that changed
+            state_data: Data about the state change
+        """
+        logger.debug(f"Element state changed: {element_id}")
+        
+        # Check for attention request
+        event_type = state_data.get("type")
+        if event_type == "attention_requested":
+            self._handle_attention_request(element_id, state_data)
+        elif event_type == "attention_cleared":
+            self._handle_attention_cleared(element_id)
+    
+    def _handle_attention_request(self, element_id: str, request_data: Dict[str, Any]) -> None:
+        """
+        Handle an attention request from a Space or Element.
+        
+        Args:
+            element_id: ID of the Space or Element requesting attention
+            request_data: Data about the attention request
+        """
+        # Add or update the attention request
+        self._attention_requests[element_id] = {
+            "timestamp": request_data.get("timestamp", int(time.time() * 1000)),
+            "data": request_data,
+            "source_element_id": request_data.get("source_element_id", element_id)
+        }
+        
+        logger.info(f"Element/Space {element_id} attention request registered in InnerSpace")
+        
+        # Notify registry that a component needs attention
+        if self._registry:
+            self._registry._notify_observers("inner_space_attention_requested", {
+                "inner_space_id": self.id,
+                "element_id": element_id,
+                "source_element_id": request_data.get("source_element_id", element_id),
+                "request_data": request_data
+            })
+    
+    def _handle_attention_cleared(self, element_id: str) -> None:
+        """
+        Handle attention cleared notification from a Space or Element.
+        
+        Args:
+            element_id: ID of the Space or Element clearing attention
+        """
+        # Remove the attention request if it exists
+        if element_id in self._attention_requests:
+            source_element_id = self._attention_requests[element_id].get("source_element_id", element_id)
+            del self._attention_requests[element_id]
+            
+            # Notify registry that this element no longer needs attention
+            if self._registry:
+                self._registry._notify_observers("inner_space_attention_cleared", {
+                    "inner_space_id": self.id,
+                    "element_id": element_id,
+                    "source_element_id": source_element_id
+                })
+                
+            logger.info(f"Element/Space {element_id} attention cleared in InnerSpace")
+    
+    def get_elements_requesting_attention(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Get all elements currently requesting attention in the InnerSpace.
+        
+        Returns:
+            Dictionary mapping element IDs to their attention request data
+        """
+        return self._attention_requests.copy()
+    
+    def handle_element_observer_event(self, event_data: Dict[str, Any]) -> None:
+        """
+        Handle events from observed elements.
+        
+        Args:
+            event_data: Data about the event
+        """
+        element_id = event_data.get("element_id")
+        if not element_id:
+            logger.warning("Received element event without element_id")
+            return
+            
+        event_type = event_data.get("type")
+        
+        # Handle attention related events
+        if event_type == "attention_requested":
+            # This is coming from a Space that has already evaluated the need
+            self._handle_attention_request(element_id, event_data)
+        elif event_type == "attention_cleared":
+            self._handle_attention_cleared(element_id)
+        elif event_type == "element_state_changed":
+            if event_data.get("state_change") == "attention_needed":
+                # Handle direct attention requests from elements mounted in InnerSpace
+                # For elements in sub-spaces, the Space should handle this
+                if element_id in self._mounted_elements:
+                    self._handle_attention_request(element_id, event_data)
+            else:
+                logger.debug(f"Element state changed: {element_id} - {event_data.get('state_change')}")
+        else:
+            logger.debug(f"Received element event: {event_type} from {element_id}") 

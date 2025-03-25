@@ -73,18 +73,25 @@ class ChatElement(Object):
         self._register_messaging_tools()
         logger.info(f"Created chat element for {platform} (adapter: {adapter_id}): {name} ({element_id})")
     
-    def publish_message(self, message_data: Dict[str, Any]) -> bool:
+    def publish_message(self, message_data: Dict[str, Any], timeline_context: Optional[Dict[str, Any]] = None) -> bool:
         """
-        Publish a message to be sent via the appropriate adapter.
-        
-        This method now routes messages through the SpaceRegistry.
+        Publish a message to the Activity Layer.
         
         Args:
             message_data: Message data to publish
+            timeline_context: Optional timeline context
             
         Returns:
-            True if the message was published, False otherwise
+            True if the message was published successfully, False otherwise
         """
+        # Validate timeline context
+        validated_timeline_context = self._validate_timeline_context(timeline_context)
+        
+        # Only publish if this is the primary timeline
+        if not validated_timeline_context.get("is_primary", False):
+            logger.info(f"Not publishing message to external systems (non-primary timeline): {validated_timeline_context.get('timeline_id')}")
+            return False
+        
         try:
             # Extract adapter ID
             adapter_id = message_data.get('adapter_id')
@@ -650,352 +657,137 @@ class ChatElement(Object):
         
     def update_state(self, update_data: Dict[str, Any], timeline_context: Optional[Dict[str, Any]] = None) -> bool:
         """
-        Update the element state based on incoming event data with timeline context.
+        Update the element state based on incoming event data.
         
         Args:
-            update_data: Event data with event_type and other fields
-            timeline_context: Optional timeline context for state updates
+            update_data: Event data to update with
+            timeline_context: Optional timeline context for the update
             
         Returns:
-            True if the state was successfully updated, False otherwise
+            True if update was successful, False otherwise
         """
-        try:
-            # Extract the event type
-            event_type = update_data.get('event_type')
-            if not event_type:
-                logger.error("Missing event_type in update data")
-                return False
-                
-            # Get or create timeline context
-            timeline_id = timeline_context.get('timeline_id') if timeline_context else None
-            if not timeline_id:
-                timeline_id = update_data.get('conversation_id')
-                
-            if timeline_id:
-                if timeline_id not in self._timeline_state["active_timelines"]:
-                    self._timeline_state["active_timelines"].add(timeline_id)
-                    self._timeline_state["timeline_metadata"][timeline_id] = {
-                        "created_at": int(time.time() * 1000),
-                        "last_updated": int(time.time() * 1000)
-                    }
-                
-                # Update timeline metadata
-                self._timeline_state["timeline_metadata"][timeline_id]["last_updated"] = int(time.time() * 1000)
-                
-                # Handle different event types
-                if event_type == 'message_received':
-                    return self._handle_message_received(update_data, timeline_id)
-                    
-                elif event_type == 'message_updated':
-                    return self._handle_message_updated(update_data, timeline_id)
-                    
-                elif event_type == 'message_deleted':
-                    return self._handle_message_deleted(update_data, timeline_id)
-                    
-                elif event_type == 'reaction_added':
-                    return self._handle_reaction_added(update_data, timeline_id)
-                    
-                elif event_type == 'reaction_removed':
-                    return self._handle_reaction_removed(update_data, timeline_id)
-                    
-                elif event_type == 'clear_context':
-                    return self._handle_clear_context(update_data, timeline_id)
-                    
-            else:
-                logger.error("Missing timeline_id in update data")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error updating state: {e}")
+        # Call parent implementation
+        success = super().update_state(update_data, timeline_context)
+        
+        if not success:
             return False
-            
-    def _handle_message_received(self, event_data: Dict[str, Any], timeline_id: str) -> bool:
+        
+        # Check for message events that might need agent attention
+        event_type = update_data.get("event_type")
+        if event_type in self.EVENT_TYPES and event_type != "needs_attention" and event_type != "attention_cleared":
+            # Check if this event should trigger agent attention
+            if self._needs_agent_attention(update_data):
+                # Signal attention need through standard state update mechanism
+                self.signal_attention_need({
+                    "event_type": event_type,
+                    "event_data": update_data,
+                    "reason": "message_requires_attention",
+                    "conversation_id": update_data.get("conversation_id"),
+                    "adapter_id": self.adapter_id,
+                    "platform": self.platform
+                }, timeline_context)
+                
+                logger.info(f"Signaled attention need for {event_type} event in timeline {timeline_context.get('timeline_id', 'unknown')}")
+        
+        return True
+    
+    def _needs_agent_attention(self, event_data: Dict[str, Any]) -> bool:
         """
-        Handle a message_received event.
+        Determine if an event needs agent attention.
         
         Args:
-            event_data: Message data
-            timeline_id: Timeline ID
+            event_data: Event data to check
             
         Returns:
-            True if handled successfully
+            True if agent attention is needed, False otherwise
         """
-        try:
-            # Extract required fields
-            adapter_id = event_data.get('adapter_id')
-            conversation_id = event_data.get('conversation_id')
-            message_id = event_data.get('message_id')
-            sender = event_data.get('sender', {})
-            user_id = sender.get('user_id') if sender else None
-            display_name = sender.get('display_name') if sender else None
-            text = event_data.get('text', '')
-            thread_id = event_data.get('thread_id')
-            attachments = event_data.get('attachments', [])
-            timestamp = event_data.get('timestamp')
-            
-            if not all([conversation_id, user_id, text]):
-                logger.error(f"Missing required fields in message_received event: {event_data}")
-                return False
-                
-            # Record the message in the element
-            self.record_chat_message(
-                chat_id=conversation_id, 
-                user_id=user_id, 
-                content=text, 
-                adapter_id=adapter_id, 
-                role="user", 
-                message_id=message_id,
-                timestamp=timestamp,
-                thread_id=thread_id,
-                display_name=display_name,
-                attachments=attachments
-            )
-            
-            # Process the message through message processing pipeline
-            # This will trigger any observers or agent attention if needed
-            # We can use the environment_manager if it's set
-            if hasattr(self, 'environment_manager') and self.environment_manager:
-                self.environment_manager.process_message(
-                    user_id=user_id,
-                    message_text=text,
-                    message_id=message_id,
-                    platform=self.platform,
-                    env_id=self.id
-                )
-                
+        # Check event type
+        event_type = event_data.get("event_type")
+        
+        # Some event types always need attention
+        if event_type in self.ATTENTION_SIGNALS:
             return True
-            
-        except Exception as e:
-            logger.error(f"Error handling message_received event: {e}")
-            return False
-            
-    def _handle_message_updated(self, event_data: Dict[str, Any], timeline_id: str) -> bool:
-        """
-        Handle a message_updated event.
         
-        Args:
-            event_data: Message update data
-            timeline_id: Timeline ID
+        # For message events, check content
+        if event_type == "message_received":
+            message_data = event_data.get("data", {})
+            message_text = message_data.get("text", "")
             
-        Returns:
-            True if handled successfully
-        """
-        try:
-            # Extract required fields
-            adapter_id = event_data.get('adapter_id')
-            conversation_id = event_data.get('conversation_id')
-            message_id = event_data.get('message_id')
-            new_text = event_data.get('new_text', '')
+            # Message starting with ignore markers should be ignored
+            for marker in self.IGNORE_MARKERS:
+                if message_text.startswith(marker):
+                    return False
             
-            if not all([conversation_id, message_id, new_text]):
-                logger.error(f"Missing required fields in message_updated event: {event_data}")
-                return False
-                
-            # Update in message history
-            if conversation_id in self._timeline_state["messages"]:
-                for i, msg in enumerate(self._timeline_state["messages"][conversation_id]):
-                    if msg.get('message_id') == message_id:
-                        # Store original content in edit history
-                        if 'edit_history' not in msg:
-                            msg['edit_history'] = []
-                            
-                        msg['edit_history'].append(msg['content'])
-                        msg['content'] = new_text
-                        msg['edited'] = True
-                        msg['edit_timestamp'] = int(time.time() * 1000)
-                        
-                        # Update in-place
-                        self._timeline_state["messages"][conversation_id][i] = msg
-                        logger.debug(f"Updated message {message_id} in chat {conversation_id}")
-                        return True
-                        
-            logger.warning(f"Message {message_id} not found in chat {conversation_id} history")
-            return False
-            
-        except Exception as e:
-            logger.error(f"Error handling message_updated event: {e}")
-            return False
-            
-    def _handle_message_deleted(self, event_data: Dict[str, Any], timeline_id: str) -> bool:
-        """
-        Handle a message_deleted event.
-        
-        Args:
-            event_data: Message deletion data
-            timeline_id: Timeline ID
-            
-        Returns:
-            True if handled successfully
-        """
-        try:
-            # Extract required fields
-            adapter_id = event_data.get('adapter_id')
-            conversation_id = event_data.get('conversation_id')
-            message_id = event_data.get('message_id')
-            
-            if not all([conversation_id, message_id]):
-                logger.error(f"Missing required fields in message_deleted event: {event_data}")
-                return False
-                
-            # Mark as deleted in message history
-            if conversation_id in self._timeline_state["messages"]:
-                for i, msg in enumerate(self._timeline_state["messages"][conversation_id]):
-                    if msg.get('message_id') == message_id:
-                        # Store original content in deletion history
-                        if 'deletion_history' not in msg:
-                            msg['deletion_history'] = []
-                            
-                        msg['deletion_history'].append(msg['content'])
-                        msg['content'] = "[Message deleted]"
-                        msg['deleted'] = True
-                        msg['deletion_timestamp'] = int(time.time() * 1000)
-                        
-                        # Update in-place
-                        self._timeline_state["messages"][conversation_id][i] = msg
-                        logger.debug(f"Marked message {message_id} as deleted in chat {conversation_id}")
-                        return True
-                        
-            logger.warning(f"Message {message_id} not found in chat {conversation_id} history")
-            return False
-            
-        except Exception as e:
-            logger.error(f"Error handling message_deleted event: {e}")
-            return False
-            
-    def _handle_reaction_added(self, event_data: Dict[str, Any], timeline_id: str) -> bool:
-        """
-        Handle a reaction_added event.
-        
-        Args:
-            event_data: Reaction data
-            timeline_id: Timeline ID
-            
-        Returns:
-            True if handled successfully
-        """
-        try:
-            # Extract required fields
-            adapter_id = event_data.get('adapter_id')
-            conversation_id = event_data.get('conversation_id')
-            message_id = event_data.get('message_id')
-            emoji = event_data.get('emoji')
-            
-            if not all([conversation_id, message_id, emoji]):
-                logger.error(f"Missing required fields in reaction_added event: {event_data}")
-                return False
-                
-            # Update reactions in message history
-            if conversation_id in self._timeline_state["messages"]:
-                for i, msg in enumerate(self._timeline_state["messages"][conversation_id]):
-                    if msg.get('message_id') == message_id:
-                        # Initialize reactions dict if needed
-                        if 'reactions' not in msg:
-                            msg['reactions'] = {}
-                            
-                        # Add reaction
-                        if emoji not in msg['reactions']:
-                            msg['reactions'][emoji] = []
-                            
-                        # Add user to this reaction (using 'user' as placeholder since we don't have user ID)
-                        if "user" not in msg['reactions'][emoji]:
-                            msg['reactions'][emoji].append("user")
-                            
-                        # Update in-place
-                        self._timeline_state["messages"][conversation_id][i] = msg
-                        logger.debug(f"Added reaction {emoji} to message {message_id} in chat {conversation_id}")
-                        return True
-                        
-            logger.warning(f"Message {message_id} not found in chat {conversation_id} history")
-            return False
-            
-        except Exception as e:
-            logger.error(f"Error handling reaction_added event: {e}")
-            return False
-            
-    def _handle_reaction_removed(self, event_data: Dict[str, Any], timeline_id: str) -> bool:
-        """
-        Handle a reaction_removed event.
-        
-        Args:
-            event_data: Reaction data
-            timeline_id: Timeline ID
-            
-        Returns:
-            True if handled successfully
-        """
-        try:
-            # Extract required fields
-            adapter_id = event_data.get('adapter_id')
-            conversation_id = event_data.get('conversation_id')
-            message_id = event_data.get('message_id')
-            emoji = event_data.get('emoji')
-            
-            if not all([conversation_id, message_id, emoji]):
-                logger.error(f"Missing required fields in reaction_removed event: {event_data}")
-                return False
-                
-            # Update reactions in message history
-            if conversation_id in self._timeline_state["messages"]:
-                for i, msg in enumerate(self._timeline_state["messages"][conversation_id]):
-                    if msg.get('message_id') == message_id:
-                        if 'reactions' in msg and emoji in msg['reactions']:
-                            # Remove user from reaction list
-                            if "user" in msg['reactions'][emoji]:
-                                msg['reactions'][emoji].remove("user")
-                                
-                            # Clean up empty reaction lists
-                            if not msg['reactions'][emoji]:
-                                del msg['reactions'][emoji]
-                                
-                            # Clean up empty reactions dict
-                            if not msg['reactions']:
-                                del msg['reactions']
-                                
-                            # Update in-place
-                            self._timeline_state["messages"][conversation_id][i] = msg
-                            logger.debug(f"Removed reaction {emoji} from message {message_id} in chat {conversation_id}")
-                            return True
-                        else:
-                            logger.warning(f"Reaction {emoji} not found on message {message_id} in chat {conversation_id}")
-                            return False
-                            
-            logger.warning(f"Message {message_id} not found in chat {conversation_id} history")
-            return False
-            
-        except Exception as e:
-            logger.error(f"Error handling reaction_removed event: {e}")
-            return False
-            
-    def _handle_clear_context(self, event_data: Dict[str, Any], timeline_id: str) -> bool:
-        """
-        Handle a clear_context event.
-        
-        Args:
-            event_data: Clear context data
-            timeline_id: Timeline ID
-            
-        Returns:
-            True if handled successfully
-        """
-        try:
-            # Extract required fields
-            adapter_id = event_data.get('adapter_id')
-            conversation_id = event_data.get('conversation_id')
-            
-            if not all([adapter_id, conversation_id]):
-                logger.error(f"Missing required fields in clear_context event: {event_data}")
-                return False
-                
-            # Clear context for this chat
-            if conversation_id in self._timeline_state["messages"]:
-                # Optionally archive history instead of deleting it
-                self._timeline_state["messages"][conversation_id] = []
-                logger.info(f"Cleared message history for chat {conversation_id}")
+            # Check for mentions of the agent
+            if "@agent" in message_text.lower() or "agent:" in message_text.lower():
                 return True
-            else:
-                logger.warning(f"No history found for chat {conversation_id}")
-                return True  # Return true anyway since there's nothing to clear
                 
-        except Exception as e:
-            logger.error(f"Error handling clear_context event: {e}")
-            return False 
+            # Check if this is a direct message
+            if message_data.get("is_direct", False):
+                return True
+        
+        return False
+    
+    def handle_response(self, response_data: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
+        """
+        Handle agent response to a message.
+        
+        Args:
+            response_data: Response data from the agent
+            timeline_context: Timeline context
+            
+        Returns:
+            True if response was handled successfully, False otherwise
+        """
+        logger.info(f"Handling agent response for chat element {self.id} in timeline {timeline_context.get('timeline_id', 'unknown')}")
+        
+        # Extract relevant information
+        response_content = response_data.get("content", "")
+        original_event = response_data.get("original_event", {})
+        
+        # Get conversation information from the original event
+        conversation_id = original_event.get("conversation_id")
+        if not conversation_id:
+            # Try to get it from the event data
+            event_data = original_event.get("data", {})
+            conversation_id = event_data.get("conversation_id")
+        
+        # If still no conversation ID, use the first available one
+        if not conversation_id and hasattr(self, "_timeline_state") and hasattr(self._timeline_state, "messages"):
+            # Find the first available conversation
+            for timeline_id, messages in self._timeline_state["messages"].items():
+                if messages:
+                    # Get conversation ID from the first message
+                    first_message = messages[0]
+                    conversation_id = first_message.get("conversation_id")
+                    if conversation_id:
+                        break
+        
+        if not conversation_id:
+            logger.error("Cannot handle response: No conversation ID found")
+            return False
+        
+        # Prepare message data
+        message_data = {
+            "event_type": "send_message",
+            "adapter_id": self.adapter_id,
+            "data": {
+                "conversation_id": conversation_id,
+                "text": response_content,
+                "is_response": True,
+                "in_response_to": original_event.get("id")
+            }
+        }
+        
+        # Thread ID if available
+        thread_id = original_event.get("thread_id")
+        if thread_id:
+            message_data["data"]["thread_id"] = thread_id
+        
+        # Publish the message with timeline context
+        success = self.publish_message(message_data, timeline_context)
+        
+        # Clear attention need
+        self.clear_attention_need(timeline_context)
+        
+        return success 
