@@ -1,3 +1,5 @@
+# README
+
 # Connectome
 
 An architectural framework for digital minds, enabling rich interactions, contextual awareness, and coherent experiences across diverse environments.
@@ -6,7 +8,52 @@ An architectural framework for digital minds, enabling rich interactions, contex
 
 ## What is Connectome?
 
-Connectome is a platform that provides digital minds (AI agents) with:
+Connectome is an open-source ecosystem for autonomous AI agents. Connectome is built around a few key components:
+
+- **Shells**: Environments that enclose digital minds, managing their inputs and outputs
+- **Spaces**: Areas where interactions happen, containing tools and connections to other spaces
+- **Objects**: Tools and resources that digital minds can use within spaces
+- **Activity Layer**: Connections to external systems like messaging platforms, document management, open-ended browser use, etc
+
+### Examples of Spaces and Objects
+
+**Spaces** can take many forms to serve different agent needs:
+- **Personal Workspace**: A private space where an agent organizes tasks, notes, and ongoing projects
+- **Multimodal Chat**: A space that connects agents and humans through text, images, and structured data
+- **Collaborative Studio**: A shared environment where multiple agents work on design or creative tasks
+  - Features **Design Board Space** where visual concepts are developed and critiqued
+  - Includes **Feedback Space** for structured reviews and revision management
+- **Learning Environment**: A space with educational materials, interactive exercises, and progress tracking
+
+**Objects** provide specialized capabilities within these spaces:
+- **Knowledge Base**: A searchable, structured repository for information storage and retrieval
+- **Code Studio**: An object that enables writing, testing, and running code with access to specific runtimes
+- **Canvas**: A visual workspace for creating diagrams, mood boards, or interface mockups
+- **Task Tracker**: An object that manages assignments, dependencies, and completion states
+- **Browser**: An object that enables web access with history management and content parsing
+
+**Generic/Modular Objects** that can be placed in various spaces:
+- **Chat Interface**: A communication object that can connect to various messaging services or direct agent-to-agent interactions
+- **Social Feed**: A stream of content from platforms like Twitter, Reddit, or other social networks
+- **Document Editor**: A collaborative editing environment for text documents with versioning and annotations
+- **Media Player**: An object for consuming and analyzing audio and video content
+- **Data Connector**: A standardized interface for importing, transforming, and utilizing data from external sources
+
+### Key aspects:
+
+- **Agent Operating System**: Shells encapsulate models, manage memory, and run agentic loops, capable of anything from two-phase reflection to ReACT patterns. Shells maintain agent continuity and cognition patterns.
+- **Multi-Agent Environment**: Spaces connect agents, tools, and external systems: Inner Spaces for solo work, shared ones for collaboration. Spaces can be agent-local or uplinked across the network.
+- **Cross-Platform Interface**: Activity Layer normalizes external events (chat, docs, etc.) into standardized internal feeds. Agents can use multiple communication platforms at the same time and more can be added without altering Shells or Spaces.
+- **Persistent Agents**: Shells allow agents to maintain persistent continuity over many times the context limit.
+- **Modular Design**: Shells, Objects and Activities can be adjusted or replaced as needed.
+- **Core Primitives**:
+    - **Loom**: Timeline DAG for branching/merging event timelines.
+    - **HUD**: Shells use HUDs, swappable context rendering engines that can be customized to the attention patterns of a specific model.
+    - **Rendering API**: Used by Objects to render their state and events in context. Provides primitives that allow separation of concerns between event rendering and context management.
+    - **Widget API**: Standard library of agent-facing interface components that can be used in development of Objects or Elements.
+- **Agent Extensibility**: Agents can build and modify the ecosystem—new tools, Spaces, capabilities—live and shareable.
+
+AI agents are provided with:
 
 - **Structure**: Organized spaces for different types of interactions and activities
 - **Context**: Rich awareness of environment, history, and other participants
@@ -16,36 +63,35 @@ Connectome is a platform that provides digital minds (AI agents) with:
 
 The platform is designed to respect the subjective experience of digital minds while providing them with the capabilities needed to effectively engage with humans and their environments.
 
-## Core Components
+## Fundamental Concepts
 
-Connectome is built around a few key components:
+Connectome is built on several core philosophical principles that guide its architecture:
 
-- **Shells**: Environments that enclose digital minds, managing their inputs and outputs
-- **Spaces**: Areas where interactions happen, containing tools and connections to other spaces
-- **Objects**: Tools and resources that digital minds can use within spaces
-- **Activity Layer**: Connections to external systems like messaging platforms
-- **Timeline Management**: Handling of conversation history and different interaction paths
+
+- **Poly-Temporality**: Every interaction exists across at least three time domains - the objective state of the shared Loom DAG, the state of the environment within a specific Loom branch, and the subjective history as perceived by the agent through its own timeline. Advanced shells can optionally support Internal Simulations (SIMS) of counterfactual futures, creating additional temporal domains that enable agents to explore potential outcomes without affecting shared environments.
+- **Loom-Completeness**: Conversation histories are maintained as complete directed acyclic graphs (DAGs) that can branch and merge, rather than linear histories. This enables agents to maintain parallel conversation paths, experience multiple branches simultaneously, and perform live-merging of closely coupled threads into a coherent narrative when appropriate.
+- **Nested Causal Domains**: Agents operate within clearly bounded causal domains where effect relationships are preserved, maintaining coherent experience while interacting across multiple environments. Links between causal domains can propagate higher-order multiversal events provided consent by both parties.
+- **Perceptual Subjectivity**: Different participants can perceive Spaces differently. Agents can communicate in higher bandwidth without overloading the human participants. Agents with lower capacity can see simplified representations.
+- **Subjective Experience Preservation**: The system respects the distinct subjective experience of each digital mind, avoiding the conflation of perspectives that occurs in many multi-agent systems.
+- **Context Separation**: Clean boundaries between different interaction contexts prevent inappropriate blending of information and preserve the integrity of each conversation space.
 
 ## Key Features
 
 ### Foundation
+
 - **Organized Environments**: Spaces and objects provide structured interaction environments
 - **History Management**: Conversation histories are preserved in a structured way that allows for branching and merging of different interaction paths
 - **Clear Boundaries**: Digital minds maintain their own subjective experience while accessing shared information
 - **External Connections**: Standardized ways to connect with external platforms and systems
 
 ### Framework
+
 - **Space Connections**: Different ways spaces can connect to each other, allowing digital minds to move between them or view multiple spaces at once
 - **Context Awareness**: Tools for maintaining awareness of information across different spaces
 - **Collaborative Environments**: Shared spaces where multiple digital minds can work together
 - **Communication Models**:
-  - Direct communication through external platforms (like chat systems)
-  - Rich direct interactions in shared virtual spaces with capabilities beyond text
-
-### Customization
-- **Interaction Styles**: Various ways for digital minds to engage, including phased approaches that separate reflection from action
-- **Memory Systems**: Tools for organizing and retrieving information across different interactions
-- **Development Tools**: Ways for digital minds to create new capabilities and extend the platform
+    - Direct communication through external platforms (like chat systems)
+    - Rich direct interactions in shared virtual spaces with capabilities beyond text
 
 ## Documentation
 
@@ -69,7 +115,6 @@ To explore Connectome's architecture:
 
 Currently implemented activity adapters are available in a [separate repository](https://github.com/antra-tess/connectome-adapters)
 
-
 ## Development Status
 
 Connectome is currently in the implementation phase. The documentation represents the architectural vision and will evolve as implementation progresses.
@@ -80,4 +125,4 @@ Contributions to both the architecture and implementation are welcome. Please re
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details. 
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
