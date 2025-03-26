@@ -13,17 +13,17 @@ The Shell is responsible for:
 """
 
 # Base Shell
-from bot_framework.shell.base_shell import BaseShell
+from shell.base_shell import BaseShell
 
 # Shell Implementations
-from bot_framework.shell.shell_implementation.two_phase_shell import TwoPhaseShell
-from bot_framework.shell.shell_implementation.single_phase_shell import SinglePhaseShell
+from shell.shell_implementation.two_phase_shell import TwoPhaseShell
+from shell.shell_implementation.single_phase_shell import SinglePhaseShell
 
 # HUD
-from bot_framework.shell.hud import HUD, RenderingRequest, RenderingResponse
+from shell.hud import HUD, RenderingRequest, RenderingResponse
 
 # Context Manager
-from bot_framework.shell.context_manager import ContextManager, ContextRequest, ContextResponse
+from shell.context_manager import ContextManager, ContextRequest, ContextResponse
 
 __all__ = [
     'BaseShell',

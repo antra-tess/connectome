@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 import inspect
 
-from bot_framework.rendering import (
+from rendering import (
     RenderingOptions,
     RenderingResult,
     RenderingMetadata,
@@ -459,7 +459,7 @@ class HUD:
         root_element_type = root_node.element_type
         
         # Get the element's delegate renderer
-        from bot_framework.rendering import registry
+        from rendering import registry
         renderer = registry.get_renderer(root_element_type)
         if renderer:
             try:
@@ -697,7 +697,7 @@ class HUD:
         
         if not delegate:
             logger.warning(f"No delegate found for element {element.id}, using default renderer")
-            from bot_framework.rendering.delegates import default_renderer
+            from rendering.delegates import default_renderer
             return default_renderer(state, options)
         
         # Special handling for remote chat elements that need connection spans
@@ -721,5 +721,5 @@ class HUD:
             return delegate(state, options)
         else:
             logger.warning(f"Invalid delegate for element {element.id}, using default renderer")
-            from bot_framework.rendering.delegates import default_renderer
+            from rendering.delegates import default_renderer
             return default_renderer(state, options) 

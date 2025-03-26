@@ -7,7 +7,7 @@ Factory for creating LLM provider instances based on configuration.
 import logging
 from typing import Dict, Any, Optional
 
-from bot_framework.llm.provider_interface import LLMProvider
+from llm.provider_interface import LLMProvider
 
 
 class LLMProviderFactory:
@@ -35,7 +35,7 @@ class LLMProviderFactory:
         
         if provider_type.lower() == "litellm":
             try:
-                from bot_framework.llm.litellm_provider import LiteLLMProvider
+                from llm.litellm_provider import LiteLLMProvider
                 return LiteLLMProvider(**config)
             except ImportError as e:
                 logger.error(f"Error importing LiteLLM provider: {e}")

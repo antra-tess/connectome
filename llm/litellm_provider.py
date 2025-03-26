@@ -15,7 +15,7 @@ try:
 except ImportError:
     LITELLM_AVAILABLE = False
 
-from bot_framework.llm.provider_interface import (
+from llm.provider_interface import (
     LLMProvider, 
     LLMMessage, 
     LLMToolDefinition,

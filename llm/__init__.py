@@ -7,14 +7,14 @@ allowing the framework to switch between different backends without changing the
 core architecture.
 """
 
-from bot_framework.llm.provider_interface import (
+from llm.provider_interface import (
     LLMProvider,
     LLMMessage,
     LLMToolDefinition,
     LLMToolCall,
     LLMResponse
 )
-from bot_framework.llm.provider_factory import LLMProviderFactory
+from llm.provider_factory import LLMProviderFactory
 
 # Define the public API
 __all__ = [

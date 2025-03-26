@@ -25,7 +25,7 @@ class Space(BaseElement):
     Spaces can be used to:
     - Create containers for grouping related elements
     - Define logical boundaries for elements
-    - Implement specialized environments like InnerSpace, ChatSpace, etc.
+    - Implement specialized environments like InnerSpace, etc.
     """
     
     # Spaces can contain other elements

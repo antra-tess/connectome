@@ -40,14 +40,13 @@ shutdown_event = Event()
 # Import modules
 from activity.client import SocketIOClient
 from activity.listener import MessageHandler
-from bot_framework.elements.space_registry import SpaceRegistry
-from bot_framework.elements.elements.inner_space import InnerSpace
-from bot_framework.elements.elements.chat_space import ChatSpace
-from bot_framework.elements.elements.messaging import ChatElement
-from bot_framework.shell import SinglePhaseShell, TwoPhaseShell
-from bot_framework.shell.hud import HUD
-from bot_framework.shell.context_manager import ContextManager
-from bot_framework.rendering import RenderingFormat, RenderingImportance
+from elements.space_registry import SpaceRegistry
+from elements.elements.inner_space import InnerSpace
+from elements.elements.messaging import ChatElement
+from shell import SinglePhaseShell, TwoPhaseShell
+from shell.hud import HUD
+from shell.context_manager import ContextManager
+from rendering import RenderingFormat, RenderingImportance
 
 
 def signal_handler(sig, frame):
@@ -148,7 +147,7 @@ def initialize_shell(shell_type=None):
         logger.info("Using uplinked chat model")
         
         # Use the factory function to create uplinked chat setup
-        from bot_framework.elements import create_uplinked_chat_setup
+        from elements import create_uplinked_chat_setup
         
         # For each adapter we want to support
         for adapter_info in DEFAULT_ADAPTERS:
@@ -171,7 +170,7 @@ def initialize_shell(shell_type=None):
         logger.info("Using direct chat model")
         
         # Use the factory function to create direct chat elements
-        from bot_framework.elements import create_direct_chat_element
+        from elements import create_direct_chat_element
         
         # For each adapter we want to support
         for adapter_info in DEFAULT_ADAPTERS:

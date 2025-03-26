@@ -12,12 +12,12 @@ import time
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional, Tuple, Callable
 
-from bot_framework.shell.hud.core import HUD, RenderingRequest, RenderingResponse
-from bot_framework.shell.context_manager import ContextManager, ContextRequest, ContextResponse
-from bot_framework.elements.elements.space import Space
-from bot_framework.elements.space_registry import SpaceRegistry
-from bot_framework.elements.elements.inner_space import InnerSpace
-from bot_framework.llm import (
+from shell.hud.core import HUD, RenderingRequest, RenderingResponse
+from shell.context_manager import ContextManager, ContextRequest, ContextResponse
+from elements.elements.space import Space
+from elements.space_registry import SpaceRegistry
+from elements.elements.inner_space import InnerSpace
+from llm import (
     LLMProvider, 
     LLMProviderFactory,
     LLMMessage, 
@@ -25,7 +25,7 @@ from bot_framework.llm import (
     LLMToolCall,
     LLMResponse
 )
-from bot_framework.rendering import RenderingFormat
+from rendering import RenderingFormat
 
 
 class BaseShell(ABC):
@@ -117,7 +117,7 @@ class BaseShell(ABC):
     def _create_context_manager(self) -> ContextManager:
         """Create and initialize the Context Manager component."""
         self.logger.info("Creating Context Manager")
-        from bot_framework.shell.context_manager.core import ContextManager
+        from shell.context_manager.core import ContextManager
         return ContextManager()
     
     def _create_inner_space(self, registry: SpaceRegistry) -> Space:

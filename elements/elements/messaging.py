@@ -102,7 +102,7 @@ class ChatElement(Object):
         """
         # Import here to avoid circular imports
         try:
-            from bot_framework.rendering.delegates import create_chat_delegate
+            from rendering.delegates import create_chat_delegate
             
             # Create the appropriate delegate function
             delegate_func = create_chat_delegate(self._is_remote)

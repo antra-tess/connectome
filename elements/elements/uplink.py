@@ -682,8 +682,8 @@ class UplinkProxy(Space):
 
     def update_delegate(self):
         """Update the delegate for this uplink to properly render history bundles."""
-        from bot_framework.rendering.delegates import ElementDelegate, RenderingResult, RenderingMetadata
-        from bot_framework.rendering import RenderingImportance, RenderingFormat, CompressionHint, RenderingOptions
+        from rendering.delegates import ElementDelegate, RenderingResult, RenderingMetadata
+        from rendering import RenderingImportance, RenderingFormat, CompressionHint, RenderingOptions
         from datetime import datetime
         
         class UplinkDelegate(ElementDelegate):

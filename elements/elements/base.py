@@ -1199,7 +1199,7 @@ class BaseElement:
         if not self._delegate:
             # Import here to avoid circular imports
             try:
-                from bot_framework.rendering.delegates import DefaultDelegate
+                from rendering.delegates import DefaultDelegate
                 self._delegate = DefaultDelegate(self)
             except ImportError:
                 logger.warning(f"Could not create default delegate for element {self.id}")

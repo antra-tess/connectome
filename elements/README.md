@@ -144,7 +144,7 @@ When creating a custom element, implementing `render_state_for_context()` is par
 You can use the provided utility script to list all available element classes:
 
 ```bash
-python -m bot_framework.utils.list_elements
+python -mconnectome.utils.list_elements
 ```
 
 This will show all element classes that the framework can discover.

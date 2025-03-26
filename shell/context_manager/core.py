@@ -9,7 +9,7 @@ import logging
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 
-from bot_framework.shell.hud.core import RenderingResponse
+from shell.hud.core import RenderingResponse
 
 
 @dataclass

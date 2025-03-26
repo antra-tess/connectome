@@ -10,12 +10,12 @@ import json
 import time
 import re
 
-from bot_framework.shell.base_shell import BaseShell
-from bot_framework.elements.space_registry import SpaceRegistry
-from bot_framework.shell.hud.core import HUD
-from bot_framework.shell.context_manager import ContextManager
-from bot_framework.elements.elements.space import Space
-from bot_framework.llm import LLMResponse, LLMMessage
+from shell.base_shell import BaseShell
+from elements.space_registry import SpaceRegistry
+from shell.hud.core import HUD
+from shell.context_manager import ContextManager
+from elements.elements.space import Space
+from llm import LLMResponse, LLMMessage
 
 
 class SinglePhaseShell(BaseShell):

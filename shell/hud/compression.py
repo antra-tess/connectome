@@ -9,7 +9,7 @@ import logging
 from typing import Dict, Any, List, Optional, Union, Tuple, Set
 import re
 
-from bot_framework.rendering import (
+from rendering import (
     RenderingResult,
     RenderingImportance,
     CompressionHint,
