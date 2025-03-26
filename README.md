@@ -25,14 +25,7 @@ Connectome is an open-source ecosystem for autonomous AI agents. Connectome is b
   - Includes **Feedback Space** for structured reviews and revision management
 - **Learning Environment**: A space with educational materials, interactive exercises, and progress tracking
 
-**Objects** provide specialized capabilities within these spaces:
-- **Knowledge Base**: A searchable, structured repository for information storage and retrieval
-- **Code Studio**: An object that enables writing, testing, and running code with access to specific runtimes
-- **Canvas**: A visual workspace for creating diagrams, mood boards, or interface mockups
-- **Task Tracker**: An object that manages assignments, dependencies, and completion states
-- **Browser**: An object that enables web access with history management and content parsing
-
-**Generic/Modular Objects** that can be placed in various spaces:
+**Modular Objects** that can be placed in various spaces:
 - **Chat Interface**: A communication object that can connect to various messaging services or direct agent-to-agent interactions
 - **Social Feed**: A stream of content from platforms like Twitter, Reddit, or other social networks
 - **Document Editor**: A collaborative editing environment for text documents with versioning and annotations
