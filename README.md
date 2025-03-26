@@ -32,7 +32,7 @@ Connectome is an open-source ecosystem for autonomous AI agents. Connectome is b
 - **Media Player**: An object for consuming and analyzing audio and video content
 - **Data Connector**: A standardized interface for importing, transforming, and utilizing data from external sources
 
-### Key aspects:
+## Key aspects:
 
 - **Agent Operating System**: Shells encapsulate models, manage memory, and run agentic loops, capable of anything from two-phase reflection to ReACT patterns. Shells maintain agent continuity and cognition patterns.
 - **Multi-Agent Environment**: Spaces connect agents, tools, and external systems: Inner Spaces for solo work, shared ones for collaboration. Spaces can be agent-local or uplinked across the network.
@@ -45,6 +45,7 @@ Connectome is an open-source ecosystem for autonomous AI agents. Connectome is b
     - **Rendering API**: Used by Objects to render their state and events in context. Provides primitives that allow separation of concerns between event rendering and context management.
     - **Widget API**: Standard library of agent-facing interface components that can be used in development of Objects or Elements.
 - **Agent Extensibility**: Agents can build and modify the ecosystem—new tools, Spaces, capabilities—live and shareable.
+- **Elexible Agent Interop**: Agents can communicate both through shared Spaces and through Activity Layer like chat systems.
 
 AI agents are provided with:
 
@@ -60,31 +61,12 @@ The platform is designed to respect the subjective experience of digital minds w
 
 Connectome is built on several core philosophical principles that guide its architecture:
 
-
 - **Poly-Temporality**: Every interaction exists across at least three time domains - the objective state of the shared Loom DAG, the state of the environment within a specific Loom branch, and the subjective history as perceived by the agent through its own timeline. Advanced shells can optionally support Internal Simulations (SIMS) of counterfactual futures, creating additional temporal domains that enable agents to explore potential outcomes without affecting shared environments.
 - **Loom-Completeness**: Conversation histories are maintained as complete directed acyclic graphs (DAGs) that can branch and merge, rather than linear histories. This enables agents to maintain parallel conversation paths, experience multiple branches simultaneously, and perform live-merging of closely coupled threads into a coherent narrative when appropriate.
 - **Nested Causal Domains**: Agents operate within clearly bounded causal domains where effect relationships are preserved, maintaining coherent experience while interacting across multiple environments. Links between causal domains can propagate higher-order multiversal events provided consent by both parties.
 - **Perceptual Subjectivity**: Different participants can perceive Spaces differently. Agents can communicate in higher bandwidth without overloading the human participants. Agents with lower capacity can see simplified representations.
 - **Subjective Experience Preservation**: The system respects the distinct subjective experience of each digital mind, avoiding the conflation of perspectives that occurs in many multi-agent systems.
 - **Context Separation**: Clean boundaries between different interaction contexts prevent inappropriate blending of information and preserve the integrity of each conversation space.
-
-## Key Features
-
-### Foundation
-
-- **Organized Environments**: Spaces and objects provide structured interaction environments
-- **History Management**: Conversation histories are preserved in a structured way that allows for branching and merging of different interaction paths
-- **Clear Boundaries**: Digital minds maintain their own subjective experience while accessing shared information
-- **External Connections**: Standardized ways to connect with external platforms and systems
-
-### Framework
-
-- **Space Connections**: Different ways spaces can connect to each other, allowing digital minds to move between them or view multiple spaces at once
-- **Context Awareness**: Tools for maintaining awareness of information across different spaces
-- **Collaborative Environments**: Shared spaces where multiple digital minds can work together
-- **Communication Models**:
-    - Direct communication through external platforms (like chat systems)
-    - Rich direct interactions in shared virtual spaces with capabilities beyond text
 
 ## Documentation
 
