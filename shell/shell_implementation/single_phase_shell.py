@@ -37,10 +37,25 @@ class SinglePhaseShell(BaseShell):
         """Initialize the Single-Phase Shell."""
         super().__init__(registry, hud, context_manager, inner_space, model_info, llm_config)
         
+        # Verify inner_space is properly initialized
+        if not self.inner_space:
+            self.logger.error("InnerSpace not initialized in SinglePhaseShell")
+            raise RuntimeError("InnerSpace not initialized in SinglePhaseShell")
+            
+        # Verify inner_space is registered with the registry
+        if not registry.get_inner_space() or registry.get_inner_space().id != self.inner_space.id:
+            self.logger.error(f"InnerSpace {self.inner_space.id} not properly registered with SpaceRegistry")
+            raise RuntimeError(f"InnerSpace {self.inner_space.id} not properly registered with SpaceRegistry")
+            
+        # Ensure the inner_space can receive events
+        if not hasattr(self.inner_space, 'receive_event'):
+            self.logger.error("InnerSpace missing required receive_event method")
+            raise RuntimeError("InnerSpace implementation is incomplete")
+        
         # Additional tools specific to this shell
         self._setup_single_phase_tools()
         
-        self.logger.info("Single-Phase Shell initialized")
+        self.logger.info("Single-Phase Shell initialized with verified InnerSpace")
     
     def _setup_single_phase_tools(self):
         """Set up tools specific to the single-phase shell."""

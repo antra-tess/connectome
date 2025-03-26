@@ -10,7 +10,7 @@ from typing import Dict, Any, Optional, List, Callable
 import uuid
 import time
 
-from ..elements.space_registry import SpaceRegistry
+from elements.space_registry import SpaceRegistry
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -70,6 +70,8 @@ class MessageHandler:
         # Construct the timeline context
         timeline_context = {
             "timeline_id": timeline_id,
+            "is_primary": True,  # Add this to match expected format in other components
+            "last_event_id": None,  # Initialize with None, will be updated as events flow
             "timestamp": int(time.time() * 1000)
         }
         

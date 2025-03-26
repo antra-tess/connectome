@@ -131,8 +131,33 @@ class BaseShell(ABC):
             The created inner space
         """
         self.logger.info("Creating agent's Inner Space")
-        # InnerSpace will register itself with the registry
-        return InnerSpace("inner_space", "Agent's Inner Space", registry)
+        
+        try:
+            # Create the InnerSpace instance
+            inner_space = InnerSpace("inner_space", "Agent's Inner Space", registry)
+            
+            # Verify it was registered properly
+            if not registry.get_inner_space():
+                self.logger.error("InnerSpace created but not registered with SpaceRegistry")
+                # Try manual registration if automatic registration failed
+                if not registry.register_inner_space(inner_space):
+                    raise RuntimeError("Failed to register InnerSpace with SpaceRegistry")
+                self.logger.info("InnerSpace manually registered with SpaceRegistry")
+            
+            # Verify it's accessible as a space
+            if not registry.get_space(inner_space.id):
+                self.logger.error("InnerSpace not accessible as a Space in SpaceRegistry")
+                # Try manual registration as a regular space
+                if not registry.register_space(inner_space):
+                    raise RuntimeError("Failed to register InnerSpace as a Space in SpaceRegistry")
+                self.logger.info("InnerSpace manually registered as a Space")
+            
+            self.logger.info(f"InnerSpace '{inner_space.id}' successfully created and registered")
+            return inner_space
+            
+        except Exception as e:
+            self.logger.error(f"Error creating InnerSpace: {e}")
+            raise RuntimeError(f"Failed to create InnerSpace: {e}")
     
     def _setup_internal_tools(self) -> Dict[str, Dict[str, Any]]:
         """Set up internal tools that are always accessible to the agent."""
