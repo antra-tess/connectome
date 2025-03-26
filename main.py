@@ -97,6 +97,9 @@ def initialize_shell(shell_type=None):
     if shell_type is None:
         shell_type = os.getenv('SHELL_TYPE', 'single_phase')
     
+    # Get chat model from environment variable
+    chat_model = os.getenv('CHAT_MODEL', 'direct')  # 'direct' or 'uplinked'
+    
     # Create SpaceRegistry
     space_registry = SpaceRegistry()
     logger.info("Space registry initialized")
@@ -139,18 +142,60 @@ def initialize_shell(shell_type=None):
             llm_config=llm_config
         )
     
-    # Initialize a ChatSpace for user interactions
-    chat_space = ChatSpace("chat_space", "User Chat Space", space_registry)
-    space_registry.register_space(chat_space)
+    # Initialize chat elements based on the selected model
+    if chat_model.lower() == 'uplinked':
+        # Model 2: Uplinked chat elements
+        logger.info("Using uplinked chat model")
+        
+        # Use the factory function to create uplinked chat setup
+        from bot_framework.elements import create_uplinked_chat_setup
+        
+        # For each adapter we want to support
+        for adapter_info in DEFAULT_ADAPTERS:
+            platform = adapter_info.get('platform', 'unknown')
+            adapter_id = adapter_info.get('adapter_id', 'unknown')
+            
+            # Create the uplinked chat setup
+            shared_space, uplink, chat_element = create_uplinked_chat_setup(
+                shell.inner_space, 
+                space_registry,
+                platform=platform,
+                adapter_id=adapter_id
+            )
+            
+            logger.info(f"Created uplinked chat for {platform} (adapter: {adapter_id})")
+        
+        logger.info("Initialized uplinked chat model with shared spaces")
+    else:
+        # Model 1: Direct chat elements
+        logger.info("Using direct chat model")
+        
+        # Use the factory function to create direct chat elements
+        from bot_framework.elements import create_direct_chat_element
+        
+        # For each adapter we want to support
+        for adapter_info in DEFAULT_ADAPTERS:
+            platform = adapter_info.get('platform', 'unknown')
+            adapter_id = adapter_info.get('adapter_id', 'unknown')
+            
+            # Create the direct chat element
+            chat_element = create_direct_chat_element(
+                f"{platform}_chat",
+                f"{platform.capitalize()} Chat",
+                f"Interface for {platform} messages",
+                platform=platform,
+                adapter_id=adapter_id,
+                registry=space_registry
+            )
+            
+            # Mount in the inner space
+            shell.inner_space.mount_element(chat_element)
+            
+            logger.info(f"Created direct chat for {platform} (adapter: {adapter_id})")
+        
+        logger.info("Initialized direct chat model")
     
-    # Initialize a ChatElement for handling messages
-    chat_element = ChatElement("chat_element", "Chat Interface", "Handle user messages")
-    chat_space.mount_element(chat_element)
-    
-    # Mount the chat space in the inner space
-    shell.inner_space.mount_element(chat_space)
-    
-    logger.info(f"Shell and spaces initialized (using {shell_type} shell)")
+    logger.info(f"Shell and elements initialized (using {shell_type} shell with {chat_model} chat model)")
     return shell, space_registry
 
 

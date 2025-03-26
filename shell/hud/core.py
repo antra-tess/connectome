@@ -10,6 +10,7 @@ import logging
 from typing import Dict, Any, List, Optional, Union, Set, Tuple
 import time
 from dataclasses import dataclass
+import inspect
 
 from bot_framework.rendering import (
     RenderingOptions,
@@ -678,3 +679,47 @@ class HUD:
         relationships["referenced_by"] = referencing_elements
         
         return relationships 
+
+    def render_element(self, element, state: Dict[str, Any], options: RenderingOptions) -> RenderingResult:
+        """
+        Render an element using its delegate.
+        
+        Args:
+            element: The element to render
+            state: The element's current state
+            options: Rendering options
+            
+        Returns:
+            Rendering result containing the rendered content
+        """
+        # Get the delegate for this element
+        delegate = self._get_element_delegate(element)
+        
+        if not delegate:
+            logger.warning(f"No delegate found for element {element.id}, using default renderer")
+            from bot_framework.rendering.delegates import default_renderer
+            return default_renderer(state, options)
+        
+        # Special handling for remote chat elements that need connection spans
+        if hasattr(element, 'is_remote') and callable(getattr(element, 'is_remote')) and element.is_remote():
+            # Check if this is a ChatElement with remote rendering
+            if hasattr(element, 'get_connection_spans') and callable(getattr(element, 'get_connection_spans')):
+                # Get connection spans from the element
+                connection_spans = element.get_connection_spans()
+                
+                # Render with connection spans if the delegate supports it
+                if hasattr(delegate, '__call__') and len(inspect.signature(delegate).parameters) >= 3:
+                    # Function delegate with support for connection spans
+                    return delegate(state, options, connection_spans)
+            
+        # Standard rendering for regular elements
+        if hasattr(delegate, 'render') and callable(getattr(delegate, 'render')):
+            # Object-style delegate
+            return delegate.render(state, options)
+        elif hasattr(delegate, '__call__'):
+            # Function-style delegate
+            return delegate(state, options)
+        else:
+            logger.warning(f"Invalid delegate for element {element.id}, using default renderer")
+            from bot_framework.rendering.delegates import default_renderer
+            return default_renderer(state, options) 

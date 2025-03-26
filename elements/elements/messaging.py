@@ -45,7 +45,7 @@ class ChatElement(Object):
     IGNORE_MARKERS = ["."]
     
     def __init__(self, element_id: str, name: str, description: str,
-                 platform: str, adapter_id: str):
+                 platform: str = "unknown", adapter_id: str = "default"):
         """
         Initialize the chat element.
         
@@ -69,9 +69,98 @@ class ChatElement(Object):
             "timeline_metadata": {}  # timeline_id -> metadata
         }
         
+        # Flag to indicate if this is a remote chat element (used for delegate selection)
+        self._is_remote = False
+        
         # Register messaging tools
         self._register_messaging_tools()
         logger.info(f"Created chat element for {platform} (adapter: {adapter_id}): {name} ({element_id})")
+    
+    def set_as_remote(self, is_remote: bool = True) -> None:
+        """
+        Set whether this is a remote chat element.
+        
+        Args:
+            is_remote: Whether this is a remote chat element
+        """
+        self._is_remote = is_remote
+        # Update the delegate when remote status changes
+        self.update_delegate()
+        
+    def is_remote(self) -> bool:
+        """
+        Check if this is a remote chat element.
+        
+        Returns:
+            True if this is a remote chat element, False otherwise
+        """
+        return self._is_remote
+    
+    def update_delegate(self) -> None:
+        """
+        Update the delegate for this chat element based on remote status.
+        """
+        # Import here to avoid circular imports
+        try:
+            from bot_framework.rendering.delegates import create_chat_delegate
+            
+            # Create the appropriate delegate function
+            delegate_func = create_chat_delegate(self._is_remote)
+            
+            # Register the delegate with the element
+            self._delegate = delegate_func
+            
+            logger.debug(f"Updated delegate for chat element {self.id} (remote: {self._is_remote})")
+        except ImportError:
+            logger.warning(f"Could not create chat delegate for element {self.id}")
+    
+    def get_delegate(self):
+        """
+        Get the element delegate for rendering.
+        
+        If the delegate hasn't been set yet, update it first.
+        
+        Returns:
+            Delegate function or object
+        """
+        if not self._delegate:
+            self.update_delegate()
+        return self._delegate
+    
+    def get_connection_spans(self, options: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+        """
+        Get connection spans for remote chat rendering.
+        
+        This is used by the remote rendering system to retrieve connection span information
+        when this chat element is accessed via an uplink.
+        
+        Args:
+            options: Options for retrieving connection spans
+                - limit: Maximum number of spans to retrieve
+                - include_active: Whether to include the active span
+                
+        Returns:
+            List of connection span information
+        """
+        options = options or {}
+        limit = options.get('limit', 5)
+        include_active = options.get('include_active', True)
+        
+        # This would typically be provided by the UplinkProxy, but we implement it here
+        # to support the ElementDelegate interfaces
+        spans = []
+        
+        # If this is a remote element and has a parent uplink, retrieve spans from it
+        if self._is_remote and hasattr(self, '_parent_element') and self._parent_element:
+            parent_id, _ = self._parent_element
+            parent = self._registry.get_element(parent_id) if self._registry else None
+            
+            if parent and hasattr(parent, 'get_connection_spans'):
+                # Delegate to parent uplink
+                return parent.get_connection_spans(options)
+        
+        # Otherwise return empty list as this is a direct element
+        return spans
     
     def publish_message(self, message_data: Dict[str, Any], timeline_context: Optional[Dict[str, Any]] = None) -> bool:
         """
@@ -626,10 +715,20 @@ class ChatElement(Object):
         Returns:
             Dictionary representation of the current state
         """
-        return {
+        # Get the basic state
+        state = super().get_state()
+        
+        # Add chat-specific state
+        state.update({
+            "platform": self.platform,
+            "adapter_id": self.adapter_id,
             "timeline_state": self._timeline_state,
-            "chat_ids": list(self._timeline_state["messages"].keys())
-        }
+            "chat_ids": list(self._timeline_state.get("messages", {}).keys()),
+            "is_remote": self._is_remote,
+            "active_timeline": next(iter(self._timeline_state.get("active_timelines", set())), None)
+        })
+        
+        return state
     
     def is_direct_message_chat(self, chat_id: str) -> bool:
         """

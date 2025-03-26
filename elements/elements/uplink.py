@@ -794,4 +794,61 @@ class UplinkProxy(Space):
         self.set_delegate(UplinkDelegate(self))
         
         # Register the delegate
-        self.get_delegate().register() 
+        self.get_delegate().register()
+
+    def mount_element(self, element: BaseElement, mount_id: Optional[str] = None, 
+                     mount_type: MountType = MountType.INCLUSION) -> bool:
+        """
+        Mount an element in this space.
+        
+        Args:
+            element: Element to mount
+            mount_id: Optional identifier for the mount point
+            mount_type: Type of mounting
+            
+        Returns:
+            True if the element was successfully mounted, False otherwise
+        """
+        # Use the parent implementation to mount the element
+        success = super().mount_element(element, mount_id, mount_type)
+        
+        if success:
+            # If this is a chat element being mounted with uplink, mark it as remote
+            if hasattr(element, 'set_as_remote') and callable(getattr(element, 'set_as_remote')):
+                element.set_as_remote(True)
+            
+            logger.info(f"Mounted element {element.id} in uplink proxy {self.id}")
+        
+        return success
+    
+    def get_connection_spans(self, options: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+        """
+        Get connection spans for remote rendering.
+        
+        Args:
+            options: Options for retrieving spans
+                - limit: Maximum number of spans to retrieve (default 5)
+                - include_active: Whether to include the active span (default True)
+                
+        Returns:
+            List of connection spans
+        """
+        options = options or {}
+        limit = options.get('limit', 5)
+        include_active = options.get('include_active', True)
+        
+        # Start with completed spans
+        spans = self._connection_spans.copy()
+        
+        # Include active span if requested
+        if include_active and self._current_span:
+            spans.append(self._current_span.copy())
+            
+        # Sort by start time (newest first)
+        spans.sort(key=lambda span: span.get('start_time', 0), reverse=True)
+        
+        # Limit the number of spans
+        if limit > 0:
+            spans = spans[:limit]
+            
+        return spans 
