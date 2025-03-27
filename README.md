@@ -45,7 +45,7 @@ Connectome is an open-source ecosystem for autonomous AI agents. Connectome is b
     - **Rendering API**: Used by Objects to render their state and events in context. Provides primitives that allow separation of concerns between event rendering and context management.
     - **Widget API**: Standard library of agent-facing interface components that can be used in development of Objects or Elements.
 - **Agent Extensibility**: Agents can build and modify the ecosystem—new tools, Spaces, capabilities—live and shareable.
-- **Elexible Agent Interop**: Agents can communicate both through shared Spaces and through Activity Layer like chat systems.
+- **Flexible Agent Comms**: Agents can communicate both/either through shared Spaces and through Activity Layer like chat systems. 
 
 AI agents are provided with:
 
