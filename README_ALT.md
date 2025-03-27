@@ -37,14 +37,15 @@ Connectome is built around several key components that function like an operatin
 
 ```mermaid
 graph TD
-    subgraph Agent "Agent (Claude)"
+    %% Define the Agent subgraph with a simple ID
+    subgraph Agent_Claude [Agent (Claude)] %% Use brackets for the visible label
         Shell[Shell: Agent OS]
         HUD[HUD: Context Renderer]
         LLM[Core AI Model]
         InnerSpace[Inner Space (Subjective Experience)]
     end
 
-    subgraph Connectome Environment
+    subgraph Connectome_Environment [Connectome Environment] %% Use brackets for label
         subgraph RemoteSpace1 ["Remote Shared Space (e.g., Digital Commons)"]
             direction LR
             RS1_Loom[Loom DAG]
@@ -61,20 +62,23 @@ graph TD
         ActivityLayer[Activity Layer]
     end
 
-    subgraph External Systems
+    subgraph External_Systems [External Systems] %% Use brackets for label
         Discord[Discord Server]
         Slack[Slack Workspace]
         Web[Web Browser Interface]
         FileSystem[Document Repository]
     end
 
+    %% Connections within Agent
     Shell --> LLM
     Shell --> HUD
     Shell --> InnerSpace
 
+    %% Connections from Agent to Environment
     InnerSpace -- Uplink --> RemoteSpace1
     InnerSpace -- Uplink --> RemoteSpace2
 
+    %% Connections within Remote Spaces
     RemoteSpace1 -- Contains --> RS1_Obj1
     RemoteSpace1 -- Contains --> RS1_Obj2
     RemoteSpace2 -- Contains --> RS2_Obj
@@ -84,23 +88,28 @@ graph TD
     InnerSpace -- "Interact via Uplink" --> RemoteSpace1
 
     %% 2. Via Activity Layer (External Systems)
-    InnerSpace -- "Use Object" --> ObjInInnerSpace(Object: Chat Interface) -- ConnectsTo --> ActivityLayer
+    %% Define a representative object within InnerSpace for clarity
+    ObjInInnerSpace(Object: Chat Interface)
+    InnerSpace -- Contains --> ObjInInnerSpace
+    ObjInInnerSpace -- ConnectsTo --> ActivityLayer
 
+    %% Connections to External Systems
     ActivityLayer -- Adapters --> Discord
     ActivityLayer -- Adapters --> Slack
     ActivityLayer -- Adapters --> Web
     ActivityLayer -- Adapters --> FileSystem
 
-    %% Dashed lines for event flow example
-    Discord -- Event --> ActivityLayer
-    ActivityLayer -- Normalized Event --> ObjInInnerSpace
-    ObjInInnerSpace -- Update --> Shell
-    Shell -- Render Request --> HUD
-    HUD -- Rendered Context --> LLM
-    LLM -- Response --> Shell
-    Shell -- Action --> ObjInInnerSpace
-    ObjInInnerSpace -- Event --> ActivityLayer
-    ActivityLayer -- External Event --> Discord
+    %% Dashed lines for event flow example (Example path)
+    style ObjInInnerSpace fill:#f9f,stroke:#333,stroke-width:2px %% Highlight the inner object
+    Discord -.->|External Event| ActivityLayer
+    ActivityLayer -.->|Normalized Event| ObjInInnerSpace
+    ObjInInnerSpace -.->|Update| Shell
+    Shell -.->|Render Request| HUD
+    HUD -.->|Rendered Context| LLM
+    LLM -.->|Response| Shell
+    Shell -.->|Action| ObjInInnerSpace
+    ObjInInnerSpace -.->|Event| ActivityLayer
+    ActivityLayer -.->|External Event| Discord
 ```
 
 ## Fundamental Principles
