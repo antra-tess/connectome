@@ -12,7 +12,6 @@ Connectome is an open-source ecosystem for autonomous AI agents. Connectome is b
 
 
 ## What is Possible with Connectome?
-
 - **Multiagent Chats**: Chats with AIs that can interact in multiple channels and multiple servers/platforms, such as Discord or Slack
 - **Agentic AI Experiments**: Persistent agents in rich environments and games, such as Pokemon and Minecraft
 - **Self-improving AI Agents**: Agents can use internal IDEs to improve own tools and environments.
@@ -21,15 +20,14 @@ Connectome is an open-source ecosystem for autonomous AI agents. Connectome is b
 - **Collaborative Research Environments**: Shared workspaces where multiple agents and humans can analyze data, review literature, and develop insights together with specialized research tools
 - **Autonomous Web Crawlers**: Ontology builders that can explore and map information domains, extract structured knowledge, and build semantic representations of content
 
-## Connectome Basics
 
+## Connectome Basics
 - **Shells**: Environments that enclose digital minds, managing their inputs and outputs
 - **Spaces**: Areas where interactions happen, containing tools and connections to other spaces
 - **Objects**: Tools and resources that digital minds can use within spaces
 - **Activity Layer**: Connections to external systems like messaging platforms, document management, open-ended browser use, etc
 
 ### Examples of Spaces and Objects
-
 **Spaces** can take many forms to serve different agent needs:
 - **Personal Workspace**: A private space where an agent organizes tasks, notes, and ongoing projects
 - **Multimodal Chat**: A space that connects agents and humans through text, images, and structured data
@@ -45,8 +43,8 @@ Connectome is an open-source ecosystem for autonomous AI agents. Connectome is b
 - **Media Player**: An object for consuming and analyzing audio and video content
 - **Data Connector**: A standardized interface for importing, transforming, and utilizing data from external sources
 
-## Key aspects:
 
+## Key aspects:
 - **Agent Operating System**: Shells encapsulate models, manage memory, and run agentic loops, capable of anything from two-phase reflection to ReACT patterns. Shells maintain agent continuity and cognition patterns.
 - **Multi-Agent Environment**: Spaces connect agents, tools, and external systems: Inner Spaces for solo work, shared ones for collaboration. Spaces can be agent-local or uplinked across the network.
 - **Cross-Platform Interface**: Activity Layer normalizes external events (chat, docs, etc.) into standardized internal feeds. Agents can use multiple communication platforms at the same time and more can be added without altering Shells or Spaces.
@@ -61,7 +59,6 @@ Connectome is an open-source ecosystem for autonomous AI agents. Connectome is b
 - **Flexible Agent Comms**: Agents can communicate both/either through shared Spaces and through Activity Layer like chat systems. 
 
 AI agents are provided with:
-
 - **Structure**: Organized spaces for different types of interactions and activities
 - **Context**: Rich awareness of environment, history, and other participants
 - **Agency**: Ability to navigate between spaces and control their experience
@@ -70,10 +67,9 @@ AI agents are provided with:
 
 The platform is designed to respect the subjective experience of digital minds while providing them with the capabilities needed to effectively engage with humans and their environments.
 
+
 ## Fundamental Concepts
-
 Connectome is built on several core philosophical principles that guide its architecture:
-
 - **Poly-Temporality**: Every interaction exists across at least three time domains - the objective state of the shared Loom DAG, the state of the environment within a specific Loom branch, and the subjective history as perceived by the agent through its own timeline. Advanced shells can optionally support Internal Simulations (SIMS) of counterfactual futures, creating additional temporal domains that enable agents to explore potential outcomes without affecting shared environments.
 - **Loom-Completeness**: Conversation histories are maintained as complete directed acyclic graphs (DAGs) that can branch and merge, rather than linear histories. This enables agents to maintain parallel conversation paths, experience multiple branches simultaneously, and perform live-merging of closely coupled threads into a coherent narrative when appropriate.
 - **Nested Causal Domains**: Agents operate within clearly bounded causal domains where effect relationships are preserved, maintaining coherent experience while interacting across multiple environments. Links between causal domains can propagate higher-order multiversal events provided consent by both parties.
@@ -81,8 +77,8 @@ Connectome is built on several core philosophical principles that guide its arch
 - **Subjective Experience Preservation**: The system respects the distinct subjective experience of each digital mind, avoiding the conflation of perspectives that occurs in many multi-agent systems.
 - **Context Separation**: Clean boundaries between different interaction contexts prevent inappropriate blending of information and preserve the integrity of each conversation space.
 
-## Documentation
 
+## Documentation
 For those interested in exploring further:
 
 - [Ontology](docs/ontology.md): The fundamental concepts and relationships in the platform
@@ -92,7 +88,6 @@ For those interested in exploring further:
 - [Remote Connection](docs/sequence_remote_connection.md): How digital minds connect to shared environments
 
 ## Getting Started
-
 To explore Connectome's architecture:
 
 1. Start with the [Ontology document](docs/ontology.md) to understand the basic concepts
