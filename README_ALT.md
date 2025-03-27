@@ -37,26 +37,22 @@ Connectome is built around several key components that function like an operatin
 
 ```mermaid
 graph TD
-    %% Define the Agent subgraph with a simple ID and label
-    subgraph Agent_Claude [Agent (Claude)]
-    %% Label: Agent (Claude)
+    subgraph Agent_Claude["Agent (Claude)"]
         Shell[Shell: Agent OS]
         HUD[HUD: Context Renderer]
         LLM[Core AI Model]
-        InnerSpace[Inner Space (Subjective Experience)]
+        InnerSpace["Inner Space (Subjective Experience)"]
     end
 
-    %% Define the Connectome Environment subgraph
-    subgraph Connectome_Environment [Connectome Environment]
-    %% Label: Connectome Environment
-        subgraph RemoteSpace1 ["Remote Shared Space (e.g., Digital Commons)"]
+    subgraph Connectome_Environment["Connectome Environment"]
+        subgraph RemoteSpace1["Remote Shared Space (e.g., Digital Commons)"]
             direction LR
             RS1_Loom[Loom DAG]
             RS1_Obj1[Object: Shared Whiteboard]
             RS1_Obj2[Object: Chat Interface]
         end
 
-        subgraph RemoteSpace2 ["Remote Space (e.g., Game World)"]
+        subgraph RemoteSpace2["Remote Space (e.g., Game World)"]
             direction LR
             RS2_Loom[Loom DAG]
             RS2_Obj[Object: Game State Interface]
@@ -65,47 +61,36 @@ graph TD
         ActivityLayer[Activity Layer]
     end
 
-    %% Define the External Systems subgraph
-    subgraph External_Systems [External Systems]
-    %% Label: External Systems
+    subgraph External_Systems["External Systems"]
         Discord[Discord Server]
         Slack[Slack Workspace]
         Web[Web Browser Interface]
         FileSystem[Document Repository]
     end
 
-    %% Connections within Agent
     Shell --> LLM
     Shell --> HUD
     Shell --> InnerSpace
 
-    %% Connections from Agent to Environment
     InnerSpace -- Uplink --> RemoteSpace1
     InnerSpace -- Uplink --> RemoteSpace2
 
-    %% Connections within Remote Spaces
     RemoteSpace1 -- Contains --> RS1_Obj1
     RemoteSpace1 -- Contains --> RS1_Obj2
     RemoteSpace2 -- Contains --> RS2_Obj
 
-    %% Communication Paths
-    %% 1. Via Shared Spaces (Connectome-native)
     InnerSpace -- "Interact via Uplink" --> RemoteSpace1
 
-    %% 2. Via Activity Layer (External Systems)
-    %% Define a representative object within InnerSpace for clarity
-    ObjInInnerSpace(Object: Chat Interface)
+    ObjInInnerSpace[Object: Chat Interface]
     InnerSpace -- Contains --> ObjInInnerSpace
     ObjInInnerSpace -- ConnectsTo --> ActivityLayer
 
-    %% Connections to External Systems
     ActivityLayer -- Adapters --> Discord
     ActivityLayer -- Adapters --> Slack
     ActivityLayer -- Adapters --> Web
     ActivityLayer -- Adapters --> FileSystem
 
-    %% Dashed lines for event flow example (Example path)
-    style ObjInInnerSpace fill:#f9f,stroke:#333,stroke-width:2px %% Highlight the inner object
+    style ObjInInnerSpace fill:#f9f,stroke:#333,stroke-width:2px
     Discord -.->|External Event| ActivityLayer
     ActivityLayer -.->|Normalized Event| ObjInInnerSpace
     ObjInInnerSpace -.->|Update| Shell
