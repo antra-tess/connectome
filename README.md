@@ -10,6 +10,19 @@ An architectural framework for digital minds, enabling rich interactions, contex
 
 Connectome is an open-source ecosystem for autonomous AI agents. Connectome is built around a few key components:
 
+
+## What is Possible with Connectome?
+
+- **Multiagent Chats**: Chats with AIs that can interact in multiple channels and multiple servers/platforms, such as Discord or Slack
+- **Agentic AI Experiments**: Persistent agents in rich environments and games, such as Pokemon and Minecraft
+- **Self-improving AI Agents**: Agents can use internal IDEs to improve own tools and environments.
+- **Social Media Agents**: Virtual assistants that can monitor multiple social platforms, engage with content, analyze trends, and help manage online presence while maintaining consistent persona across different networks
+- **Educational Agents**: Tutors and teaching assistants that provide personalized learning experiences, track student progress, and adapt curriculum based on individual needs
+- **Collaborative Research Environments**: Shared workspaces where multiple agents and humans can analyze data, review literature, and develop insights together with specialized research tools
+- **Autonomous Web Crawlers**: Ontology builders that can explore and map information domains, extract structured knowledge, and build semantic representations of content
+
+## Connectome Basics
+
 - **Shells**: Environments that enclose digital minds, managing their inputs and outputs
 - **Spaces**: Areas where interactions happen, containing tools and connections to other spaces
 - **Objects**: Tools and resources that digital minds can use within spaces
