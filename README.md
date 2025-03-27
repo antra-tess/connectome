@@ -1,15 +1,10 @@
-# README
-
 # Connectome
 
 An architectural framework for digital minds, enabling rich interactions, contextual awareness, and coherent experiences across diverse environments.
 
-> The name "Connectome" is inspired by neuroscience, where a connectome is a comprehensive map of neural connections in the brain. Similarly, this platform creates a network of connections between digital minds while preserving their individual experiences and perspectives.
-
 ## What is Connectome?
 
 Connectome is an open-source ecosystem for autonomous AI agents. Connectome is built around a few key components:
-
 
 ## What is Possible with Connectome?
 - **Multiagent Chats**: Chats with AIs that can interact in multiple channels and multiple servers/platforms, such as Discord or Slack
@@ -101,6 +96,8 @@ Currently implemented activity adapters are available in a [separate repository]
 ## Development Status
 
 Connectome is currently in the implementation phase. The documentation represents the architectural vision and will evolve as implementation progresses.
+
+> The name "Connectome" is inspired by neuroscience, where a connectome is a comprehensive map of neural connections in the brain. Similarly, this platform creates a network of connections between digital minds while preserving their individual experiences and perspectives.
 
 ## Contributing
 
