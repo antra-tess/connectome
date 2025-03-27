@@ -37,15 +37,18 @@ Connectome is built around several key components that function like an operatin
 
 ```mermaid
 graph TD
-    %% Define the Agent subgraph with a simple ID
-    subgraph Agent_Claude [Agent (Claude)] %% Use brackets for the visible label
+    %% Define the Agent subgraph with a simple ID and label
+    subgraph Agent_Claude [Agent (Claude)]
+    %% Label: Agent (Claude)
         Shell[Shell: Agent OS]
         HUD[HUD: Context Renderer]
         LLM[Core AI Model]
         InnerSpace[Inner Space (Subjective Experience)]
     end
 
-    subgraph Connectome_Environment [Connectome Environment] %% Use brackets for label
+    %% Define the Connectome Environment subgraph
+    subgraph Connectome_Environment [Connectome Environment]
+    %% Label: Connectome Environment
         subgraph RemoteSpace1 ["Remote Shared Space (e.g., Digital Commons)"]
             direction LR
             RS1_Loom[Loom DAG]
@@ -62,7 +65,9 @@ graph TD
         ActivityLayer[Activity Layer]
     end
 
-    subgraph External_Systems [External Systems] %% Use brackets for label
+    %% Define the External Systems subgraph
+    subgraph External_Systems [External Systems]
+    %% Label: External Systems
         Discord[Discord Server]
         Slack[Slack Workspace]
         Web[Web Browser Interface]
