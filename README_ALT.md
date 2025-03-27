@@ -36,70 +36,56 @@ Connectome is built around several key components that function like an operatin
 ### High-Level Architecture
 
 ```mermaid
-graph TD
-    subgraph Agent_Claude["Agent (Claude)"]
-        Shell[Shell: Agent OS]
-        HUD[HUD: Context Renderer]
-        LLM[Core AI Model]
-        InnerSpace["Inner Space (Subjective Experience)"]
-    end
-
-    subgraph Connectome_Environment["Connectome Environment"]
-        subgraph RemoteSpace1["Remote Shared Space (e.g., Digital Commons)"]
-            direction LR
-            RS1_Loom[Loom DAG]
-            RS1_Obj1[Object: Shared Whiteboard]
-            RS1_Obj2[Object: Chat Interface]
-        end
-
-        subgraph RemoteSpace2["Remote Space (e.g., Game World)"]
-            direction LR
-            RS2_Loom[Loom DAG]
-            RS2_Obj[Object: Game State Interface]
-        end
-
-        ActivityLayer[Activity Layer]
-    end
-
-    subgraph External_Systems["External Systems"]
-        Discord[Discord Server]
-        Slack[Slack Workspace]
-        Web[Web Browser Interface]
-        FileSystem[Document Repository]
-    end
-
-    Shell --> LLM
-    Shell --> HUD
-    Shell --> InnerSpace
-
-    InnerSpace -- Uplink --> RemoteSpace1
-    InnerSpace -- Uplink --> RemoteSpace2
-
-    RemoteSpace1 -- Contains --> RS1_Obj1
-    RemoteSpace1 -- Contains --> RS1_Obj2
-    RemoteSpace2 -- Contains --> RS2_Obj
-
-    InnerSpace -- "Interact via Uplink" --> RemoteSpace1
-
-    ObjInInnerSpace[Object: Chat Interface]
-    InnerSpace -- Contains --> ObjInInnerSpace
-    ObjInInnerSpace -- ConnectsTo --> ActivityLayer
-
-    ActivityLayer -- Adapters --> Discord
-    ActivityLayer -- Adapters --> Slack
-    ActivityLayer -- Adapters --> Web
-    ActivityLayer -- Adapters --> FileSystem
-
-    style ObjInInnerSpace fill:#f9f,stroke:#333,stroke-width:2px
-    Discord -.->|External Event| ActivityLayer
-    ActivityLayer -.->|Normalized Event| ObjInInnerSpace
-    ObjInInnerSpace -.->|Update| Shell
-    Shell -.->|Render Request| HUD
-    HUD -.->|Rendered Context| LLM
-    LLM -.->|Response| Shell
-    Shell -.->|Action| ObjInInnerSpace
-    ObjInInnerSpace -.->|Event| ActivityLayer
-    ActivityLayer -.->|External Event| Discord
+---
+config:
+  layout: dagre
+---
+flowchart LR
+ subgraph Loop["Loop"]
+    direction LR
+        Actions["Actions"]
+        LLM["LLM"]
+        HUD["HUD"]
+        Events["Events"]
+        L["Inner Loop"]
+  end
+ subgraph InnerSpace["Inner Space"]
+    direction LR
+        Tools["Tool Objects"]
+        Records["Records"]
+        Uplink["Uplink"]
+  end
+ subgraph Shell["Shell"]
+        Loop
+        InnerSpace
+        Memory["Memory"]
+  end
+ subgraph SharedSpace["SharedSpace"]
+        Objects2["Objects"]
+  end
+ subgraph RemoteHost["RemoteHost"]
+    direction TB
+        SharedSpace
+  end
+ subgraph Activities["Activities"]
+    direction LR
+        Discord["Discord"]
+        Telegram["Slack"]
+        IDE["IDE"]
+        MCP["MCP"]
+  end
+    Events --> HUD
+    HUD --> LLM
+    LLM --> Actions & L
+    L --> HUD
+    InnerSpace --> Events
+    Actions --> InnerSpace
+    Loop --> Memory
+    Memory --> HUD
+    Uplink <--> SharedSpace
+    Tools <--> Activities
+    Objects2 <--> Activities
+    OtherShells["OtherShells"] <--> SharedSpace
 ```
 
 ## Fundamental Principles
