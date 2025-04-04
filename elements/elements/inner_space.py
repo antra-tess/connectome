@@ -1,70 +1,388 @@
 """
 Inner Space
-Special space element that represents the agent's subjective experience.
+Special space element using component architecture, representing the agent's subjective experience.
 """
 
 import logging
-from typing import Dict, Any, Optional, List, Callable, Type
+from typing import Dict, Any, Optional, List, Type, Callable
 import uuid
-import time
-import importlib
-import inspect
 
-from .space import Space
+from .space import Space # Inherits ContainerComponent, TimelineComponent, etc.
 from .base import BaseElement, MountType
+# Import the central factory
+from .factory import ElementFactory
+# Import LLM Provider for type hint
+from ..llm.provider_interface import LLMProvider
+from .components import ( # Import necessary components
+    ToolProvider, 
+    VeilProducer, 
+    ElementFactoryComponent,
+    GlobalAttentionComponent,
+    ContainerComponent, # Needed for type hinting in tool
+    ContextManagerComponent, # <-- Add ContextManager
+    HUDComponent             # <-- Add HUD
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from llm.provider_interface import LLMProviderInterface
+    # Define type alias locally for clarity, referencing HostEventLoop's definition
+    OutgoingActionCallback = Callable[[Dict[str, Any]], None]
 
 class InnerSpace(Space):
     """
-    Special space element that represents the agent's subjective experience.
+    Special space element representing the agent's subjective experience.
+    Uses component-based architecture.
     
-    The InnerSpace is a privileged space that:
-    1. Contains the agent's subjective timeline
-    2. Serves as the agent's primary interface to the world
-    3. Manages uplinks to external spaces
-    4. Provides tools for the agent to interact with itself and external spaces
+    Inherits standard Space components (Container, Timeline) and adds:
+    - `ElementFactoryComponent`: To create new elements via prefabs.
+    - `GlobalAttentionComponent`: To track attention needs (placeholder).
+    - `ToolProvider`: For InnerSpace specific tools (like mounting).
+    - `VeilProducer`: For representation.
     
-    Each Shell has exactly one InnerSpace that cannot be replaced or destroyed.
+    Crucially, this will later host components moved from the Shell (HUD, ContextManager).
     """
     
-    # Event types that can be processed by the inner space
-    EVENT_TYPES = [
-        "user_message",
-        "system_message",
-        "tool_response",
-        "agent_message",
-        "state_update"
+    # Define event types InnerSpace might specifically handle or coordinate
+    EVENT_TYPES = Space.EVENT_TYPES + [
+        "attention_requested", # Listens for attention events for the GlobalAttentionComponent
+        "attention_cleared"
+        # Add others as needed
     ]
     
-    def __init__(self, element_id: str, name: str, registry):
+    def __init__(self, element_id: str, name: str, registry, 
+                 llm_provider: LLMProvider, # <-- Add LLM Provider parameter
+                 prefab_dir: str = "prefabs"):
         """
         Initialize the inner space.
         
         Args:
-            element_id: Unique identifier for this inner space
-            name: Human-readable name for this inner space
-            registry: SpaceRegistry instance
+            element_id: Unique identifier for this inner space.
+            name: Human-readable name for this inner space.
+            registry: SpaceRegistry instance (needed for accessing other spaces and global context).
+            llm_provider: Instance of the LLM Provider to be used by components.
+            prefab_dir: Path to the directory containing prefab YAML files.
         """
-        super().__init__(element_id, name, "Agent's Inner Space")
+        super().__init__(element_id, name, "Agent's Subjective Inner Space")
         
-        # Register with registry
-        self._registry = registry
-        registry.register_inner_space(self)
+        # Set the registry reference early, components might need it during init
+        # The base BaseElement has set_registry, Space inherits it.
+        self.set_registry(registry)
         
-        # Element registry for creating new elements
-        self._element_registry: Dict[str, Type[BaseElement]] = {}
+        # --- Instantiate Central Factory --- 
+        # For now, InnerSpace owns its factory instance. Could be injected later.
+        self._central_factory_instance = ElementFactory(prefab_directory=prefab_dir)
         
-        # Register standard element types
-        self._register_standard_element_types()
+        # --- Add InnerSpace Specific Components --- 
+        # Pass the central factory instance to the component
+        self._element_factory = self.add_component(
+            ElementFactoryComponent,
+            central_factory=self._central_factory_instance
+        )
+        if not self._element_factory:
+            logger.error(f"Failed to add ElementFactoryComponent to InnerSpace {element_id}")
+             
+        self._global_attention = self.add_component(GlobalAttentionComponent)
+        if not self._global_attention:
+             logger.error(f"Failed to add GlobalAttentionComponent to InnerSpace {element_id}")
+             
+        # --- Add Shell Components (Pass LLM Provider to HUD) --- 
+        self._context_manager = self.add_component(ContextManagerComponent)
+        if not self._context_manager:
+            logger.error(f"Failed to add ContextManagerComponent to InnerSpace {element_id}")
+            
+        self._hud = self.add_component(
+            HUDComponent,
+            llm_provider=llm_provider # <-- Inject LLM Provider here
+        )
+        if not self._hud:
+            logger.error(f"Failed to add HUDComponent to InnerSpace {element_id}")
+        # ---------------------------
+
+        # Add ToolProvider if not already inherited/added by Space, or get existing one
+        self._tool_provider = self.get_component(ToolProvider) # Use get_component for type safety
+        if not self._tool_provider:
+             self._tool_provider = self.add_component(ToolProvider)
+             if not self._tool_provider:
+                  logger.error(f"Failed to add or find ToolProvider for InnerSpace {element_id}")
+                  
+        # Add VeilProducer if not already inherited/added by Space
+        if not self.get_component(VeilProducer):
+             self._veil_producer = self.add_component(VeilProducer, renderable_id=f"innerspace_{element_id}")
+             if not self._veil_producer:
+                  logger.error(f"Failed to add VeilProducer component to InnerSpace {element_id}")
+
+        # Register InnerSpace specific tools IF tool provider exists
+        if self._tool_provider:
+            self._register_inner_space_tools()
+            
+        # --- Placeholder for Shell Components --- 
+        # self._hud_component = self.add_component(HUDComponent)
+        # self._context_manager_component = self.add_component(ContextManagerComponent)
+        # logger.info("Added placeholder HUD and ContextManager components to InnerSpace")
+        # ----------------------------------------
         
-        # Track elements requesting attention across all spaces
-        self._attention_requests: Dict[str, Dict[str, Any]] = {}
+        # Register this InnerSpace with the registry
+        # This step might change depending on how registry and InnerSpace interact
+        if registry and hasattr(registry, 'register_inner_space') and callable(getattr(registry, 'register_inner_space')):
+            registry.register_inner_space(self)
+        else:
+             logger.warning(f"Registry object provided to InnerSpace {element_id} does not have 'register_inner_space' method.")
+             
+        logger.info(f"Created inner space: {name} ({element_id}) with core and shell components.")
+
+    # --- Tool Registration --- 
+    def _register_inner_space_tools(self) -> None:
+        """Register tools specific to inner space using ToolProvider."""
         
-        logger.info(f"Created inner space: {name} ({element_id})")
+        @self._tool_provider.register_tool(
+            name="create_and_mount_element",
+            description="Creates a new element from a prefab definition and mounts it in this inner space.",
+            parameter_descriptions={
+                "prefab_name": "Name of the element prefab to create (e.g., 'chat_element')",
+                "name": "Optional override name for the new element",
+                "description": "Optional override description of the element's purpose",
+                "element_id": "Optional specific ID for the new element",
+                "mount_id": "Optional identifier for the mount point (defaults to element_id)",
+                "mount_type": "Type of mounting ('inclusion' or 'uplink', default 'inclusion')",
+                "initial_state": "Dictionary of component config overrides (e.g., {'HistoryComponent': {'max_entries': 50}})"
+            }
+        )
+        def create_and_mount_element(prefab_name: str,
+                                    name: Optional[str] = None,
+                                    description: Optional[str] = None,
+                                    element_id: Optional[str] = None,
+                                    mount_id: Optional[str] = None,
+                                    mount_type: str = "inclusion",
+                                    initial_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+            """Tool to create and mount a new element using the ElementFactoryComponent and prefab."""
+            if not self._element_factory:
+                 return {"success": False, "error": "ElementFactoryComponent unavailable"}
+
+            container = self.get_component(ContainerComponent) # Use type-safe getter
+            if not container:
+                 return {"success": False, "error": "ContainerComponent unavailable"}
+                 
+            # Validate mount type string
+            try:
+                mt_enum = MountType(mount_type.lower())
+            except ValueError:
+                return {"success": False, "error": f"Invalid mount type: '{mount_type}'. Use 'inclusion' or 'uplink'."}
+                
+            # Use factory component to create the element instance
+            new_element = self._element_factory.create_element(
+                prefab_name=prefab_name,
+                element_id=element_id, # Factory handles ID generation if None
+                name=name,             # Pass overrides directly
+                description=description,
+                initial_state=initial_state # Pass component overrides
+            )
+            
+            if not new_element:
+                # Error logged by factory component or central factory
+                return {"success": False, "error": f"Failed to create element from prefab '{prefab_name}'"}
+                
+            # Use container to mount the created element
+            actual_element_id = new_element.id
+            mount_id = mount_id or actual_element_id
+            
+            # Check if mount_id or element_id already exists in container before mounting
+            existing_mount = container.get_mounted_element(mount_id)
+            if existing_mount:
+                 return {"success": False, "error": f"Mount ID '{mount_id}' is already in use."}
+            # Check if element with same ID exists (should not happen with UUIDs from factory?)
+            # for _, el_info in container.get_mounted_elements_info().items():
+            #      if el_info['element_id'] == actual_element_id:
+            #           return {"success": False, "error": f"Element ID '{actual_element_id}' already exists in container."}
+
+            mount_success = container.mount_element(new_element, mount_id, mt_enum)
+            
+            if not mount_success:
+                # Error logged by container
+                return {"success": False, "error": f"Failed to mount created element '{actual_element_id}' at mount point '{mount_id}'"}
+                
+            # Success!
+            return {
+                "success": True,
+                "element_id": actual_element_id,
+                "mount_id": mount_id,
+                "prefab_name": prefab_name,
+                "mount_type": mount_type
+            }
+
+        @self._tool_provider.register_tool(
+            name="unmount_element",
+            description="Unmount an element currently mounted in this inner space.",
+            parameter_descriptions={
+                "mount_id": "Identifier of the mount point to unmount"
+            }
+        )
+        def unmount_element_tool(mount_id: str) -> Dict[str, Any]:
+            """Tool to unmount an element using the ContainerComponent."""
+            container = self.get_component(ContainerComponent)
+            if not container:
+                 return {"success": False, "error": "ContainerComponent unavailable"}
+                 
+            # Get info *before* unmounting for the response
+            element_info = container.get_mounted_elements_info().get(mount_id)
+            if not element_info:
+                 return {"success": False, "error": f"No element found at mount point '{mount_id}'"}
+                 
+            success = container.unmount_element(mount_id)
+            
+            return {
+                 "success": success,
+                 "unmounted_mount_id": mount_id,
+                 "unmounted_element_id": element_info.get("element_id"),
+                 "status": "Element unmounted." if success else "Failed to unmount element."
+            }
+            
+        @self._tool_provider.register_tool(
+            name="list_available_prefabs",
+            description="List the names of element prefabs that can be created.",
+            parameter_descriptions={}
+        )
+        def list_available_prefabs_tool() -> Dict[str, Any]:
+            """Tool to list available element prefabs from the central factory."""
+            if not self._element_factory:
+                 return {"success": False, "error": "ElementFactoryComponent unavailable", "prefabs": []}
+            try:
+                # Access the central factory via the component property
+                prefab_names = self._element_factory.central_factory.get_available_prefabs()
+                return {"success": True, "available_prefabs": prefab_names}
+            except Exception as e:
+                 logger.error(f"Error getting available prefabs via factory component: {e}", exc_info=True)
+                 return {"success": False, "error": "Failed to retrieve prefab list.", "prefabs": []}
+            
+        @self._tool_provider.register_tool(
+            name="get_attention_requests",
+            description="Get a list of elements currently requesting attention.",
+            parameter_descriptions={}
+        )
+        def get_attention_requests_tool() -> Dict[str, Any]:
+             """Tool to get attention requests from GlobalAttentionComponent."""
+             if not self._global_attention:
+                  return {"success": False, "error": "GlobalAttentionComponent unavailable", "requests": {}}
+             requests = self._global_attention.get_attention_requests()
+             formatted_requests = [
+                  {
+                       "request_key": key, 
+                       "space_id": req.get("space_id"), 
+                       "source_element_id": req.get("source_element_id"), 
+                       "timestamp": req.get("timestamp"),
+                       "request_data": req.get("request_data")
+                  } 
+                  for key, req in requests.items()
+             ]
+             return {"success": True, "attention_requests": formatted_requests}
+             
+        # Add other InnerSpace-specific tools if needed (e.g., managing focus, interacting with shell components once added)
+
+    # --- Action Execution Routing --- 
+    def execute_element_action(self, 
+                               space_id: Optional[str], 
+                               element_id: str, 
+                               action_name: str, 
+                               parameters: Dict[str, Any],
+                               timeline_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Executes an action, routing it to the correct element/space.
+        Overrides the base Space implementation if needed, or relies on it.
+        
+        Args:
+            space_id: ID of the target space (None or self.id for InnerSpace).
+            element_id: ID of the target element (can be self.id for InnerSpace itself).
+            action_name: Name of the action/tool.
+            parameters: Parameters for the action.
+            timeline_context: Timeline context (important for actions).
+            
+        Returns:
+            Result of the action execution.
+        """
+        target_space_id = space_id or self.id
+        
+        # Timeline context handling (ensure primary if not specified)
+        if not timeline_context:
+             timeline_comp = self.get_component_by_type("timeline")
+             primary_timeline = timeline_comp.get_primary_timeline() if timeline_comp else None
+             if primary_timeline:
+                  timeline_context = {"timeline_id": primary_timeline}
+             else:
+                  # Cannot execute action without a timeline context
+                  return {"error": f"Cannot execute action '{action_name}': Missing timeline context and no primary timeline found."} 
+                  
+        # --- Action on InnerSpace itself or its directly mounted elements --- 
+        if target_space_id == self.id:
+             # Use the inherited Space.execute_action_on_element which uses ToolProvider
+             # This correctly handles actions targeted at the InnerSpace itself (element_id == self.id)
+             # or elements directly mounted within it.
+             return super().execute_action_on_element(element_id, action_name, parameters)
+             
+        # --- Action on an element in a DIFFERENT space (requires registry) --- 
+        else:
+            registry = self.get_registry()
+            if not registry:
+                return {"error": f"Cannot execute action in space '{target_space_id}': SpaceRegistry not available."} 
+                
+            target_space = registry.get_space(target_space_id)
+            if not target_space:
+                return {"error": f"Target space '{target_space_id}' not found in registry."}
+                
+            # Ensure the target space has the execution method
+            if not hasattr(target_space, 'execute_action_on_element') or not callable(getattr(target_space, 'execute_action_on_element')):
+                 return {"error": f"Target space '{target_space_id}' does not support execute_action_on_element."} 
+                 
+            # Delegate execution to the target space
+            # We might need to inject/ensure the timeline_context is passed correctly if needed by the remote execution
+            logger.debug(f"Routing action '{action_name}' on element '{element_id}' to remote space '{target_space_id}'")
+            # Assuming parameters dict might already contain timeline_context if needed, 
+            # or the remote space handles its own timeline based on the call.
+            # For safety, let's ensure it's included if the remote method expects it.
+            # This introspection is complex; assuming the parameters are passed as is for now.
+            try:
+                 result = target_space.execute_action_on_element(element_id, action_name, parameters)
+                 # TODO: Add timeline recording for the *initiation* of the remote action in InnerSpace timeline?
+                 return result
+            except Exception as e:
+                 logger.error(f"Error executing action on remote space '{target_space_id}': {e}", exc_info=True)
+                 return {"error": f"Error during execution on remote space '{target_space_id}': {str(e)}"}
+                 
+    # --- Convenience Getters --- 
+    def get_element_factory(self) -> Optional[ElementFactoryComponent]:
+        return self._element_factory
+        
+    def get_global_attention(self) -> Optional[GlobalAttentionComponent]:
+        return self._global_attention
+
+    # --- Event Handling --- 
+    # Override handle_event if InnerSpace needs specific coordination, 
+    # e.g., routing attention events to GlobalAttentionComponent.
+    def handle_event(self, event: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
+        # Allow base class (Space) and its components (Timeline, Container) to handle first
+        handled = super().handle_event(event, timeline_context)
+        
+        # Explicitly route attention events to the global attention manager if not already handled
+        event_type = event.get("event_type")
+        if event_type in ["attention_requested", "attention_cleared"] and self._global_attention:
+             if not handled: # Avoid double handling if Space/BaseElement already routed it
+                  handled = self._global_attention.handle_event(event, timeline_context)
+             else:
+                  # If already handled (e.g. by BaseElement delegation), ensure our component still sees it if needed
+                  # This depends on whether handle_event in BaseElement stops propagation
+                  # For safety, let's ensure GlobalAttentionComponent always sees these events if present
+                  self._global_attention.handle_event(event, timeline_context)
+                  
+        # Add other InnerSpace specific coordination logic here...
+        
+        return handled
+        
+    # --- Obsolete Methods --- 
+    # _register_standard_element_types -> Moved to ElementFactoryComponent
+    # _get_element_class -> Moved to ElementFactoryComponent
+    # _attention_requests handling -> Moved to GlobalAttentionComponent
     
     def get_space(self, space_id: str) -> Optional[Space]:
         """
@@ -87,311 +405,6 @@ class InnerSpace(Space):
                 self.spaces[space_id] = space
                 return space
                 
-        return None
-    
-    def execute_element_action(self, 
-                               space_id: Optional[str], 
-                               element_id: str, 
-                               action_name: str, 
-                               parameters: Dict[str, Any],
-                               timeline_context: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Execute an action on an element.
-        
-        Args:
-            space_id: ID of the space containing the element (if None, use this space)
-            element_id: ID of the element to act on
-            action_name: Name of the action to execute
-            parameters: Parameters for the action
-            timeline_context: Timeline context for this action
-            
-        Returns:
-            Result of the action execution
-        """
-        if not space_id or space_id == self.id:
-            # Action on an element in this space
-            return self.execute_action_on_element(element_id, action_name, parameters)
-            
-        # Action on an element in another space
-        target_space = self.get_space(space_id)
-        if not target_space:
-            return {"error": f"Space not found: {space_id}"}
-            
-        return target_space.execute_action_on_element(element_id, action_name, parameters)
-    
-    def _register_inner_space_tools(self) -> None:
-        """Register tools specific to inner space."""
-        
-        @self.register_tool(
-            name="mount_element",
-            description="Mount a new element in this inner space",
-            parameter_descriptions={
-                "element_type": "Type of element to mount",
-                "element_id": "ID to assign to the new element (optional)",
-                "name": "Name for the new element",
-                "description": "Description of the element's purpose",
-                "mount_id": "Identifier for the mount point (optional)",
-                "mount_type": "Type of mounting (inclusion or uplink)",
-                "parameters": "Additional parameters for element initialization"
-            }
-        )
-        def mount_element(element_type: str, name: str, description: str, 
-                         element_id: Optional[str] = None, mount_id: Optional[str] = None,
-                         mount_type: str = "inclusion", 
-                         parameters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-            """
-            Tool to mount a new element in this inner space.
-            
-            Args:
-                element_type: Type of element to mount
-                name: Name for the new element
-                description: Description of the element's purpose
-                element_id: ID to assign to the new element (optional)
-                mount_id: Identifier for the mount point (optional)
-                mount_type: Type of mounting (inclusion or uplink)
-                parameters: Additional parameters for element initialization
-                
-            Returns:
-                Result of the mounting operation
-            """
-            # Validate mount type
-            try:
-                mt = MountType.INCLUSION if mount_type == "inclusion" else MountType.UPLINK
-            except ValueError:
-                return {
-                    "success": False,
-                    "error": f"Invalid mount type: {mount_type}"
-                }
-                
-            # Generate element ID if not provided
-            if not element_id:
-                element_id = f"{element_type.lower()}_{str(uuid.uuid4())[:8]}"
-                
-            # Check if an element with this ID already exists
-            for mount_info in self._mounted_elements.values():
-                existing_element = mount_info["element"]
-                if existing_element.id == element_id:
-                    return {
-                        "success": False,
-                        "error": f"Element with ID {element_id} already exists"
-                    }
-            
-            # Get element class
-            element_class = self._get_element_class(element_type)
-            if not element_class:
-                return {
-                    "success": False,
-                    "error": f"Element type {element_type} not found"
-                }
-                
-            # Create the element
-            try:
-                # Initialize parameters if not provided
-                params = parameters or {}
-                
-                # Create the element
-                element = element_class(element_id=element_id, name=name, 
-                                       description=description, **params)
-                                       
-                # Mount the element
-                mount_result = self.mount_element(element, mount_id, mt)
-                
-                if not mount_result:
-                    return {
-                        "success": False,
-                        "error": f"Failed to mount element {element_id}"
-                    }
-                    
-                return {
-                    "success": True,
-                    "element_id": element_id,
-                    "mount_id": mount_id or element_id,
-                    "element_type": element_type,
-                    "mount_type": mount_type
-                }
-            except Exception as e:
-                logger.error(f"Error creating element of type {element_type}: {e}")
-                return {
-                    "success": False,
-                    "error": f"Error creating element: {str(e)}"
-                }
-        
-        @self.register_tool(
-            name="unmount_element",
-            description="Unmount an element from this inner space",
-            parameter_descriptions={
-                "mount_id": "Identifier for the mount point"
-            }
-        )
-        def unmount_element_tool(mount_id: str) -> Dict[str, Any]:
-            """
-            Tool to unmount an element from this inner space.
-            
-            Args:
-                mount_id: Identifier for the mount point
-                
-            Returns:
-                Result of the unmounting operation
-            """
-            # Get element info before unmounting
-            element_info = {}
-            if mount_id in self._mounted_elements:
-                element = self._mounted_elements[mount_id]["element"]
-                element_info = {
-                    "element_id": element.id,
-                    "element_name": element.name,
-                    "element_type": element.__class__.__name__
-                }
-            
-            # Unmount the element
-            success = self.unmount_element(mount_id)
-            
-            return {
-                "success": success,
-                "mount_id": mount_id,
-                **element_info
-            }
-        
-        @self.register_tool(
-            name="register_element_type",
-            description="Register a new element type",
-            parameter_descriptions={
-                "element_type": "Name of the element type",
-                "element_class": "Fully qualified class name of the element"
-            }
-        )
-        def register_element_type_tool(element_type: str, element_class: str) -> Dict[str, Any]:
-            """
-            Tool to register a new element type.
-            
-            Args:
-                element_type: Name of the element type
-                element_class: Fully qualified class name of the element
-                
-            Returns:
-                Result of the registration operation
-            """
-            try:
-                # Import the module and get the class
-                module_path, class_name = element_class.rsplit('.', 1)
-                module = importlib.import_module(module_path)
-                cls = getattr(module, class_name)
-                
-                # Check if it's a BaseElement subclass
-                if not issubclass(cls, BaseElement):
-                    return {
-                        "success": False,
-                        "error": f"{element_class} is not a subclass of BaseElement"
-                    }
-                    
-                # Register the element type
-                self.register_element_type(element_type, cls)
-                
-                return {
-                    "success": True,
-                    "element_type": element_type,
-                    "element_class": element_class
-                }
-            except Exception as e:
-                logger.error(f"Error registering element type {element_type}: {e}")
-                return {
-                    "success": False,
-                    "error": f"Error registering element type: {str(e)}"
-                }
-        
-        @self.register_tool(
-            name="get_registered_elements",
-            description="Get all registered element types",
-            parameter_descriptions={}
-        )
-        def get_registered_elements_tool() -> Dict[str, Any]:
-            """
-            Tool to get all registered element types.
-            
-            Returns:
-                Dictionary of registered element types
-            """
-            return {
-                "success": True,
-                "element_types": self.get_registered_elements()
-            }
-    
-    def register_element_type(self, element_type: str, element_class: Type[BaseElement]) -> bool:
-        """
-        Register a new element type.
-        
-        Args:
-            element_type: Name of the element type
-            element_class: Class of the element
-            
-        Returns:
-            True if registration was successful, False otherwise
-        """
-        # Validate the element class
-        if not inspect.isclass(element_class) or not issubclass(element_class, BaseElement):
-            logger.error(f"Cannot register {element_class.__name__} as it is not a subclass of BaseElement")
-            return False
-            
-        # Register the element type
-        self._element_registry[element_type] = element_class
-        logger.info(f"Registered element type {element_type}")
-        
-        return True
-    
-    def get_registered_elements(self) -> Dict[str, str]:
-        """
-        Get all registered element types.
-        
-        Returns:
-            Dictionary mapping element type names to class names
-        """
-        return {
-            element_type: element_class.__name__ 
-            for element_type, element_class in self._element_registry.items()
-        }
-    
-    def _get_element_class(self, element_type: str) -> Optional[Type[BaseElement]]:
-        """
-        Get the class for an element type.
-        
-        Args:
-            element_type: Name of the element type
-            
-        Returns:
-            Element class if found, None otherwise
-        """
-        # Check if the element type is registered
-        if element_type in self._element_registry:
-            return self._element_registry[element_type]
-            
-        # Try to import the element type
-        try:
-            # First try as a module path
-            if '.' in element_type:
-                module_path, class_name = element_type.rsplit('.', 1)
-                module = importlib.import_module(module_path)
-                cls = getattr(module, class_name)
-                
-                # Check if it's a BaseElement subclass
-                if issubclass(cls, BaseElement):
-                    # Register for future use
-                    self._element_registry[element_type] = cls
-                    return cls
-                    
-            # Try as a class in the elements module
-            module = importlib.import_module('elements.elements')
-            if hasattr(module, element_type):
-                cls = getattr(module, element_type)
-                
-                # Check if it's a BaseElement subclass
-                if issubclass(cls, BaseElement):
-                    # Register for future use
-                    self._element_registry[element_type] = cls
-                    return cls
-        except (ImportError, AttributeError) as e:
-            logger.error(f"Error importing element type {element_type}: {e}")
-            
-        logger.warning(f"Element type {element_type} not found")
         return None
     
     def _record_timeline_event(self, event_type: str, event_data: Dict[str, Any]) -> None:
@@ -725,3 +738,46 @@ class InnerSpace(Space):
                 logger.debug(f"Element state changed: {element_id} - {event_data.get('state_change')}")
         else:
             logger.debug(f"Received element event: {event_type} from {element_id}") 
+
+    # --- Add Convenience Getters for Shell Components --- 
+    def get_context_manager(self) -> Optional[ContextManagerComponent]:
+         """Returns the context manager component instance."""
+         return self.get_component(ContextManagerComponent) # Use base class getter
+         
+    def get_hud(self) -> Optional[HUDComponent]:
+         """Returns the HUD component instance."""
+         return self.get_component(HUDComponent) # Use base class getter 
+
+    def set_outgoing_action_callback(self, callback: 'OutgoingActionCallback'):
+         """Sets the callback function used by components to enqueue outgoing actions."""
+         logger.info(f"Setting outgoing action callback for InnerSpace {self.id}")
+         self._outgoing_action_callback = callback
+         
+         # --- Propagate callback to relevant components --- 
+         # Find components that need the callback and set it
+         publisher = self.get_component(PublisherComponent)
+         if publisher and hasattr(publisher, 'set_outgoing_action_callback'):
+             publisher.set_outgoing_action_callback(callback)
+             logger.debug(f"Propagated outgoing callback to PublisherComponent")
+             
+         # Example: If HUD needs to send results of internal tools externally
+         hud = self.get_component(HUDComponent)
+         if hud and hasattr(hud, 'set_outgoing_action_callback'):
+             hud.set_outgoing_action_callback(callback)
+             logger.debug(f"Propagated outgoing callback to HUDComponent")
+             
+         # Add other components that need the callback here
+         # ...
+         pass # Add pass to fix indentation error if the block is empty for now
+
+    # Helper method to get HUD, used by HostEventLoop
+    def get_hud(self) -> Optional[HUDComponent]:
+        """Convenience method to get the HUD component."""
+        return self.get_component(HUDComponent)
+
+    # Override receive_event if InnerSpace needs specific handling before components
+    # def receive_event(self, event_data: Dict[str, Any], timeline_context: Dict[str, Any]):
+    #     logger.debug(f"InnerSpace {self.id} received event: {event_data.get('event_type')}")
+    #     # Potentially do InnerSpace-specific logic here
+    #     super().receive_event(event_data, timeline_context)
+    #     # Potentially do InnerSpace-specific logic after component processing 

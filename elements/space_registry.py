@@ -1,6 +1,8 @@
 """
 Space Registry
-Manages the lifecycle of spaces and routes messages to appropriate spaces in the Bot Framework.
+
+Manages the collection of active Spaces and Elements.
+Provides routing capabilities based on various criteria.
 """
 
 import logging
@@ -20,102 +22,88 @@ logger = logging.getLogger(__name__)
 
 class SpaceRegistry:
     """
-    Manages the lifecycle of spaces and routes messages to appropriate spaces.
-    
-    The SpaceRegistry is responsible for:
-    1. Registering and managing spaces
-    2. Routing messages to appropriate spaces based on event type
-    3. Managing space lifecycle (registration, unregistration)
-    4. Handling space state updates and observers
-    5. Routing outgoing messages to the activity layer
+    Manages spaces and facilitates event routing.
+    (Placeholder implementation)
     """
-    
-    def __init__(self, context_manager=None):
-        """
-        Initialize the space registry.
-        
-        Args:
-            context_manager: Optional context manager instance
-        """
-        self.spaces: Dict[str, Space] = {}
-        self._context_manager = context_manager
-        self.response_callback = None
-        
-        # Map of event types to observer callbacks
-        self.space_observers: Dict[str, List[Callable]] = {}
-        
-        # InnerSpace specific attributes
-        self.inner_space: Optional[InnerSpace] = None
-        
-        # Activity layer connection
-        self.socket_client = None
-        
-        logger.info("Space registry initialized")
-    
+    def __init__(self):
+        self._spaces: Dict[str, Space] = {}
+        self._elements: Dict[str, BaseElement] = {}
+        self._inner_space: Optional[InnerSpace] = None
+        # TODO: Add mapping for conversation_id/adapter_type to space_id
+        self._routing_map: Dict[str, str] = {}
+        logger.info("SpaceRegistry initialized.")
+
     def register_space(self, space: Space) -> bool:
-        """
-        Register a space in the registry.
-        
-        Args:
-            space: Space to register
-            
-        Returns:
-            True if registration was successful, False otherwise
-        """
+        """Registers a Space element."""
         if not isinstance(space, Space):
-            logger.error(f"Cannot register {space.__class__.__name__} as it is not a Space")
+            logger.error(f"Attempted to register non-Space object: {type(space)}")
             return False
-            
-        space_id = space.id
-        
-        # Check if a space with this ID already exists
-        if space_id in self.spaces:
-            logger.warning(f"Space with ID {space_id} already registered")
-            return False
-            
-        # Register the space
-        self.spaces[space_id] = space
-        
-        # Set the registry reference on the space
-        if hasattr(space, 'set_registry'):
-            space.set_registry(self)
-            
-        logger.info(f"Registered space: {space.name} ({space_id})")
-        
-        # Notify observers
-        self._notify_observers("space_registered", {
-            "space_id": space_id,
-            "space_name": space.name,
-            "space_type": space.__class__.__name__
-        })
-        
+        if space.id in self._spaces:
+            logger.warning(f"Space {space.id} already registered. Overwriting.")
+        self._spaces[space.id] = space
+        self._elements[space.id] = space # Also register as a general element
+        logger.info(f"Registered Space: {space.name} ({space.id})")
+        # TODO: Update routing map based on space properties?
         return True
-    
-    def register_inner_space(self, space: InnerSpace) -> bool:
-        """
-        Register the inner space in the registry.
         
-        Args:
-            space: InnerSpace to register
-            
-        Returns:
-            True if registration was successful, False otherwise
-        """
-        if not isinstance(space, InnerSpace):
-            logger.error(f"Cannot register {space.__class__.__name__} as inner space. Must be an InnerSpace.")
-            return False
-            
-        # Check if an inner space is already registered
-        if self.inner_space is not None:
-            logger.warning(f"Inner space already registered: {self.inner_space.id}")
-            return False
-            
-        # Register as inner space
-        self.inner_space = space
+    def register_inner_space(self, inner_space: InnerSpace) -> bool:
+        """Specifically registers the agent's InnerSpace."""
+        if self._inner_space and self._inner_space.id != inner_space.id:
+             logger.warning(f"Replacing previously registered InnerSpace {self._inner_space.id} with {inner_space.id}")
+        self._inner_space = inner_space
+        # Also register it as a general space/element
+        return self.register_space(inner_space)
+
+    def get_space(self, space_id: str) -> Optional[Space]:
+        """Gets a registered Space by its ID."""
+        return self._spaces.get(space_id)
         
-        # Also register as a regular space
-        return self.register_space(space)
-    
+    def get_element(self, element_id: str) -> Optional[BaseElement]:
+         """Gets any registered Element (Space or Object) by its ID."""
+         return self._elements.get(element_id)
+         
+    def get_inner_space(self) -> Optional[InnerSpace]:
+         """Gets the registered InnerSpace."""
+         return self._inner_space
+
+    def route_event(self, event_data: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
+        """
+        Routes an incoming event to the appropriate Space.
+        (Placeholder routing logic)
+        """
+        target_space_id = None
+        conversation_id = event_data.get("conversation_id")
+        adapter_type = event_data.get("adapter_type")
+        timeline_id_from_context = timeline_context.get("timeline_id")
+
+        # --- Placeholder Routing Logic --- 
+        # TODO: Implement robust routing based on conversation_id, adapter_type,
+        # potentially mapping these to specific Space IDs (e.g., UplinkProxies or ChatElements
+        # mounted within InnerSpace).
+        
+        # Example: If timeline ID directly matches a known space ID?
+        if timeline_id_from_context and timeline_id_from_context in self._spaces:
+            target_space_id = timeline_id_from_context
+        # Example: Simple fallback to InnerSpace for now?
+        elif self._inner_space:
+            target_space_id = self._inner_space.id
+            logger.debug(f"Routing event {event_data.get('event_id')} to InnerSpace (fallback). Context: {timeline_context}")
+        # ----------------------------------
+
+        if target_space_id:
+            target_space = self.get_space(target_space_id)
+            if target_space:
+                logger.debug(f"Routing event {event_data.get('event_id')} to Space {target_space_id}")
+                # The Space's receive_event handles timeline management and processing
+                target_space.receive_event(event_data, timeline_context)
+                return True
+            else:
+                logger.error(f"Routing failed: Target Space {target_space_id} not found in registry.")
+        else:
+            logger.warning(f"Routing failed: Could not determine target Space for event. Timeline Context: {timeline_context}")
+            
+        return False
+
     def unregister_space(self, space_id: str) -> bool:
         """
         Unregister a space from the registry.
@@ -127,20 +115,20 @@ class SpaceRegistry:
             True if unregistration was successful, False otherwise
         """
         # Cannot unregister inner space
-        if self.inner_space and space_id == self.inner_space.id:
+        if self._inner_space and space_id == self._inner_space.id:
             logger.error(f"Cannot unregister inner space: {space_id}")
             return False
             
         # Check if the space exists
-        if space_id not in self.spaces:
+        if space_id not in self._spaces:
             logger.warning(f"Space with ID {space_id} not found")
             return False
             
         # Get space before removing
-        space = self.spaces[space_id]
+        space = self._spaces[space_id]
         
         # Remove the space
-        del self.spaces[space_id]
+        del self._spaces[space_id]
         logger.info(f"Unregistered space: {space.name} ({space_id})")
         
         # Notify observers
@@ -152,27 +140,6 @@ class SpaceRegistry:
         
         return True
     
-    def get_space(self, space_id: str) -> Optional[Space]:
-        """
-        Get a space by ID.
-        
-        Args:
-            space_id: ID of the space to get
-            
-        Returns:
-            The space if found, None otherwise
-        """
-        return self.spaces.get(space_id)
-    
-    def get_inner_space(self) -> Optional[InnerSpace]:
-        """
-        Get the inner space.
-        
-        Returns:
-            The inner space if registered, None otherwise
-        """
-        return self.inner_space
-    
     def get_spaces(self) -> Dict[str, Space]:
         """
         Get all registered spaces.
@@ -180,7 +147,7 @@ class SpaceRegistry:
         Returns:
             Dictionary mapping space IDs to space objects
         """
-        return self.spaces.copy()
+        return self._spaces.copy()
     
     def is_inner_space(self, space_id: str) -> bool:
         """
@@ -192,7 +159,7 @@ class SpaceRegistry:
         Returns:
             True if the space is the inner space, False otherwise
         """
-        return self.inner_space is not None and space_id == self.inner_space.id
+        return self._inner_space is not None and space_id == self._inner_space.id
     
     def route_message(self, event_data: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
         """
@@ -231,7 +198,7 @@ class SpaceRegistry:
             
             if adapter_type and conversation_id:
                 # Check if we have a space for this conversation
-                for space_id, space in self.spaces.items():
+                for space_id, space in self._spaces.items():
                     # Spaces will have methods for checking if they handle specific conversations
                     if hasattr(space, "handles_conversation") and space.handles_conversation(adapter_type, conversation_id):
                         # Route to this space with timeline context
@@ -240,8 +207,8 @@ class SpaceRegistry:
                         break
                         
             # If not routed to a specific space, route to inner space
-            if not routed and self.inner_space:
-                self.inner_space.receive_event(event_data, timeline_context)
+            if not routed and self._inner_space:
+                self._inner_space.receive_event(event_data, timeline_context)
                 routed = True
                 
             return routed
@@ -261,11 +228,11 @@ class SpaceRegistry:
         Returns:
             True if the message was successfully routed, False otherwise
         """
-        if self.inner_space is None:
+        if self._inner_space is None:
             logger.error("Cannot route to inner space: No inner space registered")
             return False
             
-        return self.inner_space.update_state(event_data, timeline_context)
+        return self._inner_space.update_state(event_data, timeline_context)
     
     def update_space_state(self, space_id: str, event_data: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
         """

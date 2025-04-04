@@ -1,0 +1,14 @@
+type: element_prefab
+name: ChatElement
+description: A standard chat element with history, timeline, and publishing capabilities.
+components:
+  - type: HistoryComponent
+    config: {}
+  - type: TimelineComponent
+    config: {} # No specific config needed for the base component yet
+  - type: PublisherComponent
+    config: {} # No specific config needed for the base component yet
+  - type: ToolProvider # Provides tools/actions for the element
+    config: {}
+  - type: VeilProducer # Allows the element's state to be rendered/represented
+    config: {} 

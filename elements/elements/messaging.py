@@ -1,51 +1,45 @@
 """
 Chat Element
-Element for handling chat/messaging functionality with timeline-aware state management.
+Element for handling chat/messaging functionality using a component-based approach.
 """
 
 import logging
 from typing import Dict, Any, Optional, List, Callable
-from datetime import datetime
 import uuid
 import time
 
-from .object import Object
+from .base import BaseElement # Inherit directly from BaseElement
+from .components import ToolProvider, VeilProducer # Base components
+from .components.messaging import HistoryComponent, PublisherComponent # Messaging specific
+from .components.space import TimelineComponent # Needed for dependencies
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
-class ChatElement(Object):
+class ChatElement(BaseElement):
     """
     Element for handling chat/messaging functionality.
     
-    Provides tools for sending messages, typing indicators, and other
-    messaging-related functionality with timeline-aware state management.
-    
-    Each instance of ChatElement handles messages for a specific platform/adapter,
-    identified by platform and adapter_id parameters.
+    Relies on components for:
+    - History management (`HistoryComponent`)
+    - Publishing messages/indicators (`PublisherComponent`)
+    - Providing tools (`ToolProvider`)
+    - Generating representation (`VeilProducer` - basic for now)
+    - Timeline management (`TimelineComponent`)
     """
-    EVENT_TYPES = [
-        "message_received", 
-        "message_sent", 
-        "message_updated", 
-        "message_deleted", 
-        "reaction_added", 
-        "reaction_removed", 
-        "clear_context"
-    ]
+    # EVENT_TYPES handled by components. Element itself might not need many.
+    EVENT_TYPES: List[str] = [] 
     
-    # Define which events should trigger agent attention
+    # Define which events should trigger agent attention - Could move to an AttentionComponent later
     ATTENTION_SIGNALS = [
-        "message_sent",
+        "message_received", # Typically incoming messages need attention
     ]
-    
-    # Messages starting with these markers are ignored
-    IGNORE_MARKERS = ["."]
     
     def __init__(self, element_id: str, name: str, description: str,
-                 platform: str = "unknown", adapter_id: str = "default"):
+                 platform: str = "unknown", adapter_id: str = "default", 
+                 is_remote: bool = False):
         """
         Initialize the chat element.
         
@@ -55,543 +49,301 @@ class ChatElement(Object):
             description: Description of this element's purpose
             platform: Platform identifier (e.g., 'discord', 'zulip', 'telegram')
             adapter_id: ID of the adapter this element is associated with
+            is_remote: Flag if this represents a remote chat (e.g., via Uplink)
         """
         super().__init__(element_id, name, description)
         
-        # Store platform and adapter information
+        # Store config needed by components or the element itself
         self.platform = platform
         self.adapter_id = adapter_id
-        
-        # Initialize timeline-aware state
-        self._timeline_state = {
-            "messages": {},  # timeline_id -> message history
-            "active_timelines": set(),  # Set of active timeline IDs
-            "timeline_metadata": {}  # timeline_id -> metadata
-        }
-        
-        # Flag to indicate if this is a remote chat element (used for delegate selection)
-        self._is_remote = False
-        
-        # Register messaging tools
-        self._register_messaging_tools()
-        logger.info(f"Created chat element for {platform} (adapter: {adapter_id}): {name} ({element_id})")
-    
-    def set_as_remote(self, is_remote: bool = True) -> None:
-        """
-        Set whether this is a remote chat element.
-        
-        Args:
-            is_remote: Whether this is a remote chat element
-        """
         self._is_remote = is_remote
-        # Update the delegate when remote status changes
-        self.update_delegate()
         
-    def is_remote(self) -> bool:
-        """
-        Check if this is a remote chat element.
+        # --- Add Core Components --- 
+        # Add TimelineComponent first as others depend on it
+        self._timeline_comp = self.add_component(TimelineComponent)
+        if not self._timeline_comp:
+             logger.error(f"Failed to add TimelineComponent to ChatElement {element_id}")
+             # Decide how critical this is - maybe raise an error?
+
+        # History management
+        self._history_comp = self.add_component(HistoryComponent)
+        if not self._history_comp:
+             logger.error(f"Failed to add HistoryComponent to ChatElement {element_id}")
+
+        # Publishing messages
+        self._publisher_comp = self.add_component(PublisherComponent, platform=self.platform, adapter_id=self.adapter_id)
+        if not self._publisher_comp:
+             logger.error(f"Failed to add PublisherComponent to ChatElement {element_id}")
         
-        Returns:
-            True if this is a remote chat element, False otherwise
-        """
-        return self._is_remote
-    
-    def update_delegate(self) -> None:
-        """
-        Update the delegate for this chat element based on remote status.
-        """
-        # Import here to avoid circular imports
-        try:
-            from rendering.delegates import create_chat_delegate
+        # Tool provider
+        self._tool_provider = self.add_component(ToolProvider)
+        if not self._tool_provider:
+             logger.error(f"Failed to add ToolProvider component to ChatElement {element_id}")
+        else:
+             # Register tools only if ToolProvider was added successfully
+             self._register_messaging_tools()
+
+        # Basic Veil Producer
+        # A more specific ChatVeilProducer could be created later
+        self._veil_producer = self.add_component(VeilProducer, renderable_id=f"chat_{element_id}") 
+        if not self._veil_producer:
+             logger.error(f"Failed to add VeilProducer component to ChatElement {element_id}")
             
-            # Create the appropriate delegate function
-            delegate_func = create_chat_delegate(self._is_remote)
+        logger.info(f"Created chat element for {platform} (adapter: {adapter_id}): {name} ({element_id})")
+
+    # --- Tool Registration (Delegated to ToolProvider) --- 
+    def _register_messaging_tools(self) -> None:
+        """Register tools using the ToolProvider component."""
+        
+        # Ensure tool provider exists before registering
+        if not self._tool_provider:
+            return
             
-            # Register the delegate with the element
-            self._delegate = delegate_func
-            
-            logger.debug(f"Updated delegate for chat element {self.id} (remote: {self._is_remote})")
-        except ImportError:
-            logger.warning(f"Could not create chat delegate for element {self.id}")
-    
-    def get_delegate(self):
-        """
-        Get the element delegate for rendering.
-        
-        If the delegate hasn't been set yet, update it first.
-        
-        Returns:
-            Delegate function or object
-        """
-        if not self._delegate:
-            self.update_delegate()
-        return self._delegate
-    
-    def get_connection_spans(self, options: Dict[str, Any] = None) -> List[Dict[str, Any]]:
-        """
-        Get connection spans for remote chat rendering.
-        
-        This is used by the remote rendering system to retrieve connection span information
-        when this chat element is accessed via an uplink.
-        
-        Args:
-            options: Options for retrieving connection spans
-                - limit: Maximum number of spans to retrieve
-                - include_active: Whether to include the active span
-                
-        Returns:
-            List of connection span information
-        """
-        options = options or {}
-        limit = options.get('limit', 5)
-        include_active = options.get('include_active', True)
-        
-        # This would typically be provided by the UplinkProxy, but we implement it here
-        # to support the ElementDelegate interfaces
-        spans = []
-        
-        # If this is a remote element and has a parent uplink, retrieve spans from it
-        if self._is_remote and hasattr(self, '_parent_element') and self._parent_element:
-            parent_id, _ = self._parent_element
-            parent = self._registry.get_element(parent_id) if self._registry else None
-            
-            if parent and hasattr(parent, 'get_connection_spans'):
-                # Delegate to parent uplink
-                return parent.get_connection_spans(options)
-        
-        # Otherwise return empty list as this is a direct element
-        return spans
-    
-    def publish_message(self, message_data: Dict[str, Any], timeline_context: Optional[Dict[str, Any]] = None) -> bool:
-        """
-        Publish a message to the Activity Layer.
-        
-        Args:
-            message_data: Message data to publish
-            timeline_context: Optional timeline context
-            
-        Returns:
-            True if the message was published successfully, False otherwise
-        """
-        # Validate timeline context
-        validated_timeline_context = self._validate_timeline_context(timeline_context)
-        
-        # Only publish if this is the primary timeline
-        if not validated_timeline_context.get("is_primary", False):
-            logger.info(f"Not publishing message to external systems (non-primary timeline): {validated_timeline_context.get('timeline_id')}")
-            return False
-        
-        try:
-            # Extract adapter ID
-            adapter_id = message_data.get('adapter_id')
-            if not adapter_id:
-                logger.error("Missing adapter_id in published message")
-                return False
-                
-            # Validate message format
-            if 'event_type' not in message_data or 'data' not in message_data:
-                logger.error("Invalid message format: requires 'event_type' and 'data' fields")
-                return False
-            
-            # Ensure payload has required fields based on event type
-            event_type = message_data['event_type']
-            data = message_data['data']
-            
-            if event_type == 'send_message':
-                if 'conversation_id' not in data or 'text' not in data:
-                    logger.error("Invalid send_message data: requires 'conversation_id' and 'text' fields")
-                    return False
-            elif event_type == 'edit_message':
-                if 'conversation_id' not in data or 'message_id' not in data or 'text' not in data:
-                    logger.error("Invalid edit_message data: requires 'conversation_id', 'message_id', and 'text' fields")
-                    return False
-            elif event_type == 'delete_message':
-                if 'conversation_id' not in data or 'message_id' not in data:
-                    logger.error("Invalid delete_message data: requires 'conversation_id' and 'message_id' fields")
-                    return False
-            elif event_type == 'add_reaction' or event_type == 'remove_reaction':
-                if 'conversation_id' not in data or 'message_id' not in data or 'emoji' not in data:
-                    logger.error(f"Invalid {event_type} data: requires 'conversation_id', 'message_id', and 'emoji' fields")
-                    return False
-            elif event_type == 'typing_indicator':
-                if 'conversation_id' not in data or 'is_typing' not in data:
-                    logger.error("Invalid typing_indicator data: requires 'conversation_id' and 'is_typing' fields")
-                    return False
-            
-            # Check for registry
-            if not self._registry:
-                logger.error(f"Cannot publish message for element {self.id}: No registry reference")
-                return False
-                
-            # Send message through the registry
-            return self._registry.send_external_message(message_data)
-            
-        except Exception as e:
-            logger.error(f"Error publishing message: {e}")
-            return False
-    
-    def publish_typing_indicator(self, message_data: Dict[str, Any]) -> bool:
-        """
-        Publish a typing indicator through the SpaceRegistry.
-        
-        Args:
-            message_data: Typing indicator data to publish
-            
-        Returns:
-            True if the indicator was published, False otherwise
-        """
-        try:
-            # Extract adapter ID
-            adapter_id = message_data.get('adapter_id')
-            if not adapter_id:
-                logger.error("Missing adapter_id in typing indicator")
-                return False
-                
-            # Validate message format
-            if 'event_type' not in message_data or 'data' not in message_data:
-                logger.error("Invalid typing indicator format: requires 'event_type' and 'data' fields")
-                return False
-                
-            # Verify this is a typing indicator event
-            if message_data['event_type'] != 'typing_indicator':
-                logger.error(f"Invalid event type for typing indicator: {message_data['event_type']}")
-                return False
-                
-            # Ensure data has required fields
-            data = message_data['data']
-            if 'conversation_id' not in data or 'is_typing' not in data:
-                logger.error("Invalid typing_indicator data: requires 'conversation_id' and 'is_typing' fields")
-                return False
-                
-            # Check for registry
-            if not self._registry:
-                logger.error(f"Cannot publish typing indicator for element {self.id}: No registry reference")
-                return False
-                
-            # Send through registry
-            return self._registry.send_typing_indicator(
-                adapter_id, 
-                data['conversation_id'], 
-                data['is_typing']
-            )
-                
-        except Exception as e:
-            logger.error(f"Error publishing typing indicator: {e}")
-            return False
-    
-    def _register_messaging_tools(self):
-        """
-        Register messaging-specific tools for the element.
-        """
-        @self.register_tool(
+        @self._tool_provider.register_tool(
             name="send_message",
-            description="Send a message to the current chat",
+            description="Send a message to the chat",
             parameter_descriptions={
-                "chat_id": "ID of the chat to send the message to",
-                "content": "Message content to send",
-                "adapter_id": "ID of the adapter to send the message through",
-                "thread_id": "Optional thread ID if this message is part of a thread",
-                "mentions": "Optional list of user IDs to mention",
-                "parse_mode": "Optional parsing mode (e.g., 'markdown', 'plain')",
-                "disable_link_previews": "Optional flag to disable link previews",
-                "disable_mentions": "Optional flag to disable mentions processing"
+                "conversation_id": "ID of the conversation/channel",
+                "text": "Content of the message",
+                "reply_to_message_id": "Optional ID of the message to reply to"
             }
         )
-        def send_message(
-            chat_id: str, 
-            content: str, 
-            adapter_id: str,
-            thread_id: Optional[str] = None,
-            mentions: Optional[List[Dict[str, str]]] = None,
-            parse_mode: Optional[str] = None,
-            disable_link_previews: Optional[bool] = None,
-            disable_mentions: Optional[bool] = None
-        ) -> Dict[str, Any]:
-            """
-            Send a message to a chat
-            
-            Args:
-                chat_id: Chat ID to send to
-                content: Message content
-                adapter_id: ID of the adapter to use
-                thread_id: Optional thread ID
-                mentions: Optional list of user mentions
-                parse_mode: Optional parse mode
-                disable_link_previews: Whether to disable link previews
-                disable_mentions: Whether to disable mention processing
+        def send_message(conversation_id: str, text: str, reply_to_message_id: Optional[str] = None) -> Dict[str, Any]:
+            """Handles sending a message by requesting publication via an event."""
+            if not self._publisher_comp:
+                return {"success": False, "error": "Publisher component not available"}
                 
-            Returns:
-                Status information
-            """
-            # Log and notify observers
-            logger.debug(f"Sending message to chat {chat_id} via adapter {adapter_id}: {content[:50]}...")
+            # Generate a temporary ID for optimistic UI/history update if needed
+            temp_message_id = f"agent_msg_{uuid.uuid4().hex[:8]}"
             
-            # Construct message data
             message_data = {
-                "event_type": "send_message",
+                "event_type": "send_message", # Type for the external system
+                "adapter_id": self.adapter_id, 
                 "data": {
-                    "conversation_id": chat_id,
-                    "text": content
-                },
-                "adapter_id": adapter_id
+                    "conversation_id": conversation_id,
+                    "text": text,
+                    "platform": self.platform, 
+                    "sender": {"id": "agent", "name": "Agent"}, # TODO: Get proper agent ID/Name
+                    "timestamp": int(time.time() * 1000),
+                    "message_id": temp_message_id 
+                }
             }
-            
-            # Add optional parameters if provided
-            if thread_id:
-                message_data["data"]["thread_id"] = thread_id
-            if mentions:
-                message_data["data"]["mentions"] = mentions
-            if parse_mode:
-                message_data["data"]["parse_mode"] = parse_mode
-            if disable_link_previews is not None:
-                message_data["data"]["disable_link_previews"] = disable_link_previews
-            if disable_mentions is not None:
-                message_data["data"]["disable_mentions"] = disable_mentions
+            if reply_to_message_id:
+                message_data["data"]["reply_to_message_id"] = reply_to_message_id
                 
-            # Publish the message
-            published = self.publish_message(message_data)
-            
-            # Return status
-            return {
-                "success": published,
-                "chat_id": chat_id,
-                "adapter_id": adapter_id,
-                "message": "Message sent successfully" if published else "Failed to send message"
+            # Use handle_event to trigger the publisher on the correct timeline
+            # The PublisherComponent listens for "publish_message_request"
+            timeline_id = self._timeline_comp.get_primary_timeline() if self._timeline_comp else None
+            if not timeline_id:
+                 return {"success": False, "error": "Cannot determine primary timeline for publishing"}
+                 
+            # Trigger the publish request event
+            event_to_publish = {
+                "event_type": "publish_message_request", 
+                "data": message_data # Pass the fully formed message data
             }
-        
-        @self.register_tool(
+            success = self.handle_event(
+                event=event_to_publish,
+                timeline_context={"timeline_id": timeline_id}
+            )
+            
+            # Optional: Optimistically add to history immediately 
+            # if success and self._history_comp:
+            #      self._history_comp.add_message(message_data['data'], timeline_id)
+            
+            return {
+                "success": success,
+                "message_id": temp_message_id if success else None,
+                "status": "Message requested for sending."
+            }
+
+        @self._tool_provider.register_tool(
             name="edit_message",
-            description="Edit an existing message",
+            description="Edit a previously sent message",
             parameter_descriptions={
-                "chat_id": "ID of the chat containing the message",
+                "conversation_id": "ID of the conversation/channel",
                 "message_id": "ID of the message to edit",
-                "content": "New content for the message",
-                "adapter_id": "ID of the adapter to send the edit through"
+                "text": "New content of the message"
             }
         )
-        def edit_message(chat_id: str, message_id: str, content: str, adapter_id: str) -> Dict[str, Any]:
-            """
-            Edit an existing message
-            
-            Args:
-                chat_id: Chat ID containing the message
-                message_id: ID of the message to edit
-                content: New content for the message
-                adapter_id: ID of the adapter to use
+        def edit_message(conversation_id: str, message_id: str, text: str) -> Dict[str, Any]:
+            """Handles editing a message by requesting publication via an event."""
+            if not self._publisher_comp:
+                return {"success": False, "error": "Publisher component not available"}
                 
-            Returns:
-                Status information
-            """
-            logger.debug(f"Editing message {message_id} in chat {chat_id} via adapter {adapter_id}")
-            
-            # Construct message data
             message_data = {
-                "event_type": "edit_message",
+                "event_type": "edit_message", # Type for the external system
+                "adapter_id": self.adapter_id,
                 "data": {
-                    "conversation_id": chat_id,
+                    "conversation_id": conversation_id,
                     "message_id": message_id,
-                    "text": content
-                },
-                "adapter_id": adapter_id
+                    "text": text,
+                    "platform": self.platform,
+                    "timestamp": int(time.time() * 1000)
+                }
             }
             
-            # Publish the message
-            published = self.publish_message(message_data)
-            
-            # Return status
-            return {
-                "success": published,
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "adapter_id": adapter_id,
-                "message": "Message edited successfully" if published else "Failed to edit message"
+            timeline_id = self._timeline_comp.get_primary_timeline() if self._timeline_comp else None
+            if not timeline_id:
+                 return {"success": False, "error": "Cannot determine primary timeline for publishing edit"}
+                 
+            # Trigger the publish request event
+            event_to_publish = {
+                "event_type": "publish_message_request", 
+                "data": message_data
             }
-                
-        @self.register_tool(
+            success = self.handle_event(
+                event=event_to_publish,
+                timeline_context={"timeline_id": timeline_id}
+            )
+            
+            return {"success": success, "status": "Edit requested."} 
+
+        @self._tool_provider.register_tool(
             name="delete_message",
-            description="Delete a message from the chat",
+            description="Delete a previously sent message",
             parameter_descriptions={
-                "chat_id": "ID of the chat containing the message",
-                "message_id": "ID of the message to delete",
-                "adapter_id": "ID of the adapter to send the deletion through"
+                "conversation_id": "ID of the conversation/channel",
+                "message_id": "ID of the message to delete"
             }
         )
-        def delete_message(chat_id: str, message_id: str, adapter_id: str) -> Dict[str, Any]:
-            """
-            Delete a message from the chat
-            
-            Args:
-                chat_id: Chat ID containing the message
-                message_id: ID of the message to delete
-                adapter_id: ID of the adapter to use
+        def delete_message(conversation_id: str, message_id: str) -> Dict[str, Any]:
+            """Handles deleting a message by requesting publication via an event."""
+            if not self._publisher_comp:
+                return {"success": False, "error": "Publisher component not available"}
                 
-            Returns:
-                Status information
-            """
-            logger.debug(f"Deleting message {message_id} in chat {chat_id} via adapter {adapter_id}")
-            
-            # Construct message data
             message_data = {
-                "event_type": "delete_message",
+                "event_type": "delete_message", # Type for the external system
+                "adapter_id": self.adapter_id,
                 "data": {
-                    "conversation_id": chat_id,
-                    "message_id": message_id
-                },
-                "adapter_id": adapter_id
-            }
-            
-            # Publish the message
-            published = self.publish_message(message_data)
-            
-            # Return status
-            return {
-                "success": published,
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "adapter_id": adapter_id,
-                "message": "Message deleted successfully" if published else "Failed to delete message"
-            }
-                
-        @self.register_tool(
-            name="add_reaction",
-            description="Add a reaction to a message",
-            parameter_descriptions={
-                "chat_id": "ID of the chat containing the message",
-                "message_id": "ID of the message to react to",
-                "emoji": "Emoji reaction to add (e.g., ':+1:' or '👍')",
-                "adapter_id": "ID of the adapter to send the reaction through"
-            }
-        )
-        def add_reaction(chat_id: str, message_id: str, emoji: str, adapter_id: str) -> Dict[str, Any]:
-            """
-            Add a reaction to a message
-            
-            Args:
-                chat_id: Chat ID containing the message
-                message_id: ID of the message to react to
-                emoji: Emoji reaction to add
-                adapter_id: ID of the adapter to use
-                
-            Returns:
-                Status information
-            """
-            logger.debug(f"Adding reaction {emoji} to message {message_id} in chat {chat_id}")
-            
-            # Construct message data
-            message_data = {
-                "event_type": "add_reaction",
-                "data": {
-                    "conversation_id": chat_id,
+                    "conversation_id": conversation_id,
                     "message_id": message_id,
-                    "emoji": emoji
-                },
-                "adapter_id": adapter_id
+                    "platform": self.platform,
+                    "timestamp": int(time.time() * 1000)
+                }
             }
             
-            # Publish the message
-            published = self.publish_message(message_data)
-            
-            # Return status
-            return {
-                "success": published,
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "emoji": emoji,
-                "adapter_id": adapter_id,
-                "message": "Reaction added successfully" if published else "Failed to add reaction"
+            timeline_id = self._timeline_comp.get_primary_timeline() if self._timeline_comp else None
+            if not timeline_id:
+                 return {"success": False, "error": "Cannot determine primary timeline for publishing delete"}
+                 
+            # Trigger the publish request event
+            event_to_publish = {
+                "event_type": "publish_message_request", 
+                "data": message_data
             }
-                
-        @self.register_tool(
-            name="remove_reaction",
-            description="Remove a reaction from a message",
-            parameter_descriptions={
-                "chat_id": "ID of the chat containing the message",
-                "message_id": "ID of the message to remove reaction from",
-                "emoji": "Emoji reaction to remove (e.g., ':+1:' or '👍')",
-                "adapter_id": "ID of the adapter to send the removal through"
-            }
-        )
-        def remove_reaction(chat_id: str, message_id: str, emoji: str, adapter_id: str) -> Dict[str, Any]:
-            """
-            Remove a reaction from a message
+            success = self.handle_event(
+                event=event_to_publish,
+                timeline_context={"timeline_id": timeline_id}
+            )
             
-            Args:
-                chat_id: Chat ID containing the message
-                message_id: ID of the message to remove reaction from
-                emoji: Emoji reaction to remove
-                adapter_id: ID of the adapter to use
-                
-            Returns:
-                Status information
-            """
-            logger.debug(f"Removing reaction {emoji} from message {message_id} in chat {chat_id}")
-            
-            # Construct message data
-            message_data = {
-                "event_type": "remove_reaction",
-                "data": {
-                    "conversation_id": chat_id,
-                    "message_id": message_id,
-                    "emoji": emoji
-                },
-                "adapter_id": adapter_id
-            }
-            
-            # Publish the message
-            published = self.publish_message(message_data)
-            
-            # Return status
-            return {
-                "success": published,
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "emoji": emoji,
-                "adapter_id": adapter_id,
-                "message": "Reaction removed successfully" if published else "Failed to remove reaction"
-            }
-        
-        @self.register_tool(
+            return {"success": success, "status": "Delete requested."} 
+
+        @self._tool_provider.register_tool(
             name="send_typing_indicator",
-            description="Send a typing indicator to show the agent is processing",
+            description="Send a typing indicator to the chat",
             parameter_descriptions={
-                "chat_id": "ID of the chat to send the typing indicator to",
-                "adapter_id": "ID of the adapter to send the indicator through",
-                "is_typing": "Whether the agent is typing (True) or has stopped typing (False)"
+                "conversation_id": "ID of the conversation/channel",
+                "is_typing": "Boolean indicating if typing (true) or stopped typing (false)"
             }
         )
-        def send_typing(chat_id: str, adapter_id: str, is_typing: bool = True) -> Dict[str, Any]:
-            """
-            Send a typing indicator
-            
-            Args:
-                chat_id: Chat ID to send the indicator to
-                adapter_id: ID of the adapter to use
-                is_typing: Whether typing is active or not
+        def send_typing_indicator(conversation_id: str, is_typing: bool = True) -> Dict[str, Any]:
+            """Handles sending a typing indicator via an event."""
+            if not self._publisher_comp:
+                return {"success": False, "error": "Publisher component not available"}
                 
-            Returns:
-                Status information
-            """
-            # Construct message data
-            message_data = {
-                "event_type": "typing_indicator",
+            indicator_data = {
+                "event_type": "typing_indicator", # Type for the external system
+                "adapter_id": self.adapter_id,
                 "data": {
-                    "conversation_id": chat_id,
-                    "is_typing": is_typing
-                },
-                "adapter_id": adapter_id
+                    "conversation_id": conversation_id,
+                    "is_typing": is_typing,
+                    "platform": self.platform,
+                    "timestamp": int(time.time() * 1000)
+                }
             }
             
-            # Publish the message
-            published = self.publish_typing_indicator(message_data)
-            
-            # Return status
-            return {
-                "success": published,
-                "chat_id": chat_id,
-                "adapter_id": adapter_id,
-                "is_typing": is_typing,
-                "message": "Typing indicator sent successfully" if published else "Failed to send typing indicator"
+            timeline_id = self._timeline_comp.get_primary_timeline() if self._timeline_comp else None
+            if not timeline_id:
+                 # Publisher enforces primary timeline check internally for indicators too (currently)
+                 return {"success": False, "error": "Cannot determine primary timeline for indicator"}
+                 
+            # Trigger the publish indicator request event
+            event_to_publish = {
+                 "event_type": "publish_indicator_request", 
+                 "data": indicator_data
             }
+            success = self.handle_event(
+                event=event_to_publish,
+                timeline_context={"timeline_id": timeline_id} 
+            )
+            
+            return {"success": success, "status": "Indicator requested."}
+            
+        # Tool to get history (useful for agent introspection)
+        @self._tool_provider.register_tool(
+            name="get_message_history",
+            description="Get recent message history for a specific timeline",
+            parameter_descriptions={
+                 "timeline_id": "ID of the timeline (optional, defaults to primary)",
+                 "limit": "Max number of messages (optional)"
+            }
+        )
+        def get_message_history(timeline_id: Optional[str] = None, limit: Optional[int] = None) -> Dict[str, Any]:
+            if not self._history_comp:
+                 return {"success": False, "error": "History component not available", "messages": []}
+                 
+            target_timeline_id = timeline_id
+            if not target_timeline_id:
+                 target_timeline_id = self._timeline_comp.get_primary_timeline() if self._timeline_comp else None
+                 
+            if not target_timeline_id:
+                 return {"success": False, "error": "Cannot determine timeline ID", "messages": []}
+                 
+            messages = self._history_comp.get_messages(target_timeline_id, limit=limit)
+            return {"success": True, "timeline_id": target_timeline_id, "messages": messages}
+
+    # --- Event Handling (Mostly Delegated) ---
+    # Override handle_event ONLY if ChatElement needs to coordinate BETWEEN components.
+    # For example, if an incoming message should trigger attention.
+    def handle_event(self, event: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
+        # Let components handle the event first
+        handled_by_components = super().handle_event(event, timeline_context)
+        
+        # Element-specific coordination:
+        event_type = event.get("event_type")
+        if event_type in self.ATTENTION_SIGNALS:
+            # TODO: Implement Attention Request Logic (potentially via an AttentionComponent)
+            logger.debug(f"ChatElement {self.id} detected attention signal: {event_type}. Attention request logic TBD.")
+            # Example: 
+            # attention_comp = self.get_component_by_type("attention")
+            # if attention_comp:
+            #     attention_comp.request_attention(event=event, timeline_context=timeline_context)
+            #     handled_by_components = True # Consider it handled if attention was triggered
+                
+        return handled_by_components
+
+    # --- Convenience Getters for Components (Optional) ---
+    def get_history_component(self) -> Optional[HistoryComponent]:
+        return self._history_comp
+        
+    def get_publisher_component(self) -> Optional[PublisherComponent]:
+        return self._publisher_comp
+        
+    def get_tool_provider_component(self) -> Optional[ToolProvider]:
+        return self._tool_provider
+
+    # --- Obsolete Methods from original ChatElement ---
+    # Methods like publish_message, publish_typing_indicator, add_message_to_history,
+    # get_messages, update_message, delete_message are now handled by components.
+
+    # --- Existing Methods not refactored (Review if still needed) ---
+    # Keep methods not directly related to core component functions if they are still relevant
+    # For example, methods related to delegate setup might need review based on VEIL strategy.
+    
+    # Example of a potentially kept method (if its logic isn't component-based):
+    # def some_other_chat_specific_logic(self):
+    #    pass
 
     def record_chat_message(
         self, 
