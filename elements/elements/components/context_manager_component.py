@@ -46,7 +46,8 @@ class ContextManagerComponent(Component):
     HANDLED_EVENT_TYPES: List[str] = [
         "rebuild_context_request", # Explicit trigger
         "element_state_changed",   # Implicit trigger (needs careful handling)
-        "attention_focus_changed"  # From GlobalAttentionComponent
+        "attention_focus_changed",  # From GlobalAttentionComponent
+        "external_message_received" # Event type for incoming messages
     ]
     
     def __init__(self, element: Optional[BaseElement] = None,
@@ -239,124 +240,199 @@ class ContextManagerComponent(Component):
         prioritized_list.sort(key=lambda item: item[0])
         return prioritized_list
 
-    def _format_intermediate(self, prioritized_items: List[Tuple[int, str, Dict[str, Any]]]) -> List[str]:
-        """Formats prioritized history and element items into structured text blocks."""
-        logger.debug("Formatting intermediate context representation...")
-        formatted_blocks = []
-        max_items_per_element = self._state.get("max_items_per_element", 10)
+    def _format_intermediate(self, prioritized_items: List[Tuple[int, str, Dict[str, Any]]]) -> str:
+        """(Basic Implementation) Formats prioritized history into a simple string."""
+        logger.debug("Formatting intermediate context representation (basic history only)...")
+        formatted_context = "" # Start with empty string
 
-        for priority, item_type, data in prioritized_items:
+        # Filter only history items for this basic version
+        history_items = [item for item in prioritized_items if item[1] == 'history']
+        
+        for priority, item_type, data in history_items:
+            role = data.get("role")
+            content = data.get("content")
+            name = data.get("name") # For tool calls/results
+            
             block = ""
-            # --- Format History Turn --- 
-            if item_type == "history":
-                 role = data.get("role", "unknown")
-                 content = data.get("content", "")
-                 name = data.get("name")
-                 tool_call_id = data.get("tool_call_id")
+            if role == "user":
+                # Extract text if content is the structured dict
+                text_content = content.get("text", "(User message content missing)") if isinstance(content, dict) else str(content)
+                block = f"User: {text_content}\n"
+            elif role == "assistant":
+                # Extract text content and simplified tool call info
+                text_content = None
+                tool_calls_repr = ""
+                if isinstance(content, dict):
+                     text_content = content.get("content")
+                     tool_calls = content.get("tool_calls")
+                     if tool_calls:
+                          tool_calls_repr = ", ".join([f"call:{tc.get('name')}" for tc in tool_calls])
+                          tool_calls_repr = f" (Tools: {tool_calls_repr})"
+                elif isinstance(content, str):
+                     text_content = content # Older format? 
+                     
+                block = f"Assistant:{tool_calls_repr} {text_content or ''}\n"
+            elif role == "system":
+                block = f"System: {str(content)}\n"
+            elif role == "tool":
+                 # Represent tool result/error
+                 tool_content = str(content.get("error")) if isinstance(content, dict) and "error" in content else str(content)
+                 block = f"Tool Result (for {name}): {tool_content}\n"
+            elif role == "internal_monologue":
+                 block = f"Internal Thought: {str(content)}\n"
+            else:
+                 block = f"{role.capitalize()}: {str(content)}\n"
                  
-                 block += f"[{role.upper()}]
-" 
-                 if name: block += f"(Name: {name})
-" 
-                 if tool_call_id: block += f"(Tool Call ID: {tool_call_id})
-" 
-                 
-                 # Simple stringification for now
-                 if isinstance(content, dict) or isinstance(content, list):
-                      try:
-                           block += json.dumps(content, indent=1) + "\n"
-                      except TypeError:
-                           block += str(content) + "\n"
-                 else:
-                      block += str(content) + "\n"
-                      
-            # --- Format Element Data --- 
-            elif item_type == "element":
-                 element_data = data
-                 block += f"### Element: {element_data.get('name', 'Unknown')} (ID: {element_data.get('id')}, Type: {element_data.get('type')}) ###\n"
-                 # Add VEIL representation 
-                 veil_data = element_data.get("veil")
-                 if veil_data:
-                      try:
-                           block += f"Representation (VEIL):
-{json.dumps(veil_data, indent=1, default=str)[:1000]}...\n"
-                      except Exception:
-                           block += f"Representation (VEIL): {str(veil_data)[:1000]}...\n"
-                 # Add Uplink Cache
-                 uplink_cache = element_data.get("uplink_cache")
-                 if uplink_cache:
-                      block += f"Remote Cache:
-" 
-                      items_shown = 0
-                      for key, value in uplink_cache.items():
-                           if items_shown >= max_items_per_element: block += "  ... (more truncated)\n"; break
-                           block += f"  - {key}: {str(value)[:100]}...\n"
-                           items_shown += 1
-            
-            if block:
-                formatted_blocks.append(block)
-            
-        return formatted_blocks
+            formatted_context += block
 
-    def _compress_information(self, formatted_items: List[str]) -> str:
-        """Applies compression strategy to fit token budget (processes history and elements)."""
-        strategy = self._state.get("compression_strategy", "truncate_recent")
-        budget = self._state.get("token_budget", 4000)
-        logger.debug(f"Compressing {len(formatted_items)} formatted blocks using strategy: {strategy} (Budget: {budget} tokens)...")
-
-        final_context = ""
-        current_tokens = 0
+        # TODO: Add basic element info (e.g., names of mounted elements) later
+        # TODO: Add attention focus info later
         
-        # Simple truncate_recent: Add blocks (history+elements) in priority order
-        if strategy == "truncate_recent":
-             final_context = self._compress_information_truncate(formatted_items, budget)
-        elif strategy == "summarize_old":
-             # TODO: Implement summarization - needs to identify history vs element blocks
-             logger.warning("'summarize_old' compression strategy not yet implemented.")
-             final_context = self._compress_information_truncate(formatted_items, budget)
-        else:
-             logger.warning(f"Unknown compression strategy '{strategy}'. Falling back to truncate.")
-             final_context = self._compress_information_truncate(formatted_items, budget)
-
-        return final_context
+        logger.debug(f"Formatted intermediate context length: {len(formatted_context)} chars")
+        return formatted_context
         
-    def _compress_information_truncate(self, formatted_items: List[str], budget: int) -> str:
-         final_context = ""
-         current_tokens = 0
-         for item_str in formatted_items:
-             item_tokens = estimate_tokens(item_str)
-             if current_tokens + item_tokens <= budget:
-                 final_context += item_str + "\n"
-                 current_tokens += item_tokens
-             else:
-                 remaining_budget = budget - current_tokens
-                 if remaining_budget > 20:
-                     cutoff = remaining_budget * 4
-                     final_context += item_str[:cutoff] + "... (truncated)\n"
-                 break
-         return final_context
+    def _compress_information(self, formatted_context: str) -> str:
+         """(Basic Implementation) Simple truncation based on token budget."""
+         token_budget = self._state.get("token_budget", 4000)
+         estimated_tokens = estimate_tokens(formatted_context)
+         logger.debug(f"Compressing context: Estimated tokens={estimated_tokens}, Budget={token_budget}")
+         
+         if estimated_tokens <= token_budget:
+              return formatted_context # No compression needed
+              
+         # Simple truncation from the beginning (very basic strategy)
+         # TODO: Implement smarter strategies (summarization, keep recent, etc.)
+         chars_to_keep = token_budget * 4 # Rough estimate back to chars
+         truncated_context = formatted_context[-chars_to_keep:]
+         # Add an indicator that truncation occurred
+         truncated_context = "[...]\n" + truncated_context 
+         
+         logger.warning(f"Context truncated from ~{estimated_tokens} tokens to ~{token_budget} tokens.")
+         return truncated_context
+
+    # Placeholder - Needs implementation based on attention/history
+    def get_current_routing_context(self) -> Dict[str, Optional[str]]:
+        """
+        Determines the default target for outgoing messages based on the
+        most recent incoming user message's metadata.
+        Returns: Dict with 'adapter_id' and 'conversation_id'.
+        """
+        logger.debug("Determining current routing context...")
+        adapter_id = None
+        conv_id = None
+        fallback_adapter = "default_adapter" # Define fallbacks
+        fallback_conv = "default_conv"
+
+        history = self._state.get("conversation_history", [])
+        # Iterate backwards to find the latest user message
+        for turn in reversed(history):
+            if turn.get('role') == 'user':
+                content = turn.get('content')
+                # Check if content itself is a dict containing metadata (e.g., from ActivityListener)
+                if isinstance(content, dict):
+                     metadata = content.get('metadata') # Look for metadata within content
+                     if metadata and isinstance(metadata, dict):
+                          adapter_id = metadata.get('adapter_id')
+                          conv_id = metadata.get('conversation_id')
+                          logger.debug(f"Found routing context in last user message metadata: adapter={adapter_id}, conv={conv_id}")
+                          break # Found the latest user message with metadata
+
+                # Optional: Check if the turn *itself* has top-level metadata (alternative storage)
+                # elif 'metadata' in turn and isinstance(turn['metadata'], dict):
+                #      metadata = turn['metadata']
+                #      adapter_id = metadata.get('adapter_id')
+                #      conv_id = metadata.get('conversation_id')
+                #      logger.debug(f"Found routing context in last user message top-level metadata: adapter={adapter_id}, conv={conv_id}")
+                #      break
+
+        if not adapter_id or not conv_id:
+            logger.warning(f"Could not find routing metadata in recent history. Using fallbacks: adapter={fallback_adapter}, conv={fallback_conv}")
+
+        return {
+            "adapter_id": adapter_id or fallback_adapter,
+            "conversation_id": conv_id or fallback_conv
+        }
 
     # --- Event Handling --- 
 
     def _on_event(self, event: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
-        """
-        Handle events that might trigger a context rebuild.
-        """
+        """Handle events delegated to this component."""
         event_type = event.get("event_type")
         
-        # Explicit request
-        if event_type == "rebuild_context_request":
-            logger.info("Received explicit request to rebuild context.")
-            # In a real system, might queue this or handle async
-            self.build_context()
-            return True # Event was handled
+        # Handle incoming messages from external adapters
+        # Based on the structure: {"event_type": "message_received", "adapter_type": "...", "data": {...}}
+        # Where the overall event passed by ActivityClient/Host might be 
+        # {"event_type": "external_message_received", "payload": <original_data_from_adapter>}
+        # OR ActivityClient might pass the original event structure directly.
+        # Assuming ActivityClient passes the original structure received on "normalized_event"
+        # Let's look for the inner event_type first.
+        
+        inner_event_type = event.get("event_type") # Check top level first
+        event_data = event.get("data", {}) if inner_event_type else event.get("payload", {}) # Get the data/payload block
+        if not inner_event_type:
+             inner_event_type = event_data.get("event_type") # Check inside payload if not top level
 
-        # Implicit triggers (more complex)
-        # TODO: Decide if/how state changes or attention shifts automatically trigger rebuilds.
-        # This can be inefficient if not managed carefully (e.g., debouncing).
-        # if event_type == "element_state_changed" or event_type == "attention_focus_changed":
-        #    logger.debug(f"Potential context trigger event received: {event_type}")
-        #    # Trigger a rebuild, perhaps debounced?
-        #    pass 
+        # Let's standardize on handling the specific incoming message type
+        if inner_event_type == "message_received":
+            logger.debug(f"Handling incoming message_received event data")
             
-        return False # Event not fully handled for context rebuild yet 
+            text_content = event_data.get("text")
+            if not text_content:
+                 logger.warning("Ignoring message_received event: Missing 'text' in data.")
+                 return False
+                 
+            # Extract relevant info for history metadata
+            adapter_id = event.get("source_adapter_id") # Get ID used by ActivityClient connection
+            if not adapter_id:
+                 logger.warning("Incoming message missing source_adapter_id needed for routing.")
+                 # We might try to get it from the data block if adapters include it?
+                 # adapter_id = event_data.get("adapter_id") or event_data.get("adapter_name")
+            
+            conv_id = event_data.get("conversation_id")
+            sender_info = event_data.get("sender")
+            message_id = event_data.get("message_id")
+            thread_id = event_data.get("thread_id")
+            external_timestamp = event_data.get("timestamp")
+
+            if not conv_id:
+                 logger.warning("Incoming message missing conversation_id.")
+                 # Decide: Skip message or add with fallback?
+                 # Adding with fallback might break routing.
+                 return False # Skip if no conversation ID
+                 
+            history_metadata = {
+                 "adapter_id": adapter_id,
+                 "conversation_id": conv_id,
+                 "message_id": message_id,
+                 "sender": sender_info,
+                 "thread_id": thread_id,
+                 "external_timestamp": external_timestamp
+            }
+            # Filter out None values from metadata
+            history_metadata = {k: v for k, v in history_metadata.items() if v is not None}
+            
+            # Structure the content for history
+            history_content = {
+                 "text": text_content,
+                 "metadata": history_metadata 
+            }
+            
+            # Add to history with role "user"
+            self.add_history_turn(
+                 role="user", 
+                 content=history_content, 
+                 timestamp=event.get("timestamp") # Use internal host timestamp
+            )
+            return True # Event handled
+            
+        # --- Handle other control events --- 
+        elif event_type == "rebuild_context_request":
+            logger.info("Rebuilding context due to explicit request.")
+            self.build_context() 
+            return True
+            
+        elif event_type == "attention_focus_changed":
+            logger.debug("Attention focus changed, potentially rebuild context.")
+            return False 
+
+        return False 

@@ -20,7 +20,12 @@ from .components import ( # Import necessary components
     GlobalAttentionComponent,
     ContainerComponent, # Needed for type hinting in tool
     ContextManagerComponent, # <-- Add ContextManager
-    HUDComponent             # <-- Add HUD
+    HUDComponent,             # <-- Add HUD
+    TimelineComponent,
+    HistoryComponent,
+    PublisherComponent,
+    CoreToolsComponent, # Added
+    MessagingToolsComponent, # New
 )
 
 # Configure logging
@@ -29,8 +34,10 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from llm.provider_interface import LLMProviderInterface
-    # Define type alias locally for clarity, referencing HostEventLoop's definition
-    OutgoingActionCallback = Callable[[Dict[str, Any]], None]
+    from host.event_loop import OutgoingActionCallback
+    # Import Base from agent_loop, Simple from simple_loop
+    from .agent_loop import BaseAgentLoopComponent 
+    from .simple_loop import SimpleRequestResponseLoopComponent
 
 class InnerSpace(Space):
     """
@@ -53,86 +60,135 @@ class InnerSpace(Space):
         # Add others as needed
     ]
     
-    def __init__(self, element_id: str, name: str, registry, 
-                 llm_provider: LLMProvider, # <-- Add LLM Provider parameter
-                 prefab_dir: str = "prefabs"):
-        """
-        Initialize the inner space.
+    def __init__(
+        self,
+        id: str,
+        name: str,
+        llm_provider: 'LLMProviderInterface',
+        agent_loop_component_type: Type['BaseAgentLoopComponent'] = SimpleRequestResponseLoopComponent,
+        components_to_add: Optional[List[Type[Component]]] = None, # Allow adding extra components
+        **kwargs # Pass other BaseElement args like description
+    ):
+        # Call Space init first, which adds ContainerComponent and TimelineComponent
+        super().__init__(id=id, name=name, **kwargs)
         
-        Args:
-            element_id: Unique identifier for this inner space.
-            name: Human-readable name for this inner space.
-            registry: SpaceRegistry instance (needed for accessing other spaces and global context).
-            llm_provider: Instance of the LLM Provider to be used by components.
-            prefab_dir: Path to the directory containing prefab YAML files.
-        """
-        super().__init__(element_id, name, "Agent's Subjective Inner Space")
+        self._llm_provider = llm_provider
+        self._outgoing_action_callback: Optional['OutgoingActionCallback'] = None
+        self._agent_loop_component_type = agent_loop_component_type
         
-        # Set the registry reference early, components might need it during init
-        # The base BaseElement has set_registry, Space inherits it.
-        self.set_registry(registry)
+        logger.info(f"Initializing InnerSpace: {name} ({id}) with Agent Loop: {agent_loop_component_type.__name__}")
         
-        # --- Instantiate Central Factory --- 
-        # For now, InnerSpace owns its factory instance. Could be injected later.
-        self._central_factory_instance = ElementFactory(prefab_directory=prefab_dir)
-        
-        # --- Add InnerSpace Specific Components --- 
-        # Pass the central factory instance to the component
-        self._element_factory = self.add_component(
-            ElementFactoryComponent,
-            central_factory=self._central_factory_instance
-        )
-        if not self._element_factory:
-            logger.error(f"Failed to add ElementFactoryComponent to InnerSpace {element_id}")
-             
-        self._global_attention = self.add_component(GlobalAttentionComponent)
-        if not self._global_attention:
-             logger.error(f"Failed to add GlobalAttentionComponent to InnerSpace {element_id}")
-             
-        # --- Add Shell Components (Pass LLM Provider to HUD) --- 
-        self._context_manager = self.add_component(ContextManagerComponent)
-        if not self._context_manager:
-            logger.error(f"Failed to add ContextManagerComponent to InnerSpace {element_id}")
-            
-        self._hud = self.add_component(
-            HUDComponent,
-            llm_provider=llm_provider # <-- Inject LLM Provider here
-        )
-        if not self._hud:
-            logger.error(f"Failed to add HUDComponent to InnerSpace {element_id}")
-        # ---------------------------
+        # --- Define Core Components --- 
+        # Components automatically added by BaseElement/Space: ContainerComponent, TimelineComponent
+        # Additional core components specific to InnerSpace:
+        inner_space_core_component_classes = [
+            # HistoryComponent, # Assuming History is needed, needs creation
+            ToolProvider, # Manages tool definitions
+            # VeilProducer, # For representing InnerSpace state (add when ready)
+            # ElementFactoryComponent, # For creating new elements via tools
+            GlobalAttentionComponent, # Manages agent focus
+            ContextManagerComponent, # Builds context, manages history
+            HUDComponent, # Handles LLM interaction formatting
+            CoreToolsComponent, # For future internal agent tools
+            MessagingToolsComponent, # For external communication tools (New)
+            self._agent_loop_component_type # The chosen reasoning loop
+        ]
 
-        # Add ToolProvider if not already inherited/added by Space, or get existing one
-        self._tool_provider = self.get_component(ToolProvider) # Use get_component for type safety
-        if not self._tool_provider:
-             self._tool_provider = self.add_component(ToolProvider)
-             if not self._tool_provider:
-                  logger.error(f"Failed to add or find ToolProvider for InnerSpace {element_id}")
-                  
-        # Add VeilProducer if not already inherited/added by Space
-        if not self.get_component(VeilProducer):
-             self._veil_producer = self.add_component(VeilProducer, renderable_id=f"innerspace_{element_id}")
-             if not self._veil_producer:
-                  logger.error(f"Failed to add VeilProducer component to InnerSpace {element_id}")
+        # Combine with any extra components passed in constructor
+        component_classes_to_instantiate = inner_space_core_component_classes
+        if components_to_add:
+             for comp_cls in components_to_add:
+                  if not any(issubclass(comp_cls, existing_cls) or issubclass(existing_cls, comp_cls) 
+                             for existing_cls in component_classes_to_instantiate + [ContainerComponent, TimelineComponent]):
+                      component_classes_to_instantiate.append(comp_cls)
 
-        # Register InnerSpace specific tools IF tool provider exists
-        if self._tool_provider:
-            self._register_inner_space_tools()
+        # --- Instantiate and Add Components --- 
+        available_dependencies = {
+            '_llm_provider': self._llm_provider,
+        }
+        for CompCls in component_classes_to_instantiate:
+            comp_kwargs = {}
+            requirements = getattr(CompCls, 'INJECTED_DEPENDENCIES', {})
+            for kwarg_name, source_attr_name in requirements.items():
+                if source_attr_name in available_dependencies:
+                    dependency_instance = available_dependencies[source_attr_name]
+                    if dependency_instance is not None:
+                        comp_kwargs[kwarg_name] = dependency_instance
+                        # logger.debug(...) # Keep logging concise for now
+                    else:
+                        logger.error(f"{CompCls.__name__} requires injected kwarg '{kwarg_name}' but source '{source_attr_name}' is None.")
+                else:
+                    logger.error(f"{CompCls.__name__} requires injected kwarg '{kwarg_name}' but source '{source_attr_name}' unknown.")
+            try:
+                self.add_component(CompCls(**comp_kwargs)) 
+            except Exception as e:
+                 logger.error(f"Error instantiating component {CompCls.__name__} for InnerSpace {self.id}: {e}", exc_info=True)
+                 raise RuntimeError(f"Failed to instantiate component {CompCls.__name__}") from e
+                 
+        # --- Register Tools (After components are added) --- 
+        tool_provider_instance = self.get_component(ToolProvider)
+        if tool_provider_instance:
+            logger.info(f"Registering tools...")
+            # Register Core Tools (if any)
+            core_tools_instance = self.get_component(CoreToolsComponent)
+            if core_tools_instance:
+                 core_tools_instance.register_tools(tool_provider_instance)
+            else: logger.warning("CoreToolsComponent not found, skipping its tool registration.")
             
-        # --- Placeholder for Shell Components --- 
-        # self._hud_component = self.add_component(HUDComponent)
-        # self._context_manager_component = self.add_component(ContextManagerComponent)
-        # logger.info("Added placeholder HUD and ContextManager components to InnerSpace")
-        # ----------------------------------------
-        
-        # Register this InnerSpace with the registry
-        # This step might change depending on how registry and InnerSpace interact
-        if registry and hasattr(registry, 'register_inner_space') and callable(getattr(registry, 'register_inner_space')):
-            registry.register_inner_space(self)
+            # Register Messaging Tools (New)
+            messaging_tools_instance = self.get_component(MessagingToolsComponent)
+            if messaging_tools_instance:
+                 messaging_tools_instance.register_tools(tool_provider_instance)
+            else: logger.warning("MessagingToolsComponent not found, skipping its tool registration.")
+                 
         else:
-             logger.warning(f"Registry object provided to InnerSpace {element_id} does not have 'register_inner_space' method.")
+             logger.error("Cannot register tools: ToolProvider component failed to initialize or is missing.")
+        # ---------------------------
+                 
+        logger.info(f"InnerSpace {self.id} component initialization finished.")
+
+    # Replace the entire set_outgoing_action_callback method
+    def set_outgoing_action_callback(self, callback: 'OutgoingActionCallback'):
+        """Sets the callback function used by components to enqueue outgoing actions."""
+        logger.info(f"Setting outgoing action callback for InnerSpace {self.id}")
+        self._outgoing_action_callback = callback
+        
+        # Propagate callback to ALL components that might need it
+        components_needing_callback = [
+            CoreToolsComponent, # Added
+            HUDComponent, # If it needs to enqueue tool actions
+            BaseAgentLoopComponent # Find any agent loop component
+            # Add other component base classes or specific types here if they need the callback
+        ]
+        
+        for comp_type_or_base in components_needing_callback:
+             # Find component by type (handles specific types and base classes)
+             component_instance = self.get_component_by_type(comp_type_or_base.COMPONENT_TYPE if hasattr(comp_type_or_base, 'COMPONENT_TYPE') else comp_type_or_base.__name__)
              
-        logger.info(f"Created inner space: {name} ({element_id}) with core and shell components.")
+             # More robust way to find agent loop by base type if COMPONENT_TYPE isn't standard
+             if comp_type_or_base is BaseAgentLoopComponent and not component_instance:
+                  for comp in self.get_components().values():
+                       if isinstance(comp, BaseAgentLoopComponent):
+                            component_instance = comp
+                            break 
+                            
+             if component_instance:
+                 if hasattr(component_instance, 'set_outgoing_action_callback'):
+                     # Prefer setter method if available
+                     try:
+                          component_instance.set_outgoing_action_callback(callback)
+                          logger.debug(f"Propagated outgoing callback to {component_instance.__class__.__name__} via setter.")
+                     except Exception as e:
+                          logger.error(f"Error calling set_outgoing_action_callback on {component_instance.__class__.__name__}: {e}")
+                 elif hasattr(component_instance, '_outgoing_action_callback'):
+                     # Fallback: Set protected attribute directly if setter missing
+                     component_instance._outgoing_action_callback = callback
+                     logger.debug(f"Propagated outgoing callback to {component_instance.__class__.__name__} via attribute.")
+                 else:
+                     logger.warning(f"Component {component_instance.__class__.__name__} found, but cannot set outgoing callback (no setter or attribute).")
+             else:
+                 # Log if a potentially required component wasn't found (might be optional)
+                 logger.debug(f"Component type {comp_type_or_base.__name__} not found on InnerSpace {self.id} during callback propagation.")
 
     # --- Tool Registration --- 
     def _register_inner_space_tools(self) -> None:
@@ -748,29 +804,13 @@ class InnerSpace(Space):
          """Returns the HUD component instance."""
          return self.get_component(HUDComponent) # Use base class getter 
 
-    def set_outgoing_action_callback(self, callback: 'OutgoingActionCallback'):
-         """Sets the callback function used by components to enqueue outgoing actions."""
-         logger.info(f"Setting outgoing action callback for InnerSpace {self.id}")
-         self._outgoing_action_callback = callback
-         
-         # --- Propagate callback to relevant components --- 
-         # Find components that need the callback and set it
-         publisher = self.get_component(PublisherComponent)
-         if publisher and hasattr(publisher, 'set_outgoing_action_callback'):
-             publisher.set_outgoing_action_callback(callback)
-             logger.debug(f"Propagated outgoing callback to PublisherComponent")
-             
-         # Example: If HUD needs to send results of internal tools externally
-         hud = self.get_component(HUDComponent)
-         if hud and hasattr(hud, 'set_outgoing_action_callback'):
-             hud.set_outgoing_action_callback(callback)
-             logger.debug(f"Propagated outgoing callback to HUDComponent")
-             
-         # Add other components that need the callback here
-         # ...
-         pass # Add pass to fix indentation error if the block is empty for now
+    def get_agent_loop_component(self) -> Optional['BaseAgentLoopComponent']:
+         """Convenience method to get the active AgentLoop component."""
+         for comp in self.get_components().values():
+              if isinstance(comp, BaseAgentLoopComponent):
+                   return comp
+         return None
 
-    # Helper method to get HUD, used by HostEventLoop
     def get_hud(self) -> Optional[HUDComponent]:
         """Convenience method to get the HUD component."""
         return self.get_component(HUDComponent)

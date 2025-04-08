@@ -1,213 +1,247 @@
 """
-Activity Client (Formerly Socket.IO Client)
+Activity Client Module (Client Model)
 
-Sends standardized outgoing messages/actions to the external adapter API.
-(Currently uses Socket.IO based on original code, but could be adapted 
- to REST, gRPC, etc. based on the API contract with external adapters).
+Connects as a client (e.g., Socket.IO) to external Adapter API endpoints 
+to send outgoing actions and receive normalized incoming events.
 """
 
-import json
 import logging
-import socketio # Keep dependency for now based on original code
+import asyncio
+import json
 from typing import Dict, Any, List, Optional, Callable
 
-# TODO: Replace with proper config loading
-# from config import (
-#     DEFAULT_ADAPTERS, 
-#     ADDITIONAL_ADAPTERS,
-#     SOCKET_RECONNECTION_ATTEMPTS,
-#     SOCKET_RECONNECTION_DELAY,
-#     SOCKET_TIMEOUT
-# )
-# Placeholder config values
-DEFAULT_ADAPTERS = [] 
-ADDITIONAL_ADAPTERS = "[]"
+import socketio # Using python-socketio
+
+# Event Loop for queuing incoming events
+from host.event_loop import HostEventLoop 
+
+logger = logging.getLogger(__name__)
+
+# Example config defaults (move to config loading later)
 SOCKET_RECONNECTION_ATTEMPTS = 3
 SOCKET_RECONNECTION_DELAY = 5
 SOCKET_TIMEOUT = 10
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
-
 class ActivityClient:
     """
-    Sends standardized outgoing events to the external adapter API.
-    Assumes external adapters expose an API (e.g., Socket.IO endpoint) to receive these.
+    Connects to external Adapter APIs (assumed Socket.IO for now), 
+    sends standardized actions, and receives normalized events, 
+    queuing them onto the HostEventLoop.
     """
     
-    def __init__(self, adapter_configs: Optional[List[Dict[str, Any]]] = None):
+    def __init__(self, host_event_loop: HostEventLoop, adapter_api_configs: List[Dict[str, Any]]):
         """
         Initialize the Activity Client.
         
         Args:
-            adapter_configs: List of configurations for known external adapter APIs.
-                             Each dict should contain at least 'id' and 'url'.
+            host_event_loop: The main HostEventLoop instance.
+            adapter_api_configs: List of configurations for external adapter APIs.
+                                 Each dict should contain at least 'id' and 'url'.
         """
-        # Note: Removed dependency on message_handler, client only sends.
-        self.clients: Dict[str, socketio.Client] = {}
-        self.adapters: Dict[str, Dict[str, Any]] = {}
+        self._host_event_loop = host_event_loop
+        # Stores adapter configs {adapter_id: config_dict}
+        self.adapter_configs: Dict[str, Dict[str, Any]] = {}
+        # Stores connected async client instances {adapter_id: socketio.AsyncClient}
+        self.clients: Dict[str, socketio.AsyncClient] = {}
+        # Tracks connection state {adapter_id: bool}
         self.connected_adapters: Dict[str, bool] = {}
-        
-        # Load adapter configurations
-        self._load_adapter_configs(adapter_configs)
-        
-        logger.info(f"ActivityClient initialized with {len(self.adapters)} adapter API configurations")
-    
-    def _load_adapter_configs(self, adapter_configs: Optional[List[Dict[str, Any]]]) -> None:
-        """
-        Load adapter API configurations.
-        """
-        configs_to_load = adapter_configs or []
-        # TODO: Add logic for loading DEFAULT_ADAPTERS and ADDITIONAL_ADAPTERS if needed
-            
-        for adapter in configs_to_load:
-             if "id" in adapter and "url" in adapter: # Basic validation
-                  adapter_id = adapter["id"]
-                  self.adapters[adapter_id] = adapter
-                  self.connected_adapters[adapter_id] = False
-                  logger.debug(f"Loaded adapter config: {adapter_id}") # Fixed f-string
-             else:
-                  logger.warning(f"Skipping invalid adapter config: {adapter}")
 
-    def connect_to_adapter_apis(self) -> None:
-        """
-        Establish connections to all configured adapter APIs.
-        """
-        for adapter_id, adapter_config in self.adapters.items():
-            self._connect_to_adapter_api(adapter_id, adapter_config)
-    
-    def _connect_to_adapter_api(self, adapter_id: str, adapter_config: Dict[str, Any]) -> None:
-        """
-        Connect to a specific adapter API endpoint.
-        (Currently assumes Socket.IO based on original code)
+        self._load_adapter_configs(adapter_api_configs)
+        logger.info(f"ActivityClient initialized with {len(self.adapter_configs)} adapter API configs.")
+
+    def _load_adapter_configs(self, adapter_api_configs: List[Dict[str, Any]]) -> None:
+        """Loads and validates adapter API configurations."""
+        for config in adapter_api_configs:
+            if "id" in config and "url" in config:
+                adapter_id = config["id"]
+                self.adapter_configs[adapter_id] = config
+                self.connected_adapters[adapter_id] = False
+                logger.debug(f"Loaded adapter config: {adapter_id} -> {config.get('url')}")
+            else:
+                logger.warning(f"Skipping invalid adapter config: {config}")
+
+    async def start_connections(self) -> None:
+        """Establish connections to all configured adapter APIs."""
+        logger.info("Attempting connections to external Adapter APIs...")
+        connect_tasks = []
+        for adapter_id, config in self.adapter_configs.items():
+            connect_tasks.append(self._connect_to_adapter_api(adapter_id, config))
         
-        Args:
-            adapter_id: Unique identifier for the adapter API.
-            adapter_config: Configuration for the connection (e.g., URL, auth).
-        """
-        url = adapter_config.get("url")
+        if connect_tasks:
+            results = await asyncio.gather(*connect_tasks, return_exceptions=True)
+            for i, adapter_id in enumerate(self.adapter_configs.keys()):
+                 if isinstance(results[i], Exception):
+                      logger.error(f"Failed to connect to adapter '{adapter_id}': {results[i]}")
+                 elif results[i] is False: # Explicit failure from _connect
+                      logger.error(f"Failed to connect to adapter '{adapter_id}' (check logs).")
+        logger.info("Finished connection attempts to Adapter APIs.")
+
+    async def _connect_to_adapter_api(self, adapter_id: str, config: Dict[str, Any]) -> bool:
+        """Connect to a specific adapter API endpoint using socketio.AsyncClient."""
+        url = config.get("url")
         if not url:
-            logger.error(f"No URL specified for adapter API {adapter_id}")
-            return
-        
-        # --- Assuming Socket.IO based on original --- 
-        # TODO: Adapt this if the API contract uses REST, gRPC, etc.
-        client = socketio.Client(
+            logger.error(f"No URL specified for adapter API '{adapter_id}'")
+            return False
+
+        if adapter_id in self.clients and self.connected_adapters.get(adapter_id):
+             logger.info(f"Already connected to adapter '{adapter_id}'. Skipping.")
+             return True
+             
+        client = socketio.AsyncClient(
             reconnection=True,
             reconnection_attempts=SOCKET_RECONNECTION_ATTEMPTS,
             reconnection_delay=SOCKET_RECONNECTION_DELAY,
             request_timeout=SOCKET_TIMEOUT
         )
+        self.clients[adapter_id] = client
+        self.connected_adapters[adapter_id] = False # Assume disconnected until confirmed
+
+        # --- Define Event Handlers --- 
+        # Use closures to capture adapter_id for logging/handling
         
-        # Register basic connection/disconnection handlers for status tracking
         @client.event
-        def connect():
-            logger.info(f"Connected to adapter API {adapter_id} at {url}")
+        async def connect():
+            logger.info(f"Successfully connected to adapter API '{adapter_id}' at {url}")
             self.connected_adapters[adapter_id] = True
-            # Send registration/hello message?
-            self._register_with_adapter_api(adapter_id, adapter_config)
+            # Send registration/hello message if needed by adapter API
+            # await self._register_with_adapter_api(adapter_id, config)
 
         @client.event
-        def disconnect():
-            logger.info(f"Disconnected from adapter API {adapter_id}")
+        async def disconnect():
+            logger.info(f"Disconnected from adapter API '{adapter_id}'")
             self.connected_adapters[adapter_id] = False
-        
+
         @client.event
-        def connect_error(data):
-            logger.error(f"Connection error with adapter API {adapter_id}: {data}")
+        async def connect_error(data):
+            logger.error(f"Connection error with adapter API '{adapter_id}': {data}")
             self.connected_adapters[adapter_id] = False
-        # -------------------------------------------
-        
-        # Connect to the adapter API endpoint
+            # No need to disconnect client instance here, library handles retries
+
+        # --- Handler for Incoming Normalized Events --- 
+        @client.on("normalized_event") 
+        async def handle_normalized_event(data: Dict[str, Any]):
+            if not isinstance(data, dict):
+                 logger.warning(f"Received non-dict normalized_event from '{adapter_id}': {data}")
+                 return
+            
+            # Add the ID of the connection this came from for routing/history
+            data['source_adapter_id'] = adapter_id 
+            
+            logger.debug(f"Received normalized_event from '{adapter_id}': Type={data.get('event_type')}. Enqueuing...")
+            # Enqueue the *entire received data structure* onto the main loop
+            self._host_event_loop.enqueue_incoming_event(data)
+            
+        # --- Connect --- 
         try:
-            auth = {}
-            if "auth_token" in adapter_config and adapter_config["auth_token"]:
-                auth["token"] = adapter_config["auth_token"]
-            
-            logger.info(f"Attempting connection to adapter API {adapter_id} at {url}...")
-            client.connect( url, auth=auth, namespaces=["/"], wait_timeout=10 )
-            self.clients[adapter_id] = client 
-            # Connection status set by event handler upon success
-            
+            auth_data = config.get("auth") # Expect auth dict if needed
+            logger.info(f"Connecting to adapter API '{adapter_id}' at {url}...")
+            await client.connect(url, auth=auth_data, namespaces=["/"])
+            # Note: Connection status set by async connect event handler
+            return True # Indicates connection attempt initiated successfully
+        except socketio.exceptions.ConnectionError as e:
+             logger.error(f"Failed to connect to adapter '{adapter_id}': {e}")
+             # Clean up client instance if connection fails definitively?
+             if adapter_id in self.clients: del self.clients[adapter_id]
+             self.connected_adapters[adapter_id] = False
+             return False
         except Exception as e:
-            logger.error(f"Failed initial connect attempt to adapter API {adapter_id} at {url}: {str(e)}")
-            self.connected_adapters[adapter_id] = False
-    
-    def _register_with_adapter_api(self, adapter_id: str, adapter_config: Dict[str, Any]) -> None:
+             logger.error(f"Unexpected error during connection attempt to '{adapter_id}': {e}", exc_info=True)
+             if adapter_id in self.clients: del self.clients[adapter_id]
+             self.connected_adapters[adapter_id] = False
+             return False
+
+    async def handle_outgoing_action(self, action: Dict[str, Any]):
         """
-        Send a registration or hello message after connecting if needed by API contract.
-        (Currently assumes Socket.IO based on original code)
+        Handles an outgoing action routed from the HostEventLoop.
+        Finds the target adapter API client and emits the action using the 
+        expected "bot_response" event name and structure.
         """
-        if adapter_id not in self.clients or not self.connected_adapters.get(adapter_id, False):
-            logger.warning(f"Cannot register with adapter API {adapter_id} - not connected")
-            return
+        action_type = action.get("action_type")
+        payload = action.get("payload", {})
+        # Extract target adapter using the adapter_id from the payload
+        target_adapter_id = payload.get("adapter_id") 
         
-        # Example registration data (adjust based on actual API contract)
-        registration_data = {
-            "client_id": "connectome_host_process",
-            "client_type": "core_system",
-            "capabilities": ["receive_normalized_events", "send_standardized_actions"]
+        if not target_adapter_id:
+            logger.error(f"Cannot handle outgoing action '{action_type}': Missing 'adapter_id' in payload.")
+            return
+            
+        client = self.clients.get(target_adapter_id)
+        if not client or not self.connected_adapters.get(target_adapter_id):
+            logger.error(f"Cannot handle outgoing action '{action_type}': Target adapter API '{target_adapter_id}' not found or not connected.")
+            return
+            
+        # --- Structure the data to be emitted --- 
+        # Map the internal action_type to the outgoing event_type
+        outgoing_event_type = action_type # Assuming direct mapping for now (e.g., "send_message")
+        # The outgoing 'data' field should contain the relevant parts of the internal payload
+        # We might need to filter/map keys if the adapter expects different names
+        outgoing_data = payload.copy() 
+        # Remove fields only needed internally, like adapter_id itself?
+        # if 'adapter_id' in outgoing_data: del outgoing_data['adapter_id']
+        # if 'tool_name' in outgoing_data: del outgoing_data['tool_name'] # Example cleanup
+        # if 'tool_args' in outgoing_data: del outgoing_data['tool_args']
+        # The adapter only needs conversation_id, text, message_id etc.
+        # Let's be more explicit for send_message:
+        if outgoing_event_type == "send_message":
+             outgoing_data = {
+                  "conversation_id": payload.get("conversation_id"),
+                  "text": payload.get("text")
+             }
+        elif outgoing_event_type == "edit_message": # Example for other types
+             outgoing_data = {
+                  "conversation_id": payload.get("conversation_id"),
+                  "message_id": payload.get("message_id"),
+                  "text": payload.get("text")
+             }
+        elif outgoing_event_type == "delete_message":
+             outgoing_data = {
+                  "conversation_id": payload.get("conversation_id"),
+                  "message_id": payload.get("message_id")
+             }
+        elif outgoing_event_type == "add_reaction" or outgoing_event_type == "remove_reaction":
+             outgoing_data = {
+                  "conversation_id": payload.get("conversation_id"),
+                  "message_id": payload.get("message_id"),
+                  "emoji": payload.get("emoji") # Assuming payload contains 'emoji'
+             }
+        else:
+             logger.warning(f"Outgoing action type '{outgoing_event_type}' has no specific data mapping. Sending full payload minus adapter_id.")
+             outgoing_data.pop('adapter_id', None)
+
+        # Construct the final object to emit
+        data_to_emit = {
+             "event_type": outgoing_event_type,
+             "data": outgoing_data
         }
         
+        # Emit using the "bot_response" event name
+        event_name_to_emit = "bot_response"
+        
+        logger.debug(f"Sending '{event_name_to_emit}' event to adapter API '{target_adapter_id}' with data: {data_to_emit}")
         try:
-            # Assuming Socket.IO emit
-            self.clients[adapter_id].emit("register_client", registration_data)
-            logger.info(f"Sent registration to adapter API {adapter_id}")
+            await client.emit(event_name_to_emit, data_to_emit)
+            logger.debug(f"Successfully emitted '{event_name_to_emit}' to '{target_adapter_id}'")
         except Exception as e:
-            logger.error(f"Failed to send registration to adapter API {adapter_id}: {str(e)}")
-    
-    def send_event_to_adapter(self, event: Dict[str, Any]) -> bool:
-        """
-        Sends a standardized event object to the specified external adapter API.
-        
-        Args:
-            event: Standardized event data, including an 'adapter_id' field 
-                   indicating which external adapter API to target.
-                   Example format (adjust based on actual contract):
-                   {
-                       "event_type": "send_message", # or "edit_message", "typing_indicator" etc.
-                       "payload": { ... }, # Standardized payload
-                       "adapter_id": "discord_adapter_1" 
-                   }
-                
-        Returns:
-            True if the event was sent successfully, False otherwise.
-        """
-        adapter_id = event.get("adapter_id")
-        if not adapter_id:
-            logger.error("No adapter_id specified in event to send")
-            return False
-        
-        if adapter_id not in self.clients or not self.connected_adapters.get(adapter_id, False):
-            logger.error(f"Cannot send event to adapter API {adapter_id} - not connected")
-            return False
-        
-        try:
-            # --- Assuming Socket.IO based on original --- 
-            # TODO: Adapt this if the API contract uses REST, gRPC, etc.
-            # The event name ("standard_event_from_core"?) depends on the API contract
-            self.clients[adapter_id].emit("standard_event_from_core", event)
-            # -------------------------------------------
-            logger.debug(f"Sent event {event.get('event_type')} to adapter API {adapter_id}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send event to adapter API {adapter_id}: {str(e)}")
-            return False
-            
-    # Removed specific methods like send_response, send_error, send_typing_indicator
-    # Replaced by the generic send_event_to_adapter which expects standardized events.
+            logger.error(f"Error emitting action '{action_type}' to adapter '{target_adapter_id}': {e}", exc_info=True)
+            # TODO: Send feedback/error event back to originator?
 
-    def close_connections(self) -> None:
-        """Close all active connections to adapter APIs."""
-        logger.info("Closing connections to adapter APIs...")
+    async def shutdown(self):
+        """Disconnects from all adapter APIs."""
+        logger.info("Disconnecting from all Adapter APIs...")
+        disconnect_tasks = []
         for adapter_id, client in self.clients.items():
-            if self.connected_adapters.get(adapter_id, False):
-                try:
-                    client.disconnect()
-                    logger.info(f"Disconnected from adapter API {adapter_id}")
-                except Exception as e:
-                    logger.error(f"Error disconnecting from adapter API {adapter_id}: {str(e)}")
+             if self.connected_adapters.get(adapter_id):
+                  logger.info(f"Disconnecting from adapter API '{adapter_id}'...")
+                  disconnect_tasks.append(asyncio.create_task(client.disconnect()))
+             
+        if disconnect_tasks:
+            results = await asyncio.gather(*disconnect_tasks, return_exceptions=True)
+            # Log any errors during disconnection
+            adapter_ids = list(self.clients.keys())
+            for i, res in enumerate(results):
+                 if isinstance(res, Exception):
+                      logger.error(f"Error disconnecting from adapter '{adapter_ids[i]}': {res}")
+                      
         self.clients.clear()
-        self.connected_adapters.clear() 
+        self.connected_adapters.clear()
+        logger.info("All adapter API connections closed.") 

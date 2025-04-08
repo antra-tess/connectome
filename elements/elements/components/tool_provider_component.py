@@ -1,6 +1,7 @@
 """
 ToolProvider Component
-Component for registering and executing tools for Elements.
+
+Component for registering and retrieving tool definitions for an Element.
 """
 
 import logging
@@ -9,169 +10,229 @@ import uuid
 import time
 import functools
 
-from .base_component import Component
+from ..base import BaseElement, Component # Correct relative import
+from .tool_provider_component import ToolDefinition # Import own definition
+from .space.container_component import ContainerComponent # Dependency
+from collections import defaultdict # For mounted tool tracking
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Define a structure for tool definitions (can be expanded)
+class ToolDefinition:
+    def __init__(self, name: str, description: str, parameters: Dict, execution_info: Dict):
+        self.name = name
+        self.description = description
+        self.parameters = parameters # e.g., JSON Schema for parameters
+        self.execution_info = execution_info # {"type": "direct_call" | "action_request", ...details}
+        
+    def to_dict(self) -> Dict[str, Any]:
+         return {
+              "name": self.name,
+              "description": self.description,
+              "parameters": self.parameters,
+              "execution_info": self.execution_info
+         }
 
-class ToolProvider(Component):
+class ToolProviderComponent(Component):
     """
-    Component for registering and executing tools for Elements.
-    
-    The ToolProvider is responsible for:
-    - Registering tools that can be called on an Element
-    - Executing tools when requested
-    - Tracking tool execution for the timeline
+    Manages the registration and retrieval of ToolDefinitions for the Element.
+    It does not execute tools itself; execution is handled by the AgentLoopComponent
+    based on the retrieved execution_info.
+    Includes aggregation of tools from mounted elements.
     """
     
-    # Component unique type identifier
     COMPONENT_TYPE: str = "tool_provider"
+    DEPENDENCIES: Set[str] = {ContainerComponent.COMPONENT_TYPE}
+    HANDLED_EVENT_TYPES: List[str] = [] # Doesn't handle events directly
     
-    # Event types this component handles
-    HANDLED_EVENT_TYPES: List[str] = [
-        "tool_executed"
-    ]
-    
-    def __init__(self, element=None):
-        """
-        Initialize the ToolProvider component.
-        
-        Args:
-            element: The Element this component is attached to
-        """
+    def __init__(self, element: BaseElement): # Use BaseElement type hint
         super().__init__(element)
-        
-        # Initialize state
-        self._state = {
-            "tools": {},  # name -> tool function
-            "tool_descriptions": {},  # name -> description and parameters
-            "execution_history": []  # list of tool executions
-        }
-    
-    def register_tool(self, name: str, description: str, parameter_descriptions: Dict[str, str]) -> Callable:
-        """
-        Register a tool with this Element.
-        
-        Args:
-            name: Name of the tool
-            description: Description of what the tool does
-            parameter_descriptions: Dictionary mapping parameter names to descriptions
-            
-        Returns:
-            Decorator to apply to the tool function
-        """
-        def decorator(func: Callable) -> Callable:
-            self._state["tools"][name] = func
-            self._state["tool_descriptions"][name] = {
-                "description": description,
-                "parameters": parameter_descriptions
-            }
-            
-            @functools.wraps(func)
-            def wrapper(*args, **kwargs):
-                return func(*args, **kwargs)
-                
-            return wrapper
-            
-        return decorator
-    
-    def execute_tool(self, name: str, **kwargs) -> Any:
-        """
-        Execute a tool by name.
-        
-        Args:
-            name: Name of the tool to execute
-            **kwargs: Arguments to pass to the tool
-            
-        Returns:
-            Result of the tool execution
-        """
-        if not self._is_initialized or not self._is_enabled:
-            logger.warning(f"Cannot execute tool: ToolProvider component {self.id} is not initialized or enabled")
-            return {"error": "Component not initialized or enabled"}
-            
-        # Check if the tool exists
-        if name not in self._state["tools"]:
-            error = f"Tool not found: {name}"
-            logger.warning(error)
-            return {"error": error}
-            
-        # Get the tool function
-        tool_func = self._state["tools"][name]
-        
-        # Record the execution
-        execution_record = {
-            "tool": name,
-            "timestamp": int(time.time() * 1000),
-            "parameters": kwargs,
-            "status": "started"
-        }
-        self._state["execution_history"].append(execution_record)
-        
-        # Execute the tool
+        # Store ToolDefinition objects keyed by tool name
+        self._tool_definitions: Dict[str, ToolDefinition] = {}
+        # Track tools originating from mounted elements: {mount_id: {tool_name_in_provider: original_tool_name}}
+        self._mounted_element_tools: Dict[str, Dict[str, str]] = defaultdict(dict)
+        self._container_comp: Optional[ContainerComponent] = None # Store ref to container
+        logger.debug(f"ToolProviderComponent initialized for element {element.id}")
+
+    def _initialize(self, config: Dict = None) -> bool:
+        """Register listeners on initialize."""
+        if not super()._initialize(config):
+             return False # Don't proceed if base initialization failed
+
+        # Ensure element is set before accessing components
+        if not self.element:
+            logger.error("ToolProviderComponent cannot initialize: element is not set.")
+            return False
+
+        self._container_comp = self.element.get_component(ContainerComponent)
+        if self._container_comp:
+            try:
+                self._container_comp.add_mount_listener(self._handle_element_mount)
+                self._container_comp.add_unmount_listener(self._handle_element_unmount)
+                # Process already mounted elements
+                for mount_id, element in self._container_comp.get_mounted_elements().items():
+                     self._handle_element_mount(mount_id, element)
+                logger.info(f"ToolProviderComponent registered listeners with ContainerComponent on {self.element.id}")
+                return True
+            except AttributeError as e:
+                 logger.error(f"ToolProviderComponent failed to register listeners. Container missing methods? {e}", exc_info=True)
+                 return False # Fail initialization if methods missing
+        else:
+            logger.error(f"ToolProviderComponent failed to get ContainerComponent dependency on {self.element.id}")
+            return False # Fail initialization if dependency missing
+
+    def _on_cleanup(self) -> bool:
+        """Unregister listeners on cleanup."""
+        if self._container_comp:
+             try:
+                 self._container_comp.remove_mount_listener(self._handle_element_mount)
+                 self._container_comp.remove_unmount_listener(self._handle_element_unmount)
+                 logger.info(f"ToolProviderComponent unregistered listeners from ContainerComponent on {self.element.id}")
+             except Exception as e:
+                 logger.error(f"Error unregistering container listeners: {e}")
+        self._container_comp = None # Clear reference
+        # Unregister all tools sourced from mounted elements just in case
+        all_mounted_tool_names = []
+        for mount_id in list(self._mounted_element_tools.keys()):
+             all_mounted_tool_names.extend(list(self._mounted_element_tools[mount_id].keys()))
+             del self._mounted_element_tools[mount_id] # Clear tracking
+        for tool_name in all_mounted_tool_names:
+             if tool_name in self._tool_definitions:
+                  del self._tool_definitions[tool_name]
+                  logger.debug(f"Cleaned up mounted tool {tool_name} on shutdown.")
+                  
+        return super()._on_cleanup()
+
+
+    def _handle_element_mount(self, mount_id: str, mounted_element: BaseElement):
+        """Callback when an element is mounted in the container."""
+        if not mounted_element:
+             logger.warning(f"_handle_element_mount called with None element for mount_id {mount_id}")
+             return
+             
+        logger.info(f"Handling mount of element {mounted_element.id} at mount_id {mount_id}")
+        # Check if the mounted element has its own ToolProvider (use class, not string)
+        mounted_tool_provider = mounted_element.get_component(ToolProviderComponent)
+        if mounted_tool_provider:
+            logger.debug(f"Mounted element {mounted_element.id} has a ToolProviderComponent. Aggregating tools...")
+            original_definitions = mounted_tool_provider.get_all_tool_definitions()
+            for original_name, tool_def in original_definitions.items():
+                # Create a prefixed name for the tool in this provider
+                prefixed_tool_name = f"{mount_id}.{original_name}" # Use dot separator?
+
+                # --- Attempt Direct Call --- (Or consider safer action_request later)
+                success = self.register_tool(
+                    name=prefixed_tool_name,
+                    description=f"[{mounted_element.name}@{mount_id}] {tool_def.description}", # Add context
+                    parameters=tool_def.parameters,
+                    execution_info=tool_def.execution_info # Use original info directly
+                )
+                if success:
+                    # Track the mapping from prefixed name to original name for this mount_id
+                    self._mounted_element_tools[mount_id][prefixed_tool_name] = original_name
+                else:
+                     logger.warning(f"Failed to register aggregated tool {prefixed_tool_name} from {mounted_element.id}")
+        else:
+             logger.debug(f"Mounted element {mounted_element.id} does not have a ToolProviderComponent.")
+
+    def _handle_element_unmount(self, mount_id: str, element_being_unmounted: BaseElement):
+        """Callback when an element is about to be unmounted."""
+        if not element_being_unmounted:
+             logger.warning(f"_handle_element_unmount called with None element for mount_id {mount_id}")
+             return
+             
+        logger.info(f"Handling unmount of element {element_being_unmounted.id} from mount_id {mount_id}")
+        if mount_id in self._mounted_element_tools:
+            tool_names_to_remove = list(self._mounted_element_tools[mount_id].keys()) # Get keys before modifying
+            logger.debug(f"Unregistering {len(tool_names_to_remove)} tools from unmounted element {element_being_unmounted.id}")
+            for tool_name in tool_names_to_remove:
+                self.unregister_tool(tool_name) # Let unregister handle removal from main dict
+            # Clean up tracking dict (handled within unregister_tool now)
+            # del self._mounted_element_tools[mount_id]
+
+    def register_tool(
+        self,
+        name: str,
+        description: str,
+        parameters: Dict[str, Any],
+        execution_info: Dict[str, Any]
+    ) -> bool:
+        if name in self._tool_definitions:
+             logger.warning(f"Tool '{name}' already registered for element {self.element.id}. Overwriting.")
+             # If overwriting, check if it was a mounted tool and remove old tracking
+             for mount_id, tools in list(self._mounted_element_tools.items()):
+                  if name in tools:
+                       del self._mounted_element_tools[mount_id][name]
+                       if not self._mounted_element_tools[mount_id]:
+                           del self._mounted_element_tools[mount_id]
+                       break
+
+        if not execution_info or 'type' not in execution_info:
+             logger.error(f"Cannot register tool '{name}': execution_info must contain a 'type' key.")
+             return False
+             
         try:
-            result = tool_func(**kwargs)
-            
-            # Update the execution record
-            execution_record["status"] = "completed"
-            execution_record["result"] = result
-            
-            # Create a tool execution event
-            self._record_tool_execution(name, kwargs, result)
-            
-            return result
+            definition = ToolDefinition(
+                 name=name,
+                 description=description,
+                 parameters=parameters,
+                 execution_info=execution_info
+            )
+            self._tool_definitions[name] = definition
+            logger.info(f"Registered tool '{name}' for element {self.element.id}")
+            return True
         except Exception as e:
-            logger.error(f"Error executing tool {name}: {e}")
-            
-            # Update the execution record
-            execution_record["status"] = "error"
-            execution_record["error"] = str(e)
-            
-            return {"error": str(e)}
-    
-    def _record_tool_execution(self, name: str, parameters: Dict[str, Any], result: Any) -> None:
-        """
-        Record a tool execution in the timeline.
+            logger.error(f"Error creating ToolDefinition for '{name}': {e}", exc_info=True)
+            return False
+
+    def unregister_tool(self, name: str) -> bool:
+        """Removes a tool definition and cleans up mounted tool tracking."""
+        if name in self._tool_definitions:
+            del self._tool_definitions[name]
+            logger.info(f"Unregistered tool '{name}' for element {self.element.id}")
+            # Check if it was a tracked mounted tool and remove tracking
+            for mount_id, tools in list(self._mounted_element_tools.items()):
+                 if name in tools:
+                      del self._mounted_element_tools[mount_id][name]
+                      if not self._mounted_element_tools[mount_id]:
+                          del self._mounted_element_tools[mount_id]
+                      logger.debug(f"Removed tracking for mounted tool {name} from {mount_id}")
+                      break
+            return True
+        else:
+            logger.warning(f"Tool '{name}' not found for unregistration on element {self.element.id}")
+            return False
+
+    def get_tool_definition(self, name: str) -> Optional[ToolDefinition]:
+        """Gets the definition for a specific tool by name."""
+        return self._tool_definitions.get(name)
+
+    def get_all_tool_definitions(self) -> Dict[str, ToolDefinition]:
+        """Gets all registered tool definitions."""
+        return self._tool_definitions.copy()
         
-        Args:
-            name: Name of the executed tool
-            parameters: Parameters passed to the tool
-            result: Result of the tool execution
-        """
-        # Create an event for this tool execution
-        event = {
-            "event_type": "tool_executed",
-            "tool_name": name,
-            "parameters": parameters,
-            "result": result,
-            "timestamp": int(time.time() * 1000),
-            "element_id": self.element.id if self.element else None
-        }
-        
-        # Notify the Element to handle this event
-        if self.element:
-            self.element.handle_event(event, {"timeline_id": "primary"})
-    
-    def get_tools(self) -> Dict[str, Dict[str, Any]]:
-        """
-        Get all registered tools.
-        
-        Returns:
-            Dictionary of tool name to tool description
-        """
-        return self._state["tool_descriptions"].copy()
-    
-    def get_execution_history(self) -> List[Dict[str, Any]]:
-        """
-        Get the tool execution history.
-        
-        Returns:
-            List of tool execution records
-        """
-        return self._state["execution_history"].copy()
-    
+    def get_llm_tool_schemas(self) -> List[Dict[str, Any]]:
+         """
+         Generates a list of tool schemas suitable for passing to an LLM 
+         that supports function/tool calling (like OpenAI).
+         Excludes execution_info.
+         """
+         schemas = []
+         for name, definition in self._tool_definitions.items():
+              schema = {
+                   # Adjust based on specific LLM API requirements (e.g., OpenAI wants 'function')
+                   "type": "function", 
+                   "function": {
+                        "name": name,
+                        "description": definition.description,
+                        "parameters": definition.parameters # Assuming parameters are JSON Schema
+                   }
+              }
+              schemas.append(schema)
+         return schemas
+
+    # Removed execute_tool, _record_tool_execution, get_execution_history, _on_event
+
     def _on_event(self, event: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
         """
         Handle tool-related events.

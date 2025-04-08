@@ -18,4 +18,10 @@ readability-lxml>=0.8.1
 markdownify>=0.11.0
 
 # Optional - Redis for storage (if using Redis storage backend)
-# redis>=4.5.4 
+# redis>=4.5.4
+
+openai>=1.0.0 # For OpenAI LLM Provider
+anthropic>=0.20.0 # For Anthropic Claude LLM Provider
+# For Mock Adapter Server
+python-socketio[asyncio_client]>=5.10.0 # Socket.IO server/client library
+aiohttp>=3.9.0 # Async HTTP client/server 

@@ -1,131 +1,153 @@
 """
 Main entry point for the Host process.
-Initializes modules, elements, and starts the event loop.
+Initializes infrastructure modules and ShellModules for agents.
 """
 
 import logging
 import asyncio
+import sys
+from typing import Dict # Added Dict for typing
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- Imports for Core Components ---
-# Core elements & registry
-from elements.elements.inner_space import InnerSpace
-from elements.space_registry import SpaceRegistry
-
-# LLM abstraction
+# --- Imports ---
+# Infrastructure
+# Removed SpaceRegistry import
 from llm.openai_provider import OpenAIProvider # Or your chosen provider
-
-# Host components
 from host.event_loop import HostEventLoop
+from host.modules.routing.host_router import HostRouter # Added
 from host.modules.activities.activity_listener import ActivityListener
 from host.modules.activities.activity_client import ActivityClient
+# Agent/Shell
+from host.modules.shell.shell_module import ShellModule
+# TODO: Import specific AgentLoopComponent types when created
 
-# Configuration (assuming a basic config loading mechanism exists or is added)
-# from .config import load_config # Example
-
-# ---------------------------------
+# Configuration
+# from .config import load_config
+# --------------- 
 
 async def amain():
     """Asynchronous main entry point."""
     logger.info("Starting Host Process (Async)..." + "\n" + "-"*20)
 
     # --- Configuration (Placeholder) ---
-    # TODO: Implement robust configuration loading (e.g., from YAML/env vars)
-    llm_api_key = "YOUR_OPENAI_API_KEY" # IMPORTANT: Load securely!
-    # Example configs - replace with actual loaded values
-    activity_listener_config = {"host": "localhost", "port": 5000} # If listener runs a server
-    activity_client_adapter_configs = [
-         {"id": "adapter_api_1", "url": "http://localhost:5001", "auth_token": None}
-    ]
-
-    if llm_api_key == "YOUR_OPENAI_API_KEY":
+    host_config = {
+         "llm_api_key": "YOUR_OPENAI_API_KEY", 
+         "activity_listener_config": {},
+         "activity_client_adapter_configs": [
+              {"id": "adapter_api_1", "url": "http://localhost:5001", "auth_token": None}
+         ],
+         "agents": [
+              {
+                   "id": "agent_001",
+                   "name": "Default Agent",
+                   # Example routing keys for HostRouter
+                   "routing_keys": {
+                        "conversation_id": ["conv_abc", "conv_xyz"],
+                        "adapter_id": "adapter_api_1" # Route all from this adapter to agent_001
+                   }
+                   # "agent_loop_type_name": "SimpleRequestResponseLoopComponent"
+              }
+         ]
+    }
+    if host_config["llm_api_key"] == "YOUR_OPENAI_API_KEY":
         logger.warning("LLM API Key is set to placeholder!")
     # ------------------------------------
 
-    # --- Initialize Core Services/Modules ---
+    # --- Initialize Core Infrastructure ---
     try:
-        # 1. Initialize LLM Provider
-        logger.info("Initializing LLM Provider...")
-        llm_provider = OpenAIProvider(api_key=llm_api_key)
-        logger.info(f"LLM Provider Initialized: OpenAI") # Adjust if using different provider
-
-        # 2. Initialize Space Registry
-        logger.info("Initializing Space Registry...")
-        space_registry = SpaceRegistry()
-        logger.info("Space Registry Initialized.")
-
-        # TODO: Initialize Persistence Module
-
+        logger.info("Initializing Core Infrastructure...")
+        llm_provider = OpenAIProvider(api_key=host_config["llm_api_key"])
+        host_router = HostRouter() # Initialize HostRouter
+        # Removed SpaceRegistry initialization
+        activity_listener = ActivityListener(host_router=host_router) # Pass router if needed for context?
+        activity_client = ActivityClient(adapter_configs=host_config["activity_client_adapter_configs"])
+        
+        # HostEventLoop needs router and shell_modules dict (created below)
+        # Initialize later after shell_modules are created
+        event_loop = None 
+        
+        logger.info("Core Infrastructure Initialized (except EventLoop)." + 
+                    " EventLoop will be created after ShellModules.")
+        
     except Exception as e:
-        logger.exception(f"Failed to initialize core services: {e}")
-        return # Cannot proceed
+        logger.exception(f"Failed to initialize core infrastructure: {e}")
+        return 
     # ------------------------------------
 
-    # --- Initialize InnerSpace ---
-    try:
-        logger.info("Initializing InnerSpace...")
-        # InnerSpace needs the LLM provider. It will get the outgoing callback later.
-        inner_space = InnerSpace(
-            id="agent_inner_space_main",
-            name="Agent Mind",
-            llm_provider=llm_provider
-        )
-        logger.info(f"InnerSpace instance created: {inner_space.id}")
-        
-        # Register InnerSpace with the Registry AFTER creation
-        if not space_registry.register_inner_space(inner_space):
-            logger.error("Failed to register InnerSpace with the registry. Exiting.")
-            return
-        logger.info(f"InnerSpace registered: {inner_space.id}")
-
-    except Exception as e:
-         logger.exception(f"Failed to initialize InnerSpace: {e}")
-         return # Cannot proceed
+    # --- Initialize ShellModules for Agents ---
+    shell_modules: Dict[str, ShellModule] = {} # Use Dict
+    if not host_config.get("agents"):
+         logger.warning("No agents configured.")
+    else:
+         for agent_config in host_config["agents"]:
+              agent_id = agent_config.get("id")
+              agent_name = agent_config.get("name", f"Agent_{agent_id}")
+              if not agent_id:
+                   logger.error("Skipping agent config with missing 'id'")
+                   continue
+                   
+              agent_loop_type = None # Placeholder
+              
+              logger.info(f"Initializing ShellModule for agent: {agent_name} ({agent_id})")
+              try:
+                   # Shell needs router and event loop (to get callback later)
+                   # Temporarily create event loop here just to pass, then replace
+                   temp_event_loop_ref_for_shell_init = HostEventLoop(host_router, {}, activity_listener, activity_client)
+                   
+                   shell = ShellModule(
+                        agent_id=agent_id,
+                        agent_name=agent_name,
+                        host_config=host_config, 
+                        llm_provider=llm_provider,
+                        host_router=host_router, # Pass router
+                        host_event_loop=temp_event_loop_ref_for_shell_init, # Pass temporary loop ref
+                        agent_loop_component_type=agent_loop_type
+                   )
+                   if shell.get_inner_space(): 
+                        shell_modules[agent_id] = shell # Add to dict
+                        logger.info(f"Successfully initialized ShellModule for {agent_id}")
+                   else:
+                        logger.error(f"ShellModule initialization failed for {agent_id}. Skipping agent.")
+              except Exception as e:
+                   logger.exception(f"Error initializing ShellModule for {agent_id}: {e}")
+                   
+    if not shell_modules:
+         logger.critical("No agent ShellModules initialized successfully. Host cannot run.")
+         return
     # ------------------------------------
-
-    # --- Initialize Activity Modules ---
+    
+    # --- Finalize Infrastructure Setup (EventLoop) ---
     try:
-        logger.info("Initializing Activity Modules...")
-        # Pass space_registry to listener
-        activity_listener = ActivityListener(
-            space_registry=space_registry # Removed config for now
-        )
-        activity_client = ActivityClient(
-             adapter_configs=activity_client_adapter_configs
-        )
-        logger.info("Activity Listener and Client Initialized.")
-        # TODO: Start listener server/consumer task if needed
-        # TODO: Start client connection task if needed
-
+         logger.info("Finalizing HostEventLoop initialization...")
+         event_loop = HostEventLoop(
+             host_router=host_router,
+             shell_modules=shell_modules, # Pass the final dict
+             activity_listener=activity_listener,
+             activity_client=activity_client
+         )
+         # Inject incoming event callback into listener
+         activity_listener.set_event_loop(event_loop)
+         logger.info("HostEventLoop fully initialized.")
+         
+         # NOW, give the actual event loop reference back to the shells if needed 
+         # (e.g., if shell needs to directly enqueue outgoing actions, which it shouldn't usually)
+         for shell in shell_modules.values():
+             shell._host_event_loop = event_loop # Update the reference
+             # Also re-inject callback from the *correct* event loop instance
+             outgoing_callback = event_loop.get_outgoing_action_callback()
+             if shell._inner_space:
+                 shell._inner_space.set_outgoing_action_callback(outgoing_callback)
+             
     except Exception as e:
-        logger.exception(f"Failed to initialize Activity modules: {e}")
-        return # Decide if this is fatal
-    # ------------------------------------
-
-    # --- Initialize and Start Event Loop ---
+         logger.exception(f"Failed to finalize HostEventLoop: {e}")
+         return
+    # --------------------------------------------------
+    
+    # --- Start Event Loop --- 
     try:
-        logger.info("Initializing Host Event Loop...")
-        event_loop = HostEventLoop(
-            registry=space_registry,
-            inner_space=inner_space,
-            activity_listener=activity_listener,
-            activity_client=activity_client
-        )
-
-        # Give the listener the callback to enqueue INCOMING events
-        activity_listener.set_event_loop(event_loop)
-        
-        # Get the callback for OUTGOING actions from the loop
-        outgoing_action_callback = event_loop.get_outgoing_action_callback()
-        
-        # NOW Inject the OUTGOING action callback into InnerSpace
-        # This requires InnerSpace to have a method like `set_outgoing_action_callback`
-        inner_space.set_outgoing_action_callback(outgoing_action_callback)
-        logger.info("Outgoing action callback injected into InnerSpace.")
-
         logger.info("Starting Host Event Loop...")
         await event_loop.run() # Run the main async loop
 
@@ -135,15 +157,14 @@ async def amain():
          logger.exception(f"Host Event Loop encountered a critical error: {e}")
     finally:
          logger.info("Host process shutting down...")
-         # --- Graceful Shutdown ---
-         if 'event_loop' in locals() and hasattr(event_loop, 'stop'):
-             event_loop.stop() # Signal loop to stop
-
-         # TODO: Add graceful shutdown for listener, client, persistence etc.
-         # if 'activity_listener' in locals() and hasattr(activity_listener, 'shutdown'):
-         #     await activity_listener.shutdown()
-         # if 'activity_client' in locals() and hasattr(activity_client, 'close_connections'):
-         #     activity_client.close_connections() # May need async version
+         if 'event_loop' in locals() and event_loop is not None:
+             event_loop.stop() 
+         for shell in shell_modules.values(): # Iterate dict
+              if hasattr(shell, 'shutdown'):
+                   try:
+                        await shell.shutdown()
+                   except Exception as shell_shutdown_e:
+                        logger.error(f"Error shutting down ShellModule for {shell.agent_id}: {shell_shutdown_e}")
          logger.info("Shutdown sequence complete.")
     # ------------------------------------
 
@@ -152,9 +173,7 @@ def main():
     try:
         asyncio.run(amain())
     except Exception as e:
-        # Catch final errors during startup/shutdown outside amain's try/except
         logger.critical(f"Critical error during host execution: {e}", exc_info=True)
-        import sys
         sys.exit(1)
 
 if __name__ == "__main__":

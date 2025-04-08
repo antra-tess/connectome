@@ -10,6 +10,7 @@ import time
 
 from ..base_component import Component
 from ...base import MountType, BaseElement
+from collections import defaultdict # Needed for listener storage
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -48,7 +49,56 @@ class ContainerComponent(Component):
         self._state = {
             "mounted_elements": {}  # Dict[str, Dict[str, Any]]
         }
+        # Listener lists (not part of loomable state)
+        self._mount_listeners: List[Callable[[str, BaseElement], None]] = []
+        self._unmount_listeners: List[Callable[[str, BaseElement], None]] = []
     
+    # --- Listener Management ---
+    def add_mount_listener(self, listener: Callable[[str, BaseElement], None]):
+        """Adds a listener to be called after an element is mounted.
+           The listener receives (mount_id, mounted_element)."""
+        if listener not in self._mount_listeners:
+            self._mount_listeners.append(listener)
+
+    def remove_mount_listener(self, listener: Callable[[str, BaseElement], None]):
+        """Removes a mount listener."""
+        try:
+            self._mount_listeners.remove(listener)
+        except ValueError:
+            pass # Listener not found
+
+    def add_unmount_listener(self, listener: Callable[[str, BaseElement], None]):
+        """Adds a listener to be called before an element is unmounted.
+           The listener receives (mount_id, element_being_unmounted)."""
+        if listener not in self._unmount_listeners:
+            self._unmount_listeners.append(listener)
+
+    def remove_unmount_listener(self, listener: Callable[[str, BaseElement], None]):
+        """Removes an unmount listener."""
+        try:
+            self._unmount_listeners.remove(listener)
+        except ValueError:
+            pass
+
+    def _notify_mount_listeners(self, mount_id: str, element: BaseElement):
+        """Calls all registered mount listeners."""
+        logger.debug(f"Notifying {len(self._mount_listeners)} mount listeners about {mount_id}")
+        for listener in self._mount_listeners[:]: # Iterate copy in case listener removes itself
+            try:
+                listener(mount_id, element)
+            except Exception as e:
+                logger.error(f"Error calling mount listener {listener.__name__}: {e}", exc_info=True)
+
+    def _notify_unmount_listeners(self, mount_id: str, element: BaseElement):
+        """Calls all registered unmount listeners."""
+        logger.debug(f"Notifying {len(self._unmount_listeners)} unmount listeners about {mount_id}")
+        for listener in self._unmount_listeners[:]: # Iterate copy
+            try:
+                listener(mount_id, element)
+            except Exception as e:
+                logger.error(f"Error calling unmount listener {listener.__name__}: {e}", exc_info=True)
+
+    # --- Mounting/Unmounting Logic ---
     def mount_element(self, element: BaseElement, mount_id: Optional[str] = None, 
                      mount_type: MountType = MountType.INCLUSION) -> bool:
         """
@@ -92,6 +142,9 @@ class ContainerComponent(Component):
         # Record the mount event
         self._record_mount_event(element, mount_id, mount_type)
         
+        # *** Notify Listeners AFTER successful mount ***
+        self._notify_mount_listeners(mount_id, element)
+        
         logger.info(f"Mounted element {element.id} at {mount_id} in {self.element.id}")
         return True
     
@@ -118,6 +171,9 @@ class ContainerComponent(Component):
         mount_info = self._state["mounted_elements"][mount_id]
         element = mount_info["element"]
         mount_type = mount_info["mount_type"]
+        
+        # *** Notify Listeners BEFORE unmounting ***
+        self._notify_unmount_listeners(mount_id, element)
         
         # Record the unmount event
         self._record_unmount_event(element, mount_id, mount_type)
