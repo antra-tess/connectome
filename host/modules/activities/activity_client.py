@@ -9,6 +9,7 @@ import logging
 import asyncio
 import json
 from typing import Dict, Any, List, Optional, Callable
+import time # Added for timestamp
 
 import socketio # Using python-socketio
 
@@ -153,77 +154,115 @@ class ActivityClient:
     async def handle_outgoing_action(self, action: Dict[str, Any]):
         """
         Handles an outgoing action routed from the HostEventLoop.
-        Finds the target adapter API client and emits the action using the 
-        expected "bot_response" event name and structure.
+        Finds the target adapter API client, emits the action externally,
+        and then queues an internal 'agent_message_sent' event for history recording.
         """
         action_type = action.get("action_type")
-        payload = action.get("payload", {})
-        # Extract target adapter using the adapter_id from the payload
+        payload = action.get("payload", {}) 
+        # Assume these are passed in the action payload from AgentLoop
+        requesting_element_id = payload.get("requesting_element_id")
+        agent_name = payload.get("agent_name", "Unknown Agent") 
         target_adapter_id = payload.get("adapter_id") 
         
         if not target_adapter_id:
             logger.error(f"Cannot handle outgoing action '{action_type}': Missing 'adapter_id' in payload.")
-            return
+            return # TODO: Maybe return failure status?
+        if not requesting_element_id:
+             logger.error(f"Cannot handle outgoing action '{action_type}': Missing 'requesting_element_id' in payload (needed for history update).")
+             return
             
         client = self.clients.get(target_adapter_id)
         if not client or not self.connected_adapters.get(target_adapter_id):
             logger.error(f"Cannot handle outgoing action '{action_type}': Target adapter API '{target_adapter_id}' not found or not connected.")
+            # TODO: Send failure back?
             return
             
-        # --- Structure the data to be emitted --- 
-        # Map the internal action_type to the outgoing event_type
-        outgoing_event_type = action_type # Assuming direct mapping for now (e.g., "send_message")
-        # The outgoing 'data' field should contain the relevant parts of the internal payload
-        # We might need to filter/map keys if the adapter expects different names
-        outgoing_data = payload.copy() 
-        # Remove fields only needed internally, like adapter_id itself?
-        # if 'adapter_id' in outgoing_data: del outgoing_data['adapter_id']
-        # if 'tool_name' in outgoing_data: del outgoing_data['tool_name'] # Example cleanup
-        # if 'tool_args' in outgoing_data: del outgoing_data['tool_args']
-        # The adapter only needs conversation_id, text, message_id etc.
-        # Let's be more explicit for send_message:
+        # --- Structure the data to be emitted externally --- 
+        outgoing_event_type = action_type
+        outgoing_data = {} # Start fresh for explicit mapping
+        is_message_sent = False # Flag to check if we should record history
+        message_text = None # Store text for history
+        conversation_id = None # Store conversation for history
+        
+        # Map payload fields to expected outgoing data structure per action_type
         if outgoing_event_type == "send_message":
+             conversation_id = payload.get("conversation_id")
+             message_text = payload.get("text")
              outgoing_data = {
-                  "conversation_id": payload.get("conversation_id"),
-                  "text": payload.get("text")
+                  "conversation_id": conversation_id,
+                  "text": message_text
+                  # TODO: Add threadId, attachments, mentions from payload if needed by adapter API
              }
-        elif outgoing_event_type == "edit_message": # Example for other types
+             is_message_sent = True # We want to record this in history
+             
+        elif outgoing_event_type == "edit_message":
              outgoing_data = {
                   "conversation_id": payload.get("conversation_id"),
                   "message_id": payload.get("message_id"),
                   "text": payload.get("text")
              }
+             # We probably don't record edits as new history turns
+             
         elif outgoing_event_type == "delete_message":
              outgoing_data = {
                   "conversation_id": payload.get("conversation_id"),
                   "message_id": payload.get("message_id")
              }
-        elif outgoing_event_type == "add_reaction" or outgoing_event_type == "remove_reaction":
+             # We probably don't record deletions as new history turns
+             
+        elif outgoing_event_type in ["add_reaction", "remove_reaction"]:
              outgoing_data = {
                   "conversation_id": payload.get("conversation_id"),
                   "message_id": payload.get("message_id"),
-                  "emoji": payload.get("emoji") # Assuming payload contains 'emoji'
+                  "emoji": payload.get("emoji")
              }
+             # Don't record reactions as history turns either
+             
         else:
-             logger.warning(f"Outgoing action type '{outgoing_event_type}' has no specific data mapping. Sending full payload minus adapter_id.")
-             outgoing_data.pop('adapter_id', None)
+             logger.warning(f"Outgoing action type '{outgoing_event_type}' has no specific data mapping. Sending raw payload args minus internal fields.")
+             # Filter out internal fields before sending raw tool_args
+             internal_keys = {'adapter_id', 'tool_name', 'tool_args', 'tool_call_id', 
+                              'requesting_element_id', 'requesting_agent_id', 'agent_name'}
+             outgoing_data = {k: v for k, v in payload.get('tool_args', {}).items() if k not in internal_keys}
 
-        # Construct the final object to emit
+        # Construct the final object to emit to the external adapter API
         data_to_emit = {
              "event_type": outgoing_event_type,
              "data": outgoing_data
         }
         
-        # Emit using the "bot_response" event name
+        # Emit using the "bot_response" event name to the adapter
         event_name_to_emit = "bot_response"
-        
         logger.debug(f"Sending '{event_name_to_emit}' event to adapter API '{target_adapter_id}' with data: {data_to_emit}")
+        
         try:
+            # --- Emit Externally --- 
             await client.emit(event_name_to_emit, data_to_emit)
             logger.debug(f"Successfully emitted '{event_name_to_emit}' to '{target_adapter_id}'")
+            
+            # --- Enqueue Internal Event for History (if applicable) --- 
+            if is_message_sent and message_text is not None and conversation_id is not None:
+                history_event_payload = {
+                    # Routing Key: ID of the InnerSpace that sent the message
+                    "target_element_id": requesting_element_id, 
+                    # Data needed by the history handler:
+                    "adapter_id": target_adapter_id,
+                    "conversation_id": conversation_id,
+                    "text": message_text,
+                    "agent_name": agent_name, 
+                    "timestamp": int(time.time() * 1000) # Timestamp of successful send
+                }
+                history_event = {
+                    "event_type": "agent_message_sent",
+                    "payload": history_event_payload
+                }
+                logger.debug(f"Enqueuing internal event: {history_event['event_type']}")
+                self._host_event_loop.enqueue_internal_event(history_event) # Use a separate queue/method?
+                
         except Exception as e:
             logger.error(f"Error emitting action '{action_type}' to adapter '{target_adapter_id}': {e}", exc_info=True)
-            # TODO: Send feedback/error event back to originator?
+            # TODO: Send feedback/error event back to originator (InnerSpace)?
+            # Maybe enqueue an 'action_failed' internal event?
 
     async def shutdown(self):
         """Disconnects from all adapter APIs."""

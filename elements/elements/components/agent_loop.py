@@ -7,7 +7,7 @@ Components defining different strategies for the agent's core reasoning cycle.
 import logging
 import abc
 import asyncio # Added for async tool check
-from typing import Dict, Any, Optional, Callable
+from typing import Dict, Any, Optional, Callable, List, Union # Added Union
 import time
 
 # Core element/component imports
@@ -23,6 +23,10 @@ if TYPE_CHECKING:
     from .context_manager import ContextManagerComponent # Adjusted import
     # Callback for outgoing actions 
     from ....host.event_loop import OutgoingActionCallback 
+    # Import Memory Components for handling memory requests
+    from .memory.self_query_memory_generator import SelfQueryMemoryGenerationComponent
+    from .memory.curated_memory_generator import CuratedMemoryGenerationComponent # Import curated generator
+    from .memory.structured_memory_component import StructuredMemoryComponent # To store results
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +59,10 @@ class BaseAgentLoopComponent(Component, abc.ABC):
         self._hud: Optional['HUDComponent'] = None
         # self._publisher: Optional['PublisherComponent'] = None # Removed publisher dependency
         self._context_manager: Optional['ContextManagerComponent'] = None # Corrected type hint
+        # Add refs for memory components (will be fetched by _get_dependency)
+        self._memory_generator_self_query: Optional[SelfQueryMemoryGenerationComponent] = None
+        self._memory_generator_curated: Optional[CuratedMemoryGenerationComponent] = None
+        self._memory_store: Optional[StructuredMemoryComponent] = None
              
         logger.debug(f"{self.__class__.__name__} initialized for element {element.id}")
 
@@ -174,16 +182,28 @@ class BaseAgentLoopComponent(Component, abc.ABC):
             final_payload = payload_template.copy()
             final_payload['tool_name'] = tool_name
             final_payload['tool_args'] = tool_args
-            final_payload['tool_call_id'] = tool_call_id # Include the ID
-            final_payload['requesting_agent_id'] = self.element.id.replace("_inner_space", "")
-            final_payload['requesting_element_id'] = self.element.id
+            final_payload['tool_call_id'] = tool_call_id
+            # Ensure element reference exists before accessing id/name
+            if self.element:
+                 # Use InnerSpace ID as requesting_element_id
+                 final_payload['requesting_element_id'] = self.element.id
+                 # Derive agent_id if needed (e.g., strip suffix)
+                 final_payload['requesting_agent_id'] = self.element.id.replace("_inner_space", "")
+                 # <<< ADD AGENT NAME TO PAYLOAD >>>
+                 final_payload['agent_name'] = self.element.name or self.element.id 
+            else:
+                 logger.error(f"[{self.__class__.__name__}] Cannot add requesting IDs/name: Element reference missing.")
+                 # Optionally add placeholders or skip these fields
+                 final_payload['requesting_element_id'] = "unknown_element"
+                 final_payload['requesting_agent_id'] = "unknown_agent"
+                 final_payload['agent_name'] = "Unknown Agent"
                  
             action_request = {
                  "target_module": target_module,
                  "action_type": action_type,
                  "payload": final_payload
             }
-            logger.info(f"[{self.element.id}] Enqueuing action_request for tool: {tool_name}")
+            logger.info(f"[{self.element.id if self.element else '?'}] Enqueuing action_request for tool: {tool_name}")
             self._outgoing_action_callback(action_request)
             # Add note to history that action was enqueued
             if context_manager:
@@ -231,5 +251,120 @@ class BaseAgentLoopComponent(Component, abc.ABC):
         
         # Use the _execute_tool method to handle calling the 'send_message' tool
         self._execute_tool(tool_provider, "send_message", tool_args)
+
+    # --- Incoming Action Request Handling --- 
+
+    async def handle_action_request(self, action_type: str, payload: Dict[str, Any]):
+        """Handles incoming action requests targeted at the AgentLoop."""
+        logger.info(f"[{self.element.id}] Received action request: type='{action_type}'")
+
+        if action_type == "trigger_memory_processing":
+            await self._handle_memory_processing_request(payload)
+        # Add handlers for other action types here...
+        # elif action_type == "some_other_action":
+        #     await self._handle_other_action(payload)
+        else:
+            logger.warning(f"[{self.element.id}] Unhandled action_type '{action_type}' received by BaseAgentLoopComponent.")
+            # Log to history maybe?
+            ctx_mgr = self._get_dependency("context_manager", required=False)
+            if ctx_mgr:
+                 ctx_mgr.add_history_turn(role="system", content=f"Warning: Received unhandled action request type '{action_type}'")
+
+    async def _handle_memory_processing_request(self, payload: Dict[str, Any]):
+        """Handles the specific logic for the trigger_memory_processing action."""
+        tool_args = payload.get('tool_args', {})
+        process_one_chunk = tool_args.get('process_one_chunk', True)
+        # Get the selected mechanism, defaulting to 'self_query'
+        mechanism = tool_args.get('generation_mechanism', 'self_query').lower()
+        tool_call_id = payload.get('tool_call_id', 'unknown')
+
+        logger.info(f"[{self.element.id}] Handling trigger_memory_processing (from tool {tool_call_id}). "
+                    f"Params: process_one_chunk={process_one_chunk}, mechanism='{mechanism}'")
+
+        # Determine which generator component to use
+        generator_comp_type: Optional[str] = None
+        if mechanism == "curated":
+            generator_comp_type = CuratedMemoryGenerationComponent.COMPONENT_TYPE
+        elif mechanism == "self_query":
+            generator_comp_type = SelfQueryMemoryGenerationComponent.COMPONENT_TYPE
+        else:
+            logger.warning(f"[{self.element.id}] Invalid generation_mechanism '{mechanism}' requested. Defaulting to self_query.")
+            generator_comp_type = SelfQueryMemoryGenerationComponent.COMPONENT_TYPE
+
+        # Get necessary components
+        ctx_mgr: Optional['ContextManagerComponent'] = self._get_dependency("context_manager")
+        # Fetch the selected generator component instance
+        # Type hint needs to be broad or handled carefully
+        mem_gen: Optional[Union[SelfQueryMemoryGenerationComponent, CuratedMemoryGenerationComponent]] = None
+        if generator_comp_type:
+             mem_gen = self._get_dependency(generator_comp_type)
+
+        if not ctx_mgr:
+            logger.error(f"[{self.element.id}] Cannot process memory: ContextManagerComponent not found.")
+            return
+        if not mem_gen:
+            logger.error(f"[{self.element.id}] Cannot process memory: Memory Generation Component ('{generator_comp_type}') not found or failed to get.")
+            if ctx_mgr: # Log to history if possible
+                 ctx_mgr.add_history_turn(role="system", content=f"Error handling memory processing for {tool_call_id}: Requested memory generator '{generator_comp_type}' not found.")
+            return
+
+        # --- Actual Memory Processing Logic --- 
+        # (The rest of the logic remains the same, as it calls mem_gen.generate_memory_for_chunk)
+        result_message = f"Memory processing using '{mechanism}' failed for {tool_call_id}."
+        try:
+            # 1. Get unprocessed history chunk(s)
+            unprocessed_chunks = await ctx_mgr.get_unprocessed_history_chunks(limit=1 if process_one_chunk else None)
+
+            if not unprocessed_chunks:
+                logger.info(f"[{self.element.id}] No unprocessed history chunks found for memory generation.")
+                result_message = f"Memory processing triggered ({tool_call_id}), but no unprocessed history found."
+                ctx_mgr.add_history_turn(role="system", content=result_message)
+                return
+
+            processed_ids = []
+            failed_count = 0
+            last_processed_ts = None
+
+            for chunk_messages in unprocessed_chunks:
+                if not chunk_messages: continue
+
+                logger.info(f"[{self.element.id}] Processing memory chunk via '{mechanism}' generator... ({len(chunk_messages)} messages)")
+                
+                # 2. Call the selected memory generator for the chunk
+                memory_id = await mem_gen.generate_memory_for_chunk(chunk_messages)
+
+                if memory_id:
+                    logger.info(f"[{self.element.id}] Successfully generated memory {memory_id} for chunk using '{mechanism}'.")
+                    processed_ids.append(memory_id)
+                    # 3. Update the marker timestamp
+                    chunk_last_ts = chunk_messages[-1].get('timestamp')
+                    if chunk_last_ts is not None:
+                         ctx_mgr.update_processed_marker(chunk_last_ts)
+                         last_processed_ts = chunk_last_ts
+                else:
+                    logger.error(f"[{self.element.id}] Failed to generate memory for chunk using '{mechanism}'. See generator logs.")
+                    failed_count += 1
+            
+            # 4. Log overall result to history
+            if processed_ids:
+                 result_message = f"Memory processing via '{mechanism}' complete for {tool_call_id}. Generated {len(processed_ids)} memories. History processed up to timestamp {last_processed_ts}."
+                 if failed_count > 0:
+                      result_message += f" {failed_count} subsequent chunks failed processing."
+            elif failed_count > 0:
+                 result_message = f"Memory processing via '{mechanism}' failed for all {failed_count} chunks attempted for {tool_call_id}."
+            
+            logger.info(f"[{self.element.id}] Memory processing result: {result_message}")
+            ctx_mgr.add_history_turn(role="system", content=result_message)
+
+        except AttributeError as ae:
+            # Handle cases where ContextManager is missing expected methods
+            error_msg = f"Error during memory processing ({tool_call_id}): Missing required method on ContextManager ({ae})."
+            logger.error(f"[{self.element.id}] {error_msg}", exc_info=True)
+            if ctx_mgr: ctx_mgr.add_history_turn(role="system", content=error_msg)
+        except Exception as e:
+            error_msg = f"Unexpected error during memory processing for tool call {tool_call_id}: {e}"
+            logger.error(f"[{self.element.id}] {error_msg}", exc_info=True)
+            if ctx_mgr: ctx_mgr.add_history_turn(role="system", content=error_msg)
+        # ---------------------------------------
 
 # --- Concrete Implementations Removed - Moved to separate files like simple_loop.py --- 

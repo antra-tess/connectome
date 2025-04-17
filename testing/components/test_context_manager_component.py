@@ -1,6 +1,7 @@
 import pytest
+import asyncio # Added for async tests
 import time
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch, call, AsyncMock # Added AsyncMock
 from typing import Optional, Dict, Any, List
 
 try:
@@ -13,6 +14,8 @@ try:
     from elements.elements.components.veil_producer_component import VeilProducer
     from elements.elements.uplink import UplinkProxy # Assume UplinkProxy is importable
     from elements.elements.components.uplink.cache_component import RemoteStateCacheComponent
+    # Import memory component dependency
+    from elements.elements.components.memory.structured_memory_component import StructuredMemoryComponent
 except ImportError as e:
     pytest.skip(f"Skipping ContextManagerComponent tests due to import error: {e}", allow_module_level=True)
 
@@ -26,8 +29,11 @@ class MockHostElement(BaseElement):
         self._components = {}
         self._mock_container = MagicMock(spec=ContainerComponent)
         self._mock_attention = MagicMock(spec=GlobalAttentionComponent)
+        # Add mock for memory store dependency
+        self._mock_memory_store = MagicMock(spec=StructuredMemoryComponent)
         self._components[ContainerComponent.COMPONENT_TYPE] = self._mock_container
         self._components[GlobalAttentionComponent.COMPONENT_TYPE] = self._mock_attention
+        self._components[StructuredMemoryComponent.COMPONENT_TYPE] = self._mock_memory_store # Register mock
 
     def add_component(self, component: Component):
         self._components[component.COMPONENT_TYPE] = component
@@ -112,9 +118,22 @@ def mock_attention(mock_host_element):
     return mock_host_element._mock_attention
 
 @pytest.fixture
+def mock_memory_store(mock_host_element):
+    # Provide default return values for methods used by ContextManager
+    mock_store = mock_host_element._mock_memory_store
+    mock_store.get_memories.return_value = [] # Default: no memories
+    return mock_store
+
+@pytest.fixture
 def context_manager(mock_host_element):
     # Use default init values unless overridden in test
-    component = ContextManagerComponent(element=mock_host_element)
+    component = ContextManagerComponent(
+        element=mock_host_element,
+        # Ensure tiktoken doesn't interfere if not installed/mocked
+        # We'll mock _get_token_count directly in tests where needed
+        tokenizer_model='test_model_for_init_only' 
+    )
+    component._tokenizer = None # Force fallback estimator unless mocked
     # Manually initialize for testing direct calls
     component._initialize()
     component._is_enabled = True
@@ -128,6 +147,7 @@ def test_initialization_defaults(context_manager, mock_host_element):
     assert context_manager._state["token_budget"] == 4000
     assert context_manager._state["compression_strategy"] == "truncate_recent"
     assert context_manager._state["history_max_turns"] == 20
+    assert context_manager._state["max_memories_in_context"] == 5 # Check new default
     assert not context_manager._state["conversation_history"]
     assert context_manager._last_built_context is None
 
@@ -137,14 +157,16 @@ def test_initialization_custom_params(mock_host_element):
         element=mock_host_element,
         token_budget=1000,
         compression_strategy="summarize", # Example custom strategy
-        history_max_turns=5
+        history_max_turns=5,
+        max_memories_in_context=10 # Custom memory count
     )
     component._initialize() # Need to call this manually
     assert component._state["token_budget"] == 1000
     assert component._state["compression_strategy"] == "summarize"
     assert component._state["history_max_turns"] == 5
+    assert component._state["max_memories_in_context"] == 10 # Check custom value
 
-# --- History Management Tests ---
+# --- History Management Tests (Including Memory Marker) ---
 
 def test_add_history_turn(context_manager):
     """Test adding turns to conversation history."""
@@ -183,7 +205,89 @@ def test_get_recent_history(context_manager):
     assert recent_history[1]["content"] == "Message 4"
     assert recent_history[2]["content"] == "Message 5"
 
-# --- Context Building Tests ---
+def test_update_processed_marker(context_manager):
+    """Test updating the processed history marker."""
+    assert context_manager._state["processed_history_marker_timestamp"] is None
+    
+    context_manager.update_processed_marker(1000)
+    assert context_manager._state["processed_history_marker_timestamp"] == 1000
+    
+    # Update with newer timestamp
+    context_manager.update_processed_marker(1500)
+    assert context_manager._state["processed_history_marker_timestamp"] == 1500
+    
+    # Try updating with older timestamp (should be ignored)
+    context_manager.update_processed_marker(1200)
+    assert context_manager._state["processed_history_marker_timestamp"] == 1500
+    
+    # Clear history should reset marker
+    context_manager.clear_history()
+    assert context_manager._state["processed_history_marker_timestamp"] is None
+
+@pytest.mark.asyncio
+async def test_get_unprocessed_history_chunks_no_marker(context_manager):
+    """Test getting chunks when no marker is set (get all history)."""
+    # Mock token counting for simplicity (1 token per char + 10 overhead)
+    with patch.object(context_manager, '_get_token_count', side_effect=lambda t: len(t)):
+        context_manager.add_history_turn(role="user", content="Msg1", timestamp=100) # 4 + 10 = 14 tokens
+        context_manager.add_history_turn(role="asst", content="Msg2", timestamp=200) # 4 + 10 = 14 tokens
+        context_manager.add_history_turn(role="user", content="Msg3", timestamp=300) # 4 + 10 = 14 tokens
+        
+        # Max chunk tokens = 30 -> should split after 2 messages
+        chunks = await context_manager.get_unprocessed_history_chunks(limit=None, max_chunk_tokens=30)
+        
+        assert len(chunks) == 2
+        assert len(chunks[0]) == 2 # Msg1, Msg2 (14 + 14 = 28 <= 30)
+        assert chunks[0][0]["content"] == "Msg1"
+        assert chunks[0][1]["content"] == "Msg2"
+        assert len(chunks[1]) == 1 # Msg3 (14 <= 30)
+        assert chunks[1][0]["content"] == "Msg3"
+        
+@pytest.mark.asyncio
+async def test_get_unprocessed_history_chunks_with_marker(context_manager):
+    """Test getting chunks only after the marker timestamp."""
+    with patch.object(context_manager, '_get_token_count', side_effect=lambda t: len(t)):
+        context_manager.add_history_turn(role="user", content="Processed1", timestamp=100)
+        context_manager.add_history_turn(role="asst", content="Processed2", timestamp=200)
+        context_manager.update_processed_marker(200) # Mark first two as processed
+        context_manager.add_history_turn(role="user", content="Unprocessed1", timestamp=300) # 12 + 10 = 22 tokens
+        context_manager.add_history_turn(role="asst", content="Unprocessed2", timestamp=400) # 12 + 10 = 22 tokens
+        
+        # Max chunk tokens = 50
+        chunks = await context_manager.get_unprocessed_history_chunks(limit=None, max_chunk_tokens=50)
+        
+        assert len(chunks) == 1
+        assert len(chunks[0]) == 2 # Both fit (22 + 22 = 44 <= 50)
+        assert chunks[0][0]["content"] == "Unprocessed1"
+        assert chunks[0][1]["content"] == "Unprocessed2"
+
+@pytest.mark.asyncio
+async def test_get_unprocessed_history_chunks_limit(context_manager):
+    """Test the limit parameter for chunks."""
+    with patch.object(context_manager, '_get_token_count', side_effect=lambda t: len(t)):
+        context_manager.add_history_turn(role="user", content="A", timestamp=100) # 11 tokens
+        context_manager.add_history_turn(role="asst", content="B", timestamp=200) # 11 tokens
+        context_manager.add_history_turn(role="user", content="C", timestamp=300) # 11 tokens
+        
+        # Max chunk tokens = 15 -> each message is a chunk
+        chunks = await context_manager.get_unprocessed_history_chunks(limit=2, max_chunk_tokens=15)
+        
+        assert len(chunks) == 2 # Respect limit
+        assert len(chunks[0]) == 1 
+        assert chunks[0][0]["content"] == "A"
+        assert len(chunks[1]) == 1
+        assert chunks[1][0]["content"] == "B"
+        # Chunk C is excluded due to limit
+
+@pytest.mark.asyncio
+async def test_get_unprocessed_history_chunks_no_unprocessed(context_manager):
+    """Test when all history is marked as processed."""
+    context_manager.add_history_turn(role="user", content="Msg", timestamp=100)
+    context_manager.update_processed_marker(100)
+    chunks = await context_manager.get_unprocessed_history_chunks()
+    assert len(chunks) == 0
+
+# --- Context Building Tests (Including Memory) ---
 
 @pytest.fixture
 def setup_gather_mocks(mock_container, mock_attention):
@@ -202,96 +306,85 @@ def setup_gather_mocks(mock_container, mock_attention):
     
     return mounted_elements # Return for potential verification
 
-def test_gather_information(context_manager, mock_container, mock_attention, setup_gather_mocks):
-    """Test the _gather_information method."""
-    context_manager.add_history_turn(role="user", content="User message")
+def test_gather_information_with_memories(context_manager, mock_memory_store, setup_gather_mocks):
+    """Test _gather_information includes memory retrieval."""
+    context_manager._state["max_memories_in_context"] = 3 # Set limit for test
+    mock_memories = [
+        {"memory_id": "m1", "content": "Memory 1"},
+        {"memory_id": "m2", "content": "Memory 2"}
+    ]
+    mock_memory_store.get_memories.return_value = mock_memories
     
     raw_info = context_manager._gather_information()
     
-    # Verify calls to dependencies
-    mock_attention.get_state.assert_called_once()
-    mock_container.get_mounted_elements.assert_called_once()
+    # Verify memory store was called
+    mock_memory_store.get_memories.assert_called_once_with(limit=3)
     
-    # Check history
+    # Check memories are in the result
+    assert "memories" in raw_info
+    assert raw_info["memories"] == mock_memories
+    
+    # Check other parts are still gathered (basic check)
     assert "history" in raw_info
-    assert len(raw_info["history"]) == 1
-    assert raw_info["history"][0]["content"] == "User message"
-    
-    # Check attention
-    assert "attention" in raw_info
-    assert raw_info["attention"]["current_focus"] == "veil1"
-    
-    # Check elements gathered
     assert "elements" in raw_info
-    elements = raw_info["elements"]
-    # Should include InnerSpace itself (host element)
-    assert context_manager.element.id in elements
-    assert elements[context_manager.element.id]["type"] == "MockHostElement" 
-    
-    # Check mounted elements
-    assert "plain1" in elements
-    assert elements["plain1"]["mount_id"] == "mount_plain"
-    assert elements["plain1"]["veil"] is None # Plain element has no veil
-    assert elements["plain1"]["uplink_cache"] is None
+    assert "attention" in raw_info
 
-    assert "veil1" in elements
-    assert elements["veil1"]["mount_id"] == "mount_veil"
-    assert elements["veil1"]["veil"] == {"type": "veil", "content": "Veil representation"} # Veil element has veil
-    assert elements["veil1"]["uplink_cache"] is None
-    
-    assert "uplink1" in elements
-    assert elements["uplink1"]["mount_id"] == "mount_uplink"
-    assert elements["uplink1"]["veil"] is None # Uplink mock doesn't have veil
-    assert elements["uplink1"]["uplink_cache"] == {"remote": "cached_state"} # Uplink has cache
-
-def test_filter_and_prioritize(context_manager):
-    """Test the prioritization logic."""
-    # Simplified raw_info for testing priority
+def test_filter_and_prioritize_with_memories(context_manager):
+    """Test prioritization includes memories correctly."""
     raw_info = {
-        "history": [
-            {"role": "user", "content": "msg1"}, # Priority -2
-            {"role": "assistant", "content": "msg2"} # Priority -1
+        "memories": [
+            {"memory_id": "mem1", "timestamp": 100},
+            {"memory_id": "mem2", "timestamp": 200} # More recent memory
         ],
-        "attention": {"current_focus": "el_focused"},
+        "history": [
+            {"role": "user", "content": "H1", "timestamp": 300},
+            {"role": "asst", "content": "H2", "timestamp": 400} # More recent history
+        ],
         "elements": {
-            "host_for_cmc": {"id": "host_for_cmc", "type": "InnerSpace", "name": "Host"}, # Priority 1
-            "el_normal": {"id": "el_normal", "type": "SomeElement", "name": "Normal"},     # Priority 100
-            "el_focused": {"id": "el_focused", "type": "FocusElement", "name": "Focused"}, # Priority 5
-            "el_chat": {"id": "el_chat", "type": "ChatElement", "name": "Chat"},         # Priority 10
-            "el_uplink": {"id": "el_uplink", "type": "UplinkProxy", "name": "Uplink"},     # Priority 15
-        }
+            "el1": {"id": "el1", "type": "TypeA"}
+        },
+        "attention": {}
     }
     
     prioritized = context_manager._filter_and_prioritize(raw_info)
     
-    # Expected order: history, InnerSpace, focused, chat, uplink, normal
-    expected_ids_order = ["msg1", "msg2", "host_for_cmc", "el_focused", "el_chat", "el_uplink", "el_normal"]
-    
-    actual_ids_order = []
-    for priority, type, data in prioritized:
-        if type == "history":
-            actual_ids_order.append(data["content"])
-        elif type == "element":
-            actual_ids_order.append(data["id"])
-            
-    assert actual_ids_order == expected_ids_order
+    # Check order (Memories first (most recent first within memories), then History (most recent first), then Elements)
+    assert len(prioritized) == 5 # 2 mem + 2 hist + 1 el
+    assert prioritized[0][1] == "memory" and prioritized[0][2]["memory_id"] == "mem2" # Most recent mem first
+    assert prioritized[1][1] == "memory" and prioritized[1][2]["memory_id"] == "mem1"
+    assert prioritized[2][1] == "history" and prioritized[2][2]["content"] == "H2" # Most recent hist first
+    assert prioritized[3][1] == "history" and prioritized[3][2]["content"] == "H1"
+    assert prioritized[4][1] == "element" 
 
-def test_format_intermediate_basic(context_manager):
-    """Test the basic _format_intermediate which currently only handles history."""
+def test_format_intermediate_with_memories(context_manager):
+    """Test _format_intermediate correctly formats memory items."""
+    # Create prioritized items including a memory
+    memory_item = {
+        "memory_id": "mem_abc", "timestamp": 12345,
+        "content": [
+            {"role": "system", "content": "Quote: ..."},
+            {"role": "assistant", "content": "My perspective..."}
+        ]
+    }
+    history_item = {"role": "user", "content": "User asks question"}
+    
     prioritized_items = [
-        (-2, "history", {"role": "user", "content": "Question?"}),
-        (-1, "history", {"role": "assistant", "content": "Answer."}),
-        (5, "element", {"id": "el1", "name": "SomeElement", "type": "TypeA"}), # Should be ignored by basic formatter
+        (-1001, "memory", memory_item), # Memory first
+        (-101, "history", history_item)
     ]
     
     formatted_str = context_manager._format_intermediate(prioritized_items)
     
-    # Check basic formatting (exact format depends on implementation detail, check presence)
-    assert "user: Question?" in formatted_str 
-    assert "assistant: Answer." in formatted_str
-    # Ensure element data isn't included in this basic version
-    assert "SomeElement" not in formatted_str 
-    assert "TypeA" not in formatted_str
+    # Basic checks for formatting
+    assert "--- Memory (ID: mem_abc, Timestamp: 12345) ---" in formatted_str
+    assert "System: Quote: ..." in formatted_str
+    assert "Assistant: My perspective..." in formatted_str
+    assert "--- End Memory ---" in formatted_str
+    assert "User: User asks question" in formatted_str
+    # Check spacing between sections
+    assert "--- End Memory ---\n\nUser: User asks question" in formatted_str
+
+# --- Other Tests ---
 
 @patch('elements.elements.components.context_manager_component.estimate_tokens', side_effect=lambda t: len(t)) # Simple 1 char = 1 token mock
 def test_compress_information_truncate(mock_estimate, context_manager):

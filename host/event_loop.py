@@ -85,61 +85,85 @@ class HostEventLoop:
                  event_data, timeline_context = await self._incoming_event_queue.get()
                  event_type = event_data.get("event_type")
                  event_id = event_data.get("event_id", "unknown")
+                 payload = event_data.get("payload", {}) # Get payload safely
                  logger.debug(f"Processing incoming event {event_id} ({event_type}) from queue.")
-                 
+
                  # 1. Find target agent via HostRouter
-                 target_agent_id = self.host_router.get_target_agent_id(timeline_context)
+                 target_agent_id = None
+                 routing_context = payload # Use payload as the primary context for routing external events
+
+                 # Add timeline context info if needed for internal event routing fallback
+                 if timeline_context: 
+                     # Avoid overwriting payload keys if they exist
+                     for key, value in timeline_context.items():
+                         routing_context.setdefault(key, value)
                  
+                 try:
+                     # Use the updated get_target_agent_id which prioritizes adapter_id in the context (payload)
+                     target_agent_id = self.host_router.get_target_agent_id(routing_context)
+                 except Exception as router_err:
+                     logger.error(f"Error calling host_router.get_target_agent_id: {router_err}", exc_info=True)
+
                  if not target_agent_id:
-                      # TODO: Implement default routing or error handling for unroutable events
-                      logger.warning(f"Could not route event {event_id}: No target agent found for context {timeline_context}")
-                      self._incoming_event_queue.task_done()
-                      continue
-                      
+                     # Handle unroutable events
+                     logger.warning(f"Could not route event {event_id}: No target agent found for routing context: {routing_context}")
+                     self._incoming_event_queue.task_done()
+                     continue
+
                  # 2. Get the corresponding ShellModule
                  target_shell = self.shell_modules.get(target_agent_id)
                  if not target_shell:
-                      logger.error(f"Could not route event {event_id}: Target agent '{target_agent_id}' not found in shell_modules.")
-                      self._incoming_event_queue.task_done()
-                      continue
-                      
+                     logger.error(f"Could not process event {event_id}: Target agent '{target_agent_id}' found by router, but not in active shell_modules.")
+                     self._incoming_event_queue.task_done()
+                     continue
+
                  # 3. Call the ShellModule's handler
                  try:
-                      # Pass the event handling off to the specific shell
-                      await target_shell.handle_incoming_event(event_data, timeline_context)
+                     await target_shell.handle_incoming_event(event_data, timeline_context) # Pass original event_data and context
                  except Exception as shell_event_error:
-                      logger.error(f"Error in ShellModule {target_agent_id} while handling event {event_id}: {shell_event_error}", exc_info=True)
-                      # Decide if this error should prevent cycle trigger
-                      
-                 # 4. Check if this event type should trigger an agent cycle for this agent
+                     logger.error(f"Error in ShellModule {target_agent_id} while handling event {event_id}: {shell_event_error}", exc_info=True)
+
+                 # 4. Check if this event type should trigger an agent cycle
                  if event_type in TRIGGERING_EVENT_TYPES:
                      logger.debug(f"Event {event_id} ({event_type}) is a cycle trigger for agent {target_agent_id}.")
                      self._trigger_event_received_time[target_agent_id] = now
-                     self._pending_agent_cycles.add(target_agent_id) # Mark agent for potential cycle
-                         
+                     self._pending_agent_cycles.add(target_agent_id)
+
                  self._incoming_event_queue.task_done()
          except Exception as e:
               logger.exception("Exception during incoming event queue processing.")
          # No return value needed now, state is tracked in _pending_agent_cycles
 
     async def _process_outgoing_action_queue(self) -> None:
-        """Processes all actions currently in the outgoing queue."""
+        """Processes all actions currently in the outgoing queue, routing to target modules."""
         try:
             while not self._outgoing_action_queue.empty():
                 action_request = await self._outgoing_action_queue.get()
-                logger.debug(f"Processing outgoing action: {action_request.get('action_type')}")
                 action_type = action_request.get("action_type")
-                target_module = action_request.get("target_module")
-                payload = action_request.get("payload")
-                if target_module == "activity_client" and action_type == "send_external_event":
-                     if isinstance(payload, dict):
-                          success = self.activity_client.send_event_to_adapter(payload)
-                          if not success:
-                               logger.warning(f"Failed to send external event via ActivityClient: {payload.get('event_type')}")
+                target_module_name = action_request.get("target_module") # Use name for clarity
+                # payload = action_request.get("payload") # Payload is part of the full request dict
+                logger.debug(f"Processing outgoing action: Type='{action_type}', Target='{target_module_name}'")
+                
+                # --- Routing Logic --- 
+                handler_called = False
+                if target_module_name == "ActivityClient": # <<< Added handler routing
+                     if hasattr(self.activity_client, 'handle_outgoing_action') and callable(getattr(self.activity_client, 'handle_outgoing_action')):
+                          try:
+                               await self.activity_client.handle_outgoing_action(action_request) # Pass full request
+                               handler_called = True
+                          except Exception as client_error:
+                               logger.error(f"Error in ActivityClient handling action '{action_type}': {client_error}", exc_info=True)
                      else:
-                          logger.error(f"Invalid payload format for send_external_event: {payload}")
-                else:
-                     logger.warning(f"No handler found for outgoing action: Type='{action_type}', Target='{target_module}'")
+                          logger.error(f"ActivityClient module does not have a callable 'handle_outgoing_action' method.")
+                # Add routing for other target modules here...
+                # elif target_module_name == "PersistenceModule":
+                #     await self.persistence_module.handle_action(...) 
+                # elif target_module_name == "TimerService":
+                #     await self.timer_service.handle_action(...)
+                
+                if not handler_called:
+                     logger.warning(f"No handler found or registered for outgoing action target module: '{target_module_name}'")
+                     
                 self._outgoing_action_queue.task_done()
         except Exception as e:
             logger.exception("Exception during outgoing action queue processing.")

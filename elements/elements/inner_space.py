@@ -517,163 +517,67 @@ class InnerSpace(Space):
     
     def receive_event(self, event: Dict[str, Any], timeline_context: Dict[str, Any]) -> None:
         """
-        Receive an event from the Activity Layer.
-        
-        Args:
-            event: The event to receive
-            timeline_context: The timeline context for this event
+        Receive an event, store it in the timeline, and dispatch it to components
+        and potentially mounted elements.
         """
-        logger.info(f"Receiving event in timeline {timeline_context.get('timeline_id')}: {event.get('type')}")
-        
-        # Store the event in the timeline DAG
-        self.add_event_to_timeline(event, timeline_context)
-        
-        # Process the event
-        try:
-            event_type = event.get("type")
-            if event_type in self.EVENT_TYPES:
-                self._process_event(event, timeline_context)
-            
-            # Route to appropriate element if specified
-            if "targetElement" in event:
-                target_element_id = event["targetElement"]
-                
-                if target_element_id in self.mounted_elements:
-                    element = self.mounted_elements[target_element_id]
-                    element.receive_event(event, timeline_context)
-                else:
-                    logger.warning(f"Event targeted non-existent element: {target_element_id}")
-        except Exception as e:
-            logger.error(f"Error processing event: {e}", exc_info=True)
-    
-    def add_event_to_timeline(self, event: Dict[str, Any], timeline_context: Dict[str, Any]) -> str:
-        """
-        Add an event to the timeline DAG.
-        
-        Args:
-            event: The event to add
-            timeline_context: The timeline context for this event
-            
-        Returns:
-            ID of the newly created event
-        """
-        logger.info(f"Adding event to timeline {timeline_context.get('timeline_id')}: {event.get('type')}")
-        
-        # Create event object with metadata
-        event_id = event.get("id", str(uuid.uuid4()))
-        event["id"] = event_id
-        event["timestamp"] = event.get("timestamp", int(time.time() * 1000))
-        
-        # Get branch ID from context
-        branch_id = timeline_context.get("timeline_id")
-        if not branch_id:
-            logger.warning("No branch ID in timeline context, using primary branch")
-            branch_id = "primary-branch-001"
-        
-        # Link to parent event if available
-        parent_event_id = timeline_context.get("last_event_id")
-        if parent_event_id:
-            event["parent_id"] = parent_event_id
-        
-        # Store in timeline state
-        if branch_id not in self._timeline_state["events"]:
-            self._timeline_state["events"][branch_id] = {}
-            
-        self._timeline_state["events"][branch_id][event_id] = event
-        
-        # Update timeline context with this event as the new last event
-        timeline_context["last_event_id"] = event["id"]
-        
-        # Notify any observers
-        self._notify_observers("timeline_updated", {
-            "element_id": self.id,
-            "event_id": event_id,
-            "event_type": event.get("type"),
-            "timeline_id": branch_id
-        })
-        
-        return event["id"]
-    
-    def send_message(self, message: Dict[str, Any], timeline_context: Dict[str, Any]) -> None:
-        """
-        Send a message from the agent to external systems.
-        
-        This passes through the Inner Space, to the Activity Layer, and then to external adapters.
-        
-        Args:
-            message: The message to send
-            timeline_context: The timeline context for this message
-        """
-        logger.info(f"Sending message in timeline {timeline_context.get('timeline_id')}: {message.get('type')}")
-        
-        # Add the message to the timeline as an event
-        message_id = self.add_event_to_timeline(message, timeline_context)
-        
-        # Only propagate externally if in primary timeline
-        if timeline_context.get("is_primary", False):
-            # In a real implementation, this would call Activity Layer to propagate externally
-            logger.info(f"Propagating message externally: {message_id}")
-            
-            # If we have an associated registry, propagate through it
-            if self._registry:
-                self._registry.propagate_message(message, timeline_context)
-        else:
-            logger.info(f"Message not propagated externally (non-primary timeline): {message_id}")
-    
-    def _process_event(self, event: Dict[str, Any], timeline_context: Dict[str, Any]) -> None:
-        """
-        Process an event based on its type.
-        
-        Args:
-            event: The event to process
-            timeline_context: The timeline context for this event
-        """
-        event_type = event.get("type")
-        
-        if event_type == "user_message":
-            # Process user message
-            self._handle_user_message(event, timeline_context)
-        elif event_type == "system_message":
-            # Process system message
-            self._handle_system_message(event, timeline_context)
-        elif event_type == "tool_response":
-            # Process tool response
-            self._handle_tool_response(event, timeline_context)
-        elif event_type == "agent_message":
-            # Process agent message
-            self._handle_agent_message(event, timeline_context)
-        elif event_type == "state_update":
-            # Process state update
-            self._handle_state_update(event, timeline_context)
-        else:
-            logger.warning(f"Unknown event type: {event_type}")
-            
-    def _handle_user_message(self, event: Dict[str, Any], timeline_context: Dict[str, Any]) -> None:
-        """Handle a user message event"""
-        # In a complete implementation, this would process the user message
-        # and potentially update the state of the inner space
-        logger.info(f"Handling user message: {event.get('content', '')[:30]}...")
-        
-    def _handle_system_message(self, event: Dict[str, Any], timeline_context: Dict[str, Any]) -> None:
-        """Handle a system message event"""
-        # Process system message
-        logger.info(f"Handling system message: {event.get('content', '')[:30]}...")
-        
-    def _handle_tool_response(self, event: Dict[str, Any], timeline_context: Dict[str, Any]) -> None:
-        """Handle a tool response event"""
-        # Process tool response
-        logger.info(f"Handling tool response: {event.get('toolName', '')} - {event.get('status', '')}")
-        
-    def _handle_agent_message(self, event: Dict[str, Any], timeline_context: Dict[str, Any]) -> None:
-        """Handle an agent message event"""
-        # Process agent message
-        logger.info(f"Handling agent message: {event.get('content', '')[:30]}...")
-        
-    def _handle_state_update(self, event: Dict[str, Any], timeline_context: Dict[str, Any]) -> None:
-        """Handle a state update event"""
-        # Process state update
-        logger.info(f"Handling state update: {event.get('stateType', '')}")
-    
+        event_type = event.get("event_type") # Use 'event_type' consistently
+        event_id = event.get("event_id", "unknown")
+        logger.info(f"[{self.id}] Receiving event {event_id} ({event_type}) in timeline {timeline_context.get('timeline_id')}")
+
+        # --- Store the event in the timeline DAG (Potentially redundant if TimelineComponent handles this) ---
+        # TODO: Review if TimelineComponent should solely handle adding events via its handle_event
+        # self.add_event_to_timeline(event, timeline_context) # Temporarily comment out if TimelineComponent handles it
+        # For now, assume TimelineComponent handles its own event addition via handle_event
+
+        # --- Dispatch event to all attached components --- 
+        handled_by_component = False
+        for comp_name, component in self.get_components().items():
+            if hasattr(component, 'handle_event') and callable(component.handle_event):
+                try:
+                    # Pass the original event dictionary and timeline context
+                    if component.handle_event(event, timeline_context):
+                         logger.debug(f"Event {event_id} ({event_type}) handled by component: {comp_name}")
+                         handled_by_component = True
+                         # Decide if we should break after first handler or let all components process?
+                         # Let's allow all components to potentially handle the event for now.
+                except Exception as comp_err:
+                     logger.error(f"Error in component '{comp_name}' while handling event {event_id}: {comp_err}", exc_info=True)
+        # ---------------------------------------------
+
+        # --- Optional: Original internal processing (can be kept or removed/refactored) ---
+        # Maybe components should replace this explicit routing?
+        # try:
+        #     internal_event_type = event.get("type") # Original check used "type"
+        #     if internal_event_type in self.EVENT_TYPES:
+        #         self._process_event(event, timeline_context)
+        # except Exception as e:
+        #     logger.error(f"Error during internal event processing: {e}", exc_info=True)
+        # ---------------------------------------------------------------------
+
+        # --- Optional: Routing to mounted elements (can be kept) ---
+        if "targetElement" in event:
+            target_element_id = event["targetElement"]
+            mounted_element = self.get_element_by_id(target_element_id) # Use helper method
+            if mounted_element:
+                logger.debug(f"Routing event {event_id} to mounted element: {target_element_id}")
+                try:
+                    # Assuming mounted elements also have receive_event
+                    mounted_element.receive_event(event, timeline_context) 
+                except Exception as mounted_err:
+                    logger.error(f"Error in mounted element '{target_element_id}' receiving event {event_id}: {mounted_err}", exc_info=True)
+            else:
+                logger.warning(f"Event {event_id} targeted non-existent or unmounted element: {target_element_id}")
+        # -----------------------------------------------------
+
+        # Log if no component explicitly handled the event (optional)
+        # if not handled_by_component and "targetElement" not in event:
+        #     logger.debug(f"Event {event_id} ({event_type}) was not explicitly handled by any InnerSpace component.")
+
+    # --- Comment out or remove add_event_to_timeline if TimelineComponent handles it ---
+    # def add_event_to_timeline(self, event: Dict[str, Any], timeline_context: Dict[str, Any]) -> str:
+    #     ...
+    # -----------------------------------------------------------------------------------
+
     def mount_element(self, element: BaseElement, mount_type: MountType = MountType.CHILD) -> None:
         """
         Mount an element to this space.

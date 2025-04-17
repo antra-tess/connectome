@@ -5,7 +5,6 @@ Simple Request-Response Agent Loop Component
 import logging
 import asyncio
 import json # For parsing tool args
-import re # For parsing tool calls
 import time # For timestamp
 from typing import Dict, Any, Optional, Callable, Tuple, List
 
@@ -20,7 +19,6 @@ if TYPE_CHECKING:
     from ....llm.provider_interface import LLMProviderInterface
     from .tool_provider_component import ToolProviderComponent
     from .hud_component import HUDComponent
-    from .publisher import PublisherComponent
     from .context_manager_component import ContextManagerComponent
     from ....host.event_loop import OutgoingActionCallback
     from ....llm.response import LLMResponse, LLMToolCall
@@ -30,17 +28,18 @@ logger = logging.getLogger(__name__)
 class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
     """
     A basic loop: Prepare context, call LLM once, parse actions/message, execute.
-    Does not handle multi-step tool use within one cycle.
+    Inherits action request handling (like memory processing) from BaseAgentLoopComponent.
     """
     COMPONENT_TYPE = "agent_loop.simple" # Specific type
-
-    # Define regex for parsing tool calls (simple example)
-    TOOL_CALL_REGEX = re.compile(r"<tool_call\s+name=['"]([a-zA-Z0-9_]+)['"]\s*>(.*?)</tool_call>", re.DOTALL)
 
     # __init__ is inherited from BaseAgentLoopComponent
     # set_outgoing_action_callback is inherited
     # _get_dependency is inherited
     # _call_llm is inherited
+    # handle_action_request is inherited
+    # _handle_memory_processing_request is inherited
+    # _execute_tool is inherited
+    # _publish_final_message is inherited
 
     async def run_cycle(self) -> None:
         logger.info(f"[{self.element.id}] Starting SimpleRequestResponse cycle...")
@@ -92,6 +91,9 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
              logger.warning(f"[{self.element.id}] LLM response had no tool calls and no content.")
              
         logger.info(f"[{self.element.id}] SimpleRequestResponse cycle finished.")
+
+    # Removed handle_action_request
+    # Removed _handle_memory_processing_request
 
     # _execute_tool is now inherited from BaseAgentLoopComponent
     # def _execute_tool(self, tool_provider: Optional['ToolProviderComponent'], tool_name: str, tool_args: Dict[str, Any]):

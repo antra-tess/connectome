@@ -10,5 +10,10 @@ components:
     config: {} # No specific config needed for the base component yet
   - type: ToolProvider # Provides tools/actions for the element
     config: {}
-  - type: VeilProducer # Allows the element's state to be rendered/represented
-    config: {} 
+  - type: chat.chat_representation # Add the new representation component
+    config:
+      max_history_turns: 10 # Example config: Limit history in representation
+  - type: messaging.conversation_info # Added component for identity
+    config: {} # adapter_id and conversation_id must be provided on creation
+  # - type: VeilProducer # Removed old placeholder
+  #   config: {} 

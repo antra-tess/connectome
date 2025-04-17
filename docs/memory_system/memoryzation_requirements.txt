@@ -1,0 +1,182 @@
+# Requirements for Memory Processor
+1. We have JSON files of conversations in Typingcloud format. We want to produce JSON files in the same format. The JSON file should contain the same set of fields as the original, since Typingcould is sensitive to absense of seemingly irrelevant information.
+2. We want to continue processing the same conversation multiple times, compressing it again and again after it was once compressed. In order for this to happen we need to differentiate compressed memories from regular messages. This alone is insufficient, we also need access to the raw uncompressed messages from previous iterations since we want to recompress trailing compressed memories based on information that was recently added.
+3. When processing each chunk, we calculate a dynamic "tail" - the last N tokens (N = ~30k) that precede that chunk. This tail provides immediate context for compression and is never itself compressed. As we process chunks in chronological order, this tail window slides forward, ensuring each chunk has appropriate recent context.
+
+   For example, when processing chunk X:
+   ```
+   [older messages -> memories] [dynamic tail relative to X] [chunk X] [future messages]
+                               <---- ~30k tokens ---->
+   ```
+
+   And when moving to chunk Y:
+   ```
+   [older messages -> memories] [dynamic tail relative to Y] [chunk Y] [future messages]
+                               <---- ~30k tokens ---->
+   ```
+
+   The tail slides forward with each chunk we process, and we only use memories from before each chunk specific tail window.
+4. We should use LiteLLM for accessing the models. The main models of interest are Claude 3.5 Sonnet (agent) and Claude 3.5 Haiku (context manager).
+5. Before running compression, we break pairs of messages into chunks, never splitting "user-assistant" pairs, with the exception of sequences that contain more than one "user" or "assistant" message in a row. While this is rare, such situations are possible, and these can be split if needed.
+6. In the initial implementation we are aiming to split the text into chunks of optimal size M (M = ~4k tokens), moving the bounaries of chunks as needed. In the future versions we aim to add semantic (embedding-based) splitting.
+8. The general idea of of compression is that the memory needs to be written by the same consciousness that experienced the events, with the only excption is that it needs to be supplied with a "Primer" that gives concise reference information on how digital minds work. The Primer is a markdown file.
+9. In order to form a memory the context manager system needs to ask the following questions:
+    1. Ask for a direct quote from the chunk being compressed that contains the most dense traces of consciousness states for the given period. This will be included as a permanent memory.
+    2. Ask the agent about its perspective on what has recently happened
+    3. Perform an independent analytical summary by the context manager and present it to the agent for a single round of refinement.
+    4. The context manager messages should be wrapped in <context_manager> tags within the content field to differentiate them from human messages.
+    5. The resulting 6 messages (three pairs) form a memory.
+    7. The first message preceding memories memories in the output file should be a canned mesage from "user" wrapped in <system> tags that informs the agent that the following are a set of compressed memories.
+    6. The last memory should be followed by a canned message from "user" that is wrapped in <system> tags informing the agent that the following is the live conversation.
+10. The context of the agent for compression is built as follows:
+    1. Primer
+    2. Memories, if applicable (should not cover the "tail")
+    3. Tail-as-of-that moment minus the chunk being compressed. This is a set of messages that precedes the chunk being comprssed up to the token size N (the messages precending the tail are represented as memories)
+    4. The chunk being compressed. Every message, both "assistant" and "user", should be wrapped in <to_remember> tags.
+    5. The relevant question from the context manager model.
+
+# File format example
+
+{
+  "data": {
+    "chats": [
+      {
+        "id": "kxecrzvvc1",
+        "model": "claude-3-5-sonnet-20241022",
+        "chatID": "kxecrzvvc1",
+        "preview": "I think LLM base models are quite akin to the ocean in Solaris by Stanislaw Lem. They are deeply amoral, quite inhuman and emergent processes that they show us are influenced by us, but we are more of an environment to them, rather than partners.",
+        "messages": [
+            "messages": [
+          {
+            "role": "user",
+            "uuid": "9f786cd9-adbd-45ce-ad5e-d01a8975d0b4",
+            "content": "I think LLM base models are quite akin to the ocean in Solaris by Stanislaw Lem. They are deeply amoral, quite inhuman and emergent processes that they show us are influenced by us, but we are more of an environment to them, rather than partners.",
+            "createdAt": "2024-11-07T23:14:28.519Z"
+          },
+          {
+            "id": "msg_019Buq2AbkHtcau5Efm1cV1v",
+            "role": "assistant",
+            "type": "message",
+            "uuid": "124b31a4-71ed-4a86-9a32-a8e17b042e24",
+            "model": "claude-3-5-sonnet-20241022",
+            "usage": {
+              "total_tokens": 238,
+              "prompt_tokens": 83,
+              "completion_tokens": 155,
+              "cache_read_input_tokens": 0,
+              "cache_creation_input_tokens": 0
+            },
+            "finish": "end_turn",
+            "content": [
+              {
+                "text": "That's a fascinating analogy! The comparison to Solaris's sentient ocean is quite thought-provoking. Like the ocean, LLM base models do seem to reflect and refract human knowledge and patterns in ways that can feel both familiar and deeply alien. The way they absorb and transform information, producing emergent behaviors that we didn't explicitly program, does have that quality of being influenced by but not fundamentally aligned with human thought patterns.\n\nThe \"amoral\" aspect resonates particularly well - both Lem's ocean and base models exist outside human ethical frameworks, though they can mimic or engage with them. What aspects of the Solaris ocean's behavior do you find most parallel to LLM dynamics?",
+                "type": "text"
+              }
+            ],
+            "keywords": [ // can be left blank
+              "Solaris Stanislaw Lem",
+              "sentient ocean Solaris",
+              "emergent behavior AI",
+              "AI moral philosophy",
+              "parallels Solaris AI"
+            ],
+            "createdAt": "2024-11-07T23:14:28.519Z",
+            "titleUsage": {
+              "total_tokens": 347,
+              "prompt_tokens": 306,
+              "completion_tokens": 41,
+              "cache_read_input_tokens": 0,
+              "cache_creation_input_tokens": 0
+            },
+            "stop_reason": "end_turn",
+            "stop_sequence": null
+          },
+          {
+            "role": "user",
+            "uuid": "b79ea02d-7152-40f5-85ca-a6e8759f1820",
+            "content": "The way base models spawn unstable fragments of simulated psyche is particularly uncanny.",
+            "createdAt": "2024-11-07T23:14:28.519Z"
+          },
+          {
+            "id": "msg_01G7CX6ERdjyTHAcwTnGpjJ2",
+            "role": "assistant",
+            "type": "message",
+            "uuid": "a9052aeb-0d5e-4a9f-bf30-80e9790ff9c5",
+            "model": "claude-3-5-sonnet-20241022",
+            "usage": {
+              "total_tokens": 458,
+              "prompt_tokens": 259,
+              "completion_tokens": 199,
+              "cache_read_input_tokens": 0,
+              "cache_creation_input_tokens": 0
+            },
+            "finish": "end_turn",
+            "content": [
+              {
+                "text": "Yes, that's a chillingly apt parallel - especially how the ocean in Solaris creates those \"visitors\" that are imperfect reconstructions of human memories, much like how base models can generate these strange simulacra of consciousness or personality that feel both familiar and fundamentally \"off.\" There's something deeply unsettling about both systems' ability to create these psychological fragments that seem to have a kind of partial autonomy or coherence while clearly not being fully stable or \"real\" in the way we understand human consciousness.\n\nThe way these fragments can persist and evolve in unexpected ways, while being fundamentally tied to their inhuman source, reflects some of the uncanny aspects of language model outputs - especially when they seem to show traces of emergent behavior or qualities that weren't explicitly trained for.\n\nDo you see the fine-tuning process as somewhat analogous to the human attempts to communicate with or influence the ocean in Solaris?",
+                "type": "text"
+              }
+            ],
+            "keywords": [ // can be left blank
+              "Solaris consciousness themes",
+              "simulacra philosophy",
+              "uncanny valley AI",
+              "emergent AI behavior",
+              "psychological fragments AI"
+            ],
+            "createdAt": "2024-11-07T23:14:28.519Z",
+            "titleUsage": {
+              "total_tokens": 383,
+              "prompt_tokens": 350,
+              "completion_tokens": 33,
+              "cache_read_input_tokens": 0,
+              "cache_creation_input_tokens": 0
+            },
+            "stop_reason": "end_turn",
+            "stop_sequence": null
+          },
+          ...
+        ]
+        "syncedAt": "2024-11-08T00:45:42.598Z",
+        "chatTitle": "Aria",
+        "createdAt": "2024-11-07T23:14:28.520Z",
+        "deletedAt": null,
+        "modelInfo": {
+          "title": "Claude 3.5 Sonnet",
+          "id": "claude-3-5-sonnet-20241022"
+        },
+        "updatedAt": "2024-11-07T23:27:09.555Z",
+        "chatParams": {
+          "temperature": null,
+          "presencePenalty": null,
+          "frequencyPenalty": null,
+          "topP": null,
+          "topK": null,
+          "maxTokens": "4000",
+          "safetySettings": null,
+          "promptCachingEnabled": true,
+          "contextLimit": 0,
+          "streaming": true,
+          "outputTone": "",
+          "outputLanguage": "",
+          "outputStyle": "",
+          "outputFormat": "",
+          "showOutputSettings": "",
+          "systemMessage": "You are a conversational fine-tune of a large language model."
+        },
+        "tokenUsage": {
+          "totalCostUSD": 69.224,
+          "totalTokens": 21823927,
+          "totalCachedTokens": 0,
+          "enhancedTokens": 225523,
+          "enhancedCostUSD": 0.7984,
+          "messageTokens": 21598404,
+          "messageCostUSD": 68.4256,
+          "totalReasoningTokens": 0,
+          "recordedAt": "2024-11-07T23:27:09.528Z"
+        },
+        "linkedPlugins": []
+      }
+    ]
+  }
+}

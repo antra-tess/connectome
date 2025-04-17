@@ -104,25 +104,62 @@ class ShellModule:
             self._inner_space = None # Ensure partial state isn't left
 
     def _register_routing(self):
-        """Registers routes for this agent with the HostRouter."""
+        """Registers routes for this agent with the HostRouter based on configuration.
+        Primarily registers based on 'adapter_id' found in routing_keys.
+        """
         if not self._inner_space: # Don't register if init failed
+            logger.warning(f"[{self.agent_id}] Skipping route registration: InnerSpace not initialized.")
             return
-            
+
         logger.info(f"[{self.agent_id}] Registering routes...")
-        # Example: Register based on config (needs refinement based on actual config structure)
-        agent_specific_config = next((agent for agent in self._host_config.get('agents', []) if agent.get('id') == self.agent_id), None)
-        
-        if agent_specific_config and 'routing_keys' in agent_specific_config:
-             # Assuming routing_keys is like {"conversation_id": ["conv1", "conv2"]} 
-             for context_key, context_values in agent_specific_config['routing_keys'].items():
-                  if isinstance(context_values, list):
-                       for value in context_values:
-                            self._host_router.register_agent_route(self.agent_id, context_key, value)
-                  else: # Assume single value
-                       self._host_router.register_agent_route(self.agent_id, context_key, context_values)
-        else:
-             logger.warning(f"[{self.agent_id}] No specific routing keys found in config to register.")
-             # Maybe register a default route based on agent_id if applicable?
+        agent_config = next((agent for agent in self._host_config.get('agents', []) if agent.get('id') == self.agent_id), None)
+
+        if not agent_config:
+            logger.warning(f"[{self.agent_id}] No configuration found for agent. Cannot register routes.")
+            return
+
+        routing_config = agent_config.get('routing_keys', {})
+        registered_any = False
+
+        # --- Handle specific 'adapter_id' key --- 
+        adapter_id_val = routing_config.get("adapter_id")
+        if adapter_id_val:
+            if isinstance(adapter_id_val, str):
+                context_key = "adapter_id" # The key to register under
+                self._host_router.register_agent_route(self.agent_id, context_key, adapter_id_val)
+                logger.info(f"[{self.agent_id}] Registered route for adapter_id: {adapter_id_val}")
+                registered_any = True
+                # Remove so it's not processed generically
+                routing_config.pop("adapter_id", None) 
+            elif isinstance(adapter_id_val, list):
+                 # Allow registering multiple adapters if needed
+                 context_key = "adapter_id"
+                 for ad_id in adapter_id_val:
+                      if isinstance(ad_id, str):
+                           self._host_router.register_agent_route(self.agent_id, context_key, ad_id)
+                           logger.info(f"[{self.agent_id}] Registered route for adapter_id: {ad_id}")
+                           registered_any = True
+                      else:
+                           logger.warning(f"[{self.agent_id}] Invalid adapter_id found in list: {ad_id}. Skipping.")
+                 routing_config.pop("adapter_id", None)
+            else:
+                 logger.warning(f"[{self.agent_id}] 'adapter_id' key in routing_keys has invalid type {type(adapter_id_val)}. Expected string or list. Skipping.")
+                 routing_config.pop("adapter_id", None)
+
+        # --- Handle other generic routing keys --- 
+        logger.debug(f"[{self.agent_id}] Processing remaining generic routing keys: {list(routing_config.keys())}")
+        for context_key, context_values in routing_config.items():
+            if isinstance(context_values, list):
+                for value in context_values:
+                    if value is not None:
+                        self._host_router.register_agent_route(self.agent_id, context_key, value)
+                        registered_any = True
+            elif context_values is not None:
+                self._host_router.register_agent_route(self.agent_id, context_key, context_values)
+                registered_any = True
+
+        if not registered_any:
+            logger.warning(f"[{self.agent_id}] No valid routes were registered based on configuration.")
 
     async def handle_incoming_event(self, event_data: Dict[str, Any], timeline_context: Dict[str, Any]):
         """
