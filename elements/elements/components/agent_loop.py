@@ -115,22 +115,23 @@ class BaseAgentLoopComponent(Component, abc.ABC):
     # --- Common Action/Tool Handling Logic --- 
     # Moved here from SimpleRequestResponseLoopComponent
     
-    def _execute_tool(self, tool_provider: Optional['ToolProviderComponent'], tool_name: str, tool_args: Dict[str, Any]):
+    # Updated signature to accept action_context
+    def _execute_tool(self, tool_provider: Optional['ToolProviderComponent'], 
+                        tool_name: str, tool_args: Dict[str, Any], 
+                        action_context: Dict[str, Any]):
         """Handles getting tool definition and executing based on execution_info."""
-        # Get dependencies needed within this method
-        context_manager = self._get_dependency("context_manager", required=False)
+        # Removed internal fetching of context_manager
+        # context_manager = self._get_dependency("context_manager", required=False)
         
         if not tool_provider:
             logger.error(f"[{self.element.id}] Cannot execute tool '{tool_name}': ToolProvider not found.")
-            # Log error to history if possible
-            if context_manager: context_manager.add_history_turn(role="system", content=f"Error: ToolProvider not found, cannot execute {tool_name}.")
+            # Removed logging to history via context_manager
             return
             
         tool_def = tool_provider.get_tool_definition(tool_name)
         if not tool_def:
             logger.error(f"[{self.element.id}] Tool '{tool_name}' definition not found.")
-            # Log error to history if possible
-            if context_manager: context_manager.add_history_turn(role="system", content=f"Error: Tool '{tool_name}' definition not found.")
+            # Removed logging to history via context_manager
             return
             
         exec_info = tool_def.execution_info
@@ -140,34 +141,27 @@ class BaseAgentLoopComponent(Component, abc.ABC):
         tool_call_id = f"temp_{tool_name}_{int(time.time()*1000)}" 
 
         if exec_type == "direct_call":
+            # Direct call execution - needs careful thought about context/permissions
+            # This remains unchanged for now, but might need action_context later
             tool_func = exec_info.get("function")
             if not callable(tool_func):
                  logger.error(f"[{self.element.id}] Invalid execution_info for direct_call tool '{tool_name}': 'function' is missing or not callable.")
-                 if context_manager: context_manager.add_history_turn(role="system", content=f"Error: Invalid definition for direct_call tool {tool_name}.")
+                 # Removed logging to history via context_manager
                  return
             try:
                  logger.info(f"[{self.element.id}] Executing direct_call tool '{tool_name}' synchronously.")
                  tool_result = tool_func(**tool_args)
                  logger.info(f"[{self.element.id}] Direct tool '{tool_name}' result: {str(tool_result)[:100]}...")
-                 # Add result to history
-                 if context_manager:
-                     context_manager.add_history_turn(
-                          role="tool", content=str(tool_result)[:500], # Truncate result string
-                          name=tool_name, tool_call_id=tool_call_id
-                     )
+                 # TODO: How should direct tool results be handled / added to history?
+                 # Maybe emit a specific event? 
             except Exception as tool_err:
                  logger.error(f"[{self.element.id}] Error executing direct_call tool '{tool_name}': {tool_err}", exc_info=True)
-                 # Add error to history
-                 if context_manager:
-                     context_manager.add_history_turn(
-                          role="tool", content={"error": str(tool_err)}, 
-                          name=tool_name, tool_call_id=tool_call_id
-                     )
+                 # Removed logging to history via context_manager
 
         elif exec_type == "action_request":
             if not self._outgoing_action_callback:
                  logger.error(f"[{self.element.id}] Cannot enqueue action_request tool '{tool_name}': Callback not set.")
-                 if context_manager: context_manager.add_history_turn(role="system", content=f"Error: Cannot enqueue action request for tool {tool_name}, callback missing.")
+                 # Removed logging to history via context_manager
                  return
             
             target_module = exec_info.get("target_module")
@@ -176,99 +170,103 @@ class BaseAgentLoopComponent(Component, abc.ABC):
             
             if not target_module or not action_type:
                  logger.error(f"[{self.element.id}] Invalid execution_info for action_request tool '{tool_name}': Missing target_module or action_type.")
-                 if context_manager: context_manager.add_history_turn(role="system", content=f"Error: Invalid definition for action_request tool {tool_name}.")
+                 # Removed logging to history via context_manager
                  return
                  
+            # Start with base payload from tool definition
             final_payload = payload_template.copy()
+            # Merge tool arguments provided by LLM
+            final_payload.update(tool_args)
+            # Add tool metadata
             final_payload['tool_name'] = tool_name
-            final_payload['tool_args'] = tool_args
-            final_payload['tool_call_id'] = tool_call_id
-            # Ensure element reference exists before accessing id/name
+            final_payload['tool_call_id'] = tool_call_id 
+            
+            # Add requestor info
             if self.element:
-                 # Use InnerSpace ID as requesting_element_id
                  final_payload['requesting_element_id'] = self.element.id
-                 # Derive agent_id if needed (e.g., strip suffix)
                  final_payload['requesting_agent_id'] = self.element.id.replace("_inner_space", "")
-                 # <<< ADD AGENT NAME TO PAYLOAD >>>
                  final_payload['agent_name'] = self.element.name or self.element.id 
             else:
                  logger.error(f"[{self.__class__.__name__}] Cannot add requesting IDs/name: Element reference missing.")
-                 # Optionally add placeholders or skip these fields
                  final_payload['requesting_element_id'] = "unknown_element"
                  final_payload['requesting_agent_id'] = "unknown_agent"
                  final_payload['agent_name'] = "Unknown Agent"
                  
+            # Add routing context (adapter_id, conversation_id) from action_context
+            if action_context.get("adapter_id"):
+                 final_payload['adapter_id'] = action_context["adapter_id"]
+            if action_context.get("conversation_id"):
+                 final_payload['conversation_id'] = action_context["conversation_id"]
+                 
+            # Construct the full action request
             action_request = {
-                 "target_module": target_module,
-                 "action_type": action_type,
-                 "payload": final_payload
+                "type": "action_request",
+                "target_module": target_module,
+                "action_type": action_type,
+                "payload": final_payload
             }
-            logger.info(f"[{self.element.id if self.element else '?'}] Enqueuing action_request for tool: {tool_name}")
-            self._outgoing_action_callback(action_request)
-            # Add note to history that action was enqueued
-            if context_manager:
-                 context_manager.add_history_turn(role="system", content=f"Enqueued action request for tool '{tool_name}' (ID: {tool_call_id}).")
-            
-        else:
-            logger.error(f"[{self.element.id}] Unknown execution_info type '{exec_type}' for tool '{tool_name}'.")
-            if context_manager: context_manager.add_history_turn(role="system", content=f"Error: Unknown execution type for tool {tool_name}.")
 
-    def _publish_final_message(self, context_manager: Optional['ContextManagerComponent'], message_content: str):
-        """Handles publishing the final message via the ToolProvider using send_message tool."""
-        logger.debug(f"[{self.element.id}] Attempting to publish final message via send_message tool.")
-        
-        tool_provider: Optional['ToolProviderComponent'] = self._get_dependency("tool_provider")
-        # We need context_manager again here, ensure it's passed or get it again
-        if context_manager is None:
-             context_manager = self._get_dependency("context_manager")
-             
-        if not tool_provider:
-             logger.error(f"[{self.element.id}] Cannot publish message: ToolProvider not found.")
-             if context_manager: context_manager.add_history_turn(role="system", content="Error: Cannot publish message, ToolProvider missing.")
-             return
-        if not context_manager:
-             logger.error(f"[{self.element.id}] Cannot publish message: ContextManager not found (required for routing).")
-             # Cannot log to history without context manager
+            logger.info(f"[{self.element.id}] Enqueuing action request for tool '{tool_name}': Target={target_module}, Action={action_type}")
+            logger.debug(f"Action Request Payload: {final_payload}")
+            self._outgoing_action_callback(action_request)
+        else:
+             logger.error(f"[{self.element.id}] Unknown execution type '{exec_type}' for tool '{tool_name}'.")
+             # Removed logging to history via context_manager
+
+    # Updated signature to accept action_context
+    def _publish_final_message(self, action_context: Dict[str, Any], message_content: str):
+        """Constructs and enqueues a 'send_message' action request."""
+        if not self._outgoing_action_callback:
+             logger.error(f"[{self.element.id}] Cannot publish final message: Callback not set.")
              return
              
-        # --- Get Target Context using ContextManager --- 
-        target_conversation_id = "fallback_conv_id"
-        target_adapter_id = "fallback_adapter_id"
-        # This call might fail if context_manager wasn't found
-        current_routing_info = context_manager.get_current_routing_context() 
-        if current_routing_info:
-             target_conversation_id = current_routing_info.get("conversation_id", target_conversation_id)
-             target_adapter_id = current_routing_info.get("adapter_id", target_adapter_id)
-        else: 
-            logger.warning(f"[{self.element.id}] ContextManager returned no routing info, using fallbacks.")
-        # -------------------------------------------
-        
-        tool_args = {
+        # Removed context_manager usage for getting routing info
+        # context_manager = self._get_dependency("context_manager", required=False)
+        # if not context_manager:
+        #      logger.error(f"[{self.element.id}] Cannot publish final message: ContextManager not found for routing info.")
+        #      return
+             
+        # Assume context_manager provided routing info; replace with action_context
+        # adapter_id = context_manager.get_last_context_value('adapter_id')
+        # conversation_id = context_manager.get_last_context_value('conversation_id')
+        adapter_id = action_context.get("adapter_id")
+        conversation_id = action_context.get("conversation_id")
+
+        if not adapter_id or not conversation_id:
+             logger.error(f"[{self.element.id}] Cannot publish final message: Missing adapter_id or conversation_id in action_context.")
+             # Consider falling back to a default or logging an internal error message?
+             return
+             
+        payload = {
+             "adapter_id": adapter_id,
+             "conversation_id": conversation_id,
              "text": message_content,
-             "adapter_id": target_adapter_id,
-             "conversation_id": target_conversation_id
+             # Add requestor info
+             "requesting_element_id": self.element.id if self.element else "unknown",
+             "requesting_agent_id": self.element.id.replace("_inner_space", "") if self.element else "unknown",
+             "agent_name": self.element.name if self.element else "Unknown Agent"
         }
         
-        # Use the _execute_tool method to handle calling the 'send_message' tool
-        self._execute_tool(tool_provider, "send_message", tool_args)
+        action_request = {
+            "type": "action_request",
+            "target_module": "ActivityClient", # Standard target for messaging
+            "action_type": "send_message",
+            "payload": payload
+        }
+        
+        logger.info(f"[{self.element.id}] Enqueuing final message action request to {adapter_id}/{conversation_id}")
+        logger.debug(f"Send Message Payload: {payload}")
+        self._outgoing_action_callback(action_request)
 
-    # --- Incoming Action Request Handling --- 
-
+    # --- Memory Processing Logic --- 
+    # (Keep handle_action_request and _handle_memory_processing_request as they are for now)
     async def handle_action_request(self, action_type: str, payload: Dict[str, Any]):
-        """Handles incoming action requests targeted at the AgentLoop."""
-        logger.info(f"[{self.element.id}] Received action request: type='{action_type}'")
-
+        """Handles specific action requests targeted at the agent loop itself."""
+        logger.debug(f"[{self.element.id}] AgentLoop received action request: {action_type}")
         if action_type == "trigger_memory_processing":
             await self._handle_memory_processing_request(payload)
-        # Add handlers for other action types here...
-        # elif action_type == "some_other_action":
-        #     await self._handle_other_action(payload)
         else:
-            logger.warning(f"[{self.element.id}] Unhandled action_type '{action_type}' received by BaseAgentLoopComponent.")
-            # Log to history maybe?
-            ctx_mgr = self._get_dependency("context_manager", required=False)
-            if ctx_mgr:
-                 ctx_mgr.add_history_turn(role="system", content=f"Warning: Received unhandled action request type '{action_type}'")
+            logger.warning(f"[{self.element.id}] AgentLoop received unhandled action request type: {action_type}")
 
     async def _handle_memory_processing_request(self, payload: Dict[str, Any]):
         """Handles the specific logic for the trigger_memory_processing action."""

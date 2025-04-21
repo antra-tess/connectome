@@ -14,8 +14,9 @@ EVENT_MESSAGE_EDITED = "message_edited"
 EVENT_MESSAGE_DELETED = "message_deleted"
 EVENT_REACTION_ADDED = "reaction_added"
 EVENT_REACTION_REMOVED = "reaction_removed"
+EVENT_SYSTEM_NOTIFICATION = "system_notification"
+EVENT_TOOL_RESULT_AVAILABLE = "tool_result_available" # Added
 # Add other relevant types if needed, e.g., system notifications
-EVENT_SYSTEM_NOTIFICATION = "system_notification" 
 
 HISTORY_EVENT_TYPES = {
     EVENT_MESSAGE_RECEIVED,
@@ -25,6 +26,7 @@ HISTORY_EVENT_TYPES = {
     EVENT_REACTION_ADDED,
     EVENT_REACTION_REMOVED,
     EVENT_SYSTEM_NOTIFICATION,
+    EVENT_TOOL_RESULT_AVAILABLE, # Added
 }
 
 class HistoryComponent(Component):
@@ -83,22 +85,32 @@ class HistoryComponent(Component):
                  logger.info(f"[{self.element.id}] Creating new history partition for conversation_id: {conversation_id}")
                  self._history[conversation_id] = {}
                  self._entry_timestamps[conversation_id] = {}
-        else:
-             # Handle non-conversation events like system notifications
-             if event_type == EVENT_SYSTEM_NOTIFICATION:
-                  logger.info(f"HistoryComponent received system notification: {payload.get('text')}")
-                  # Decide how/if to store these - maybe a separate list?
-                  # For now, just log and mark handled.
-                  return True
-             else:
-                  # Other event types might need conversation_id later
-                  logger.warning(f"Skipping {event_type} event for {self.element.id}: 'conversation_id' is required but missing.")
+        elif event_type == EVENT_SYSTEM_NOTIFICATION:
+             # Handle system notifications (existing logic)
+             return True
+        elif event_type == EVENT_TOOL_RESULT_AVAILABLE:
+             # Tool results might not always have a direct conversation_id in their payload
+             # depending on how the tool execution context is managed. 
+             # Let's assume for now it *does* have conversation_id if it's relevant to a specific chat.
+             # If not, we might need a different way to store/route tool results.
+             if not conversation_id:
+                  logger.warning(f"Skipping {event_type} for {self.element.id}: 'conversation_id' missing. Cannot store result in history partition.")
                   return False
+             # Ensure partition exists if we have a conversation_id
+             if conversation_id not in self._history:
+                  logger.info(f"[{self.element.id}] Creating new history partition for conversation_id: {conversation_id} for tool result.")
+                  self._history[conversation_id] = {}
+                  self._entry_timestamps[conversation_id] = {}
+        else:
+             # Other event types might need conversation_id later
+             logger.warning(f"Skipping {event_type} event for {self.element.id}: 'conversation_id' is required but missing.")
+             return False
         # --- End Partitioning Logic ---
         
-        # Now, proceed with event handling *within the specific conversation partition*
-        logger.debug(f"HistoryComponent on {self.element.id} handling event: {event_type} for Conversation: {conversation_id}, Message ID: {message_id}")
+        # Use tool_call_id as the message_id for tool results
+        message_id = payload.get("message_id") or payload.get("tool_call_id")
 
+        logger.debug(f"HistoryComponent on {self.element.id} handling event: {event_type} for Conv: {conversation_id}, ID: {message_id}")
         current_time_ms = int(time.time() * 1000)
 
         # --- Handle different event types within the partition ---
@@ -129,7 +141,26 @@ class HistoryComponent(Component):
             is_add = event_type == EVENT_REACTION_ADDED
             return self._update_reaction(conversation_id, message_id, payload.get("emoji"), is_add, payload.get("user_id"))
 
-        # Should have been handled earlier if conversation_id was missing
+        elif event_type == EVENT_TOOL_RESULT_AVAILABLE:
+            # Store the tool result
+            tool_call_id = payload.get("tool_call_id")
+            tool_result = payload.get("result") # Assuming result is in payload
+            tool_name = payload.get("tool_name", "unknown_tool") # Get tool name if available
+            
+            if not tool_call_id:
+                 logger.warning(f"Skipping {event_type} for Conv '{conversation_id}': missing 'tool_call_id'.")
+                 return False
+            if tool_result is None:
+                 logger.warning(f"Skipping {event_type} for Conv '{conversation_id}' (ToolCall ID: {tool_call_id}): missing 'result'.")
+                 # Store an error maybe? Or just skip?
+                 # Let's store an entry indicating missing result.
+                 tool_result = {"error": "Result missing in event payload"}
+                 
+            self._add_tool_result(conversation_id, tool_call_id, tool_name, tool_result, timeline_context, current_time_ms)
+            # Decide whether to enforce history limit on tool results? Yes, treat like other entries.
+            self._enforce_history_limit(conversation_id)
+            return True
+
         return False # Fallback
 
     def _add_new_message(self, conversation_id: str, event: Dict[str, Any], message_id: str, payload: Dict[str, Any], timeline_context: Optional[Dict[str, Any]], timestamp_ms: int):
@@ -202,6 +233,44 @@ class HistoryComponent(Component):
             else:
                 logger.warning(f"Cannot remove reaction '{emoji}' from msg '{message_id}' (Conv:{conversation_id}): Not present.")
         return True
+
+    def _add_tool_result(self, conversation_id: str, tool_call_id: str, tool_name: str, result: Any, timeline_context: Optional[Dict[str, Any]], timestamp_ms: int):
+        """Adds a tool result entry to the specific conversation's history."""
+        conv_history = self._history[conversation_id]
+        conv_timestamps = self._entry_timestamps[conversation_id]
+
+        # Use tool_call_id as the unique key for this history entry
+        message_id = tool_call_id 
+        
+        if message_id in conv_history:
+             # This might happen if a tool result is somehow processed twice. 
+             # Overwriting might be okay, or log a more severe warning.
+             logger.warning(f"[{self.element.id}/Conv:{conversation_id}] Duplicate tool_call_id '{message_id}' received as history entry key. Overwriting.")
+
+        entry = {
+            # Treat tool_call_id as the message_id for history purposes
+            "message_id": message_id, 
+            "conversation_id": conversation_id,
+            # Use a specific event type if desired, or keep the incoming one
+            "event_type": EVENT_TOOL_RESULT_AVAILABLE, 
+            "timestamp": timestamp_ms, # Use processing time
+            "timeline_id": timeline_context.get("timeline_id") if timeline_context else None,
+            # Structure the data payload for tool results clearly
+            "data": { 
+                "role": "tool", # Standard role for tool results
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+                "content": result # Store the actual result here
+            },
+            # Metadata fields (not typically edited/deleted/reacted to)
+            "deleted": False,
+            "edited_timestamp": None,
+            "deleted_timestamp": None,
+            "reactions": {}
+        }
+        conv_history[message_id] = entry
+        conv_timestamps[message_id] = entry["timestamp"]
+        logger.debug(f"Added tool result '{tool_call_id}' to history for Conv:{conversation_id}.")
 
     def _enforce_history_limit(self, conversation_id: str):
         """Removes the oldest entries for a specific conversation if it exceeds the limit."""

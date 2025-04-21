@@ -1,41 +1,59 @@
 import logging
-from typing import Optional
+import html
+from typing import Optional, Dict, Any, List
 
-from .base_component import Component
+from .base import Component
 from ..base import BaseElement
+# Import the new base class
+from .base_representation_component import BaseRepresentationComponent
 
 logger = logging.getLogger(__name__)
 
-class SimpleRepresentationComponent(Component):
+# Change inheritance
+class SimpleRepresentationComponent(BaseRepresentationComponent):
     '''
     A temporary, simple component to provide a basic string representation 
     of an element for context building, acting as a placeholder for the 
     more complex VeilProducerComponent.
     '''
     COMPONENT_TYPE: str = "simple_representation"
-    DEPENDENCIES = [] # Base component usually doesn't need dependencies
+    DEPENDENCIES = set()
 
     def __init__(self, element: Optional[BaseElement] = None, **kwargs):
         super().__init__(element, **kwargs)
         # No specific state needed for the base version
 
-    def produce_representation(self) -> str:
+    def generate_representation(self, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         '''
-        Generates a basic XML-like string representation for the element.
-        Subclasses should override this to provide more specific info within the tags.
+        Generates a basic structured representation.
         '''
-        if not self.element:
-            # Return an empty or error tag for detachment
-            return '<element_representation type="Detached" id="unknown"/>'
-        
-        # Default representation: Basic info in attributes
-        element_type = self.element.__class__.__name__
-        element_name = self.element.name or ""
-        element_id = self.element.id
-        
-        # Basic tag with attributes, no inner content for the default
-        # Use simple escaping for potential quotes in name (though less common)
-        safe_name = element_name.replace('"', '&quot;')
-        return f'<element_representation type="{element_type}" name="{safe_name}" id="{element_id}" />'
+        # Use the base implementation to get common fields
+        representation = super().generate_representation(options)
+        # Subclasses override the _generate_* methods called by the super method
+        return representation
 
     # No specific _on_event handling needed for this simple version 
+
+    # --- Implement abstract methods --- 
+
+    def _generate_content(self, options: Optional[Dict[str, Any]] = None) -> Any:
+        """Simple representation has no complex content, maybe just description?"""
+        # Return a simple dictionary or just the description string
+        return {
+            "description": self.element.description if self.element else "N/A"
+        }
+
+    def _generate_attributes(self, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Generate basic attributes."""
+        # Add any other simple, relevant attributes here if needed
+        attrs = {}
+        # Example: Add creation timestamp if available on element?
+        # if hasattr(self.element, 'created_at') and self.element.created_at:
+        #     attrs['created_at'] = self.element.created_at
+        return attrs
+
+    def _generate_children(self, options: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """Simple representation does not typically include children."""
+        return []
+
+    # _generate_compression_hints can use the default empty implementation 

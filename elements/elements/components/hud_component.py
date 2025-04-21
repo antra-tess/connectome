@@ -9,10 +9,13 @@ import time
 import json # For JSON parsing in response handling
 
 from ..base_component import Component
-from .context_manager_component import ContextManagerComponent
+# Remove ContextManagerComponent dependency for now
+# from .context_manager_component import ContextManagerComponent 
 from .tool_provider_component import ToolProvider
 # Need BaseElement for type hinting
 from ..base import BaseElement
+# Import the new representation base class
+from .base_representation_component import BaseRepresentationComponent 
 # Import LLM provider interface and data classes
 from ...llm.provider_interface import (
     LLMProvider,
@@ -30,15 +33,15 @@ logger = logging.getLogger(__name__)
 
 class HUDComponent(Component):
     """
-    Formats context, prepares messages and tool definitions, interacts with an
-    LLMProvider, and handles the LLMResponse.
+    Formats context (from representation), prepares messages and tool definitions, 
+    interacts with an LLMProvider, and handles the LLMResponse.
     
     Lives within the InnerSpace.
     """
     
     COMPONENT_TYPE: str = "hud"
-    # Declare dependencies on other components (optional, for validation later)
-    # DEPENDENCIES: List[str] = [ContextManagerComponent.COMPONENT_TYPE, ToolProvider.COMPONENT_TYPE]
+    # Update dependencies: Remove ContextManager, ensure ToolProvider is listed if needed
+    # DEPENDENCIES: List[str] = [ToolProvider.COMPONENT_TYPE]
     
     # Declare injected dependencies from the parent Element (InnerSpace)
     # Format: {kwarg_name_in_init: attribute_name_in_parent_element}
@@ -47,20 +50,17 @@ class HUDComponent(Component):
     }
     
     HANDLED_EVENT_TYPES: List[str] = [
-        # "agent_response_received", # Handled internally after call now
         "run_agent_cycle_request" # Explicit request to run the cycle
     ]
     
     def __init__(self, element: Optional[BaseElement] = None,
-                 llm_provider: Optional[LLMProvider] = None, # Inject the provider
+                 llm_provider: Optional[LLMProvider] = None, 
                  system_prompt: str = "You are a helpful AI assistant.",
-                 # tool_format is less relevant now, provider handles formatting
-                 # response_prefix: Optional[str] = None,
-                 model: Optional[str] = None, # Default model for provider
+                 model: Optional[str] = None, 
                  temperature: Optional[float] = 0.7,
                  max_tokens: Optional[int] = 1000,
-                 # Add config for how to represent history to LLM
-                 history_representation: str = "user_message", # or "message_list"
+                 # history_representation is less relevant now, as we get structured data
+                 # history_representation: str = "user_message", 
                  **kwargs):
         """
         Initialize the HUD component.
@@ -72,7 +72,6 @@ class HUDComponent(Component):
             model: Default model name to use (can be overridden in calls).
             temperature: Default sampling temperature.
             max_tokens: Default max tokens for responses.
-            history_representation: How to represent history to LLM
             **kwargs: Passthrough for BaseComponent.
         """
         super().__init__(element, **kwargs)
@@ -90,7 +89,7 @@ class HUDComponent(Component):
             "model": model,
             "temperature": temperature,
             "max_tokens": max_tokens,
-            "history_representation": history_representation,
+            # "history_representation": history_representation, # Removed
             # State related to last interaction
             "last_llm_response": None, # Store the LLMResponse object
             "last_presentation_time": None
@@ -100,13 +99,28 @@ class HUDComponent(Component):
 
     # --- Helper Methods --- 
 
-    def _get_context_manager(self) -> Optional[ContextManagerComponent]:
-        if not self.element: return None
-        return self.element.get_component(ContextManagerComponent)
+    # def _get_context_manager(self) -> Optional[ContextManagerComponent]:
+    #     if not self.element: return None
+    #     return self.element.get_component(ContextManagerComponent)
 
     def _get_tool_provider(self) -> Optional[ToolProvider]:
         if not self.element: return None
         return self.element.get_component(ToolProvider)
+
+    def _get_representation_component(self) -> Optional[BaseRepresentationComponent]:
+         """Finds any component inheriting from BaseRepresentationComponent."""
+         if not self.element: return None
+         # Look for specific types first, then the base type
+         for comp_type in ["representation.chat", "simple_representation", "representation.base"]:
+              comp = self.element.get_component_by_type(comp_type)
+              if comp and isinstance(comp, BaseRepresentationComponent):
+                   return comp
+         # Fallback check: iterate all components (less efficient)
+         for comp in self.element.get_components().values():
+              if isinstance(comp, BaseRepresentationComponent):
+                   return comp
+         logger.warning(f"No Representation Component found on element {self.element.id}")
+         return None
 
     def _prepare_tool_definitions(self) -> Optional[List[LLMToolDefinition]]:
         """Gets tools from ToolProvider and formats them as LLMToolDefinition list."""
@@ -129,62 +143,110 @@ class HUDComponent(Component):
         
         return tool_definitions # Return the list directly
 
+    # --- Refactored Message Preparation --- 
     def _prepare_llm_messages(self) -> Optional[List[LLMMessage]]:
-        """Prepares the list of messages for the LLM call."""
-        logger.debug("Preparing LLM messages...")
-        context_manager = self._get_context_manager()
-        if not context_manager:
-             logger.error("Cannot prepare messages: ContextManagerComponent missing.")
-             return None
-
-        # 1. Build the context string (which now includes history implicitly)
-        processed_context_str = context_manager.build_context()
-
-        # 2. Assemble messages based on representation strategy
+        """Prepares the list of messages using orchestrated context."""
+        logger.debug("Preparing LLM messages from orchestrated context...")
         messages = []
-        if self._state.get("system_prompt"):            
-            messages.append(LLMMessage(role="system", content=self._state["system_prompt"]))            
 
-        history_rep = self._state.get("history_representation", "user_message")
+        # 1. Add System Prompt
+        if self._state.get("system_prompt"):
+            messages.append(LLMMessage(role="system", content=self._state["system_prompt"]))
+
+        # 2. Get Orchestrated Context from ContextManagerComponent
+        # context_manager: Optional['ContextManagerComponent'] = self._get_dependency("context_manager") # Use helper if exists
+        context_manager = self.element.get_component_by_type("context_manager") # Or direct access
         
-        if history_rep == "user_message":
-            # Simplest: Send the entire processed context as one user message
-            # This relies on ContextManager formatting history correctly within the string.
-            messages.append(LLMMessage(role="user", content=processed_context_str))
-        elif history_rep == "message_list":
-            # TODO: More complex: Get structured history from ContextManager 
-            # and format it into individual LLMMessages (user, assistant, tool)
-            # Requires ContextManager to provide structured history access.
-            logger.warning("'message_list' history representation not yet fully implemented in HUD.")
-            # Fallback to user_message style for now
-            messages.append(LLMMessage(role="user", content=processed_context_str))
-        else:
-             logger.error(f"Unknown history_representation: {history_rep}")
-             return None
+        if not context_manager:
+             logger.error(f"[{self.element.id}] Cannot prepare messages: ContextManagerComponent missing.")
+             messages.append(LLMMessage(role="user", content="[System Error: Cannot retrieve context - ContextManager missing]"))
+             return messages
+
+        try:
+            orchestrated_context = context_manager.get_orchestrated_context()
+        except Exception as e:
+             logger.exception(f"Error getting orchestrated context: {e}")
+             messages.append(LLMMessage(role="user", content="[System Error: Failed to orchestrate context]"))
+             return messages
+
+        # 3. Extract and Format History Turns
+        history_turns = orchestrated_context.get("history_turns", [])
         
+        if not history_turns and orchestrated_context.get("active_conversation_id") is None:
+             logger.debug("No active conversation history found in orchestrated context.")
+             # Proceed with only system prompt initially?
+        elif not history_turns:
+             logger.warning("Orchestrated context is missing 'history_turns' list.")
+             # Add a placeholder?
+             messages.append(LLMMessage(role="user", content="[System Note: Current context available but contains no chat turns.]"))
+
+        for turn in history_turns:
+            # Turn data should already be formatted by ContextManager
+            role = turn.get("role")
+            turn_content = turn.get("content")
+            # --- Handle Tool Role --- 
+            if role == "tool":
+                 tool_call_id = turn.get("tool_call_id")
+                 tool_name = turn.get("tool_name") # ContextManager should include this
+                 if tool_call_id and turn_content is not None:
+                      # Format according to LLM provider expectations (e.g., OpenAI)
+                      # Content should be the result string/JSON
+                      content_str = json.dumps(turn_content) if isinstance(turn_content, (dict, list)) else str(turn_content)
+                      # Some providers might want tool_call_id directly in the message object
+                      # For OpenAI, the content is the result, role is 'tool', and tool_call_id is a parameter
+                      # Let's create a standard LLMMessage first
+                      messages.append(LLMMessage(role="tool", content=content_str, tool_call_id=tool_call_id, name=tool_name))
+                 else:
+                      logger.warning(f"Skipping tool turn in orchestrated context due to missing tool_call_id or content: {turn}")
+            # --- Handle Other Roles --- 
+            elif role and turn_content is not None:
+                 llm_role = "assistant" if role == "agent" else role # user, system, assistant
+                 # Ensure content is string
+                 content_str = json.dumps(turn_content) if isinstance(turn_content, (dict, list)) else str(turn_content)
+                 # Add tool_calls to assistant message if present in original turn?
+                 # The history turn structure might need refinement if assistant message *also* has tool_calls key
+                 messages.append(LLMMessage(role=llm_role, content=content_str))
+            else:
+                 logger.warning(f"Skipping non-tool turn in orchestrated context due to missing role or content: {turn}")
+                 
+        # 4. TODO: Optionally add other parts of the orchestrated context? 
+        # E.g., append self_summary, memories, environment_summary as a final user message?
+        # Example:
+        # summary_parts = []
+        # if orchestrated_context.get('self_summary'): summary_parts.append(json.dumps(orchestrated_context['self_summary']))
+        # if orchestrated_context.get('memories'): summary_parts.append(json.dumps(orchestrated_context['memories']))
+        # if orchestrated_context.get('environment_summary'): summary_parts.append(json.dumps(orchestrated_context['environment_summary']))
+        # if summary_parts:
+        #     messages.append(LLMMessage(role="user", content="[Current Context Summary]\n" + "\n---\n".join(summary_parts))) 
+        
+        if len(messages) <= 1: # Only system prompt present
+             logger.warning("Prepared LLM messages contain only system prompt. No history or other context added.")
+             messages.append(LLMMessage(role="user", content="What should I do next?"))
+             
+        # TODO: Implement final token budget check/truncation here if needed
+        # This would operate on the final list of LLMMessage objects.
+             
         return messages
 
     # Renamed from run_agent_cycle
     async def prepare_and_call_llm(self) -> Optional[LLMResponse]:
         """
-        Prepares messages and tools, calls the LLM provider.
+        Prepares messages (from representation) and tools, calls the LLM provider.
         Returns the LLMResponse or None if the call failed.
         """
         if not self._llm_provider:
              logger.error("Cannot run agent cycle: LLMProvider is not configured.")
              return None
-             
-        # Get context string (includes history) using ContextManager
-        context_manager = self._get_context_manager()
-        if not context_manager:
-             logger.error("Cannot prepare messages: ContextManagerComponent missing.")
-             return None
-        processed_context_str = context_manager.build_context()
 
-        # Prepare messages using the context string
-        messages = self._prepare_llm_messages_from_string(processed_context_str)
+        # REMOVED: ContextManager usage
+        # context_manager = self._get_context_manager()
+        # if not context_manager: ...
+        # processed_context_str = context_manager.build_context()
+
+        # Prepare messages using the representation component
+        messages = self._prepare_llm_messages()
         if not messages:
-             logger.error("Failed to prepare messages for LLM.")
+             logger.error("Failed to prepare messages for LLM from representation.")
              return None
              
         # Prepare tool definitions
@@ -216,30 +278,6 @@ class HUDComponent(Component):
              self._state["last_llm_response"] = None # Clear last response on error
              return None
 
-    # Renamed from _prepare_llm_messages to clarify input
-    def _prepare_llm_messages_from_string(self, processed_context_str: str) -> Optional[List[LLMMessage]]:
-        """Prepares the list of messages using the pre-built context string."""
-        logger.debug("Preparing LLM messages from context string...")
-        messages = []
-        if self._state.get("system_prompt"):            
-            messages.append(LLMMessage(role="system", content=self._state["system_prompt"]))            
-
-        history_rep = self._state.get("history_representation", "user_message")
-        
-        if history_rep == "user_message":
-            # Simplest: Send the entire processed context as one user message
-            messages.append(LLMMessage(role="user", content=processed_context_str))
-        elif history_rep == "message_list":
-            # TODO: Requires ContextManager to provide structured history access.
-            logger.warning("'message_list' history representation not yet fully implemented in HUD.")
-            # Fallback to user_message style for now
-            messages.append(LLMMessage(role="user", content=processed_context_str))
-        else:
-             logger.error(f"Unknown history_representation: {history_rep}")
-             return None
-        
-        return messages
-
     # --- Event Handling --- 
     def _on_event(self, event: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
         """Handle events."""
@@ -247,8 +285,14 @@ class HUDComponent(Component):
         
         if event_type == "run_agent_cycle_request":
             logger.info("Received request to run agent cycle.")
-            self.prepare_and_call_llm() # Trigger the cycle
-            return True # Event handled
+            # We need to run this async task but the handler itself is sync
+            # Use asyncio.create_task if this component is running in an async context
+            # For simplicity here, assume prepare_and_call_llm is intended to be awaited elsewhere
+            # or handled by the caller of _on_event if needed.
+            # await self.prepare_and_call_llm() # Cannot await in sync function
+            # Instead, the AgentLoopComponent should call prepare_and_call_llm
+            logger.debug("HUD processing run_agent_cycle_request (action likely deferred to AgentLoop)." )
+            return True # Acknowledge handling the request intent
             
         # No longer need agent_response_received event from outside
         # elif event_type == "agent_response_received": ... 

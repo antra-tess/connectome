@@ -147,6 +147,79 @@ class InnerSpace(Space):
                  
         logger.info(f"InnerSpace {self.id} component initialization finished.")
 
+        # Call Space init first, which adds ContainerComponent and TimelineComponent
+        super().__init__(element_id=id, name=name, description=description, **kwargs)
+
+        # Agent-specific injected dependencies
+        self._llm_provider = llm_provider
+        
+        # Core components specific to InnerSpace (or standard components it *always* uses)
+        self._tool_provider = self.add_component(ToolProvider)
+        self._element_factory = self.add_component(ElementFactoryComponent)
+        self._global_attention = self.add_component(GlobalAttentionComponent) # Placeholder
+        self._veil_producer = self.add_component(VeilProducer) # Placeholder
+        self._hud = self.add_component(HUDComponent) # Added
+        
+        # Add core tools component
+        self.add_component(CoreToolsComponent)
+        # Add messaging tools component
+        self.add_component(MessagingToolsComponent)
+        # Add history component (assuming ChatElement needs it)
+        self.add_component(HistoryComponent)
+        # Add representation component
+        self.add_component(ChatElementRepresentationComponent) 
+        
+        # Add the required Agent Loop component
+        self._agent_loop_component = self.add_component(agent_loop_component_type)
+        if not self._agent_loop_component:
+             # Log error or raise if agent loop is critical
+             logger.error(f"CRITICAL: Failed to add required AgentLoopComponent ({agent_loop_component_type.__name__}) to InnerSpace {self.id}")
+             # raise RuntimeError(f"Could not initialize AgentLoopComponent for InnerSpace {self.id}")
+             
+        # Add any extra components requested
+        if components_to_add:
+             for comp_type in components_to_add:
+                  if isinstance(comp_type, type) and issubclass(comp_type, Component):
+                       self.add_component(comp_type)
+                  else:
+                       logger.warning(f"Skipping invalid entry in components_to_add: {comp_type}")
+                       
+        # --- Inject Dependencies into Components --- 
+        # This is a simplistic approach; a DI container would be more robust.
+        # Example: Injecting llm_provider into HUDComponent if it declares it
+        if self._hud:
+            hud_injected_deps = getattr(self._hud, 'INJECTED_DEPENDENCIES', {})
+            for init_kwarg, parent_attr in hud_injected_deps.items():
+                if hasattr(self, parent_attr):
+                    if hasattr(self._hud, init_kwarg):
+                         # This assumes __init__ already handled it via kwargs, 
+                         # but we could force-setattr here if needed, though less clean.
+                         # setattr(self._hud, init_kwarg, getattr(self, parent_attr)) 
+                         logger.debug(f"Dependency '{parent_attr}' assumed injected into HUD via __init__ kwarg '{init_kwarg}'.")
+                    else:
+                         # If __init__ didn't take it, try setting attribute directly
+                         logger.warning(f"HUD declared injected dependency '{init_kwarg}' but has no matching attribute. Trying to set _' + init_kwarg)")
+                         # Attempt to set a conventional private attribute
+                         try:
+                              setattr(self._hud, f"_{init_kwarg}", getattr(self, parent_attr))
+                         except AttributeError:
+                              logger.error(f"Failed to inject dependency '{parent_attr}' into HUD component.")
+                              
+            # Inject ToolProvider if needed by HUD or AgentLoop?
+            # Example (if AgentLoop declares ToolProvider dependency):
+            # if self._agent_loop_component:
+            #     agent_loop_injected = getattr(self._agent_loop_component, 'INJECTED_DEPENDENCIES', {})
+            #     if 'tool_provider' in agent_loop_injected.values(): # Check if it *needs* tool_provider
+            #         setattr(self._agent_loop_component, '_tool_provider', self._tool_provider)
+                    
+        # --- Final Validation Step --- 
+        if not self._validate_all_component_dependencies():
+             # Handle validation failure - maybe raise an exception?
+             logger.error(f"Dependency validation failed for InnerSpace {self.id}. InnerSpace might be unstable.")
+             # raise RuntimeError(f"Dependency validation failed for InnerSpace {self.id}")
+             
+        logger.info(f"InnerSpace {self.id} initialized with {len(self._components)} components.")
+
     # Replace the entire set_outgoing_action_callback method
     def set_outgoing_action_callback(self, callback: 'OutgoingActionCallback'):
         """Sets the callback function used by components to enqueue outgoing actions."""

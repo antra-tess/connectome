@@ -68,9 +68,15 @@ class BaseElement:
         self._registry = None
         
         # Components
-        self._components: Dict[str, Any] = {}
+        self._components: Dict[str, 'Component'] = {}
         
         logger.info(f"Created element: {name} ({element_id})")
+        
+        # Note: Components are typically added by subclasses or factories *after* base init.
+        # Therefore, calling validation here might be too early. 
+        # Let's add the validation method here, but the call should likely be moved
+        # to the end of the subclass __init__ or the factory construction process.
+        # self._validate_all_component_dependencies() # <<< Tentatively place call here, but see note.
     
     def set_registry(self, registry) -> None:
         """
@@ -94,7 +100,7 @@ class BaseElement:
         """
         return self._registry
     
-    def add_component(self, component_type: Type, **kwargs) -> Optional[Any]:
+    def add_component(self, component_type: Type['Component'], **kwargs) -> Optional['Component']:
         """
         Add a component to this element.
         
@@ -107,31 +113,33 @@ class BaseElement:
         """
         # Create the component
         try:
+            # Pass self (the element) to the component constructor
             component = component_type(element=self, **kwargs)
         except Exception as e:
-            logger.error(f"Error creating component of type {component_type.__name__}: {e}")
+            logger.error(f"Error creating component of type {component_type.__name__} for {self.id}: {e}", exc_info=True)
             return None
         
         # Check if we already have a component of this type
-        for existing in self._components.values():
-            if existing.COMPONENT_TYPE == component.COMPONENT_TYPE:
-                logger.warning(f"Element {self.id} already has a component of type {component.COMPONENT_TYPE}")
-                return None
+        if self.get_component_by_type(component.COMPONENT_TYPE):
+             logger.warning(f"Element {self.id} already has a component of type {component.COMPONENT_TYPE}. Cannot add duplicate.")
+             return None
         
-        # Validate dependencies
-        if not component.validate_dependencies(self._components):
-            logger.error(f"Component {component.COMPONENT_TYPE} has unsatisfied dependencies")
-            return None
+        # REMOVED: Dependency validation during single component addition
+        # if not component.validate_dependencies(self._components): 
+        #     logger.error(f"Component {component.COMPONENT_TYPE} has unsatisfied dependencies")
+        #     return None
         
         # Initialize the component
         if not component.initialize():
             logger.error(f"Failed to initialize component {component.COMPONENT_TYPE}")
             return None
         
-        # Add to components dictionary
-        self._components[component.id] = component
+        # Add to components dictionary using component type as key for easier lookup?
+        # Or use component.id? Let's stick with component.id for now as it seems to be the current pattern elsewhere.
+        comp_id = component.id 
+        self._components[comp_id] = component
         
-        logger.debug(f"Added component {component.COMPONENT_TYPE} to element {self.id}")
+        logger.debug(f"Added component {component.COMPONENT_TYPE} ({comp_id}) to element {self.id}")
         return component
     
     def remove_component(self, component_id: str) -> bool:
@@ -164,7 +172,7 @@ class BaseElement:
         
         return True
     
-    def get_component(self, component_id: str) -> Optional[Any]:
+    def get_component(self, component_id: str) -> Optional['Component']:
         """
         Get a component by ID.
         
@@ -176,29 +184,31 @@ class BaseElement:
         """
         return self._components.get(component_id)
     
-    def get_component_by_type(self, component_type: str) -> Optional[Any]:
+    def get_component_by_type(self, component_type: str) -> Optional['Component']:
         """
         Get a component by type.
         
         Args:
-            component_type: Type of component to get
+            component_type: Type string (COMPONENT_TYPE) of component to get
             
         Returns:
-            The first component of the specified type, or None if not found
+            The first component matching the specified type, or None if not found
         """
         for component in self._components.values():
-            if component.COMPONENT_TYPE == component_type:
+            # Ensure the component instance has the attribute before checking
+            if hasattr(component, 'COMPONENT_TYPE') and component.COMPONENT_TYPE == component_type:
                 return component
-            return None
+        # Removed erroneous second return None inside the loop
+        return None # Return None only after checking all components
     
-    def get_components(self) -> Dict[str, Any]:
+    def get_components(self) -> Dict[str, 'Component']:
         """
         Get all components.
         
         Returns:
-            Dictionary of component ID to component
+            Dictionary of component ID to component instance.
         """
-        return self._components.copy()
+        return self._components
     
     def handle_event(self, event: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
         """
@@ -264,4 +274,51 @@ class BaseElement:
             if not self.remove_component(component_id):
                 success = False
         
-        return success 
+        return success
+
+    def _validate_all_component_dependencies(self) -> bool:
+        """
+        Validates dependencies for ALL attached components after they have been added.
+
+        Returns:
+            True if all components satisfy their dependencies, False otherwise.
+        """
+        logger.debug(f"Validating dependencies for all components on element {self.id}...")
+        all_valid = True
+        component_map_by_type = {comp.COMPONENT_TYPE: comp for comp in self._components.values() if hasattr(comp, 'COMPONENT_TYPE')}
+        
+        for comp_id, component in self._components.items():
+            if hasattr(component, 'DEPENDENCIES') and component.DEPENDENCIES:
+                # Check if DEPENDENCIES is a set or list
+                dependencies_list = component.DEPENDENCIES
+                if isinstance(dependencies_list, set):
+                     pass # Already a set
+                elif isinstance(dependencies_list, list):
+                     dependencies_list = set(dependencies_list) # Convert list to set for efficient lookup
+                else:
+                     logger.error(f"Component {comp_id} ({component.COMPONENT_TYPE}) has invalid DEPENDENCIES attribute (not a set or list). Skipping validation.")
+                     all_valid = False
+                     continue
+                     
+                for required_type in dependencies_list:
+                    if required_type not in component_map_by_type:
+                        logger.error(f"Dependency validation FAILED for {comp_id} ({component.COMPONENT_TYPE}): Missing required component type '{required_type}'.")
+                        all_valid = False
+                        # Optionally, raise an exception here to halt initialization immediately
+                        # raise ValueError(f"Missing dependency '{required_type}' for component {component.COMPONENT_TYPE} on element {self.id}")
+            # Check if the component has the validate_dependencies method (it should from Component base)
+            # if hasattr(component, 'validate_dependencies') and callable(component.validate_dependencies):
+            #     if not component.validate_dependencies(self._components):
+            #         # Error already logged by component.validate_dependencies
+            #         all_valid = False
+            #         # Optionally raise an exception here
+            #         # raise ValueError(f"Dependency validation failed for {component.COMPONENT_TYPE} on element {self.id}")
+            # else:
+            #     logger.warning(f"Component {comp_id} ({component.COMPONENT_TYPE}) missing validate_dependencies method.")
+
+        if all_valid:
+            logger.debug(f"All component dependencies successfully validated for element {self.id}.")
+        else:
+            logger.error(f"Dependency validation failed for one or more components on element {self.id}.")
+            
+        return all_valid 

@@ -45,13 +45,23 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
         logger.info(f"[{self.element.id}] Starting SimpleRequestResponse cycle...")
         
         # Get dependencies safely within the cycle
-        hud: Optional['HUDComponent'] = self._get_dependency("hud")
-        context_manager: Optional['ContextManagerComponent'] = self._get_dependency("context_manager")
-        tool_provider: Optional['ToolProviderComponent'] = self._get_dependency("tool_provider")
+        # hud: Optional['HUDComponent'] = self._get_dependency("hud") 
+        # context_manager: Optional['ContextManagerComponent'] = self._get_dependency("context_manager") # Removed
+        # tool_provider: Optional['ToolProviderComponent'] = self._get_dependency("tool_provider")
+        # Let's use the direct element accessors assuming they exist
+        hud = self.element.get_component_by_type("hud")
+        tool_provider = self.element.get_component_by_type("tool_provider") # ToolProviderComponent.COMPONENT_TYPE
+        history_comp = self.element.get_component_by_type("history") # HistoryComponent.COMPONENT_TYPE - Needed for context
         
         if not hud: 
              logger.error(f"[{self.element.id}] Cycle aborted: HUDComponent missing.")
              return
+        # Tool provider is needed for tool execution
+        # History component is needed for routing context
+        if not tool_provider:
+             logger.warning(f"[{self.element.id}] ToolProviderComponent missing. Tool execution will fail.")
+        if not history_comp:
+             logger.warning(f"[{self.element.id}] HistoryComponent missing. Routing context for actions might be unavailable.")
              
         # --- 1. Prepare Context and Call LLM (using HUD) --- 
         llm_response: Optional[LLMResponse] = await hud.prepare_and_call_llm()
@@ -61,32 +71,46 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
              return
              
         # --- 2. Add Assistant Response to History --- 
-        # Do this early, regardless of whether it's a tool call or final message
-        if context_manager and (llm_response.tool_calls or llm_response.content):
-             # Storing the raw response object might be too verbose; extract key info.
-             history_content = {}
-             if llm_response.content: history_content["content"] = llm_response.content
-             if llm_response.tool_calls: history_content["tool_calls"] = [tc.to_dict() for tc in llm_response.tool_calls]
-             context_manager.add_history_turn(role="assistant", content=history_content)
-        elif not context_manager:
-             logger.warning(f"[{self.element.id}] ContextManager missing, cannot add assistant response to history.")
+        # REMOVED: Direct call to context_manager.add_history_turn
+        # HistoryComponent will handle this based on outgoing action requests/events.
+        # if context_manager and (llm_response.tool_calls or llm_response.content): ...
+        # elif not context_manager: ...
              
         # --- 3. Parse LLM Response for Tool Calls --- 
         tool_calls_to_execute: List[LLMToolCall] = llm_response.tool_calls or []
         final_message_content: Optional[str] = llm_response.content
         
         # --- 4. Execute Tool Calls or Publish Final Message --- 
+        
+        # Get context for actions (needed for both tools and messages)
+        adapter_id: Optional[str] = None
+        conversation_id: Optional[str] = None
+        if history_comp:
+             conversation_id = history_comp.get_active_conversation_id()
+             # How to get adapter_id? Assume it's stored in history entry data? Or element state?
+             # For now, we might need to fetch it from the last message in the active conversation.
+             if conversation_id:
+                  active_history = history_comp.get_history(conversation_id)
+                  if active_history:
+                       last_entry_data = active_history[-1].get('data', {})
+                       adapter_id = last_entry_data.get('adapter_id') 
+             
+        if not adapter_id or not conversation_id:
+             logger.warning(f"[{self.element.id}] Could not determine adapter/conversation ID for outgoing actions from HistoryComponent.")
+             # Decide if we should abort or proceed without full context?
+             # Let's proceed but actions might fail.
+             
+        action_context = {"adapter_id": adapter_id, "conversation_id": conversation_id}
+        
         if tool_calls_to_execute:
              logger.info(f"[{self.element.id}] Executing {len(tool_calls_to_execute)} tool call(s)...")
-             # TODO: Handle multiple tool calls concurrently? For simple loop, maybe one by one.
              for tool_call in tool_calls_to_execute:
-                 # Note: LLMResponse uses LLMToolCall which has name and parameters
-                 self._execute_tool(tool_provider, tool_call.tool_name, tool_call.parameters)
-                 # TODO: Add tool results back to history? Requires tool_call_id from LLM.
+                 # Pass action_context to _execute_tool
+                 self._execute_tool(tool_provider, tool_call.tool_name, tool_call.parameters, action_context)
         elif final_message_content:
              logger.info(f"[{self.element.id}] Publishing final message...")
-             # Pass ContextManager to get routing info
-             self._publish_final_message(context_manager, final_message_content)
+             # Pass action_context instead of context_manager
+             self._publish_final_message(action_context, final_message_content)
         else:
              logger.warning(f"[{self.element.id}] LLM response had no tool calls and no content.")
              
