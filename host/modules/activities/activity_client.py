@@ -130,7 +130,8 @@ class ActivityClient:
             
             logger.debug(f"Received normalized_event from '{adapter_id}': Type={data.get('event_type')}. Enqueuing...")
             # Enqueue the *entire received data structure* onto the main loop
-            self._host_event_loop.enqueue_incoming_event(data)
+            # Pass an empty dict for timeline_context as ActivityClient doesn't determine it.
+            self._host_event_loop.enqueue_incoming_event(data, {})
             
         # --- Connect --- 
         try:

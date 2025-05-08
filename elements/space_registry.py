@@ -28,7 +28,7 @@ class SpaceRegistry:
     def __init__(self):
         self._spaces: Dict[str, Space] = {}
         self._elements: Dict[str, BaseElement] = {}
-        self._inner_space: Optional[InnerSpace] = None
+        self._agent_inner_spaces: Dict[str, InnerSpace] = {}
         # TODO: Add mapping for conversation_id/adapter_type to space_id
         self._routing_map: Dict[str, str] = {}
         logger.info("SpaceRegistry initialized.")
@@ -46,11 +46,16 @@ class SpaceRegistry:
         # TODO: Update routing map based on space properties?
         return True
         
-    def register_inner_space(self, inner_space: InnerSpace) -> bool:
-        """Specifically registers the agent's InnerSpace."""
-        if self._inner_space and self._inner_space.id != inner_space.id:
-             logger.warning(f"Replacing previously registered InnerSpace {self._inner_space.id} with {inner_space.id}")
-        self._inner_space = inner_space
+    def register_inner_space(self, inner_space: InnerSpace, agent_id: str) -> bool:
+        """Specifically registers an agent's InnerSpace."""
+        if not isinstance(inner_space, InnerSpace):
+            logger.error(f"Attempted to register non-InnerSpace object as InnerSpace: {type(inner_space)}")
+            return False
+        if agent_id in self._agent_inner_spaces and self._agent_inner_spaces[agent_id].id != inner_space.id:
+             logger.warning(f"Replacing previously registered InnerSpace for agent {agent_id} (ID: {self._agent_inner_spaces[agent_id].id}) with new InnerSpace (ID: {inner_space.id})")
+        
+        self._agent_inner_spaces[agent_id] = inner_space
+        logger.info(f"Registered InnerSpace for agent_id '{agent_id}': {inner_space.name} ({inner_space.id})")
         # Also register it as a general space/element
         return self.register_space(inner_space)
 
@@ -62,9 +67,9 @@ class SpaceRegistry:
          """Gets any registered Element (Space or Object) by its ID."""
          return self._elements.get(element_id)
          
-    def get_inner_space(self) -> Optional[InnerSpace]:
-         """Gets the registered InnerSpace."""
-         return self._inner_space
+    def get_inner_space_for_agent(self, agent_id: str) -> Optional[InnerSpace]:
+        """Gets the InnerSpace registered for a specific agent_id."""
+        return self._agent_inner_spaces.get(agent_id)
 
     def route_event(self, event_data: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
         """
@@ -85,9 +90,17 @@ class SpaceRegistry:
         if timeline_id_from_context and timeline_id_from_context in self._spaces:
             target_space_id = timeline_id_from_context
         # Example: Simple fallback to InnerSpace for now?
-        elif self._inner_space:
-            target_space_id = self._inner_space.id
-            logger.debug(f"Routing event {event_data.get('event_id')} to InnerSpace (fallback). Context: {timeline_context}")
+        # This fallback logic needs to be reconsidered in a multi-agent setup.
+        # It should probably try to route to an InnerSpace relevant to the event context
+        # or not route at all if no specific target is found.
+        # For now, if there's only one InnerSpace, it might be okay.
+        # Let's assume ExternalEventRouter will handle the primary routing decision.
+        # elif self._agent_inner_spaces: # Check if any inner spaces exist
+        #     # This is problematic: which InnerSpace to route to?
+        #     # Commenting out this general fallback for now.
+        #     # first_agent_inner_space = next(iter(self._agent_inner_spaces.values()))
+        #     # target_space_id = first_agent_inner_space.id
+        #     logger.debug(f"Routing event {event_data.get('event_id')} to an InnerSpace (fallback - needs agent context). Context: {timeline_context}")
         # ----------------------------------
 
         if target_space_id:
@@ -114,12 +127,19 @@ class SpaceRegistry:
         Returns:
             True if unregistration was successful, False otherwise
         """
-        # Cannot unregister inner space
-        if self._inner_space and space_id == self._inner_space.id:
-            logger.error(f"Cannot unregister inner space: {space_id}")
-            return False
+        # Check if the space to be unregistered is any of the agent's InnerSpaces
+        agent_id_for_this_space = None
+        for aid, inner_s in self._agent_inner_spaces.items():
+            if inner_s.id == space_id:
+                agent_id_for_this_space = aid
+                break
+        
+        if agent_id_for_this_space:
+            logger.info(f"Unregistering InnerSpace for agent {agent_id_for_this_space} (Space ID: {space_id})")
+            del self._agent_inner_spaces[agent_id_for_this_space]
+            # Continue to remove from general _spaces and _elements
             
-        # Check if the space exists
+        # Check if the space exists in the general list
         if space_id not in self._spaces:
             logger.warning(f"Space with ID {space_id} not found")
             return False
@@ -151,15 +171,15 @@ class SpaceRegistry:
     
     def is_inner_space(self, space_id: str) -> bool:
         """
-        Check if a space is the inner space.
+        Check if a space is an inner space for any registered agent.
         
         Args:
             space_id: ID of the space to check
             
         Returns:
-            True if the space is the inner space, False otherwise
+            True if the space is an inner space, False otherwise
         """
-        return self._inner_space is not None and space_id == self._inner_space.id
+        return any(inner_s.id == space_id for inner_s in self._agent_inner_spaces.values())
     
     def route_message(self, event_data: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
         """
@@ -207,32 +227,21 @@ class SpaceRegistry:
                         break
                         
             # If not routed to a specific space, route to inner space
-            if not routed and self._inner_space:
-                self._inner_space.receive_event(event_data, timeline_context)
-                routed = True
+            # This needs to be agent-specific now.
+            # The ExternalEventRouter will handle routing to the correct InnerSpace.
+            # This general fallback is problematic.
+            # if not routed and self._agent_inner_spaces:
+            #     # Which InnerSpace? For now, this method might be deprecated for external routing.
+            #     # first_agent_inner_space = next(iter(self._agent_inner_spaces.values()))
+            #     # first_agent_inner_space.receive_event(event_data, timeline_context)
+            #     # routed = True
+            #     logger.warning("SpaceRegistry.route_message fallback to InnerSpace is ambiguous in multi-agent setup.")
                 
             return routed
             
         except Exception as e:
             logger.error(f"Error routing message: {e}")
             return False
-    
-    def route_to_inner_space(self, event_data: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
-        """
-        Route a message specifically to the inner space.
-        
-        Args:
-            event_data: Event data to route
-            timeline_context: Timeline context for the event
-            
-        Returns:
-            True if the message was successfully routed, False otherwise
-        """
-        if self._inner_space is None:
-            logger.error("Cannot route to inner space: No inner space registered")
-            return False
-            
-        return self._inner_space.update_state(event_data, timeline_context)
     
     def update_space_state(self, space_id: str, event_data: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
         """
@@ -529,3 +538,45 @@ class SpaceRegistry:
         else:
             logger.warning("No socket client available for message propagation")
             return False
+
+    def get_or_create_shared_space(self, identifier: str, name: Optional[str] = None, description: Optional[str] = "Shared Space", metadata: Optional[Dict[str, Any]] = None) -> Optional[Space]:
+        """
+        Gets a SharedSpace by its identifier, or creates it if it doesn't exist.
+        A SharedSpace is an instance of the base Space class.
+
+        Args:
+            identifier: Unique identifier for the SharedSpace.
+            name: Human-readable name for the SharedSpace if created. Defaults to identifier.
+            description: Description for the SharedSpace if created.
+            metadata: Optional additional metadata for the space if created.
+
+        Returns:
+            The existing or newly created Space instance, or None if creation failed.
+        """
+        existing_space = self.get_space(identifier)
+        if existing_space:
+            logger.debug(f"Found existing SharedSpace with identifier: {identifier}")
+            return existing_space
+
+        logger.info(f"SharedSpace with identifier '{identifier}' not found. Creating new one.")
+        space_name = name if name else identifier
+        
+        try:
+            # Assuming elements.elements.space.Space is the correct class to instantiate
+            # and its constructor matches this.
+            # We need to import Space from elements.elements.space
+            new_shared_space = Space(element_id=identifier, name=space_name, description=description)
+            # You might want to pass metadata to the Space constructor if it accepts it,
+            # or set it via a method after creation.
+            # e.g., if new_shared_space.set_metadata(metadata)
+
+            if self.register_space(new_shared_space):
+                logger.info(f"Successfully created and registered SharedSpace: {space_name} ({identifier})")
+                return new_shared_space
+            else:
+                # register_space should log its own errors
+                logger.error(f"Failed to register newly created SharedSpace: {space_name} ({identifier})")
+                return None
+        except Exception as e:
+            logger.error(f"Exception during SharedSpace creation for identifier '{identifier}': {e}", exc_info=True)
+            return None

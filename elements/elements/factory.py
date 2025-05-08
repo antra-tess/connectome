@@ -297,8 +297,7 @@ if __name__ == "__main__":
         "HistoryComponent": {
             "max_entries": 50 # Override value
         }
-        # Can add overrides for other components here, e.g.:
-        # "PublisherComponent": { "batch_size": 5 }
+        # Can add overrides for other components here
     }
     chat_element_override = factory.create_element(
         element_id="chat_2",

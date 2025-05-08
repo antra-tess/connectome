@@ -4,6 +4,7 @@ Special space element using component architecture, representing the agent's sub
 """
 
 import logging
+import time
 from typing import Dict, Any, Optional, List, Type, Callable
 import uuid
 
@@ -14,7 +15,7 @@ from .factory import ElementFactory
 # Import LLM Provider for type hint
 from ..llm.provider_interface import LLMProvider
 from .components import ( # Import necessary components
-    ToolProvider, 
+    ToolProviderComponent, 
     VeilProducer, 
     ElementFactoryComponent,
     GlobalAttentionComponent,
@@ -27,6 +28,8 @@ from .components import ( # Import necessary components
     CoreToolsComponent, # Added
     MessagingToolsComponent, # New
 )
+# Import BaseAgentLoopComponent
+from .agent_loop import BaseAgentLoopComponent, SimpleRequestResponseLoopComponent
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -36,8 +39,8 @@ if TYPE_CHECKING:
     from llm.provider_interface import LLMProviderInterface
     from host.event_loop import OutgoingActionCallback
     # Import Base from agent_loop, Simple from simple_loop
-    from .agent_loop import BaseAgentLoopComponent 
-    from .simple_loop import SimpleRequestResponseLoopComponent
+    # from .agent_loop import BaseAgentLoopComponent 
+    # from .simple_loop import SimpleRequestResponseLoopComponent # Already imported above
 
 class InnerSpace(Space):
     """
@@ -47,7 +50,7 @@ class InnerSpace(Space):
     Inherits standard Space components (Container, Timeline) and adds:
     - `ElementFactoryComponent`: To create new elements via prefabs.
     - `GlobalAttentionComponent`: To track attention needs (placeholder).
-    - `ToolProvider`: For InnerSpace specific tools (like mounting).
+    - `ToolProviderComponent`: For InnerSpace specific tools (like mounting).
     - `VeilProducer`: For representation.
     
     Crucially, this will later host components moved from the Shell (HUD, ContextManager).
@@ -65,15 +68,16 @@ class InnerSpace(Space):
         id: str,
         name: str,
         llm_provider: 'LLMProviderInterface',
-        agent_loop_component_type: Type['BaseAgentLoopComponent'] = SimpleRequestResponseLoopComponent,
+        agent_loop_component_type: Type[BaseAgentLoopComponent] = SimpleRequestResponseLoopComponent,
         components_to_add: Optional[List[Type[Component]]] = None, # Allow adding extra components
+        outgoing_action_callback: Optional['OutgoingActionCallback'] = None, # Added for convenience
         **kwargs # Pass other BaseElement args like description
     ):
         # Call Space init first, which adds ContainerComponent and TimelineComponent
         super().__init__(id=id, name=name, **kwargs)
         
         self._llm_provider = llm_provider
-        self._outgoing_action_callback: Optional['OutgoingActionCallback'] = None
+        self._outgoing_action_callback: Optional['OutgoingActionCallback'] = outgoing_action_callback
         self._agent_loop_component_type = agent_loop_component_type
         
         logger.info(f"Initializing InnerSpace: {name} ({id}) with Agent Loop: {agent_loop_component_type.__name__}")
@@ -82,51 +86,97 @@ class InnerSpace(Space):
         # Components automatically added by BaseElement/Space: ContainerComponent, TimelineComponent
         # Additional core components specific to InnerSpace:
         inner_space_core_component_classes = [
-            # HistoryComponent, # Assuming History is needed, needs creation
-            ToolProvider, # Manages tool definitions
-            # VeilProducer, # For representing InnerSpace state (add when ready)
-            # ElementFactoryComponent, # For creating new elements via tools
-            GlobalAttentionComponent, # Manages agent focus
-            ContextManagerComponent, # Builds context, manages history
-            HUDComponent, # Handles LLM interaction formatting
-            CoreToolsComponent, # For future internal agent tools
-            MessagingToolsComponent, # For external communication tools (New)
-            self._agent_loop_component_type # The chosen reasoning loop
+            ToolProviderComponent, 
+            GlobalAttentionComponent, 
+            ContextManagerComponent, 
+            HUDComponent, 
+            CoreToolsComponent, 
+            MessagingToolsComponent,
+            # The chosen agent_loop_component_type will be added specifically to ensure it's captured
         ]
 
         # Combine with any extra components passed in constructor
-        component_classes_to_instantiate = inner_space_core_component_classes
+        component_classes_to_instantiate = list(inner_space_core_component_classes) # Create a mutable copy
         if components_to_add:
              for comp_cls in components_to_add:
-                  if not any(issubclass(comp_cls, existing_cls) or issubclass(existing_cls, comp_cls) 
-                             for existing_cls in component_classes_to_instantiate + [ContainerComponent, TimelineComponent]):
-                      component_classes_to_instantiate.append(comp_cls)
+                  # Avoid adding duplicates or already foundational components if accidentally passed
+                  is_already_present_or_base = any(
+                      existing_cls == comp_cls or issubclass(comp_cls, existing_cls) 
+                      for existing_cls in [ContainerComponent, TimelineComponent] + inner_space_core_component_classes
+                  )
+                  if not is_already_present_or_base:
+                      is_derived_from_present = any(issubclass(existing_cls, comp_cls) 
+                                                for existing_cls in [ContainerComponent, TimelineComponent] + inner_space_core_component_classes)
+                      if not is_derived_from_present:
+                           component_classes_to_instantiate.append(comp_cls)
 
         # --- Instantiate and Add Components --- 
-        available_dependencies = {
-            '_llm_provider': self._llm_provider,
+        # Dependencies that components might need injected.
+        # Key: kwarg name in component's __init__; Value: attribute name on InnerSpace instance.
+        available_dependencies_map = {
+            'llm_provider': '_llm_provider',
+            'parent_inner_space': self, # Allow components to get their parent InnerSpace
+            'outgoing_action_callback': '_outgoing_action_callback'
         }
+
         for CompCls in component_classes_to_instantiate:
             comp_kwargs = {}
             requirements = getattr(CompCls, 'INJECTED_DEPENDENCIES', {})
-            for kwarg_name, source_attr_name in requirements.items():
-                if source_attr_name in available_dependencies:
-                    dependency_instance = available_dependencies[source_attr_name]
+            for kwarg_name, source_attr_name_or_self in requirements.items():
+                if source_attr_name_or_self == self: # Special case for injecting self
+                    comp_kwargs[kwarg_name] = self
+                elif isinstance(source_attr_name_or_self, str) and hasattr(self, source_attr_name_or_self):
+                    dependency_instance = getattr(self, source_attr_name_or_self)
                     if dependency_instance is not None:
                         comp_kwargs[kwarg_name] = dependency_instance
-                        # logger.debug(...) # Keep logging concise for now
                     else:
-                        logger.error(f"{CompCls.__name__} requires injected kwarg '{kwarg_name}' but source '{source_attr_name}' is None.")
+                        logger.error(f"{CompCls.__name__} requires injected kwarg '{kwarg_name}' but InnerSpace attribute '{source_attr_name_or_self}' is None.")
+                elif source_attr_name_or_self in available_dependencies_map: # Check map for direct attributes
+                     attr_name_on_self = available_dependencies_map[source_attr_name_or_self]
+                     if hasattr(self, attr_name_on_self):
+                          dependency_instance = getattr(self, attr_name_on_self)
+                          if dependency_instance is not None:
+                               comp_kwargs[kwarg_name] = dependency_instance
+                          else:
+                               logger.error(f"{CompCls.__name__} requires injected kwarg '{kwarg_name}' but InnerSpace attribute '{attr_name_on_self}' is None.")
+                     else:
+                          logger.error(f"{CompCls.__name__} requires injected kwarg '{kwarg_name}', mapped to InnerSpace attribute '{attr_name_on_self}', which was not found.")
                 else:
-                    logger.error(f"{CompCls.__name__} requires injected kwarg '{kwarg_name}' but source '{source_attr_name}' unknown.")
+                    logger.error(f"{CompCls.__name__} requires injected kwarg '{kwarg_name}' but source '{source_attr_name_or_self}' is unknown or not found on InnerSpace.")
             try:
                 self.add_component(CompCls(**comp_kwargs)) 
             except Exception as e:
                  logger.error(f"Error instantiating component {CompCls.__name__} for InnerSpace {self.id}: {e}", exc_info=True)
-                 raise RuntimeError(f"Failed to instantiate component {CompCls.__name__}") from e
-                 
+                 # Optionally re-raise if a core component fails
+
+        # Instantiate and add the AgentLoopComponent specifically
+        # It might also have INJECTED_DEPENDENCIES
+        agent_loop_kwargs = {}
+        agent_loop_requirements = getattr(self._agent_loop_component_type, 'INJECTED_DEPENDENCIES', {})
+        for kwarg_name, source_attr_name_or_self in agent_loop_requirements.items():
+            if source_attr_name_or_self == self:
+                agent_loop_kwargs[kwarg_name] = self
+            elif isinstance(source_attr_name_or_self, str) and hasattr(self, source_attr_name_or_self):
+                dependency_instance = getattr(self, source_attr_name_or_self)
+                if dependency_instance is not None: agent_loop_kwargs[kwarg_name] = dependency_instance
+                else: logger.error(f"{self._agent_loop_component_type.__name__} needs '{kwarg_name}' from '{source_attr_name_or_self}' on InnerSpace, but it's None.")
+            elif source_attr_name_or_self in available_dependencies_map:
+                 attr_name_on_self = available_dependencies_map[source_attr_name_or_self]
+                 if hasattr(self, attr_name_on_self):
+                      dependency_instance = getattr(self, attr_name_on_self)
+                      if dependency_instance is not None: agent_loop_kwargs[kwarg_name] = dependency_instance
+                      else: logger.error(f"{self._agent_loop_component_type.__name__} needs '{kwarg_name}' from '{attr_name_on_self}' on InnerSpace, but it's None.")
+                 else: logger.error(f"{self._agent_loop_component_type.__name__} requires kwarg '{kwarg_name}' mapped to '{attr_name_on_self}' on InnerSpace, not found.")
+            else:
+                logger.error(f"{self._agent_loop_component_type.__name__} requires injected kwarg '{kwarg_name}' but source '{source_attr_name_or_self}' is unknown.")
+        
+        self._agent_loop_component_instance = self.add_component(self._agent_loop_component_type(**agent_loop_kwargs))
+        if not self._agent_loop_component_instance:
+            logger.critical(f"CRITICAL: Failed to add AgentLoopComponent ({self._agent_loop_component_type.__name__}) to InnerSpace {self.id}")
+            # raise RuntimeError(f"Could not initialize AgentLoopComponent for InnerSpace {self.id}")
+
         # --- Register Tools (After components are added) --- 
-        tool_provider_instance = self.get_component(ToolProvider)
+        tool_provider_instance = self.get_component(ToolProviderComponent)
         if tool_provider_instance:
             logger.info(f"Registering tools...")
             # Register Core Tools (if any)
@@ -142,7 +192,7 @@ class InnerSpace(Space):
             else: logger.warning("MessagingToolsComponent not found, skipping its tool registration.")
                  
         else:
-             logger.error("Cannot register tools: ToolProvider component failed to initialize or is missing.")
+             logger.error("Cannot register tools: ToolProviderComponent failed to initialize or is missing.")
         # ---------------------------
                  
         logger.info(f"InnerSpace {self.id} component initialization finished.")
@@ -154,7 +204,7 @@ class InnerSpace(Space):
         self._llm_provider = llm_provider
         
         # Core components specific to InnerSpace (or standard components it *always* uses)
-        self._tool_provider = self.add_component(ToolProvider)
+        self._tool_provider = self.add_component(ToolProviderComponent)
         self._element_factory = self.add_component(ElementFactoryComponent)
         self._global_attention = self.add_component(GlobalAttentionComponent) # Placeholder
         self._veil_producer = self.add_component(VeilProducer) # Placeholder
@@ -265,7 +315,7 @@ class InnerSpace(Space):
 
     # --- Tool Registration --- 
     def _register_inner_space_tools(self) -> None:
-        """Register tools specific to inner space using ToolProvider."""
+        """Register tools specific to inner space using ToolProviderComponent."""
         
         @self._tool_provider.register_tool(
             name="create_and_mount_element",
@@ -445,7 +495,7 @@ class InnerSpace(Space):
                   
         # --- Action on InnerSpace itself or its directly mounted elements --- 
         if target_space_id == self.id:
-             # Use the inherited Space.execute_action_on_element which uses ToolProvider
+             # Use the inherited Space.execute_action_on_element which uses ToolProviderComponent
              # This correctly handles actions targeted at the InnerSpace itself (element_id == self.id)
              # or elements directly mounted within it.
              return super().execute_action_on_element(element_id, action_name, parameters)
@@ -781,16 +831,18 @@ class InnerSpace(Space):
          """Returns the HUD component instance."""
          return self.get_component(HUDComponent) # Use base class getter 
 
-    def get_agent_loop_component(self) -> Optional['BaseAgentLoopComponent']:
+    def get_agent_loop_component(self) -> Optional[BaseAgentLoopComponent]:
          """Convenience method to get the active AgentLoop component."""
+         # Return the instance captured during init
+         if hasattr(self, '_agent_loop_component_instance') and isinstance(self._agent_loop_component_instance, BaseAgentLoopComponent):
+             return self._agent_loop_component_instance
+         # Fallback scan if not captured (should not be necessary with current init)
          for comp in self.get_components().values():
               if isinstance(comp, BaseAgentLoopComponent):
+                   self._agent_loop_component_instance = comp # Cache it for next time
                    return comp
+         logger.warning(f"No AgentLoopComponent found in InnerSpace {self.id}")
          return None
-
-    def get_hud(self) -> Optional[HUDComponent]:
-        """Convenience method to get the HUD component."""
-        return self.get_component(HUDComponent)
 
     # Override receive_event if InnerSpace needs specific handling before components
     # def receive_event(self, event_data: Dict[str, Any], timeline_context: Dict[str, Any]):

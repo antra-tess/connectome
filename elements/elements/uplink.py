@@ -9,7 +9,7 @@ import uuid
 import time
 
 from .space import Space # Inherits Space functionality (Container, Timeline)
-from .components import ToolProvider, VeilProducer
+from .components import ToolProviderComponent, VeilProducer
 from .components.uplink import UplinkConnectionComponent, RemoteStateCacheComponent
 
 # Configure logging
@@ -25,7 +25,7 @@ class UplinkProxy(Space):
     Adds components for:
     - Uplink connection management (`UplinkConnectionComponent`)
     - Remote state caching (`RemoteStateCacheComponent`)
-    - Uplink-specific tools (`ToolProvider`)
+    - Uplink-specific tools (`ToolProviderComponent`)
     - Representation (`VeilProducer`)
     """
     
@@ -75,9 +75,9 @@ class UplinkProxy(Space):
         if not self._cache_comp:
              logger.error(f"Failed to add RemoteStateCacheComponent to UplinkProxy {element_id}")
 
-        self._tool_provider = self.add_component(ToolProvider)
+        self._tool_provider = self.add_component(ToolProviderComponent)
         if not self._tool_provider:
-             logger.error(f"Failed to add ToolProvider component to UplinkProxy {element_id}")
+             logger.error(f"Failed to add ToolProviderComponent component to UplinkProxy {element_id}")
         else:
              self._register_uplink_tools() # Register tools if provider exists
              
@@ -92,9 +92,9 @@ class UplinkProxy(Space):
     
     # --- Tool Registration --- 
     def _register_uplink_tools(self) -> None:
-        """Register tools specific to uplink proxies using ToolProvider."""
+        """Register tools specific to uplink proxies using ToolProviderComponent."""
         if not self._tool_provider:
-             logger.warning(f"Cannot register uplink tools for {self.id}, ToolProvider missing.")
+             logger.warning(f"Cannot register uplink tools for {self.id}, ToolProviderComponent missing.")
              return
         
         @self._tool_provider.register_tool(
