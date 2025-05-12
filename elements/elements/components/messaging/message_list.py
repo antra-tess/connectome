@@ -97,7 +97,8 @@ class MessageListComponent(Component):
             # Add more fields as needed: reactions, read_status, attachments, is_edited etc.
             'is_edited': False,
             'reactions': {},
-            'read_by': []
+            'read_by': [],
+            'attachments': message_data.get('attachments', []) # Store attachments
         }
 
         self._state['_messages'].append(new_message)

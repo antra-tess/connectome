@@ -296,11 +296,13 @@ class MessageActionHandler(Component):
                  return {"success": False, "error": f"Error dispatching remove reaction request: {e}"}
 
     # --- Helper to get context --- (Could be improved)
-    def _get_message_context(self) -> Tuple[Optional[str], Optional[str]]:
+    def _get_message_context(self, use_external_conversation_id: Optional[str] = None) -> Dict[str, Any]:
         """Helper to determine adapter_id and conversation_id based on owner/parent context."""
         adapter_id = None
         conversation_id = None
         try:
+            if use_external_conversation_id:
+                conversation_id = use_external_conversation_id
             if hasattr(self.owner, 'parent') and self.owner.parent:
                 parent_space = self.owner.parent
                 if hasattr(parent_space, 'IS_INNER_SPACE') and parent_space.IS_INNER_SPACE:
@@ -313,12 +315,12 @@ class MessageActionHandler(Component):
                         conversation_id = parent_space.metadata.get('external_channel_id')
             if not adapter_id or not conversation_id:
                 logger.warning(f"[{self.owner.id}] Failed to determine valid message context (adapter: {adapter_id}, conversation: {conversation_id})")
-                return None, None
+                return {"success": False, "error": f"Failed to determine adapter context for conversation {conversation_id}"}
         except Exception as e:
             logger.error(f"[{self.owner.id}] Error determining message context: {e}", exc_info=True)
-            return None, None
+            return {"success": False, "error": f"Error determining message context: {e}"}
             
-        return adapter_id, conversation_id
+        return {"success": True, "adapter_id": adapter_id, "conversation_id": conversation_id}
         
     def handle_fetch_history(self, 
                              conversation_id: str,
@@ -369,5 +371,64 @@ class MessageActionHandler(Component):
         }
         
         return self._dispatch_action("fetch_history", payload, calling_context)
+
+    def handle_get_attachment(self, 
+                              attachment_id: str,
+                              conversation_id: Optional[str] = None, # Optional, try context first
+                              message_external_id: Optional[str] = None, # Optional, for context
+                              calling_context: Dict[str, Any] = None):
+        """
+        Tool to request the content of a specific attachment from the adapter.
+
+        Args:
+            attachment_id: The unique ID of the attachment to fetch (required).
+            conversation_id: Optional external ID of the conversation (if context is ambiguous).
+            message_external_id: Optional external ID of the message the attachment belongs to (for context).
+            calling_context: Context from the loop component calling the tool.
+        
+        Returns:
+            Result of the action dispatch (e.g., confirmation or error).
+        """
+        if not calling_context:
+            logger.warning(f"[{self.owner.id}] handle_get_attachment called without calling_context.")
+            calling_context = {}
+        if not attachment_id:
+            return { "status": "error", "message": "attachment_id is required."}
+
+        # --- Determine Context (Adapter ID & Conversation ID) ---
+        adapter_id = None
+        conv_id_to_use = conversation_id # Prioritize explicitly passed ID
+        
+        if not conv_id_to_use:
+            # If not passed, try to get from context
+            context_result = self._get_message_context()
+            if not context_result['success']:
+                logger.error(f"[{self.owner.id}] Failed to get message context for handle_get_attachment: {context_result['error']}")
+                return { "status": "error", "message": f"Failed to determine adapter context for attachment {attachment_id}" }
+            adapter_id = context_result['adapter_id']
+            conv_id_to_use = context_result['conversation_id']
+        else:
+            # If conv_id was passed, we still need the adapter_id from context
+            context_result = self._get_message_context(use_external_conversation_id=conv_id_to_use)
+            if not context_result['success']:
+                logger.error(f"[{self.owner.id}] Failed to get adapter context for handle_get_attachment (conv_id provided): {context_result['error']}")
+                return { "status": "error", "message": f"Failed to determine adapter context for conversation {conv_id_to_use}" }
+            adapter_id = context_result['adapter_id']
+        
+        if not adapter_id or not conv_id_to_use:
+            return { "status": "error", "message": f"Could not determine adapter_id ({adapter_id}) or conversation_id ({conv_id_to_use}) for getting attachment."}
+
+        logger.info(f"[{self.owner.id}] Preparing get_attachment action for adapter '{adapter_id}', conv '{conv_id_to_use}', attachment '{attachment_id}'.")
+
+        payload = {
+            "adapter_id": adapter_id,
+            "conversation_id": conv_id_to_use,
+            "attachment_id": attachment_id,
+            "message_external_id": message_external_id, # Pass along if provided
+            "requesting_element_id": self.owner.id, 
+            "calling_loop_id": calling_context.get('loop_component_id')
+        }
+        
+        return self._dispatch_action("get_attachment", payload, calling_context)
 
     # --- Register other tools as needed ---

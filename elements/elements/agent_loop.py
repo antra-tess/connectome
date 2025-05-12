@@ -36,11 +36,12 @@ class BaseAgentLoopComponent(Component):
         'parent_inner_space': 'self' 
     }
 
-    def __init__(self, element_id: str, name: str, parent_inner_space: 'InnerSpace', **kwargs):
+    def __init__(self, element_id: str, name: str, parent_inner_space: 'InnerSpace', system_prompt_template: Optional[str] = None, **kwargs):
         super().__init__(element_id, name, **kwargs)
         if not parent_inner_space: # Should be guaranteed by InnerSpace's injection
             raise ValueError("BaseAgentLoopComponent requires a parent_inner_space instance.")
         self.parent_inner_space: 'InnerSpace' = parent_inner_space
+        self._system_prompt_template = system_prompt_template or "You are AI assistant '{agent_name}'. Be helpful." # Default fallback
         
         # Convenience accessors, assuming parent_inner_space is correctly typed and populated
         self._llm_provider: Optional['LLMProvider'] = self.parent_inner_space._llm_provider
@@ -100,8 +101,8 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
     """
     COMPONENT_TYPE = "SimpleRequestResponseLoopComponent"
 
-    def __init__(self, element_id: str, name: str, parent_inner_space: 'InnerSpace', **kwargs):
-        super().__init__(element_id, name, parent_inner_space, **kwargs)
+    def __init__(self, element_id: str, name: str, parent_inner_space: 'InnerSpace', system_prompt_template: Optional[str] = None, **kwargs):
+        super().__init__(element_id, name, parent_inner_space, system_prompt_template=system_prompt_template, **kwargs)
         # Additional initialization specific to this loop type, if any.
 
     async def trigger_cycle(self):
@@ -187,7 +188,14 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
 
             # 3. Send context and aggregated tools to LLM
             logger.debug(f"{self.name} ({self.id}): Sending context and tools to LLM...")
-            messages = [LLMMessage(role="user", content=llm_context_string)]
+            
+            # Format the system prompt
+            formatted_system_prompt = self._system_prompt_template.format(agent_name=self.parent_inner_space.name)
+            
+            messages = [
+                LLMMessage(role="system", content=formatted_system_prompt),
+                LLMMessage(role="user", content=llm_context_string)
+            ]
             llm_response_obj = llm_provider.complete(messages=messages, tools=aggregated_tools)
             
             if not llm_response_obj:
@@ -322,8 +330,8 @@ class MultiStepToolLoopComponent(BaseAgentLoopComponent):
     # New event for structured tool call dispatch
     EVENT_TYPE_STRUCTURED_TOOL_ACTION_DISPATCHED = "structured_tool_action_dispatched"
 
-    def __init__(self, element_id: str, name: str, parent_inner_space: 'InnerSpace', **kwargs):
-        super().__init__(element_id, name, parent_inner_space, **kwargs)
+    def __init__(self, element_id: str, name: str, parent_inner_space: 'InnerSpace', system_prompt_template: Optional[str] = None, **kwargs):
+        super().__init__(element_id, name, parent_inner_space, system_prompt_template=system_prompt_template, **kwargs)
         logger.info(f"{self.COMPONENT_TYPE} '{self.name}' ({self.id}) initialized.")
 
     def _determine_stage(self, last_relevant_event: Optional[Dict[str, Any]]) -> str:
@@ -331,10 +339,15 @@ class MultiStepToolLoopComponent(BaseAgentLoopComponent):
         if not last_relevant_event:
             return "initial_request" # No prior relevant event found
         
-        event_type = last_relevant_event.get("payload", {}).get("event_type") # Look inside payload
-        event_data = last_relevant_event.get("payload", {}).get("data", {})
+        outer_payload = last_relevant_event.get("payload", {})
+        event_type = outer_payload.get("event_type") # Get type from outer payload
+        # Access data from the *inner* payload where MultiStepLoop stores it
+        inner_payload = outer_payload.get("payload", {})
+        event_data = inner_payload.get("data", {}) 
 
         if event_type == self.EVENT_TYPE_TOOL_RESULT_RECEIVED:
+             # Assuming tool results also follow the inner payload structure
+             # We might need to adjust if tool result events have a different shape
              return "tool_result_received" # Ready to process the result
         elif event_type == self.EVENT_TYPE_STRUCTURED_TOOL_ACTION_DISPATCHED:
              return "waiting_for_tool_result"
@@ -371,17 +384,17 @@ class MultiStepToolLoopComponent(BaseAgentLoopComponent):
             return
 
         try:
-            # --- 1. Analyze Recent History to Determine Current State --- 
+            # --- 1. Analyze Recent History to Determine Current State ---
             relevant_event_types = [
                  self.EVENT_TYPE_TOOL_RESULT_RECEIVED,
                  self.EVENT_TYPE_STRUCTURED_TOOL_ACTION_DISPATCHED,
                  self.EVENT_TYPE_LLM_RESPONSE_PROCESSED,
                  self.EVENT_TYPE_AGENT_CONTEXT_GENERATED,
-                 # Exclude legacy TOOL_ACTION_DISPATCHED for stage determination?
             ]
+            # Corrected filter criteria to point to the actual data locations
             filter_criteria = {
-                 "payload.data.loop_component_id": self.id,
-                 "payload.event_type__in": relevant_event_types
+                 "payload.payload.data.loop_component_id": self.id, # Points to inner payload's data
+                 "payload.event_type__in": relevant_event_types # Points to outer payload's event_type
             }
             try:
                  last_relevant_event = timeline_comp.get_last_relevant_event(filter_criteria=filter_criteria)
@@ -446,7 +459,14 @@ class MultiStepToolLoopComponent(BaseAgentLoopComponent):
 
                 # Call LLM with aggregated tools
                 logger.debug(f"Calling LLM for stage '{current_stage}'...")
-                messages = [LLMMessage(role="user", content=context_string)]
+                
+                # Format the system prompt
+                formatted_system_prompt = self._system_prompt_template.format(agent_name=self.parent_inner_space.name)
+                
+                messages = [
+                    LLMMessage(role="system", content=formatted_system_prompt),
+                    LLMMessage(role="user", content=context_string)
+                ]
                 llm_response_obj = llm_provider.complete(messages=messages, tools=aggregated_tools)
                 if not llm_response_obj: logger.warning(f"LLM returned no response object."); return
 

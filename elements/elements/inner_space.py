@@ -76,6 +76,7 @@ class InnerSpace(Space):
         agent_id: str,
         llm_provider: 'LLMProviderInterface',
         agent_loop_component_type: Type[BaseAgentLoopComponent] = MultiStepToolLoopComponent,
+        system_prompt_template: Optional[str] = None,
         outgoing_action_callback: Optional['OutgoingActionCallback'] = None,
         space_registry: Optional['SpaceRegistry'] = None,
         mark_agent_for_cycle_callback: Optional[MarkAgentForCycleCallable] = None,
@@ -92,6 +93,7 @@ class InnerSpace(Space):
             agent_id: The unique ID of the agent this InnerSpace belongs to.
             llm_provider: Interface to the LLM powering the agent
             agent_loop_component_type: Type of AgentLoopComponent to use
+            system_prompt_template: Optional system prompt template for the agent
             outgoing_action_callback: Callback function for sending actions to external systems
             space_registry: Reference to the SpaceRegistry instance
             mark_agent_for_cycle_callback: Callback to HostEventLoop.mark_agent_for_cycle.
@@ -107,6 +109,7 @@ class InnerSpace(Space):
         self._outgoing_action_callback = outgoing_action_callback
         self._space_registry = space_registry
         self._mark_agent_for_cycle = mark_agent_for_cycle_callback
+        self._system_prompt_template = system_prompt_template
         
         # Initialize component references (will be populated during initialization)
         self._tool_provider = None
@@ -175,6 +178,10 @@ class InnerSpace(Space):
                 elif dependency == 'outgoing_action_callback':
                     agent_loop_kwargs[kwarg] = outgoing_action_callback
                 # Handle other possible dependencies as needed
+        
+        # Pass the system prompt template to the agent loop constructor
+        if self._system_prompt_template:
+             agent_loop_kwargs['system_prompt_template'] = self._system_prompt_template
         
         # Add the agent loop component
         self._agent_loop = self.add_component(agent_loop_component_type, **agent_loop_kwargs)
@@ -591,4 +598,4 @@ class InnerSpace(Space):
                 element.remote_space_id == remote_space_id and 
                 callable(getattr(element, 'get_connection_component', None))):
                 return element
-        return None
+            return None

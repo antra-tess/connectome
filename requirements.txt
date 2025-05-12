@@ -1,24 +1,20 @@
 # Core dependencies
-python-socketio[client,asyncio_client]>=5.10.0  # For Socket.IO client and server
+python-socketio>=5.10.0                        # For Socket.IO client and server
 python-dotenv>=1.0.0                           # For environment variable management
 aiohttp>=3.9.0                                 # Async HTTP client/server
-pydantic>=2.0.0                                # Data validation and settings management
-jsonschema>=4.17.3                             # JSON Schema validation
-requests>=2.28.2                               # HTTP client for synchronous requests
+pydantic>=2.0.0                                # Data validation
+pydantic-settings>=2.0.0                       # Settings management with Pydantic
+asyncio>=3.4.3                                 # Asynchronous I/O
 
 # LLM Providers
 openai>=1.0.0                                  # For OpenAI API
-anthropic>=0.20.0                              # For Anthropic Claude API
 litellm>=1.0.0                                 # For model interaction abstraction
 tiktoken>=0.5.0                                # For token counting (used by context manager)
 
-# Content Processing and Formatting
-beautifulsoup4>=4.12.0                         # For HTML parsing
-html2text>=2020.1.16                           # For HTML to text conversion
-trafilatura>=1.6.0                             # For web content extraction
-readability-lxml>=0.8.1                        # For web content readability processing
-markdownify>=0.11.0                            # For Markdown formatting
-PyYAML>=6.0                                    # For YAML file handling (used in factory.py)
+# Web and HTTP
+requests>=2.28.2                               # HTTP client for synchronous requests
+jsonschema>=4.17.3                             # JSON Schema validation
+PyYAML>=6.0                                    # For YAML file handling
 
 # Testing
 pytest>=7.0.0                                  # For unit testing
@@ -26,4 +22,4 @@ pytest-mock>=3.10.0                            # For mocking in tests
 pytest-asyncio>=0.20.0                         # For async test support
 
 # Optional - Redis for storage (if using Redis storage backend)
-# redis>=4.5.4 
+# redis>=4.5.4

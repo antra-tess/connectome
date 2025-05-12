@@ -176,53 +176,83 @@ class ActivityClient:
         async def handle_request_success(raw_payload: Dict[str, Any]):
             """Handles generic success responses from the adapter API."""
             if not isinstance(raw_payload, dict):
-                 logger.warning(f"Received non-dict request_success from {adapter_id}: {raw_payload}")
+                 logger.warning(f"Received non-dict request_success from '{adapter_id}': {raw_payload}")
                  return
             
-            request_type = raw_payload.get("request_type")
-            status = raw_payload.get("status") # Should be "success"
-            data = raw_payload.get("data")
+            request_type = raw_payload.get('request_type')
+            status = raw_payload.get('status') # Should be "success"
+            data = raw_payload.get('data')
 
-            logger.debug(f"Received request_success from {adapter_id}. Type: {request_type}, Status: {status}, Data keys: {list(data.keys()) if isinstance(data, dict) else None}")
+            logger.debug(f"Received request_success from '{adapter_id}'. Type: {request_type}, Status: {status}, Data keys: {list(data.keys()) if isinstance(data, dict) else None}")
 
             if status != "success":
-                logger.warning(f"Received request_success event from {adapter_id} but status was not success: {status}")
+                logger.warning(f"Received request_success event from '{adapter_id}' but status was not 'success': {status}")
                 # Optionally handle non-success statuses if they use this event type
 
-            # --- Check if it"s a response to fetch_history ---
+            # --- Check if it's a response to fetch_history ---
             if request_type == "history" and isinstance(data, dict):
-                conversation_id = data.get("conversation_id")
-                messages = data.get("messages") # List of message dicts
+                conversation_id = data.get('conversation_id')
+                messages = data.get('messages') # List of message dicts
 
                 if not conversation_id or not isinstance(messages, list):
-                     logger.warning(f"Received history success response from {adapter_id} missing conversation_id or valid messages list in data: {data}")
+                     logger.warning(f"Received history success response from '{adapter_id}' missing 'conversation_id' or valid 'messages' list in data: {data}")
                      return
 
-                logger.info(f"Received history success response from {adapter_id} for conv {conversation_id} with {len(messages)} messages. Enqueuing...")
+                logger.info(f"Received history success response from '{adapter_id}' for conv '{conversation_id}' with {len(messages)} messages. Enqueuing...")
                 
-                # Construct the internal event structure
                 event_to_enqueue = {
                     "source_adapter_id": adapter_id, 
-                    "event_type": "connectome_history_received", # Internal type for router
+                    "event_type": "connectome_history_received", 
                     "payload": { 
                          "conversation_id": conversation_id,
                          "messages": messages, 
-                         # Pass the original success payloads data as adapter_data for context
                          "adapter_data": data 
                     }
                 }
-                # Enqueue onto the main loop
+                self._host_event_loop.enqueue_incoming_event(event_to_enqueue, {})
+            
+            # --- Check if it's a response to get_attachment ---
+            elif request_type == "attachment" and isinstance(data, dict):
+                # 'data' here is the payload from the adapter for the fetched attachment
+                # It should contain conversation_id, attachment_id, filename, content_type, content etc.
+                conversation_id_from_attach = data.get('conversation_id') # Adapter should echo this back
+                attachment_id_from_attach = data.get('attachment_id')   # Adapter should echo this back
+
+                if not conversation_id_from_attach or not attachment_id_from_attach:
+                    logger.warning(f"Received attachment success response from '{adapter_id}' missing 'conversation_id' or 'attachment_id' in data: {data}")
+                    return
+
+                logger.info(f"Received attachment success response from '{adapter_id}' for conv '{conversation_id_from_attach}', attachment '{attachment_id_from_attach}'. Enqueuing...")
+                
+                event_to_enqueue = {
+                    "source_adapter_id": adapter_id, 
+                    "event_type": "connectome_attachment_received",
+                    "payload": {
+                        # Pass the conversation_id as identified in the attachment response data
+                        "conversation_id": conversation_id_from_attach,
+                        # Pass the entire 'data' from the adapter as 'adapter_data'
+                        # This will contain attachment_id, filename, content, content_type etc.
+                        "adapter_data": data 
+                    }
+                }
                 self._host_event_loop.enqueue_incoming_event(event_to_enqueue, {})
 
             elif request_type == "send_message":
                 # Log success, maybe extract message ID if needed later for correlation
-                external_msg_id = data.get("message_external_id") if isinstance(data, dict) else None
-                logger.info(f"Received success confirmation for send_message from {adapter_id}. External ID: {external_msg_id}")
+                external_msg_id = data.get('message_external_id') if isinstance(data, dict) else None
+                logger.info(f"Received success confirmation for 'send_message' from '{adapter_id}'. External ID: {external_msg_id}")
                 # TODO: Optionally enqueue an internal "agent_message_confirmed" event?
             
             else:
                 # Handle success confirmations for other types if needed
-                logger.info(f"Received unhandled request_success confirmation for type {request_type} from {adapter_id}.")
+                logger.info(f"Received unhandled request_success confirmation for type '{request_type}' from '{adapter_id}'.")
+
+        # --- Handler for Incoming Attachment Data (separate from message events) ---
+        # Placeholder - assuming adapter sends attachment data via a specific event
+        # Example: @client.on("attachment_data")
+        # async def handle_attachment_data(raw_payload: Dict[str, Any]):
+        #    ...
+        #    self._host_event_loop.enqueue_incoming_event(event_to_enqueue, {})
 
         # --- Connect --- 
         try:
@@ -326,6 +356,14 @@ class ActivityClient:
                 }
                 # Note: No internal history event is generated for the request itself.
                 # The response (history) will generate events later.
+
+            elif outgoing_event_type == "get_attachment":
+                outgoing_data = {
+                    "conversation_id": payload["conversation_id"], # Required
+                    "attachment_id": payload["attachment_id"]    # Required
+                    # Optional: pass message_id if adapter needs it for context
+                    # "message_id": payload.get("message_external_id") 
+                }
 
             else:
                 logger.warning(f"Outgoing action type '{outgoing_event_type}' has no specific data mapping. Sending empty data field.")

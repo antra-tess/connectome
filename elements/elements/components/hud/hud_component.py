@@ -156,8 +156,25 @@ class HUDComponent(Component):
         output = f"{indent_str}{sender}: {text}"
         if is_edited:
             output += " (edited)"
+        
+        # --- NEW: Render Attachment Metadata ---
+        attachment_metadata = props.get("attachment_metadata", [])
+        if attachment_metadata:
+            output += "\n" # Newline before attachments section if text exists
+            for idx, att_meta in enumerate(attachment_metadata):
+                filename = att_meta.get('filename', att_meta.get('attachment_id', f'attachment_{idx+1}'))
+                att_type = att_meta.get('attachment_type', 'unknown')
+                # Check if content is available (from a child VEIL_ATTACHMENT_CONTENT_NODE_TYPE)
+                # This requires the main renderer to pass child info or MessageListVeilProducer to flatten it.
+                # For now, we just display metadata. The main renderer will handle child content nodes.
+                output += f"{indent_str}  [Attachment: {filename} (Type: {att_type})]"
+                # If we knew content was available here, we could add: (Content Available)
+                output += "\n"
+        else:
+             output += "\n" # Ensure newline after message text even if no attachments
+
         # output += f" [@ {timestamp}]" # Optional timestamp
-        output += "\n"
+        # output += "\n" # Removed this as newlines are handled by attachments or final message newline
         return output
 
     def _render_uplink_summary(self, node: Dict[str, Any], attention: Dict[str, Any], options: Dict[str, Any], indent_str: str, node_info: str) -> str:
@@ -170,6 +187,19 @@ class HUDComponent(Component):
         output = f"{indent_str}Uplink to {remote_name} ({remote_id}):\n"
         output += f"{indent_str}  (Contains {node_count} cached items)\n"
         # Children (the cached items) will be rendered by the main loop
+        return output
+
+    def _render_attachment_content(self, node: Dict[str, Any], attention: Dict[str, Any], options: Dict[str, Any], indent_str: str, node_info: str) -> str:
+        """Renders a placeholder for fetched attachment content."""
+        props = node.get("properties", {})
+        filename = props.get("filename", "unknown_file")
+        content_type = props.get("content_nature", "unknown_type")
+        attachment_id = props.get("attachment_id", "unknown_id")
+        
+        output = f"{indent_str}  >> Fetched Attachment: {filename} (Type: {content_type}, ID: {attachment_id}) - Content ready for processing by agent.\n"
+        # For text-based content, a preview could be rendered here if available in props.
+        # if "content_preview" in props:
+        #    output += f"{indent_str}     Preview: {props['content_preview'][:100]}...\n"
         return output
 
     # --- Main Recursive Renderer (Dispatcher) --- 
@@ -205,6 +235,8 @@ class HUDComponent(Component):
             render_func = self._render_chat_message
         elif content_nature == "uplink_summary":
              render_func = self._render_uplink_summary
+        elif node_type == "attachment_content_item": # From VEIL_ATTACHMENT_CONTENT_NODE_TYPE
+             render_func = self._render_attachment_content
         elif structural_role == "container" or node_type == "message_list_container": # Treat message list container like other containers
              render_func = self._render_container
         # Add more dispatch rules here...
@@ -243,7 +275,7 @@ class HUDComponent(Component):
         # Render children recursively (always use the main dispatcher)
         # Only render children if the current node isn't a specific content type 
         # that shouldn't have its VEIL children rendered (like a chat message itself)
-        if children and render_func not in [self._render_chat_message]: # Add other terminal renderers here
+        if children and render_func not in []: # No longer excluding _render_chat_message
             rendered_children_output = ""
             children_to_render = children # TODO: Apply filtering/limiting here
             # TODO: Sort children based on timestamp or other properties?

@@ -279,29 +279,31 @@ class TimelineComponent(Component):
             if not event_node:
                 continue # Should not happen normally
 
-            # --- Check if event matches filter criteria --- 
+            # --- Check if event matches filter criteria ---
             match = True
-            payload = event_node.get('payload', {})
-            data = payload.get('data', {})
+            # payload = event_node.get('payload', {}) # No longer needed here
+            # data = payload.get('data', {}) # No longer needed here
             for key, expected_value in filter_criteria.items():
                 actual_value = None
-                if key == 'payload.event_type':
-                    actual_value = payload.get('event_type')
-                elif key == 'payload.event_type__in':
-                     # Special case for list membership check
-                     event_type = payload.get('event_type')
-                     if not isinstance(expected_value, list) or event_type not in expected_value:
-                          match = False; break
-                     continue # Skip normal comparison for __in
-                elif key.startswith('payload.data.'):
-                    data_key = key.split('payload.data.', 1)[1]
-                    actual_value = data.get(data_key)
-                else:
-                     logger.warning(f"Unsupported filter key: {key}")
-                     match = False; break # Unsupported key
+                is_match = False
+
+                # Handle special suffixes first (e.g., __in)
+                if key.endswith('__in'):
+                    base_key = key[:-4] # Remove '__in'
+                    actual_value = self._get_nested_value(event_node, base_key)
+                    if isinstance(expected_value, list) and actual_value in expected_value:
+                        is_match = True
+                    # else: is_match remains False
                 
-                # Perform comparison (excluding __in handled above)
-                if actual_value != expected_value:
+                # Handle standard equality check
+                else:
+                    actual_value = self._get_nested_value(event_node, key)
+                    if actual_value == expected_value:
+                        is_match = True
+                    # else: is_match remains False
+
+                # If any criterion fails, the event doesn't match
+                if not is_match:
                     match = False
                     break
             
@@ -325,7 +327,21 @@ class TimelineComponent(Component):
         logger.debug(f"No matching event found for criteria: {filter_criteria}")
         return None # No match found in history
 
-    # --- Methods for future Loom features (Forking, Merging) --- 
+    # --- Helper for nested dictionary access ---
+    def _get_nested_value(self, data: Dict, key_path: str, default: Any = None) -> Any:
+        """Safely retrieve a value from a nested dictionary using dot notation."""
+        keys = key_path.split('.')
+        current_level = data
+        for key in keys:
+            if isinstance(current_level, dict):
+                current_level = current_level.get(key)
+            else:
+                return default # Cannot traverse further
+            if current_level is None:
+                return default # Key not found at this level
+        return current_level
+
+    # --- Methods for future Loom features (Forking, Merging) ---
     # def create_timeline_fork(...)
     # def merge_timelines(...)
     # def get_timeline_relationships(...)

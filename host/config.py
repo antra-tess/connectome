@@ -37,6 +37,10 @@ class AgentConfig(BaseSettings):
     name: str = Field(description="Human-readable name for the agent")
     description: str = Field(default="An agent instance.", description="Description of the agent\'s purpose")
     agent_loop_component_type_name: str = Field(default="SimpleRequestResponseLoopComponent", description="Component type name for the agent\'s loop")
+    system_prompt_template: str = Field(
+        default="You are an AI assistant named '{agent_name}' operating within the Connectome V3 framework.\nYou will be given a context representing your current environment, including recent messages and available data sources.\nYou also have a set of tools you can use to interact with this environment or request more information.\nYour goal is to understand the context, use tools if necessary, and respond appropriately or achieve given objectives.\nWhen using tools, strictly adhere to their specified JSON schema for arguments.",
+        description="Template for the system prompt sent to the LLM. Use '{agent_name}' as a placeholder."
+    )
     platform_aliases: Dict[str, str] = Field(default_factory=dict, 
                                             description="Platform-specific user-facing aliases for the agent, "
                                                         "e.g., {\'discord_adapter_1\': \'MyBotName\'} for mention detection.")
@@ -61,11 +65,10 @@ class HostSettings(BaseSettings):
     
     # Agents - Expects a JSON string in CONNECTOME_AGENTS_JSON
     agents_json: str = Field(
-        default='[{"agent_id": "agent_001", "name": "Default Agent", "description": "The primary agent instance.", "agent_loop_component_type_name": "SimpleRequestResponseLoopComponent", "platform_aliases": {"discord_adapter_1": "ConnectoBot"}, "handles_direct_messages_from_adapter_ids": ["discord_adapter_1"]}]',
         alias="AGENTS_JSON",
         description="JSON string representing a list of AgentConfig objects"
     )
-    
+
     # Parsed lists (populated after initialization)
     activity_client_adapter_configs: List[ActivityAdapterConfig] = []
     agents: List[AgentConfig] = []

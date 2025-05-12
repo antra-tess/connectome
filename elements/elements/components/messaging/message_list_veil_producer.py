@@ -21,6 +21,8 @@ VEIL_INTERNAL_ID_PROP = "connectome_internal_msg_id"
 VEIL_EXTERNAL_ID_PROP = "external_msg_id"
 VEIL_ADAPTER_ID_PROP = "adapter_id"
 VEIL_EDITED_FLAG_PROP = "is_edited"
+VEIL_ATTACHMENT_METADATA_PROP = "attachment_metadata"
+VEIL_ATTACHMENT_CONTENT_NODE_TYPE = "attachment_content_item"
 
 class MessageListVeilProducer(VeilProducer):
     """
@@ -74,12 +76,70 @@ class MessageListVeilProducer(VeilProducer):
                     VEIL_INTERNAL_ID_PROP: internal_id,
                     VEIL_EXTERNAL_ID_PROP: msg_data.get('original_external_id'),
                     VEIL_ADAPTER_ID_PROP: msg_data.get('adapter_id'),
-                    VEIL_EDITED_FLAG_PROP: msg_data.get('is_edited', False)
+                    VEIL_EDITED_FLAG_PROP: msg_data.get('is_edited', False),
+                    VEIL_ATTACHMENT_METADATA_PROP: msg_data.get('attachments', []) # Add attachment metadata
                     # Add annotations here based on other msg_data fields (reactions, read_status)
                     # e.g., "annotations": {"salience": "high" if msg_data.get('is_unread') else "normal"}
                 },
-                "children": [] # Messages are typically leaf nodes in this simple structure
+                "children": [] # Initialize, may add attachment content nodes later
             }
+
+            # --- Check for fetched attachment content on the timeline --- 
+            attachments_metadata = msg_data.get('attachments', [])
+            if attachments_metadata and hasattr(self.owner, 'get_timeline') and callable(self.owner.get_timeline):
+                timeline_comp = self.owner.get_timeline()
+                if timeline_comp and hasattr(self.owner, 'metadata') and isinstance(self.owner.metadata, dict):
+                    list_conversation_id = self.owner.metadata.get('external_channel_id')
+                    if not list_conversation_id:
+                        # Try to get conversation_id from msg_data if owner context is missing (e.g. for DM-like elements)
+                        # This assumes msg_data['adapter_id'] might be a stand-in for conv_id for DMs or that
+                        # the external_channel_id is consistently populated in msg_data for this producer.
+                        # A more robust way would be to have a clear conversation_id on the msg_data itself.
+                        list_conversation_id = msg_data.get('external_channel_id') 
+                        if not list_conversation_id:
+                            logger.debug(f"[{self.owner.id}] MessageListVeilProducer: Could not determine list_conversation_id for attachment query. Owner metadata: {self.owner.metadata}, msg_data: {msg_data.get('external_channel_id')}")
+                        
+                    if list_conversation_id:
+                        for att_meta in attachments_metadata:
+                            attachment_id = att_meta.get('attachment_id') 
+                            if not attachment_id: continue
+
+                            # Adjusted filter keys to match the actual nested structure in timeline events
+                            filter_criteria = {
+                                "payload.event_type": "connectome_attachment_received", 
+                                "payload.payload.conversation_id": list_conversation_id, 
+                                "payload.payload.adapter_data.attachment_id": attachment_id 
+                            }
+                            
+                            try:
+                                # Assuming get_last_relevant_event is synchronous and handles nested lookups
+                                fetched_attachment_event_node = timeline_comp.get_last_relevant_event(filter_criteria=filter_criteria)
+                                
+                                if fetched_attachment_event_node:
+                                    # The actual attachment data is in payload.adapter_data from the event structure
+                                    event_payload = fetched_attachment_event_node.get('payload', {})
+                                    attachment_content_data = event_payload.get('adapter_data', {})
+
+                                    attachment_content_node = {
+                                        "veil_id": f"att_{attachment_id}_content_{internal_id}", # Make VEIL ID unique per message context
+                                        "node_type": VEIL_ATTACHMENT_CONTENT_NODE_TYPE,
+                                        "properties": {
+                                            "structural_role": "attachment_content",
+                                            "content_nature": attachment_content_data.get("content_type", "unknown"),
+                                            "filename": attachment_content_data.get("filename", attachment_id),
+                                            "content_available": True,
+                                            "attachment_id": attachment_id,
+                                            "original_message_veil_id": internal_id,
+                                            # Optionally add a preview for text-based content, be careful with size
+                                            # "content_preview": str(attachment_content_data.get("content", ""))[:100] if "text" in attachment_content_data.get("content_type", "") else "[Binary Content]"
+                                        }
+                                    }
+                                    message_node["children"].append(attachment_content_node)
+                                else:
+                                    logger.debug(f"[{self.owner.id}] No fetched content found on timeline for attachment {attachment_id} in conv {list_conversation_id}")
+                            except Exception as e:
+                                logger.error(f"[{self.owner.id}] Error querying timeline for attachment {attachment_id}: {e}", exc_info=True)
+                    # else: logger.debug(f"No list_conversation_id for attachment query on {self.owner.id}")
             message_nodes.append(message_node)
 
         # Create the root container node for the list
@@ -144,7 +204,8 @@ class MessageListVeilProducer(VeilProducer):
                         VEIL_INTERNAL_ID_PROP: internal_id,
                         VEIL_EXTERNAL_ID_PROP: msg.get('original_external_id'),
                         VEIL_ADAPTER_ID_PROP: msg.get('adapter_id'),
-                        VEIL_EDITED_FLAG_PROP: msg.get('is_edited', False)
+                        VEIL_EDITED_FLAG_PROP: msg.get('is_edited', False),
+                        VEIL_ATTACHMENT_METADATA_PROP: msg.get('attachments', []) # Add attachment metadata
                     },
                     "children": []
                 }

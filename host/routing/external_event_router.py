@@ -118,6 +118,10 @@ class ExternalEventRouter:
         # TODO: Handle system notifications (user_added_to_channel etc.) if needed
         # elif event_type_from_adapter == "user_added_to_channel":
         #     await self._handle_system_notification(source_adapter_id, adapter_data)
+        elif event_type_from_adapter == "connectome_history_received":
+            await self._handle_history_received(source_adapter_id, payload.get("conversation_id"), payload.get("messages", []), adapter_data)
+        elif event_type_from_adapter == "connectome_attachment_received":
+            await self._handle_attachment_received(source_adapter_id, payload.get("conversation_id"), payload)
         else:
             logger.warning(f"ExternalEventRouter: Unhandled event type '{event_type_from_adapter}' from adapter '{source_adapter_id}'. Data: {adapter_data}")
 
@@ -276,7 +280,8 @@ class ExternalEventRouter:
                 "mentions": adapter_data.get("mentions", []), 
                 "original_message_id_external": adapter_data.get("message_id"),
                 "external_channel_id": adapter_data.get("conversation_id"), # Store conversation ID
-                "original_adapter_data": adapter_data # Keep original for full context if needed later
+                "original_adapter_data": adapter_data, # Keep original for full context if needed later
+                "attachments": adapter_data.get("attachments", []) 
             }
         except Exception as e:
              logger.error(f"Error constructing DM event payload from adapter_data: {e}. Data: {adapter_data}", exc_info=True)
@@ -350,7 +355,8 @@ class ExternalEventRouter:
                 "mentions": adapter_data.get("mentions", []), # Pass mentions if adapter provides
                 "original_message_id_external": adapter_data.get("message_id"),
                 "external_channel_id": external_channel_id,
-                "original_adapter_data": adapter_data
+                "original_adapter_data": adapter_data,
+                "attachments": adapter_data.get("attachments", [])
             }
         except Exception as e:
              logger.error(f"Error constructing channel message event payload from adapter_data: {e}. Data: {adapter_data}", exc_info=True)
@@ -593,8 +599,8 @@ class ExternalEventRouter:
                     "mentions": message_dict.get("mentions", []), 
                     "original_message_id_external": message_dict.get("message_id"),
                     "external_channel_id": conversation_id, # Use the main conversation ID
-                    "original_adapter_data": message_dict # Store original history item
-                    # Add other fields if available/needed, e.g., attachments, thread_id
+                    "original_adapter_data": message_dict, # Store original history item
+                    "attachments": message_dict.get("attachments", []),
                 }
 
                 connectome_history_event = {
@@ -658,7 +664,8 @@ class ExternalEventRouter:
                     "mentions": message_dict.get("mentions", []), 
                     "original_message_id_external": message_dict.get("message_id"),
                     "external_channel_id": conversation_id, 
-                    "original_adapter_data": message_dict 
+                    "original_adapter_data": message_dict,
+                    "attachments": message_dict.get("attachments", []),
                 }
 
                 connectome_history_event = {
@@ -675,6 +682,46 @@ class ExternalEventRouter:
                 error_count += 1
         
         logger.info(f"Finished processing history for '{conversation_id}'. Processed: {processed_count}, Errors: {error_count}")
+
+    # --- NEW HANDLER for Attachment Data --- 
+    async def _handle_attachment_received(self, source_adapter_id: str, conversation_id: str, attachment_event_payload: Dict[str, Any]):
+        """
+        Handles the internally routed 'connectome_attachment_received' event.
+        Finds the target space and puts the attachment event onto its timeline.
+        """
+        adapter_data = attachment_event_payload.get("adapter_data", {})
+        attachment_id = adapter_data.get("attachment_id")
+        logger.info(f"Handling 'connectome_attachment_received' for conv '{conversation_id}' from {source_adapter_id}, attachment '{attachment_id}'.")
+
+        # --- Find Target Space --- 
+        # Use adapter_data from the payload for context
+        target_space = await self._find_target_space_for_conversation(source_adapter_id, conversation_id, adapter_data)
+        
+        if not target_space:
+            logger.error(f"Failed to find target space for attachment received for conv '{conversation_id}'. Attachment event ignored.")
+            return
+
+        logger.info(f"Found target space '{target_space.id}'. Routing attachment event.")
+
+        # --- Route the full attachment event onto the timeline --- 
+        timeline_context = await self._construct_timeline_context_for_space(target_space)
+        
+        # Construct the event to be recorded on the timeline
+        # The payload already contains conversation_id and adapter_data (with attachment info)
+        connectome_attachment_event = {
+            "event_type": "connectome_attachment_received", 
+            "source_adapter_id": source_adapter_id,
+             # Target element? Could target the chat element, or maybe a specific attachment element?
+             # For simplicity, let's target the chat element for now.
+            "target_element_id": f"chat_{conversation_id}", 
+            "payload": attachment_event_payload # Pass the whole payload received from ActivityClient
+        }
+
+        try:
+            target_space.receive_event(connectome_attachment_event, timeline_context)
+            logger.info(f"Routed connectome_attachment_received event for attachment '{attachment_id}' to space '{target_space.id}'.")
+        except Exception as e:
+            logger.error(f"Error routing connectome_attachment_received event: {e}", exc_info=True)
 
     # --- Removed _handle_system_notification for brevity --- 
     # Re-add if system events need specific handling

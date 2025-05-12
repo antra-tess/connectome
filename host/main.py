@@ -167,7 +167,8 @@ async def amain():
                        agent_loop_component_type=agent_loop_type,
                        outgoing_action_callback=outgoing_callback,
                        space_registry=space_registry,
-                       mark_agent_for_cycle_callback=mark_agent_callback # <<< Pass callback
+                       mark_agent_for_cycle_callback=mark_agent_callback, # <<< Pass callback
+                       system_prompt_template=agent_config.system_prompt_template # <<< Pass template
                        # components_to_add=agent_config.inner_space_extra_components # If using this config
                    )
                    
