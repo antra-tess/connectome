@@ -1,9 +1,0 @@
-type: element_prefab
-name: TextElement # Or Notebook? Let's stick to element name for consistency
-description: A simple element for storing and managing plain text content.
-components:
-  - type: TextStateComponent
-    config: {} # No specific config needed for the base component yet
-  - type: standard.text_representation # Add the representation component
-    config:
-      max_content_length: 1000 # Example config: Limit representation length 

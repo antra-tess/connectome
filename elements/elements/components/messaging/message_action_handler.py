@@ -3,7 +3,7 @@ Message Action Handler Component
 Provides tools/actions for interacting with messaging elements (e.g., sending messages).
 """
 import logging
-from typing import Dict, Any, Optional, TYPE_CHECKING
+from typing import Dict, Any, Optional, TYPE_CHECKING, Tuple
 
 from ...base import Component
 
@@ -129,12 +129,245 @@ class MessageActionHandler(Component):
                  logger.error(f"[{self.owner.id}] Error dispatching send_message action via callback: {e}", exc_info=True)
                  return {"success": False, "error": f"Error dispatching message: {e}"}
 
-        # --- Register add_reaction Tool (Example) --- 
-        # @tool_provider.register_tool(...)
-        # def add_reaction_tool(message_external_id: str, emoji: str) -> Dict[str, Any]:
-        #     # Similar logic to determine context (adapter_id, conversation_id)
-        #     # Construct action_request for "add_reaction"
-        #     # Use self._outgoing_action_callback
-        #     pass
+        # --- Register delete_message Tool --- 
+        @tool_provider.register_tool(
+            name="delete_message",
+            description="Deletes a message specified by its external ID.",
+            parameter_descriptions={
+                "message_external_id": "The external ID of the message to delete (required, string)"
+            }
+        )
+        def delete_message_tool(message_external_id: str) -> Dict[str, Any]:
+            """Handles deleting a message using its external ID."""
+            if not self._outgoing_action_callback:
+                return {"success": False, "error": "Outgoing action callback is not configured."}
+            if not message_external_id:
+                return {"success": False, "error": "message_external_id is required."} 
+                
+            # Determine context (adapter_id, conversation_id)
+            adapter_id, conversation_id = self._get_message_context()
+            if not adapter_id or not conversation_id:
+                return {"success": False, "error": f"Could not determine context for deleting message."} 
+                
+            action_request = {
+                "target_module": "ActivityClient",
+                "action_type": "delete_message",
+                "payload": {
+                    "adapter_id": adapter_id,
+                    "conversation_id": conversation_id,
+                    "message_external_id": message_external_id,
+                    "requesting_element_id": self.owner.id,
+                    "requesting_agent_id": self.owner.parent.id if (hasattr(self.owner, 'parent') and self.owner.parent and hasattr(self.owner.parent, 'IS_INNER_SPACE')) else None
+                }
+            }
+            
+            try:
+                self._outgoing_action_callback(action_request)
+                logger.info(f"[{self.owner.id}] Dispatched 'delete_message' action for ID '{message_external_id}' to adapter '{adapter_id}'.")
+                return {"success": True, "status": "Delete request sent to outgoing queue."} 
+            except Exception as e:
+                 logger.error(f"[{self.owner.id}] Error dispatching delete_message action: {e}", exc_info=True)
+                 return {"success": False, "error": f"Error dispatching delete request: {e}"}
+                 
+        # --- Register edit_message Tool --- 
+        @tool_provider.register_tool(
+            name="edit_message",
+            description="Edits an existing message specified by its external ID.",
+            parameter_descriptions={
+                "message_external_id": "The external ID of the message to edit (required, string)",
+                "new_text": "The new text content for the message (required, string)"
+            }
+        )
+        def edit_message_tool(message_external_id: str, new_text: str) -> Dict[str, Any]:
+            """Handles editing a message using its external ID."""
+            if not self._outgoing_action_callback:
+                return {"success": False, "error": "Outgoing action callback is not configured."}
+            if not message_external_id or not new_text:
+                return {"success": False, "error": "message_external_id and new_text are required."} 
+                
+            # Determine context (adapter_id, conversation_id)
+            adapter_id, conversation_id = self._get_message_context()
+            if not adapter_id or not conversation_id:
+                return {"success": False, "error": f"Could not determine context for editing message."} 
+                
+            action_request = {
+                "target_module": "ActivityClient",
+                "action_type": "edit_message",
+                "payload": {
+                    "adapter_id": adapter_id,
+                    "conversation_id": conversation_id,
+                    "message_external_id": message_external_id,
+                    "new_text": new_text,
+                    "requesting_element_id": self.owner.id,
+                    "requesting_agent_id": self.owner.parent.id if (hasattr(self.owner, 'parent') and self.owner.parent and hasattr(self.owner.parent, 'IS_INNER_SPACE')) else None
+                }
+            }
+            
+            try:
+                self._outgoing_action_callback(action_request)
+                logger.info(f"[{self.owner.id}] Dispatched 'edit_message' action for ID '{message_external_id}' to adapter '{adapter_id}'.")
+                return {"success": True, "status": "Edit request sent to outgoing queue."} 
+            except Exception as e:
+                 logger.error(f"[{self.owner.id}] Error dispatching edit_message action: {e}", exc_info=True)
+                 return {"success": False, "error": f"Error dispatching edit request: {e}"}
 
-        # --- Register other tools as needed ---
+        # --- Register add_reaction Tool --- 
+        @tool_provider.register_tool(
+            name="add_reaction",
+            description="Adds an emoji reaction to a message specified by its external ID.",
+            parameter_descriptions={
+                "message_external_id": "The external ID of the message to react to (required, string)",
+                "emoji": "The emoji to add as a reaction (required, string, e.g., '👍', ':smile:')"
+            }
+        )
+        def add_reaction_tool(message_external_id: str, emoji: str) -> Dict[str, Any]:
+            """Handles adding a reaction to a message using its external ID."""
+            if not self._outgoing_action_callback:
+                return {"success": False, "error": "Outgoing action callback is not configured."}
+            if not message_external_id or not emoji:
+                return {"success": False, "error": "message_external_id and emoji are required."} 
+                
+            # Determine context (adapter_id, conversation_id)
+            adapter_id, conversation_id = self._get_message_context()
+            if not adapter_id or not conversation_id:
+                return {"success": False, "error": f"Could not determine context for adding reaction."} 
+                
+            action_request = {
+                "target_module": "ActivityClient",
+                "action_type": "add_reaction",
+                "payload": {
+                    "adapter_id": adapter_id,
+                    "conversation_id": conversation_id,
+                    "message_external_id": message_external_id,
+                    "emoji": emoji,
+                    "requesting_element_id": self.owner.id,
+                    "requesting_agent_id": self.owner.parent.id if (hasattr(self.owner, 'parent') and self.owner.parent and hasattr(self.owner.parent, 'IS_INNER_SPACE')) else None
+                }
+            }
+            
+            try:
+                self._outgoing_action_callback(action_request)
+                logger.info(f"[{self.owner.id}] Dispatched 'add_reaction' ({emoji}) action for ID '{message_external_id}' to adapter '{adapter_id}'.")
+                return {"success": True, "status": "Add reaction request sent to outgoing queue."} 
+            except Exception as e:
+                 logger.error(f"[{self.owner.id}] Error dispatching add_reaction action: {e}", exc_info=True)
+                 return {"success": False, "error": f"Error dispatching add reaction request: {e}"}
+
+        # --- Register remove_reaction Tool --- 
+        @tool_provider.register_tool(
+            name="remove_reaction",
+            description="Removes an emoji reaction (previously added by this agent/bot) from a message specified by its external ID.",
+            parameter_descriptions={
+                "message_external_id": "The external ID of the message to remove the reaction from (required, string)",
+                "emoji": "The emoji reaction to remove (required, string, e.g., '👍', ':smile:')"
+            }
+        )
+        def remove_reaction_tool(message_external_id: str, emoji: str) -> Dict[str, Any]:
+            """Handles removing a reaction from a message using its external ID."""
+            if not self._outgoing_action_callback:
+                return {"success": False, "error": "Outgoing action callback is not configured."}
+            if not message_external_id or not emoji:
+                return {"success": False, "error": "message_external_id and emoji are required."} 
+                
+            # Determine context (adapter_id, conversation_id)
+            adapter_id, conversation_id = self._get_message_context()
+            if not adapter_id or not conversation_id:
+                return {"success": False, "error": f"Could not determine context for removing reaction."} 
+                
+            action_request = {
+                "target_module": "ActivityClient",
+                "action_type": "remove_reaction",
+                "payload": {
+                    "adapter_id": adapter_id,
+                    "conversation_id": conversation_id,
+                    "message_external_id": message_external_id,
+                    "emoji": emoji,
+                    "requesting_element_id": self.owner.id,
+                    "requesting_agent_id": self.owner.parent.id if (hasattr(self.owner, 'parent') and self.owner.parent and hasattr(self.owner.parent, 'IS_INNER_SPACE')) else None
+                }
+            }
+            
+            try:
+                self._outgoing_action_callback(action_request)
+                logger.info(f"[{self.owner.id}] Dispatched 'remove_reaction' ({emoji}) action for ID '{message_external_id}' to adapter '{adapter_id}'.")
+                return {"success": True, "status": "Remove reaction request sent to outgoing queue."} 
+            except Exception as e:
+                 logger.error(f"[{self.owner.id}] Error dispatching remove_reaction action: {e}", exc_info=True)
+                 return {"success": False, "error": f"Error dispatching remove reaction request: {e}"}
+
+    # --- Helper to get context --- (Could be improved)
+    def _get_message_context(self) -> Tuple[Optional[str], Optional[str]]:
+        """Helper to determine adapter_id and conversation_id based on owner/parent context."""
+        adapter_id = None
+        conversation_id = None
+        try:
+            if hasattr(self.owner, 'parent') and self.owner.parent:
+                parent_space = self.owner.parent
+                if hasattr(parent_space, 'IS_INNER_SPACE') and parent_space.IS_INNER_SPACE:
+                    # DM Context - Owning element needs to provide details
+                    if hasattr(self.owner, 'get_adapter_id'): adapter_id = self.owner.get_adapter_id()
+                    if hasattr(self.owner, 'get_dm_recipient_id'): conversation_id = self.owner.get_dm_recipient_id()
+                elif hasattr(parent_space, 'IS_SPACE'): # SharedSpace Context
+                    if hasattr(parent_space, 'metadata'):
+                        adapter_id = parent_space.metadata.get('source_adapter')
+                        conversation_id = parent_space.metadata.get('external_channel_id')
+            if not adapter_id or not conversation_id:
+                logger.warning(f"[{self.owner.id}] Failed to determine valid message context (adapter: {adapter_id}, conversation: {conversation_id})")
+                return None, None
+        except Exception as e:
+            logger.error(f"[{self.owner.id}] Error determining message context: {e}", exc_info=True)
+            return None, None
+            
+        return adapter_id, conversation_id
+        
+    def handle_fetch_history(self, 
+                             conversation_id: str,
+                             before_ms: Optional[int] = None,
+                             after_ms: Optional[int] = None,
+                             limit: Optional[int] = 100, 
+                             calling_context: Dict[str, Any] = None):
+        """
+        Tool to request historical messages for a conversation from the adapter.
+
+        Args:
+            conversation_id: The external ID of the conversation/channel.
+            before_ms: Fetch messages before this timestamp (milliseconds UTC).
+            after_ms: Fetch messages after this timestamp (milliseconds UTC).
+            limit: Maximum number of messages to fetch.
+            calling_context: Context from the loop component calling the tool.
+
+        Returns:
+            Result of the action dispatch (e.g., confirmation or error).
+        """
+        if not calling_context:
+            logger.warning(f"[{self.owner.id}] handle_fetch_history called without calling_context.")
+            # Potentially raise error or return failure? For now, proceed but log.
+            calling_context = {}
+            
+        # --- Determine Context (Adapter ID) ---
+        # Use the helper, assuming it can find the context for the owner element
+        context_result = self._get_message_context(use_external_conversation_id=conversation_id)
+        if not context_result['success']:
+             logger.error(f"[{self.owner.id}] Failed to get message context for handle_fetch_history: {context_result['error']}")
+             # TODO: Return a structured error to the LLM?
+             return { "status": "error", "message": f"Failed to determine adapter context for conversation {conversation_id}" }
+        
+        adapter_id = context_result['adapter_id']
+        # We already have conversation_id from args
+        
+        logger.info(f"[{self.owner.id}] Preparing fetch_history action for adapter '{adapter_id}', conv '{conversation_id}'.")
+        
+        payload = {
+            "adapter_id": adapter_id,
+            "conversation_id": conversation_id,
+            "before": before_ms, # Pass along Nones if not provided
+            "after": after_ms,
+            "limit": limit,
+            # Pass necessary context for potential response handling/history recording
+            "requesting_element_id": self.owner.id, 
+            "calling_loop_id": calling_context.get('loop_component_id')
+        }
+        
+        return self._dispatch_action("fetch_history", payload, calling_context)
+
+    # --- Register other tools as needed ---

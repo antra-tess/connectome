@@ -284,3 +284,10 @@ class Component:
                 return False
                 
         return True 
+    
+class VeilProducer(Component):
+    """
+    Base class for components that produce VEIL representations.
+    """
+    COMPONENT_TYPE = "VeilProducer"
+    

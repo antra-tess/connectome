@@ -8,12 +8,15 @@ import uuid
 from typing import Dict, Any, Optional, List, Set
 
 from ...base import Component
+# Import the registry decorator
+from elements.component_registry import register_component
 
 logger = logging.getLogger(__name__)
 
 # Constants
 DEFAULT_TIMELINE_ID = "primary"
 
+@register_component
 class TimelineComponent(Component):
     """
     Manages the Loom DAG (event history) for the owning Space element.
@@ -220,6 +223,107 @@ class TimelineComponent(Component):
 
         # Events are currently newest -> oldest due to traversal order
         return events
+
+    def get_last_relevant_event(
+        self, 
+        timeline_id: Optional[str] = None, 
+        filter_criteria: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Finds the most recent event on a timeline matching the filter criteria.
+        Searches backwards from the timeline head(s).
+
+        Args:
+            timeline_id: The ID of the timeline to search. Defaults to the primary timeline.
+            filter_criteria: A dictionary specifying conditions the event must meet.
+                             Supports filtering by 'event_type' in payload, and keys within payload['data'].
+                             Example: 
+                                 {'payload.event_type': 'tool_result_received'}
+                                 {'payload.data.loop_component_id': 'abc-123'}
+                                 {'payload.event_type__in': ['type1', 'type2']}
+
+        Returns:
+            The full event dictionary of the most recent matching event, or None if not found.
+        """
+        target_timeline_id = timeline_id or self.get_primary_timeline()
+        if not target_timeline_id:
+            logger.warning(f"[{self.owner.id}] Cannot get last relevant event: No timeline specified and no primary found.")
+            return None
+            
+        timeline_info = self._state['_timelines'].get(target_timeline_id)
+        if not timeline_info:
+            logger.warning(f"[{self.owner.id}] Cannot get last relevant event: Timeline '{target_timeline_id}' not found.")
+            return None
+            
+        if not filter_criteria:
+             logger.warning(f"[{self.owner.id}] get_last_relevant_event called without filter_criteria.")
+             # Optionally return the absolute last event? For now, return None.
+             return None
+
+        # Use a similar backward traversal logic as get_timeline_events, but stop at first match
+        queue: List[str] = []
+        visited: Set[str] = set()
+        
+        # Start from current head(s)
+        queue.extend(list(timeline_info.get('head_event_ids', [])))
+        # Process newest heads first
+        queue.sort(key=lambda eid: self._state['_all_events'].get(eid, {}).get('timestamp', 0), reverse=True)
+
+        while queue:
+            current_event_id = queue.pop(0)
+            if current_event_id in visited:
+                continue
+            visited.add(current_event_id)
+
+            event_node = self._state['_all_events'].get(current_event_id)
+            if not event_node:
+                continue # Should not happen normally
+
+            # --- Check if event matches filter criteria --- 
+            match = True
+            payload = event_node.get('payload', {})
+            data = payload.get('data', {})
+            for key, expected_value in filter_criteria.items():
+                actual_value = None
+                if key == 'payload.event_type':
+                    actual_value = payload.get('event_type')
+                elif key == 'payload.event_type__in':
+                     # Special case for list membership check
+                     event_type = payload.get('event_type')
+                     if not isinstance(expected_value, list) or event_type not in expected_value:
+                          match = False; break
+                     continue # Skip normal comparison for __in
+                elif key.startswith('payload.data.'):
+                    data_key = key.split('payload.data.', 1)[1]
+                    actual_value = data.get(data_key)
+                else:
+                     logger.warning(f"Unsupported filter key: {key}")
+                     match = False; break # Unsupported key
+                
+                # Perform comparison (excluding __in handled above)
+                if actual_value != expected_value:
+                    match = False
+                    break
+            
+            if match:
+                logger.debug(f"Found matching event '{current_event_id}' for criteria: {filter_criteria}")
+                return event_node # Found the most recent match
+            # --- End Match Check ---
+
+            # If not matched, add parents to queue (newest first)
+            parent_ids = event_node.get('parent_ids', [])
+            parents_to_add = []
+            for p_id in parent_ids:
+                 if p_id not in visited and p_id in self._state['_all_events']:
+                      parents_to_add.append((self._state['_all_events'][p_id].get('timestamp', 0), p_id))
+            
+            # Sort parents by timestamp descending to check newer branches first
+            parents_to_add.sort(key=lambda item: item[0], reverse=True)
+            # Insert parents at the beginning of the queue to continue depth-first search backwards
+            queue = [p_id for _, p_id in parents_to_add] + queue
+
+        logger.debug(f"No matching event found for criteria: {filter_criteria}")
+        return None # No match found in history
 
     # --- Methods for future Loom features (Forking, Merging) --- 
     # def create_timeline_fork(...)

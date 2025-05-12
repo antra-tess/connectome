@@ -11,12 +11,15 @@ from datetime import datetime, timedelta
 
 from ..base_component import Component
 from .connection_component import UplinkConnectionComponent # Needed to check connection status
+# Import the registry decorator
+from elements.component_registry import register_component
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
+@register_component
 class RemoteStateCacheComponent(Component):
     """
     Manages caching of remote state, history bundles, and synchronization for an Uplink.
@@ -171,6 +174,81 @@ class RemoteStateCacheComponent(Component):
               logger.warning("Auto-sync timer cancellation required.")
               # ------------------------------
               logger.info(f"Disabled auto-sync for {self.remote_space_id}.")
+
+    # --- NEW: Apply Deltas --- 
+    def apply_deltas(self, deltas: List[Dict[str, Any]]) -> None:
+        """
+        Applies a list of VEIL delta operations to the cached state.
+        Currently handles 'add_node' and 'remove_node'.
+        Structure of cache assumed to be { veil_id: node_data }
+        """
+        if not isinstance(deltas, list):
+            logger.warning(f"[{self.element.id if self.element else 'cache'}] Invalid delta format received: not a list.")
+            return
+
+        logger.debug(f"[{self.element.id if self.element else 'cache'}] Applying {len(deltas)} deltas to cache for {self.remote_space_id}.")
+        cache_modified = False
+        # Ensure cache exists
+        if "remote_state_cache" not in self._state:
+             self._state["remote_state_cache"] = {}
+
+        for delta_op in deltas:
+            op = delta_op.get("op")
+            veil_id = delta_op.get("veil_id")
+
+            if op == "add_node":
+                node_data = delta_op.get("node")
+                parent_id = delta_op.get("parent_id") # Optional: used if cache is hierarchical
+                if node_data and "veil_id" in node_data:
+                    # Simple flat cache implementation: veil_id -> node_data
+                    node_veil_id = node_data["veil_id"]
+                    if node_veil_id in self._state["remote_state_cache"]:
+                         logger.debug(f"Updating existing node {node_veil_id} in cache via add_node delta.")
+                    else:
+                         logger.debug(f"Adding new node {node_veil_id} to cache via add_node delta.")
+                    self._state["remote_state_cache"][node_veil_id] = node_data
+                    cache_modified = True
+                    # TODO: Handle hierarchical cache using parent_id if needed
+                else:
+                     logger.warning(f"Skipping add_node delta: missing node data or veil_id. Op: {delta_op}")
+
+            elif op == "remove_node":
+                if veil_id:
+                    if veil_id in self._state["remote_state_cache"]:
+                        logger.debug(f"Removing node {veil_id} from cache via remove_node delta.")
+                        del self._state["remote_state_cache"][veil_id]
+                        cache_modified = True
+                    else:
+                        logger.debug(f"Skipping remove_node delta: veil_id {veil_id} not found in cache.")
+                    # TODO: Handle removal in hierarchical cache (remove children?)
+                else:
+                    logger.warning(f"Skipping remove_node delta: missing veil_id. Op: {delta_op}")
+                    
+            elif op == "update_node":
+                # Placeholder for future implementation
+                properties = delta_op.get("properties")
+                if veil_id and properties:
+                     if veil_id in self._state["remote_state_cache"]:
+                          logger.debug(f"Updating properties for node {veil_id} in cache via update_node delta.")
+                          # Naive update: merge properties dictionary
+                          # A more robust implementation might handle specific property changes
+                          self._state["remote_state_cache"][veil_id]["properties"].update(properties)
+                          cache_modified = True
+                     else:
+                          logger.debug(f"Skipping update_node delta: veil_id {veil_id} not found in cache.")
+                else:
+                     logger.warning(f"Skipping update_node delta: missing veil_id or properties. Op: {delta_op}")
+
+            else:
+                logger.warning(f"Unsupported delta operation received: '{op}'. Skipping.")
+                
+        if cache_modified:
+             # Update timestamp to reflect cache freshness from deltas
+             self._state["last_successful_sync"] = int(time.time() * 1000) # Treat delta application as a successful sync
+             self._state["cache_expiry"]["full_state"] = self._state["last_successful_sync"] + (self._state["cache_ttl"] * 1000)
+             logger.info(f"Cache for {self.remote_space_id} updated via deltas.")
+             # Optionally trigger element event? uplink_state_synced might be too coarse.
+             # Maybe a more specific event like "uplink_cache_updated_via_delta"?
 
     def _on_event(self, event: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
         """

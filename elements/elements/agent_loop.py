@@ -4,13 +4,19 @@ Defines the base class and simple implementations for agent cognitive cycles.
 """
 import logging
 import asyncio
-from typing import Dict, Any, Optional, TYPE_CHECKING
+from typing import Dict, Any, Optional, TYPE_CHECKING, List, Set
 
-from .base import Component
+from .base import Component, BaseAgentLoopComponent
+from elements.component_registry import register_component
+
+# NEW: Import LLMMessage for correct provider interaction
+from llm.provider_interface import LLMMessage
+# NEW: Import LLMToolDefinition for passing tools
+from llm.provider_interface import LLMToolDefinition, LLMToolCall
 
 if TYPE_CHECKING:
     from .inner_space import InnerSpace
-    from ..llm.provider_interface import LLMProviderInterface
+    from llm.provider_interface import LLMProvider
     from .components.hud import HUDComponent # Assuming HUDComponent is in .components.hud
     from .components.tool_provider import ToolProviderComponent # Assuming ToolProviderComponent is in .components.tool_provider
     from host.event_loop import OutgoingActionCallback
@@ -37,7 +43,7 @@ class BaseAgentLoopComponent(Component):
         self.parent_inner_space: 'InnerSpace' = parent_inner_space
         
         # Convenience accessors, assuming parent_inner_space is correctly typed and populated
-        self._llm_provider: Optional['LLMProviderInterface'] = self.parent_inner_space._llm_provider
+        self._llm_provider: Optional['LLMProvider'] = self.parent_inner_space._llm_provider
         self._hud_component: Optional['HUDComponent'] = self.parent_inner_space.get_hud()
         self._tool_provider: Optional['ToolProviderComponent'] = self.parent_inner_space.get_component(ToolProviderComponent)
         self._outgoing_action_callback: Optional['OutgoingActionCallback'] = self.parent_inner_space._outgoing_action_callback
@@ -64,14 +70,15 @@ class BaseAgentLoopComponent(Component):
                  logger.error(f"{self.name} ({self.id}): HUDComponent could not be retrieved on demand.")
         return self._hud_component
 
-    def _get_llm_provider(self) -> Optional['LLMProviderInterface']:
+    def _get_llm_provider(self) -> Optional['LLMProvider']:
         if not self._llm_provider: # Should have been set in init
              logger.error(f"{self.name} ({self.id}): LLMProvider not available.")
         return self._llm_provider
 
     def _get_tool_provider(self) -> Optional['ToolProviderComponent']:
-        if not self._tool_provider:
-            self._tool_provider = self.parent_inner_space.get_component(ToolProviderComponent)
+        # Ensure this helper can return None gracefully
+        if not hasattr(self, '_tool_provider'): # Check if attribute exists
+             self._tool_provider = self.parent_inner_space.get_component(ToolProviderComponent)
         return self._tool_provider
         
     def _get_outgoing_action_callback(self) -> Optional['OutgoingActionCallback']:
@@ -80,13 +87,16 @@ class BaseAgentLoopComponent(Component):
         return self._outgoing_action_callback
 
 
+@register_component
 class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
     """
     A basic agent loop that:
     1. Gets context from HUD.
-    2. Sends context to LLM.
-    3. Processes LLM response via HUD (which may extract actions).
-    4. Dispatches actions.
+    2. Gets available tools from InnerSpace ToolProvider.
+    3. Sends context and tools to LLM.
+    4. Checks LLM response for structured tool calls.
+       - If tool calls exist, dispatches them.
+    5. If no tool calls, processes text content via HUD and dispatches resulting actions.
     """
     COMPONENT_TYPE = "SimpleRequestResponseLoopComponent"
 
@@ -99,6 +109,7 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
 
         hud = self._get_hud()
         llm_provider = self._get_llm_provider()
+        tool_provider = self._get_tool_provider() # Get InnerSpace's provider
 
         if not hud:
             logger.error(f"{self.name} ({self.id}): HUDComponent not available. Aborting cycle.")
@@ -109,86 +120,428 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
 
         try:
             # 1. Prepare context using HUD
-            # Assuming HUDComponent has a method like `prepare_llm_context`
-            # This method would look at InnerSpace's DAG, use VeilProducers, CompressionEngine etc.
-            # For now, let's assume it returns a string or a structured dict for the LLM.
             logger.debug(f"{self.name} ({self.id}): Preparing LLM context via HUD...")
-            llm_context = await hud.prepare_llm_context() # This method needs to be async
-            if llm_context is None:
-                logger.warning(f"{self.name} ({self.id}): HUD prepared a null context. Aborting cycle.")
-                return
-
-            # 2. Send context to LLM
-            logger.debug(f"{self.name} ({self.id}): Sending context to LLM...")
-            # Assuming LLMProvider has a method like `generate_text_response` or similar
-            llm_response_text = await llm_provider.generate_text_response(llm_context) # This needs to be async
-            if not llm_response_text:
-                logger.warning(f"{self.name} ({self.id}): LLM returned no response. Aborting cycle.")
+            render_options = {"render_style": "clean"}
+            llm_context_string = await hud.get_agent_context(options=render_options)
+            if not llm_context_string:
+                logger.warning(f"{self.name} ({self.id}): HUD generated an empty context string. Aborting cycle.")
                 return
             
-            logger.debug(f"{self.name} ({self.id}): Received LLM response.")
+            # Optional: Record context to timeline
+            try:
+                timeline_comp = self.parent_inner_space.get_timeline()
+                if timeline_comp:
+                    timeline_comp.add_event_to_primary_timeline({
+                        "event_type": "agent_context_generated",
+                        "data": {
+                            "loop_component_id": self.id,
+                            "context_preview": llm_context_string[:250] + ('...' if len(llm_context_string) > 250 else ''),
+                            "context_length": len(llm_context_string),
+                            "render_options": render_options
+                        }
+                    })
+            except Exception as tl_err:
+                logger.error(f"Error recording agent context to timeline: {tl_err}", exc_info=True)
 
-            # 3. Process LLM response via HUD
-            # Assuming HUDComponent has a method like `process_llm_response`
-            # This method would parse the LLM's output (potentially VEIL-structured),
-            # extract content to be saved, and identify actions to be taken.
-            # It might return a list of actions or directly call handlers.
-            # For this example, let's assume it returns a list of parsed action dictionaries.
-            logger.debug(f"{self.name} ({self.id}): Processing LLM response via HUD...")
-            # This method on HUD also needs to be async if it involves I/O or complex parsing
-            processed_actions = await hud.process_llm_response(llm_response_text) 
+            # 2. Aggregate Tools from InnerSpace and its Children
+            aggregated_tools: List[LLMToolDefinition] = []
+            processed_tool_names: Set[str] = set() # Track names to avoid duplicates
 
-            # 4. Dispatch actions
-            if processed_actions and isinstance(processed_actions, list):
-                logger.info(f"{self.name} ({self.id}): Dispatching {len(processed_actions)} actions.")
-                for action_request in processed_actions:
-                    if not isinstance(action_request, dict):
-                        logger.warning(f"Invalid action format from HUD: {action_request}. Skipping.")
+            # Get tools directly from InnerSpace
+            if tool_provider:
+                try:
+                    inner_space_tools = tool_provider.get_llm_tool_definitions()
+                    for tool_def in inner_space_tools:
+                        if tool_def.name not in processed_tool_names:
+                             aggregated_tools.append(tool_def)
+                             processed_tool_names.add(tool_def.name)
+                except Exception as tool_err:
+                    logger.error(f"Error getting InnerSpace tool definitions: {tool_err}", exc_info=True)
+            
+            # Get tools from mounted children
+            mounted_elements = self.parent_inner_space.get_mounted_elements()
+            for child_id, child_element in mounted_elements.items():
+                 try:
+                     child_tool_provider = child_element.get_component(ToolProviderComponent)
+                     if child_tool_provider:
+                         child_tools = child_tool_provider.get_llm_tool_definitions()
+                         for tool_def in child_tools:
+                             # Prefix child tool name with element ID
+                             prefixed_name = f"{child_element.id}::{tool_def.name}"
+                             if prefixed_name not in processed_tool_names:
+                                 # Create a new LLMToolDefinition with the prefixed name
+                                 prefixed_tool_def = LLMToolDefinition(
+                                     name=prefixed_name,
+                                     description=tool_def.description,
+                                     parameters=tool_def.parameters
+                                 )
+                                 aggregated_tools.append(prefixed_tool_def)
+                                 processed_tool_names.add(prefixed_name)
+                 except Exception as child_tool_err:
+                      logger.error(f"Error getting tools from child element {child_id}: {child_tool_err}", exc_info=True)
+
+            if aggregated_tools:
+                logger.debug(f"Aggregated {len(aggregated_tools)} tool definitions to pass to LLM.")
+            else:
+                logger.debug("No tools found on InnerSpace or children.")
+
+            # 3. Send context and aggregated tools to LLM
+            logger.debug(f"{self.name} ({self.id}): Sending context and tools to LLM...")
+            messages = [LLMMessage(role="user", content=llm_context_string)]
+            llm_response_obj = llm_provider.complete(messages=messages, tools=aggregated_tools)
+            
+            if not llm_response_obj:
+                logger.warning(f"{self.name} ({self.id}): LLM returned no response object. Aborting cycle.")
+                return
+
+            llm_response_text = llm_response_obj.content # May be None if tool call occurs
+            logger.info(f"{self.name} ({self.id}): Received LLM response. Finish reason: {llm_response_obj.finish_reason}")
+            if llm_response_text:
+                 logger.debug(f"LLM Response Text Content: {llm_response_text[:100]}...")
+            if llm_response_obj.tool_calls:
+                 logger.debug(f"LLM Response Tool Calls: {llm_response_obj.tool_calls}")
+
+            # 4. Process LLM Response: Check for Tool Calls first
+            if llm_response_obj.tool_calls:
+                logger.info(f"LLM requested {len(llm_response_obj.tool_calls)} tool call(s). Dispatching...")
+                for tool_call in llm_response_obj.tool_calls:
+                    if not isinstance(tool_call, LLMToolCall):
+                        logger.warning(f"Skipping invalid item in tool_calls: {tool_call}")
                         continue
                     
-                    target_module = action_request.get("target_module")
+                    # Parse prefixed tool name to find target element and actual tool name
+                    raw_tool_name = tool_call.tool_name
+                    target_element_id: str
+                    actual_tool_name: str
                     
-                    if target_module: # Assumed to be for external systems like ActivityClient
-                        callback = self._get_outgoing_action_callback()
-                        if callback:
-                            logger.debug(f"Dispatching external action via callback: {action_request}")
-                            callback(action_request) # Enqueues to HostEventLoop's outgoing queue
-                        else:
-                            logger.error(f"Cannot dispatch external action: No outgoing_action_callback set. Action: {action_request}")
-                    elif action_request.get("target_element_id"): # Action for an element within a Space
-                        tool_provider = self._get_tool_provider()
-                        if tool_provider:
-                            # TODO: This part needs refinement.
-                            # The action_request should match what ToolProviderComponent.execute_tool expects.
-                            # Or, InnerSpace.execute_element_action should be called.
-                            # For now, a placeholder:
-                            action_name = action_request.get("action_name")
-                            action_params = action_request.get("payload", {}).get("parameters", {}) # common pattern
-                            element_id_target = action_request.get("target_element_id")
-                            space_id_target = action_request.get("target_space_id", self.parent_inner_space.id) # Default to own InnerSpace
-
-                            logger.debug(f"Dispatching internal action: TargetSpace='{space_id_target}', TargetElement='{element_id_target}', Action='{action_name}'")
-                            # Using parent InnerSpace's action execution method
-                            # This allows actions to target elements in this InnerSpace or other Spaces via registry.
-                            # Timeline context for actions also needs to be considered.
-                            # For now, let's assume a default timeline context is handled by execute_element_action.
-                            action_result = self.parent_inner_space.execute_element_action(
-                                space_id=space_id_target,
-                                element_id=element_id_target,
-                                action_name=action_name,
-                                parameters=action_params
-                                # timeline_context might be needed here
-                            )
-                            logger.debug(f"Internal action result: {action_result}")
-                            # TODO: Optionally record action result in DAG or handle errors
-                        else:
-                            logger.error(f"Cannot dispatch internal action: ToolProviderComponent not available. Action: {action_request}")
+                    if "::" in raw_tool_name:
+                        parts = raw_tool_name.split("::", 1)
+                        target_element_id = parts[0]
+                        actual_tool_name = parts[1]
+                        # Validate target_element_id exists in InnerSpace? Optional.
+                        if not self.parent_inner_space.get_element_by_id(target_element_id):
+                             logger.error(f"LLM requested tool '{actual_tool_name}' on non-existent element '{target_element_id}'. Skipping.")
+                             continue
                     else:
-                        logger.warning(f"Could not dispatch action: No target_module or target_element_id specified. Action: {action_request}")
+                        # Assume tool is on InnerSpace itself
+                        target_element_id = self.parent_inner_space.id 
+                        actual_tool_name = raw_tool_name
+                    
+                    target_space_id = self.parent_inner_space.id # Assume target space is always current InnerSpace for now
+                    parameters = tool_call.parameters
+                    
+                    logger.debug(f"Dispatching structured tool call: Space='{target_space_id}', Element='{target_element_id}', Action='{actual_tool_name}', Params='{parameters}'")
+                    try:
+                        calling_context = { "loop_component_id": self.id } 
+                        action_result = self.parent_inner_space.execute_element_action(
+                            space_id=target_space_id,
+                            element_id=target_element_id, # Use parsed target_element_id
+                            action_name=actual_tool_name,  # Use parsed actual_tool_name
+                            parameters=parameters,
+                            calling_context=calling_context
+                        )
+                        logger.debug(f"Structured tool call result for {actual_tool_name} on {target_element_id}: {action_result}")
+                    except Exception as exec_err:
+                        logger.error(f"Error executing structured tool call '{actual_tool_name}' on element '{target_element_id}': {exec_err}", exc_info=True)
+            
+            # 5. If NO tool calls, process text content via HUD for actions/response
+            elif llm_response_text:
+                logger.debug(f"{self.name} ({self.id}): No tool calls detected. Processing text response via HUD...")
+                processed_actions = await hud.process_llm_response(llm_response_text)
+                
+                # --- Dispatch Actions from Text --- 
+                if processed_actions and isinstance(processed_actions, list):
+                    logger.info(f"{self.name} ({self.id}): Dispatching {len(processed_actions)} actions extracted by HUD from text.")
+                    callback = self._get_outgoing_action_callback() # Get callback here
+                    for action_request in processed_actions:
+                        if not isinstance(action_request, dict) or not action_request.get("action_name"):
+                            logger.warning(f"Invalid action format from HUD: {action_request}. Skipping.")
+                            continue
+                        
+                        target_module = action_request.get("target_module")
+                        target_element_id = action_request.get("target_element_id")
+                        action_name = action_request.get("action_name")
+                        parameters = action_request.get("parameters", {})
+                        
+                        # Dispatch External Actions
+                        if target_module:
+                            if callback:
+                                logger.debug(f"Dispatching external action to module '{target_module}': {action_request}")
+                                try: callback(action_request)
+                                except Exception as cb_err: logger.error(f"Error calling outgoing callback for '{target_module}': {cb_err}", exc_info=True)
+                            else: logger.error(f"Cannot dispatch external action to '{target_module}': No outgoing_action_callback. Action: {action_request}")
+                        
+                        # Dispatch Internal Actions from Text
+                        elif target_element_id:
+                            target_space_id = action_request.get("target_space_id", self.parent_inner_space.id)
+                            logger.debug(f"Dispatching internal action from text: Space='{target_space_id}', Element='{target_element_id}', Action='{action_name}', Params='{parameters}'")
+                            try:
+                                calling_context = { "loop_component_id": self.id }
+                                action_result = self.parent_inner_space.execute_element_action(
+                                    space_id=target_space_id, element_id=target_element_id,
+                                    action_name=action_name, parameters=parameters,
+                                    calling_context=calling_context
+                                )
+                                logger.debug(f"Internal action from text result for {action_name} on {target_element_id}: {action_result}")
+                            except Exception as exec_err: logger.error(f"Error executing internal action from text '{action_name}' on '{target_element_id}': {exec_err}", exc_info=True)
+                        else:
+                            logger.warning(f"Could not dispatch text action: No target_module or target_element_id. Action: {action_request}")
+                else:
+                    logger.info(f"{self.name} ({self.id}): No actions extracted by HUD from text response.")
             else:
-                logger.info(f"{self.name} ({self.id}): No actions to dispatch from LLM response.")
+                 logger.info(f"{self.name} ({self.id}): LLM response had no tool calls and no text content.")
 
         except Exception as e:
             logger.error(f"{self.name} ({self.id}): Error during cognitive cycle: {e}", exc_info=True)
         finally:
-            logger.info(f"{self.name} ({self.id}): Cycle finished.") 
+            logger.info(f"{self.name} ({self.id}): Cycle finished.")
+
+
+# --- Multi-Step Loop --- 
+
+from .base import BaseAgentLoopComponent # Ensure BaseAgentLoopComponent is imported correctly
+from elements.component_registry import register_component # Already imported for SimpleRequestResponseLoop
+
+@register_component
+class MultiStepToolLoopComponent(BaseAgentLoopComponent):
+    """
+    An agent loop designed for multi-step interactions, specifically handling 
+    the cycle of: Context -> LLM -> Tool Call -> Tool Result -> LLM -> Final Response.
+
+    This loop relies on analyzing the recent timeline history to determine the 
+    current stage of the interaction and uses structured tool calling.
+    """
+    COMPONENT_TYPE = "MultiStepToolLoopComponent"
+
+    # Define necessary event types (assuming these will be standardized)
+    EVENT_TYPE_TOOL_ACTION_DISPATCHED = "tool_action_dispatched"
+    EVENT_TYPE_TOOL_RESULT_RECEIVED = "tool_result_received"
+    EVENT_TYPE_FINAL_ACTION_DISPATCHED = "final_action_dispatched"
+    EVENT_TYPE_AGENT_CONTEXT_GENERATED = "agent_context_generated"
+    EVENT_TYPE_LLM_RESPONSE_PROCESSED = "llm_response_processed"
+    # New event for structured tool call dispatch
+    EVENT_TYPE_STRUCTURED_TOOL_ACTION_DISPATCHED = "structured_tool_action_dispatched"
+
+    def __init__(self, element_id: str, name: str, parent_inner_space: 'InnerSpace', **kwargs):
+        super().__init__(element_id, name, parent_inner_space, **kwargs)
+        logger.info(f"{self.COMPONENT_TYPE} '{self.name}' ({self.id}) initialized.")
+
+    def _determine_stage(self, last_relevant_event: Optional[Dict[str, Any]]) -> str:
+        """Analyzes the last event to determine the current stage."""
+        if not last_relevant_event:
+            return "initial_request" # No prior relevant event found
+        
+        event_type = last_relevant_event.get("payload", {}).get("event_type") # Look inside payload
+        event_data = last_relevant_event.get("payload", {}).get("data", {})
+
+        if event_type == self.EVENT_TYPE_TOOL_RESULT_RECEIVED:
+             return "tool_result_received" # Ready to process the result
+        elif event_type == self.EVENT_TYPE_STRUCTURED_TOOL_ACTION_DISPATCHED:
+             return "waiting_for_tool_result"
+        elif event_type == self.EVENT_TYPE_TOOL_ACTION_DISPATCHED: # Legacy/text-based dispatch
+             # We might need to distinguish if this was the intended final step
+             logger.warning(f"Handling legacy {self.EVENT_TYPE_TOOL_ACTION_DISPATCHED} event. Assuming waiting for result.")
+             return "waiting_for_tool_result"
+        elif event_type == self.EVENT_TYPE_LLM_RESPONSE_PROCESSED:
+            # Check if the processed response indicated completion (no tool dispatched)
+            if not event_data.get("dispatched_tool_action"): 
+                 return "interaction_complete" # Final response was likely dispatched
+            else:
+                 # This case should ideally not be reached if tool dispatch events are used properly
+                 logger.warning(f"LLM response processed event indicated tool dispatch, but no specific dispatch event found? Assuming waiting.")
+                 return "waiting_for_tool_result"
+        elif event_type == self.EVENT_TYPE_AGENT_CONTEXT_GENERATED:
+             # If context was just generated, we're ready for the initial LLM call.
+             return "initial_request"
+        else:
+             logger.warning(f"Unclear state from last event type: {event_type}. Defaulting to initial_request.")
+             return "initial_request"
+
+    async def trigger_cycle(self):
+        logger.info(f"{self.name} ({self.id}): Multi-step cycle triggered in InnerSpace '{self.parent_inner_space.name}'.")
+
+        hud = self._get_hud()
+        llm_provider = self._get_llm_provider()
+        timeline_comp = self.parent_inner_space.get_timeline()
+        callback = self._get_outgoing_action_callback()
+        tool_provider = self._get_tool_provider() # Get tool provider
+
+        if not hud or not llm_provider or not timeline_comp:
+            logger.error(f"{self.name} ({self.id}): Missing critical components (HUD, LLM, Timeline). Aborting cycle.")
+            return
+
+        try:
+            # --- 1. Analyze Recent History to Determine Current State --- 
+            relevant_event_types = [
+                 self.EVENT_TYPE_TOOL_RESULT_RECEIVED,
+                 self.EVENT_TYPE_STRUCTURED_TOOL_ACTION_DISPATCHED,
+                 self.EVENT_TYPE_LLM_RESPONSE_PROCESSED,
+                 self.EVENT_TYPE_AGENT_CONTEXT_GENERATED,
+                 # Exclude legacy TOOL_ACTION_DISPATCHED for stage determination?
+            ]
+            filter_criteria = {
+                 "payload.data.loop_component_id": self.id,
+                 "payload.event_type__in": relevant_event_types
+            }
+            try:
+                 last_relevant_event = timeline_comp.get_last_relevant_event(filter_criteria=filter_criteria)
+            except Exception as query_err:
+                 logger.error(f"Error querying timeline: {query_err}", exc_info=True)
+                 last_relevant_event = None
+                 
+            current_stage = self._determine_stage(last_relevant_event)
+            logger.debug(f"Determined current stage: {current_stage}")
+
+            # --- 2. Execute Logic Based on Stage --- 
+
+            # === STAGE: Initial Request or Processing Tool Result ===
+            if current_stage == "initial_request" or current_stage == "tool_result_received":
+                # Generate context
+                render_options = {"render_style": "clean"} 
+                context_string = await hud.get_agent_context(options=render_options)
+                if not context_string: return
+                
+                # Record context generated
+                try:
+                     timeline_comp.add_event_to_primary_timeline({
+                         "event_type": self.EVENT_TYPE_AGENT_CONTEXT_GENERATED,
+                         "payload": { # Ensure payload structure consistency
+                              "data": {"loop_component_id": self.id, "stage": current_stage, "context_length": len(context_string)}
+                         }
+                     })
+                except Exception as e: logger.error(f"Error recording context event: {e}")
+
+                # --- Aggregate Tools (InnerSpace + Children) --- 
+                aggregated_tools: List[LLMToolDefinition] = []
+                processed_tool_names: Set[str] = set()
+                # Get tools from InnerSpace
+                if tool_provider:
+                    try:
+                        inner_space_tools = tool_provider.get_llm_tool_definitions()
+                        for tool_def in inner_space_tools:
+                            if tool_def.name not in processed_tool_names:
+                                aggregated_tools.append(tool_def)
+                                processed_tool_names.add(tool_def.name)
+                    except Exception as tool_err: logger.error(f"Error getting InnerSpace tools: {tool_err}", exc_info=True)
+                # Get tools from children
+                mounted_elements = self.parent_inner_space.get_mounted_elements()
+                for child_id, child_element in mounted_elements.items():
+                    try:
+                        child_tool_provider = child_element.get_component(ToolProviderComponent)
+                        if child_tool_provider:
+                            child_tools = child_tool_provider.get_llm_tool_definitions()
+                            for tool_def in child_tools:
+                                prefixed_name = f"{child_element.id}::{tool_def.name}"
+                                if prefixed_name not in processed_tool_names:
+                                    prefixed_tool_def = LLMToolDefinition(
+                                        name=prefixed_name,
+                                        description=tool_def.description,
+                                        parameters=tool_def.parameters
+                                    )
+                                    aggregated_tools.append(prefixed_tool_def)
+                                    processed_tool_names.add(prefixed_name)
+                    except Exception as child_tool_err: logger.error(f"Error getting child {child_id} tools: {child_tool_err}", exc_info=True)
+                if aggregated_tools: logger.debug(f"Aggregated {len(aggregated_tools)} tool definitions.")
+                # ---------------------------------------------
+
+                # Call LLM with aggregated tools
+                logger.debug(f"Calling LLM for stage '{current_stage}'...")
+                messages = [LLMMessage(role="user", content=context_string)]
+                llm_response_obj = llm_provider.complete(messages=messages, tools=aggregated_tools)
+                if not llm_response_obj: logger.warning(f"LLM returned no response object."); return
+
+                llm_response_text = llm_response_obj.content
+                logger.info(f"LLM response received. Finish reason: {llm_response_obj.finish_reason}")
+
+                # --- Process Response: Check for Tool Calls first --- 
+                dispatched_tool_action = False
+                if llm_response_obj.tool_calls:
+                    logger.info(f"LLM requested {len(llm_response_obj.tool_calls)} tool call(s). Dispatching...")
+                    for tool_call in llm_response_obj.tool_calls:
+                        if not isinstance(tool_call, LLMToolCall): continue
+                        
+                        # Parse prefixed name
+                        raw_tool_name = tool_call.tool_name
+                        target_element_id: str
+                        actual_tool_name: str
+                        if "::" in raw_tool_name:
+                            parts = raw_tool_name.split("::", 1)
+                            target_element_id = parts[0]
+                            actual_tool_name = parts[1]
+                            if not self.parent_inner_space.get_element_by_id(target_element_id):
+                                 logger.error(f"LLM tool target element '{target_element_id}' not found. Skipping call.")
+                                 continue
+                        else:
+                            target_element_id = self.parent_inner_space.id
+                            actual_tool_name = raw_tool_name
+                        
+                        target_space_id = self.parent_inner_space.id
+                        parameters = tool_call.parameters
+                        
+                        logger.debug(f"Dispatching structured tool call: Element='{target_element_id}', Action='{actual_tool_name}'...")
+                        try:
+                            calling_context = { "loop_component_id": self.id } 
+                            action_result = self.parent_inner_space.execute_element_action(
+                                space_id=target_space_id, 
+                                element_id=target_element_id,
+                                action_name=actual_tool_name, 
+                                parameters=parameters,
+                                calling_context=calling_context
+                            )
+                            # Record the structured dispatch event
+                            timeline_comp.add_event_to_primary_timeline({
+                                "event_type": self.EVENT_TYPE_STRUCTURED_TOOL_ACTION_DISPATCHED,
+                                "payload": { 
+                                     "data": {"loop_component_id": self.id, "tool_call_name": raw_tool_name, "tool_call_params": parameters, "sync_result_preview": str(action_result)[:100]}
+                                }
+                            })
+                            dispatched_tool_action = True
+                        except Exception as exec_err: logger.error(f"Error executing structured tool call '{actual_tool_name}' on '{target_element_id}': {exec_err}", exc_info=True)
+
+                # If NO tool calls were dispatched, process text response via HUD
+                if not dispatched_tool_action:
+                    if llm_response_text:
+                        logger.debug("No tool calls. Processing text response via HUD...")
+                        processed_actions = await hud.process_llm_response(llm_response_text)
+                        final_action_requests = processed_actions
+                        logger.info(f"Dispatching {len(final_action_requests)} final action(s) from text.")
+                        for action_request in final_action_requests:
+                             target_module = action_request.get("target_module")
+                             if target_module and callback:
+                                  try: callback(action_request)
+                                  except Exception as e: logger.error(f"Error dispatching final external action: {e}")
+                        # Record LLM_RESPONSE_PROCESSED event (no tool dispatched)
+                        timeline_comp.add_event_to_primary_timeline({
+                             "event_type": self.EVENT_TYPE_LLM_RESPONSE_PROCESSED,
+                             "payload": { 
+                                  "data": {"loop_component_id": self.id, "dispatched_tool_action": False, "final_actions_count": len(final_action_requests)}
+                             }
+                        })
+                    else:
+                         # Record LLM_RESPONSE_PROCESSED event (no tool, no text)
+                         logger.info("LLM response had no tool calls and no text content.")
+                         timeline_comp.add_event_to_primary_timeline({
+                              "event_type": self.EVENT_TYPE_LLM_RESPONSE_PROCESSED,
+                              "payload": { 
+                                   "data": {"loop_component_id": self.id, "dispatched_tool_action": False, "final_actions_count": 0}
+                              }
+                         })
+
+            # === STAGE: Waiting for Tool Result ===
+            elif current_stage == "waiting_for_tool_result":
+                logger.info(f"Currently waiting for tool result. No action taken this cycle.")
+                pass
+
+            # === STAGE: Interaction Complete ===
+            elif current_stage == "interaction_complete":
+                 logger.info(f"Multi-step interaction appears complete. No action taken this cycle.")
+                 pass
+
+            # === STAGE: Unknown/Error ===
+            else:
+                 logger.error(f"Reached unknown stage: {current_stage}. Aborting cycle.")
+
+        except Exception as e:
+            logger.error(f"{self.name} ({self.id}): Error during multi-step cognitive cycle: {e}", exc_info=True)
+        finally:
+            logger.info(f"{self.name} ({self.id}): Multi-step cycle finished.") 

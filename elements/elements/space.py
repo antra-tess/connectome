@@ -8,7 +8,7 @@ from typing import Dict, Any, Optional, List, Callable, Type, Set
 import uuid
 import time
 
-from .base import BaseElement, MountType, Component
+from .base import BaseElement, MountType, Component, VeilProducer
 from .components.space import ContainerComponent, TimelineComponent
 
 # Configure logging
@@ -45,6 +45,10 @@ class Space(BaseElement):
         self._container: Optional[ContainerComponent] = self.add_component(ContainerComponent)
         self._timeline: Optional[TimelineComponent] = self.add_component(TimelineComponent)
         
+        # NEW: Initialize uplink listeners set and delta cache
+        self._uplink_listeners: Set[Callable[[List[Dict[str, Any]]], None]] = set()
+        self._cached_deltas: List[Dict[str, Any]] = []
+        
         if not self._container or not self._timeline:
             # BaseElement.add_component logs errors, but we might want to raise here
             logger.critical(f"CRITICAL: Failed to initialize required components (Container/Timeline) for space {self.id}. Space may be unstable.")
@@ -71,7 +75,7 @@ class Space(BaseElement):
         """Get a mounted element by ID (delegates to ContainerComponent)."""
         if not self._container:
             logger.error(f"[{self.id}] Cannot get mounted element: ContainerComponent unavailable.")
-            return None
+        return None
         return self._container.get_mounted_element(mount_id)
     
     def get_mounted_elements(self) -> Dict[str, BaseElement]:
@@ -184,6 +188,89 @@ class Space(BaseElement):
         else:
              # Event was not targeted at a specific child element
              logger.debug(f"[{self.id}] Event '{new_event_id}' ({event_type}) processed by Space components.")
+
+    # NEW methods for listener registration
+    def register_uplink_listener(self, callback: Callable[[List[Dict[str, Any]]], None]):
+        """Registers a callback function to be notified when new VEIL deltas are generated."""
+        if callable(callback):
+            self._uplink_listeners.add(callback)
+            logger.debug(f"[{self.id}] Registered uplink listener: {callback}")
+        else:
+            logger.warning(f"[{self.id}] Attempted to register non-callable uplink listener: {callback}")
+
+    def unregister_uplink_listener(self, callback: Callable[[List[Dict[str, Any]]], None]):
+        """Unregisters a previously registered uplink listener callback."""
+        self._uplink_listeners.discard(callback)
+        logger.debug(f"[{self.id}] Unregistered uplink listener: {callback}")
+
+    # NEW: Frame end processing method
+    def on_frame_end(self):
+        """
+        Processes the end of a frame: calculates VEIL deltas for all child elements
+        with VeilProducers, caches them, and notifies listeners.
+        """
+        logger.debug(f"[{self.id}] Starting on_frame_end processing...")
+        all_deltas_in_frame: List[Dict[str, Any]] = []
+        processed_elements = set() # Track elements to avoid duplicate processing if mounted multiple times
+
+        mounted_elements = self.get_mounted_elements() # Use the delegation method
+
+        for mount_id, element in mounted_elements.items():
+            if element.id in processed_elements:
+                continue # Skip if already processed via another mount point
+            processed_elements.add(element.id)
+
+            # Find VeilProducer components on this element
+            veil_producers = element.get_components_by_type(VeilProducer) # Get all instances
+
+            if not veil_producers:
+                 # This debug message might be too verbose if many elements don't have VeilProducers
+                 # logger.debug(f"[{self.id}] Element {element.name} ({element.id}) has no VeilProducer components.")
+                 continue
+
+            for producer_component in veil_producers:
+                if hasattr(producer_component, 'calculate_delta') and callable(producer_component.calculate_delta):
+                    try:
+                        delta = producer_component.calculate_delta()
+                        if delta: # Only collect non-empty deltas
+                            if isinstance(delta, list):
+                                all_deltas_in_frame.extend(delta)
+                                logger.debug(f"[{self.id}] Collected {len(delta)} delta operations from {producer_component.__class__.__name__} on element {element.id}")
+                            else:
+                                 logger.warning(f"[{self.id}] VeilProducer {producer_component.__class__.__name__} on element {element.id} returned non-list delta: {type(delta)}. Skipping.")
+                    except Exception as e:
+                        logger.error(f"[{self.id}] Error calling calculate_delta on {producer_component.__class__.__name__} for element {element.id}: {e}", exc_info=True)
+                else:
+                     logger.warning(f"[{self.id}] Found VeilProducer component {producer_component.__class__.__name__} on {element.id} without a callable calculate_delta method.")
+
+
+        # Cache the collected deltas for this frame
+        # TODO: Decide on caching strategy - replace, append, timestamp? Replacing for now.
+        self._cached_deltas = all_deltas_in_frame
+        logger.debug(f"[{self.id}] Total deltas collected in frame: {len(self._cached_deltas)}")
+
+        # Notify listeners if new deltas were generated
+        if self._cached_deltas and self._uplink_listeners:
+            logger.info(f"[{self.id}] Notifying {len(self._uplink_listeners)} uplink listeners of new VEIL deltas.")
+            # Pass a copy of the deltas to listeners
+            deltas_to_send = list(self._cached_deltas)
+            for listener in list(self._uplink_listeners): # Iterate over a copy in case listener modifies the set
+                try:
+                    # Consider if listeners should PULL the data instead?
+                    # Passing deltas directly for now.
+                    listener(deltas_to_send)
+                except Exception as e:
+                    logger.error(f"[{self.id}] Error notifying uplink listener {listener}: {e}", exc_info=True)
+                    # Optionally unregister faulty listeners?
+                    # self.unregister_uplink_listener(listener)
+
+        logger.debug(f"[{self.id}] Finished on_frame_end processing.")
+
+    # Optional: Method for listeners to pull cached deltas if needed
+    def get_cached_deltas(self) -> List[Dict[str, Any]]:
+        """Returns the VEIL deltas calculated in the last frame."""
+        # Consider clearing cache after retrieval? Or timestamping?
+        return list(self._cached_deltas) # Return a copy
 
     # --- Action Execution --- 
     def execute_action_on_element(self, element_id: str, action_name: str, parameters: Dict[str, Any]) -> Dict[str, Any]:

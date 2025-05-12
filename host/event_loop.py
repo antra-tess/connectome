@@ -7,17 +7,16 @@ Manages incoming/outgoing queues, timing, and triggers ShellModules based on rou
 import logging
 import asyncio
 import time
-from typing import Dict, Any, Tuple, Callable, Optional, Set
+from typing import Dict, Any, Tuple, Callable, Optional, Set, List
 
 # Type hinting imports
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from host.modules.routing.host_router import HostRouter
-    # from host.modules.shell.shell_module import ShellModule # Removed
-    from host.modules.activities.activity_listener import ActivityListener
     from host.modules.activities.activity_client import ActivityClient
     from host.routing.external_event_router import ExternalEventRouter
-    from elements.space_registry import SpaceRegistry # Added import
+    from elements.space_registry import SpaceRegistry
+    from host.config import AgentConfig
 
 logger = logging.getLogger(__name__)
 
@@ -26,36 +25,39 @@ OutgoingActionCallback = Callable[[Dict[str, Any]], None]
 
 # Cycle triggering constants
 AGENT_CYCLE_DEBOUNCE_SECONDS = 0.5
-TRIGGERING_EVENT_TYPES = {"message_received", "tool_result_available"}
+
+# MODIFIED: TRIGGERING_EVENT_TYPES - more specific now
+# We will rely on mark_agent_for_cycle to decide based on content
+MESSAGE_EVENT_TYPE = "message_received" # Example type for incoming messages
+TOOL_RESULT_EVENT_TYPE = "tool_result_received" # Example type for tool results targeting an agent
 
 class HostEventLoop:
     
     def __init__(self,
-                 host_router: 'HostRouter', # May become vestigial if ExternalEventRouter handles all routing
-                 # shell_modules: Dict[str, 'ShellModule'], # Removed
-                 activity_listener: 'ActivityListener',
+                 host_router: 'HostRouter',
                  activity_client: 'ActivityClient',
                  external_event_router: 'ExternalEventRouter',
-                 space_registry: 'SpaceRegistry'): # Added parameter
+                 space_registry: 'SpaceRegistry',
+                 agent_configs: List['AgentConfig']): # NEW: Add agent_configs
         self.running = False
-        # Infrastructure Modules
-        self.host_router: 'HostRouter' = host_router # Keep for now, reassess its role later
-        # self.shell_modules: Dict[str, 'ShellModule'] = shell_modules # Removed
-        self.activity_listener: 'ActivityListener' = activity_listener
-        self.activity_client: 'ActivityClient' = activity_client
-        self.external_event_router: 'ExternalEventRouter' = external_event_router
-        self.space_registry: 'SpaceRegistry' = space_registry # Added instance variable
+        self.host_router = host_router
+        self.activity_client = activity_client
+        self.external_event_router = external_event_router
+        self.space_registry = space_registry
         
-        # Queues
+        # NEW: Store agent_configs as a dict for easy lookup
+        self.agent_configs: Dict[str, 'AgentConfig'] = {ac.agent_id: ac for ac in agent_configs if ac.agent_id}
+        if len(self.agent_configs) != len(agent_configs):
+            logger.warning("Some agent configs were missing agent_id and were not stored in HostEventLoop.")
+
         self._incoming_event_queue: asyncio.Queue[Tuple[Dict[str, Any], Dict[str, Any]]] = asyncio.Queue()
         self._outgoing_action_queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
         
-        # Cycle triggering state
         self._trigger_event_received_time: Dict[str, float] = {}
         self._pending_agent_cycles: Set[str] = set()
         self._last_agent_cycle_time: Dict[str, float] = {}
         
-        logger.info("HostEventLoop initialized with HostRouter and ShellModules.")
+        logger.info("HostEventLoop initialized.") # Updated log message
 
     # --- Enqueue Methods (Unchanged) ---
     def enqueue_incoming_event(self, event_data: Dict[str, Any], timeline_context: Dict[str, Any]):
@@ -82,92 +84,130 @@ class HostEventLoop:
         except Exception as e:
              logger.error(f"Error enqueuing outgoing action: {e}", exc_info=True)
              
-    # --- Queue Processing Methods --- 
+    # --- NEW: Method for conditional agent cycle marking --- 
+    def mark_agent_for_cycle(self, agent_id: str, event_payload: Dict[str, Any], current_time: float):
+        """
+        Conditionally marks an agent for a cycle based on event content (DM/mention).
+        This method is intended to be called by ExternalEventRouter or other systems
+        that have determined an event is relevant to a specific agent's InnerSpace.
+        """
+        if not agent_id:
+            logger.warning("mark_agent_for_cycle called with no agent_id.")
+            return
+
+        agent_config = self.agent_configs.get(agent_id)
+        if not agent_config:
+            logger.warning(f"Agent config not found for {agent_id}. Cannot determine mention aliases.")
+            # Default to triggering if we can't find config? Or not? For now, don't trigger.
+            return
+
+        event_type = event_payload.get("event_type")
+        payload_data = event_payload.get("payload", {}) # The actual content from the adapter
+        is_dm = payload_data.get("is_dm", False)
+        text_content = payload_data.get("text_content", "").lower() # Ensure text_content is string
+        # Mentions should be a list of IDs/names from the adapter
+        mentions = payload_data.get("mentions", []) 
+        source_adapter_id = event_payload.get("source_adapter_id")
+
+        should_trigger = False
+
+        if event_type == TOOL_RESULT_EVENT_TYPE:
+            # Tool results for an agent should always trigger their cycle if the result is routed to their InnerSpace
+            # The ExternalEventRouter should ensure this event_payload is associated with the correct agent_id
+            # when calling mark_agent_for_cycle.
+            logger.debug(f"Tool result received for agent {agent_id}. Marking for cycle.")
+            should_trigger = True
+        elif event_type == MESSAGE_EVENT_TYPE:
+            if is_dm:
+                logger.debug(f"DM received for agent {agent_id}. Marking for cycle.")
+                should_trigger = True
+            elif source_adapter_id and agent_config.platform_aliases:
+                agent_alias_on_platform = agent_config.platform_aliases.get(source_adapter_id)
+                if agent_alias_on_platform:
+                    agent_alias_lower = agent_alias_on_platform.lower()
+                    # Check simple text mention (e.g., @BotName text, BotName: text)
+                    # More sophisticated mention parsing might be needed depending on platform specifics
+                    # Combine the conditions into a single boolean check
+                    is_mentioned_in_text = (
+                        f"@{agent_alias_lower}" in text_content or
+                        text_content.startswith(f"{agent_alias_lower}:") or
+                        agent_alias_lower in text_content # General check, might be too broad
+                    )
+                    if is_mentioned_in_text:
+                        logger.debug(f"Agent {agent_id} (alias: {agent_alias_on_platform}) mentioned in text. Marking for cycle.")
+                        should_trigger = True
+                    
+                    # Check structured mentions if provided by adapter
+                    # Assuming mentions is a list of strings (user IDs or names)
+                    if not should_trigger and isinstance(mentions, list):
+                        for mentioned_user in mentions:
+                            if isinstance(mentioned_user, str) and agent_alias_lower == mentioned_user.lower():
+                                logger.debug(f"Agent {agent_id} (alias: {agent_alias_on_platform}) found in structured mentions. Marking for cycle.")
+                                should_trigger = True
+                                break 
+                else:
+                    logger.debug(f"No alias configured for agent {agent_id} on adapter {source_adapter_id}. Cannot check for text mentions.")
+            else:
+                if not source_adapter_id:
+                    logger.debug(f"Event for agent {agent_id} has no source_adapter_id. Cannot check platform alias.")
+                if not agent_config.platform_aliases:
+                    logger.debug(f"Agent {agent_id} has no platform_aliases configured.")
+        else:
+            # For other event types, assume they don't trigger a cycle unless explicitly handled
+            logger.debug(f"Event type {event_type} for agent {agent_id} is not a direct message or tool result. Not marking for cycle based on content.")
+
+
+        if should_trigger:
+            self._trigger_event_received_time[agent_id] = current_time
+            self._pending_agent_cycles.add(agent_id)
+            logger.info(f"Agent {agent_id} marked for cycle trigger due to event: {event_type}.")
+        else:
+            logger.debug(f"Event {event_type} for agent {agent_id} did not meet criteria for cycle trigger.")
+
     async def _process_incoming_event_queue(self) -> None:
-         """Processes incoming events, routes them to ShellModules, and marks cycle triggers."""
-         now = time.monotonic()
-         try:
-             while not self._incoming_event_queue.empty():
-                 event_data, timeline_context = await self._incoming_event_queue.get()
-                 event_type = event_data.get("event_type")
-                 event_id = event_data.get("event_id", "unknown")
-                 payload = event_data.get("payload", {}) # Get payload safely
-                 logger.debug(f"Processing incoming event {event_id} ({event_type}) from queue. Source Adapter: {event_data.get('source_adapter_id')}")
+        """Processes incoming events, routes them, and uses mark_agent_for_cycle."""
+        # current_time = time.monotonic() # Moved local, passed to mark_agent_for_cycle
+        try:
+            while not self._incoming_event_queue.empty():
+                event_data, timeline_context = await self._incoming_event_queue.get()
+                event_type = event_data.get("event_type")
+                event_id = event_data.get("event_id", "unknown")
+                payload = event_data.get("payload", {}) # Get payload safely
+                logger.debug(f"Processing incoming event {event_id} ({event_type}) from queue. Source Adapter: {event_data.get('source_adapter_id')}")
 
-                 # --- New Routing Logic --- 
-                 if event_data.get("source_adapter_id"):
-                     # This event came from ActivityClient, route through ExternalEventRouter
-                     try:
-                         # ExternalEventRouter needs the raw event_data from ActivityClient (which includes payload)
-                         # and potentially the timeline_context if it's to be used or modified further.
-                         # Given ActivityClient sends {} for timeline_context, ExternalEventRouter must handle that.
-                         await self.external_event_router.route_external_event(event_data, timeline_context)
-                     except Exception as ext_router_err:
-                         logger.error(f"Error in ExternalEventRouter for event {event_id}: {ext_router_err}", exc_info=True)
-                     self._incoming_event_queue.task_done()
-                     continue # Move to next event in queue
-                 # --- End New Routing Logic ---
+                # Routing via ExternalEventRouter is primary for adapter events
+                if event_data.get("source_adapter_id"):
+                    try:
+                        # ExternalEventRouter will call self.mark_agent_for_cycle if needed
+                        await self.external_event_router.route_external_event(event_data, timeline_context)
+                    except Exception as ext_router_err:
+                        logger.error(f"Error in ExternalEventRouter for event {event_id}: {ext_router_err}", exc_info=True)
+                    self._incoming_event_queue.task_done()
+                    continue
+                
+                # Handling for internal events (e.g., tool results not from an adapter)
+                # These events must contain enough info to identify the target agent_id
+                # Example: a tool result being placed back onto an InnerSpace timeline
+                # The InnerSpace itself (or component that recorded it) should then call mark_agent_for_cycle
+                # This loop no longer tries to guess the target agent for internal events.
+                # If an internal event is put on the queue and isn't an adapter event, it's assumed 
+                # that the system component that enqueued it is also responsible for calling mark_agent_for_cycle
+                # if that event is supposed to trigger a cycle.
+                # The old logic for internal event routing is removed for simplification here.
+                # It needs to be handled by the component that generates such internal events.
+                # For example, InnerSpace.execute_element_action, when it records a tool_result_received,
+                # should call self.host_event_loop.mark_agent_for_cycle(...).
+                # This requires InnerSpace to have a reference to the HostEventLoop.
 
-                 # 1. Find target agent via HostRouter (Original logic for non-adapter events)
-                 # This part needs to be re-evaluated. If an event isn't from an adapter,
-                 # how do we know which agent to trigger? Internal events should carry agent context.
-                 # For now, we assume cycle triggering is primarily based on external_event_router determining the agent
-                 # or internal events explicitly marking an agent for a cycle.
-                 
-                 # If ExternalEventRouter or other logic determines an agent needs a cycle based on this event:
-                 # This logic would now likely live within ExternalEventRouter which calls back to HEL, or HEL uses a flag from it.
-                 # For simplicity, let's assume ExternalEventRouter's processing might update _pending_agent_cycles
-                 # or that internal events (like tool_results) directly add to it.
+                # For now, if an event reaches here and is not from an adapter, we log it.
+                # The component responsible for this internal event needs to be updated
+                # to call mark_agent_for_cycle itself.
+                if not event_data.get("source_adapter_id"):
+                    logger.warning(f"Internal event {event_id} received in HEL queue. Cycle triggering for this event must be handled by the event source by calling mark_agent_for_cycle.")
 
-                 # The following original logic is now largely superseded by ExternalEventRouter for adapter events
-                 # and needs a clear path for internally generated, agent-specific events.
-                 if not event_data.get("source_adapter_id"): # Only if NOT handled by ExternalEventRouter
-                     target_agent_id_for_internal = None
-                     # Option 1: payload directly contains target_agent_id for internal events
-                     if isinstance(payload, dict):
-                         target_agent_id_for_internal = payload.get("target_connectome_agent_id")
-
-                     # Option 2: Use host_router if it's still relevant for some internal event types
-                     if not target_agent_id_for_internal and self.host_router:
-                         routing_context_internal = payload 
-                         if timeline_context: 
-                             for key, value in timeline_context.items():
-                                 routing_context_internal.setdefault(key, value)
-                         try:
-                             target_agent_id_for_internal = self.host_router.get_target_agent_id(routing_context_internal)
-                         except Exception as router_err:
-                             logger.error(f"Error calling host_router.get_target_agent_id for internal event: {router_err}", exc_info=True)
-
-                     if target_agent_id_for_internal:
-                         # This internal event might be a direct request for a shell to handle something OR a cycle trigger.
-                         # If it's a direct event for a component (e.g. tool result), it should be routed via its InnerSpace.receive_event.
-                         # This HostEventLoop shouldn't directly call ShellModule.handle_incoming_event anymore.
-                         # Instead, such internal events should target an InnerSpace element.
-                         # For cycle triggering based on internal events:
-                         if event_type in TRIGGERING_EVENT_TYPES:
-                             logger.debug(f"Internal event {event_id} ({event_type}) is a cycle trigger for agent {target_agent_id_for_internal}.")
-                             self._trigger_event_received_time[target_agent_id_for_internal] = now
-                             self._pending_agent_cycles.add(target_agent_id_for_internal)
-                     else:
-                         logger.warning(f"Internal event {event_id} ({event_type}) could not be routed to a specific agent for cycle triggering.")
-
-                 # The old call to target_shell.handle_incoming_event(event_data, timeline_context) is removed.
-                 # Events are now routed by ExternalEventRouter to Space.receive_event for DAG recording and component processing.
-
-                 # Cycle triggering based on event_type (original logic for reference, needs integration with new routing)
-                 # If an event (external or internal) has been processed and determined to affect an agent, 
-                 # that agent ID should be added to _pending_agent_cycles. 
-                 # ExternalEventRouter might need a way to signal back to HostEventLoop or directly add to _pending_agent_cycles.
-                 # For now, let's assume if ExternalEventRouter successfully routes a TRIGGERING_EVENT_TYPE to an InnerSpace,
-                 # the InnerSpace itself (or a component) might be responsible for adding its agent_id to a list HEL checks,
-                 # or ExternalEventRouter informs HEL. This is a subtle point.
-                 # A simpler flow: ExternalEventRouter identifies the agent_id and if the event type is triggering, it directly calls a method on HEL
-                 # like self.mark_agent_for_cycle(agent_id, now)
-
-                 self._incoming_event_queue.task_done()
-         except Exception as e:
-              logger.exception("Exception during incoming event queue processing.")
-         # No return value needed now, state is tracked in _pending_agent_cycles
+                self._incoming_event_queue.task_done()
+        except Exception as e:
+            logger.exception("Exception during incoming event queue processing.")
 
     async def _process_outgoing_action_queue(self) -> None:
         """Processes all actions currently in the outgoing queue, routing to target modules."""
@@ -247,10 +287,31 @@ class HostEventLoop:
                      else:
                           logger.error(f"Could not trigger agent cycle: InnerSpace for {agent_id} not found in SpaceRegistry.")
 
+                # NEW STEP 5: Process on_frame_end for all registered spaces
+                try:
+                    all_spaces = self.space_registry.get_spaces() # Returns Dict[str, Space]
+                    if all_spaces:
+                        logger.debug(f"Processing on_frame_end for {len(all_spaces)} spaces.")
+                        for space_id, space in all_spaces.items():
+                            try:
+                                if hasattr(space, 'on_frame_end') and callable(space.on_frame_end):
+                                    # If on_frame_end is async, it needs to be awaited.
+                                    # Assuming it's synchronous for now based on previous Space impl.
+                                    # If it becomes async in Space, this will need `await space.on_frame_end()`
+                                    space.on_frame_end()
+                                    logger.debug(f"Called on_frame_end for space: {space.name} ({space_id})")
+                                else:
+                                    logger.warning(f"Space {space.name} ({space_id}) does not have a callable on_frame_end method.")
+                            except Exception as frame_end_err:
+                                logger.error(f"Error calling on_frame_end for space {space.name} ({space_id}): {frame_end_err}", exc_info=True)
+                    else:
+                        logger.debug("No spaces registered to process on_frame_end.")
+                except Exception as e_spaces:
+                    logger.error(f"Error retrieving spaces from registry for on_frame_end: {e_spaces}", exc_info=True)
+
                 # Prevent busy-waiting
-                await asyncio.sleep(0.1)
-                
-            except asyncio.CancelledError:
+                await asyncio.sleep(0.01) # Adjust sleep time as necessary
+            except KeyboardInterrupt:
                  logger.info("Host Event Loop task cancelled.")
                  self.running = False 
             except Exception as e:

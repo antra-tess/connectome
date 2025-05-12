@@ -118,21 +118,112 @@ class ActivityClient:
             self.connected_adapters[adapter_id] = False
             # No need to disconnect client instance here, library handles retries
 
-        # --- Handler for Incoming Normalized Events --- 
-        @client.on("normalized_event") 
-        async def handle_normalized_event(data: Dict[str, Any]):
-            if not isinstance(data, dict):
-                 logger.warning(f"Received non-dict normalized_event from '{adapter_id}': {data}")
+        # --- Handler for Incoming Events from Adapter API --- 
+        # Renamed from "normalized_event" to "bot_request"
+        @client.on("bot_request") 
+        async def handle_bot_request(raw_payload: Dict[str, Any]):
+            """Handles incoming events (structured as per user spec) from the adapter API."""
+            
+            if not isinstance(raw_payload, dict):
+                 logger.warning(f"Received non-dict bot_request from '{adapter_id}': {raw_payload}")
                  return
             
-            # Add the ID of the connection this came from for routing/history
-            data['source_adapter_id'] = adapter_id 
+            # Extract core fields from the raw payload
+            raw_event_type = raw_payload.get('event_type')
+            raw_data = raw_payload.get('data')
+            # adapter_type = raw_payload.get('adapter_type') # Could store/use this if needed
+
+            if not raw_event_type or not isinstance(raw_data, dict):
+                 logger.warning(f"Received bot_request from '{adapter_id}' missing 'event_type' or valid 'data': {raw_payload}")
+                 return
+
+            # Extract the adapter ID (which is adapter_name in the raw data)
+            # Use the connection's adapter_id as fallback/confirmation?
+            # For now, trust the data payload.
+            source_adapter_id_from_data = raw_data.get('adapter_name')
+            if not source_adapter_id_from_data:
+                 logger.warning(f"Received bot_request data from '{adapter_id}' missing 'adapter_name': {raw_data}")
+                 # Use the connection's adapter_id as fallback?
+                 source_adapter_id_from_data = adapter_id 
+                 # Maybe return an error?
+                 
+            # Log if the adapter_name in data doesn't match the connection ID - indicates potential issue
+            if source_adapter_id_from_data != adapter_id:
+                 logger.warning(f"Adapter name '{source_adapter_id_from_data}' in bot_request data does not match connection ID '{adapter_id}'. Using data value.")
+
+            logger.debug(f"Received bot_request from '{adapter_id}': Type={raw_event_type}. Enqueuing...")
             
-            logger.debug(f"Received normalized_event from '{adapter_id}': Type={data.get('event_type')}. Enqueuing...")
-            # Enqueue the *entire received data structure* onto the main loop
-            # Pass an empty dict for timeline_context as ActivityClient doesn't determine it.
-            self._host_event_loop.enqueue_incoming_event(data, {})
+            # Construct the event structure expected by HostEventLoop/ExternalEventRouter
+            event_to_enqueue = {
+                # Set the reliable source ID from the connection
+                "source_adapter_id": adapter_id, 
+                # Pass the raw event type and data payload for the router to interpret
+                "payload": {
+                     "event_type_from_adapter": raw_event_type, # e.g., "message_received", "message_updated"
+                     "adapter_data": raw_data # The entire 'data' dict from the raw payload
+                }
+            }
             
+            # Enqueue the event onto the main loop
+            # Pass an empty dict for timeline_context initially.
+            self._host_event_loop.enqueue_incoming_event(event_to_enqueue, {})
+            
+        # --- Handler for Incoming History Response --- 
+        # REMOVED @client.on("history_response") handler
+
+        # --- NEW Handler for Generic Success Responses ---
+        @client.on("request_success")
+        async def handle_request_success(raw_payload: Dict[str, Any]):
+            """Handles generic success responses from the adapter API."""
+            if not isinstance(raw_payload, dict):
+                 logger.warning(f"Received non-dict request_success from {adapter_id}: {raw_payload}")
+                 return
+            
+            request_type = raw_payload.get("request_type")
+            status = raw_payload.get("status") # Should be "success"
+            data = raw_payload.get("data")
+
+            logger.debug(f"Received request_success from {adapter_id}. Type: {request_type}, Status: {status}, Data keys: {list(data.keys()) if isinstance(data, dict) else None}")
+
+            if status != "success":
+                logger.warning(f"Received request_success event from {adapter_id} but status was not success: {status}")
+                # Optionally handle non-success statuses if they use this event type
+
+            # --- Check if it"s a response to fetch_history ---
+            if request_type == "history" and isinstance(data, dict):
+                conversation_id = data.get("conversation_id")
+                messages = data.get("messages") # List of message dicts
+
+                if not conversation_id or not isinstance(messages, list):
+                     logger.warning(f"Received history success response from {adapter_id} missing conversation_id or valid messages list in data: {data}")
+                     return
+
+                logger.info(f"Received history success response from {adapter_id} for conv {conversation_id} with {len(messages)} messages. Enqueuing...")
+                
+                # Construct the internal event structure
+                event_to_enqueue = {
+                    "source_adapter_id": adapter_id, 
+                    "event_type": "connectome_history_received", # Internal type for router
+                    "payload": { 
+                         "conversation_id": conversation_id,
+                         "messages": messages, 
+                         # Pass the original success payloads data as adapter_data for context
+                         "adapter_data": data 
+                    }
+                }
+                # Enqueue onto the main loop
+                self._host_event_loop.enqueue_incoming_event(event_to_enqueue, {})
+
+            elif request_type == "send_message":
+                # Log success, maybe extract message ID if needed later for correlation
+                external_msg_id = data.get("message_external_id") if isinstance(data, dict) else None
+                logger.info(f"Received success confirmation for send_message from {adapter_id}. External ID: {external_msg_id}")
+                # TODO: Optionally enqueue an internal "agent_message_confirmed" event?
+            
+            else:
+                # Handle success confirmations for other types if needed
+                logger.info(f"Received unhandled request_success confirmation for type {request_type} from {adapter_id}.")
+
         # --- Connect --- 
         try:
             auth_data = config.get("auth") # Expect auth dict if needed
@@ -181,50 +272,68 @@ class ActivityClient:
         # --- Structure the data to be emitted externally --- 
         outgoing_event_type = action_type
         outgoing_data = {} # Start fresh for explicit mapping
-        is_message_sent = False # Flag to check if we should record history
-        message_text = None # Store text for history
-        conversation_id = None # Store conversation for history
+        # is_message_sent = False # Removed history event logic for now
+        # message_text = None # Removed history event logic for now
+        # conversation_id = None # Removed history event logic for now
         
         # Map payload fields to expected outgoing data structure per action_type
-        if outgoing_event_type == "send_message":
-             conversation_id = payload.get("conversation_id")
-             message_text = payload.get("text")
-             outgoing_data = {
-                  "conversation_id": conversation_id,
-                  "text": message_text
-                  # TODO: Add threadId, attachments, mentions from payload if needed by adapter API
-             }
-             is_message_sent = True # We want to record this in history
-             
-        elif outgoing_event_type == "edit_message":
-             outgoing_data = {
-                  "conversation_id": payload.get("conversation_id"),
-                  "message_id": payload.get("message_id"),
-                  "text": payload.get("text")
-             }
-             # We probably don't record edits as new history turns
-             
-        elif outgoing_event_type == "delete_message":
-             outgoing_data = {
-                  "conversation_id": payload.get("conversation_id"),
-                  "message_id": payload.get("message_id")
-             }
-             # We probably don't record deletions as new history turns
-             
-        elif outgoing_event_type in ["add_reaction", "remove_reaction"]:
-             outgoing_data = {
-                  "conversation_id": payload.get("conversation_id"),
-                  "message_id": payload.get("message_id"),
-                  "emoji": payload.get("emoji")
-             }
-             # Don't record reactions as history turns either
-             
-        else:
-             logger.warning(f"Outgoing action type '{outgoing_event_type}' has no specific data mapping. Sending raw payload args minus internal fields.")
-             # Filter out internal fields before sending raw tool_args
-             internal_keys = {'adapter_id', 'tool_name', 'tool_args', 'tool_call_id', 
-                              'requesting_element_id', 'requesting_agent_id', 'agent_name'}
-             outgoing_data = {k: v for k, v in payload.get('tool_args', {}).items() if k not in internal_keys}
+        # Based on user-provided examples.
+        try:
+            if outgoing_event_type == "send_message":
+                outgoing_data = {
+                    "conversation_id": payload["conversation_id"], # Required
+                    "text": payload["text"],                 # Required
+                    # Optional fields if adapters support them
+                    # "reply_to_external_id": payload.get("reply_to_external_id") 
+                }
+                # is_message_sent = True
+                # message_text = payload["text"]
+                # conversation_id = payload["conversation_id"]
+                
+            elif outgoing_event_type == "edit_message":
+                outgoing_data = {
+                    "conversation_id": payload["conversation_id"],     # Required
+                    "message_id": payload["message_external_id"], # Required - maps from message_external_id
+                    "text": payload["new_text"]                   # Required - maps from new_text
+                }
+                
+            elif outgoing_event_type == "delete_message":
+                outgoing_data = {
+                    "conversation_id": payload["conversation_id"],     # Required
+                    "message_id": payload["message_external_id"]  # Required - maps from message_external_id
+                }
+                
+            elif outgoing_event_type == "add_reaction":
+                outgoing_data = {
+                    "conversation_id": payload["conversation_id"],     # Required
+                    "message_id": payload["message_external_id"], # Required - maps from message_external_id
+                    "emoji": payload["emoji"]                     # Required
+                }
+                
+            elif outgoing_event_type == "remove_reaction":
+                outgoing_data = {
+                    "conversation_id": payload["conversation_id"],     # Required
+                    "message_id": payload["message_external_id"], # Required - maps from message_external_id
+                    "emoji": payload["emoji"]                     # Required
+                }
+                
+            elif outgoing_event_type == "fetch_history":
+                outgoing_data = {
+                    "conversation_id": payload["conversation_id"], # Required
+                    "before": payload.get("before"),           # Optional
+                    "after": payload.get("after"),             # Optional
+                    "limit": payload.get("limit", 100)         # Optional, with default
+                }
+                # Note: No internal history event is generated for the request itself.
+                # The response (history) will generate events later.
+
+            else:
+                logger.warning(f"Outgoing action type '{outgoing_event_type}' has no specific data mapping. Sending empty data field.")
+                outgoing_data = {} # Send empty data if type is unknown
+
+        except KeyError as e:
+            logger.error(f"Missing required key '{e}' in payload for action type '{outgoing_event_type}'. Cannot construct outgoing data.")
+            return # Abort if payload is missing required fields for the specific action
 
         # Construct the final object to emit to the external adapter API
         data_to_emit = {
@@ -242,23 +351,11 @@ class ActivityClient:
             logger.debug(f"Successfully emitted '{event_name_to_emit}' to '{target_adapter_id}'")
             
             # --- Enqueue Internal Event for History (if applicable) --- 
-            if is_message_sent and message_text is not None and conversation_id is not None:
-                history_event_payload = {
-                    # Routing Key: ID of the InnerSpace that sent the message
-                    "target_element_id": requesting_element_id, 
-                    # Data needed by the history handler:
-                    "adapter_id": target_adapter_id,
-                    "conversation_id": conversation_id,
-                    "text": message_text,
-                    "agent_name": agent_name, 
-                    "timestamp": int(time.time() * 1000) # Timestamp of successful send
-                }
-                history_event = {
-                    "event_type": "agent_message_sent",
-                    "payload": history_event_payload
-                }
-                logger.debug(f"Enqueuing internal event: {history_event['event_type']}")
-                self._host_event_loop.enqueue_internal_event(history_event) # Use a separate queue/method?
+            # Removed for now
+            # if is_message_sent and message_text is not None and conversation_id is not None:
+            #     history_event_payload = { ... }
+            #     history_event = { ... }
+            #     self._host_event_loop.enqueue_internal_event(history_event)
                 
         except Exception as e:
             logger.error(f"Error emitting action '{action_type}' to adapter '{target_adapter_id}': {e}", exc_info=True)

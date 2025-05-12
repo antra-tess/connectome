@@ -8,12 +8,17 @@ import logging
 from typing import Dict, Any, Callable, List, Optional, Tuple
 
 from ..base import Component, BaseElement
+# Import the registry decorator
+from elements.component_registry import register_component
+# Import LLM Tool Definition structure
+from llm.provider_interface import LLMToolDefinition
 
 logger = logging.getLogger(__name__)
 
 # Define a type for the stored tool information
 ToolDefinition = Dict[str, Any] # Stores description, params_schema, function
 
+@register_component
 class ToolProviderComponent(Component):
     """
     A component that acts as a registry and execution point for tools on an Element.
@@ -84,6 +89,39 @@ class ToolProviderComponent(Component):
                 "parameters": tool_info["parameter_descriptions"] # LLM usually expects schema of params
             })
         return available_tools_list
+
+    def get_llm_tool_definitions(self) -> List[LLMToolDefinition]:
+        """
+        Returns a list of available tools formatted as LLMToolDefinition objects,
+        suitable for passing to the LLM provider.
+        Infers a basic JSON schema assuming string parameters.
+        """
+        llm_tools = []
+        for tool_name, tool_info in self._tools.items():
+            parameter_schema = {
+                "type": "object",
+                "properties": {},
+                "required": [] # Assume required for now, could be refined
+            }
+            # Infer basic schema from descriptions
+            param_descriptions = tool_info.get("parameter_descriptions", {})
+            for param_name, description in param_descriptions.items():
+                parameter_schema["properties"][param_name] = {
+                    "type": "string", # Assume string type
+                    "description": description
+                }
+                parameter_schema["required"].append(param_name)
+            
+            # If no parameters, remove empty required list
+            if not parameter_schema["required"]:
+                del parameter_schema["required"]
+
+            llm_tools.append(LLMToolDefinition(
+                name=tool_name,
+                description=tool_info["description"],
+                parameters=parameter_schema
+            ))
+        return llm_tools
 
     def execute_tool(self, tool_name: str, **kwargs: Any) -> Dict[str, Any]:
         """

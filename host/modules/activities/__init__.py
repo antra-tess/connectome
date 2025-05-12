@@ -7,7 +7,6 @@ a standardized interface.
 
 # Import the central client and listener classes
 from .activity_client import ActivityClient
-from .activity_listener import ActivityListener
 
 # Optionally, import specific adapter implementations if they were 
 # implemented here instead of externally.

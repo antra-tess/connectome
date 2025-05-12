@@ -4,19 +4,28 @@ Component for managing the connection state and spans of an UplinkProxy.
 """
 
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Callable
 import uuid
 import time
 from datetime import datetime, timedelta
 
+# Type hinting imports
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from ....space_registry import SpaceRegistry
+    from ....elements.space import Space
+
 from ..base_component import Component
 from ..space.timeline_component import TimelineComponent # Needed to record connection events
+# Import the registry decorator
+from elements.component_registry import register_component
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
+@register_component
 class UplinkConnectionComponent(Component):
     """
     Manages the connection lifecycle, state, and spans for an Uplink element.
@@ -35,9 +44,16 @@ class UplinkConnectionComponent(Component):
         # "disconnect_request"
     ]
     
-    def __init__(self, element=None, remote_space_id: Optional[str] = None, sync_interval: int = 60):
+    def __init__(self, element=None, remote_space_id: Optional[str] = None, 
+                 sync_interval: int = 60,
+                 space_registry: Optional['SpaceRegistry'] = None,
+                 delta_callback: Optional[Callable[[List[Dict[str, Any]]], None]] = None):
         super().__init__(element)
         self.remote_space_id = remote_space_id or "unknown_remote"
+        self._space_registry = space_registry
+        self._delta_callback = delta_callback
+        self._remote_space_ref: Optional['Space'] = None
+        
         # State stores connection details and history
         self._state = {
             "connected": False,
@@ -100,6 +116,25 @@ class UplinkConnectionComponent(Component):
             logger.info(f"Successfully connected to {self.remote_space_id}")
             # Record event in the element's *own* timeline
             self._record_timeline_event("uplink_connected", {"remote_space_id": self.remote_space_id})
+
+            # --- NEW: Register listener with remote space --- 
+            if self._space_registry and self._delta_callback:
+                try:
+                     self._remote_space_ref = self._space_registry.get_space(self.remote_space_id)
+                     if self._remote_space_ref:
+                         logger.info(f"Registering delta listener with remote space {self.remote_space_id}")
+                         self._remote_space_ref.register_uplink_listener(self._delta_callback)
+                     else:
+                          logger.error(f"Could not register listener: Remote space {self.remote_space_id} not found in registry.")
+                          # TODO: Should connection fail if remote space cannot be found?
+                except Exception as e:
+                     logger.error(f"Error registering uplink listener with remote space {self.remote_space_id}: {e}", exc_info=True)
+            elif not self._space_registry:
+                 logger.warning("Cannot register uplink listener: SpaceRegistry not provided.")
+            elif not self._delta_callback:
+                 logger.warning("Cannot register uplink listener: Delta callback not provided.")
+            # --- END NEW --- 
+
             return True
         else:
             self._state["connected"] = False
@@ -123,6 +158,16 @@ class UplinkConnectionComponent(Component):
         Returns:
             True if disconnected successfully (or already disconnected).
         """
+        # --- NEW: Unregister listener --- 
+        if self._remote_space_ref and self._delta_callback:
+             try:
+                  logger.info(f"Unregistering delta listener from remote space {self.remote_space_id}")
+                  self._remote_space_ref.unregister_uplink_listener(self._delta_callback)
+             except Exception as e:
+                  logger.error(f"Error unregistering uplink listener from {self.remote_space_id}: {e}", exc_info=True)
+        self._remote_space_ref = None # Clear reference regardless
+        # --- END NEW --- 
+
         if not self._state["connected"]:
             logger.debug(f"Already disconnected from {self.remote_space_id}")
             return True

@@ -4,16 +4,23 @@ Base class for all elements in the Component-based architecture.
 """
 
 import logging
-from typing import Dict, Any, Optional, List, Callable, Set, Tuple, Literal, Type
+from typing import Dict, Any, Optional, List, Callable, Set, Tuple, Literal, Type, TYPE_CHECKING
 import uuid
 import time
 import enum
+import inspect # For tool registration
 
 from .components import Component
+from .components.base_component import Component as BaseComponent
+from .components.tool_provider import ToolProviderComponent # Needed for registration target
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Forward reference for type hint
+if TYPE_CHECKING:
+    from .space import Space
 
 
 class MountType(enum.Enum):
@@ -322,3 +329,65 @@ class BaseElement:
             logger.error(f"Dependency validation failed for one or more components on element {self.id}.")
             
         return all_valid 
+
+    def finalize_setup(self) -> None:
+        """
+        Call this after all components have been added to the element
+        to perform final setup steps like tool registration.
+        """
+        self._register_component_tools()
+        logger.debug(f"Final setup completed for Element {self.id}")
+
+    def _register_component_tools(self) -> None:
+        """
+        Iterates through attached components and registers methods 
+        marked as tools (e.g., starting with 'handle_') with this 
+        element's own ToolProviderComponent (if present).
+        """
+        # Find the ToolProviderComponent on this element
+        tool_provider = self.get_component_by_type(ToolProviderComponent)
+        if not tool_provider:
+            # No tool provider on this element, nothing to do.
+            # Log this only if other components *have* handle_ methods?
+            # For now, just return silently.
+            return
+
+        logger.debug(f"[{self.id}] Scanning attached components for local tools...")
+        registered_count = 0
+        skipped_count = 0
+
+        for comp_id, component in self.get_components().items():
+            # Skip the tool provider itself
+            if component is tool_provider:
+                continue
+                
+            # Inspect methods
+            for attr_name in dir(component):
+                if attr_name.startswith("handle_"):
+                    try:
+                        attr_value = getattr(component, attr_name)
+                        if callable(attr_value) and not attr_name.startswith('_'):
+                            tool_name = attr_name.replace("handle_", "")
+                            docstring = inspect.getdoc(attr_value) or ""
+                            description = docstring.split('\n')[0] if docstring else f"Tool '{tool_name}' from {component.COMPONENT_TYPE}"
+                            param_descriptions = {} # Placeholder
+                            
+                            # Check if already registered *on this element's provider*
+                            if tool_name in tool_provider.list_tools():
+                                logger.debug(f"Tool '{tool_name}' already registered on {self.id}. Skipping registration from {component.COMPONENT_TYPE}.")
+                                skipped_count += 1
+                                continue
+                                
+                            tool_provider.register_tool_function(
+                                name=tool_name,
+                                description=description,
+                                parameter_descriptions=param_descriptions,
+                                tool_func=attr_value
+                            )
+                            registered_count += 1
+                            logger.debug(f"Registered tool '{tool_name}' on {self.id} from {component.COMPONENT_TYPE}")
+                    except Exception as e:
+                        logger.error(f"Error inspecting/registering method {attr_name} from component {comp_id} on element {self.id}: {e}", exc_info=True)
+        
+        if registered_count > 0 or skipped_count > 0:
+            logger.info(f"[{self.id}] Local tool registration complete. Registered: {registered_count}, Skipped: {skipped_count}.")

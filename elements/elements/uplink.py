@@ -4,9 +4,14 @@ Implementation of the uplink proxy using components.
 """
 
 import logging
-from typing import Dict, Any, Optional, List
-import uuid
-import time
+from typing import Dict, Any, Optional, List, Callable
+
+# Type hinting imports
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from ..space_registry import SpaceRegistry
+
+from .base import BaseElement, MountType
 
 from .space import Space # Inherits Space functionality (Container, Timeline)
 from .components import ToolProviderComponent, VeilProducer
@@ -43,7 +48,8 @@ class UplinkProxy(Space):
     
     def __init__(self, element_id: str, name: str, description: str, 
                  remote_space_id: str, remote_space_info: Optional[Dict[str, Any]] = None,
-                 sync_interval: int = 60, cache_ttl: int = 300):
+                 sync_interval: int = 60, cache_ttl: int = 300,
+                 space_registry: Optional['SpaceRegistry'] = None):
         """
         Initialize the uplink proxy.
         
@@ -55,17 +61,23 @@ class UplinkProxy(Space):
             remote_space_info: Optional info about the remote space (e.g., name, type)
             sync_interval: Default interval for connection component (may be obsolete)
             cache_ttl: Default TTL for the remote state cache component
+            space_registry: Reference to the SpaceRegistry for finding remote space
         """
         super().__init__(element_id, name, description)
         
         # Store basic remote info accessible to tools/VEIL
         self.remote_space_id = remote_space_id
         self.remote_space_info = remote_space_info or {}
+        self._space_registry = space_registry
         
         # --- Add Uplink Components --- 
-        self._connection_comp = self.add_component(UplinkConnectionComponent, 
-                                                   remote_space_id=remote_space_id,
-                                                   sync_interval=sync_interval)
+        self._connection_comp = self.add_component(
+            UplinkConnectionComponent, 
+            remote_space_id=remote_space_id,
+            sync_interval=sync_interval,
+            space_registry=self._space_registry, 
+            delta_callback=self.handle_remote_deltas
+        )
         if not self._connection_comp:
             logger.error(f"Failed to add UplinkConnectionComponent to UplinkProxy {element_id}")
             
@@ -284,6 +296,21 @@ class UplinkProxy(Space):
         
     def get_cache_component(self) -> Optional[RemoteStateCacheComponent]:
         return self._cache_comp
+
+    # --- NEW: Delta Handler ---
+    def handle_remote_deltas(self, deltas: List[Dict[str, Any]]):
+        """
+        Callback method invoked by the remote Space when new VEIL deltas are generated.
+        Delegates delta application to the cache component.
+        """
+        logger.info(f"[{self.id}] Received {len(deltas)} VEIL delta(s) from remote space {self.remote_space_id}.")
+        if self._cache_comp:
+            try:
+                self._cache_comp.apply_deltas(deltas)
+            except Exception as e:
+                logger.error(f"[{self.id}] Error applying remote deltas in cache component: {e}", exc_info=True)
+        else:
+            logger.warning(f"[{self.id}] Cannot apply remote deltas: RemoteStateCacheComponent not found.")
 
     # --- Event Handling --- 
     # Default delegation via super().handle_event is likely sufficient unless 

@@ -3,16 +3,21 @@ Container Component
 Manages child elements mounted within a Space.
 """
 import logging
-from typing import Dict, Any, Optional, TYPE_CHECKING
+from typing import Dict, Any, Optional, TYPE_CHECKING, List
 
 from ...base import Component, MountType
+from ..base_component import Component as BaseComponent
+from ...base import BaseElement
+# Import the registry decorator
+from elements.component_registry import register_component
 
 if TYPE_CHECKING:
     from ...base import BaseElement
 
 logger = logging.getLogger(__name__)
 
-class ContainerComponent(Component):
+@register_component
+class ContainerComponent(BaseComponent):
     """
     Manages the collection of child Elements mounted within the owning Space element.
     Maintains the hierarchical structure and provides methods for managing children.

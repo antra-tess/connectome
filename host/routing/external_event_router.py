@@ -5,8 +5,8 @@ Responsible for routing events originating from external adapters (via ActivityC
 to the appropriate InnerSpace or SharedSpace.
 """
 import logging
-import time # For timestamps if not provided by adapter
-from typing import Dict, Any, Optional
+import time # For timestamps if not provided by adapter and for mark_agent_for_cycle
+from typing import Dict, Any, Optional, Callable, List # Added List
 
 # Assuming elements.elements.space.Space is the base class for SharedSpace
 # and elements.elements.inner_space.InnerSpace inherits from it.
@@ -14,25 +14,46 @@ from elements.elements.space import Space
 from elements.elements.inner_space import InnerSpace # For type hinting
 from elements.space_registry import SpaceRegistry # For finding/creating spaces
 
+# Type hint for the callback
+MarkAgentForCycleCallable = Callable[[str, Dict[str, Any], float], None]
+
+# NEW: Type hint for AgentConfig (or import it if stable)
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from host.config import AgentConfig
+
 logger = logging.getLogger(__name__)
 
 class ExternalEventRouter:
     """
     Routes normalized events from external adapters (via HostEventLoop)
-    to the appropriate InnerSpace or SharedSpace.
+    to the appropriate InnerSpace or SharedSpace. It also notifies the
+    HostEventLoop when an event relevant to an agent has been routed.
     """
 
-    def __init__(self, space_registry: SpaceRegistry):
+    def __init__(self, 
+                 space_registry: SpaceRegistry, 
+                 mark_agent_for_cycle_callback: MarkAgentForCycleCallable,
+                 agent_configs: List['AgentConfig']): # <<< NEW: Add agent_configs
         """
         Initializes the ExternalEventRouter.
 
         Args:
             space_registry: An instance of SpaceRegistry to find or create Spaces.
+            mark_agent_for_cycle_callback: The HostEventLoop.mark_agent_for_cycle method.
+            agent_configs: A list of all configured agents.
         """
         if not isinstance(space_registry, SpaceRegistry):
             raise TypeError("ExternalEventRouter requires an instance of SpaceRegistry.")
+        if not callable(mark_agent_for_cycle_callback):
+             raise TypeError("ExternalEventRouter requires a callable mark_agent_for_cycle_callback.")
+        if not isinstance(agent_configs, list):
+            raise TypeError("ExternalEventRouter requires a list of agent_configs.")
+             
         self.space_registry = space_registry
-        logger.info("ExternalEventRouter initialized.")
+        self.mark_agent_for_cycle = mark_agent_for_cycle_callback # Store the callback
+        self.agent_configs = agent_configs # <<< NEW: Store agent configs
+        logger.info(f"ExternalEventRouter initialized with {len(agent_configs)} agent configs.")
 
     async def route_external_event(self, event_data_from_activity_client: Dict[str, Any], original_timeline_context: Dict[str, Any]):
         """
@@ -41,38 +62,163 @@ class ExternalEventRouter:
 
         Args:
             event_data_from_activity_client: The event dictionary enqueued by ActivityClient.
-                                             Expected to contain 'source_adapter_id' and 'payload'
-                                             (which is the original normalized event from the adapter).
-            original_timeline_context: The timeline_context passed by HostEventLoop.
-                                       Currently an empty dict from ActivityClient.
-                                       This router will construct the actual timeline_context
-                                       for the target Space.
+                                             Expected structure:
+                                             {
+                                                 "source_adapter_id": "adapter_x",
+                                                 "payload": {
+                                                     "event_type_from_adapter": "message_received",
+                                                     "adapter_data": { ... raw data ... }
+                                                 }
+                                             }
+            original_timeline_context: The timeline_context passed by HostEventLoop. 
+                                       (Currently unused here, context built per-space).
         """
         if not isinstance(event_data_from_activity_client, dict):
             logger.error(f"ExternalEventRouter received non-dict event_data: {type(event_data_from_activity_client)}")
             return
 
         source_adapter_id = event_data_from_activity_client.get("source_adapter_id")
-        adapter_payload = event_data_from_activity_client.get("payload") # Original normalized event from adapter
+        # The payload is now nested one level deeper
+        payload = event_data_from_activity_client.get("payload") 
 
-        if not source_adapter_id or not isinstance(adapter_payload, dict):
-            logger.error(f"Event from ActivityClient missing 'source_adapter_id' or valid 'payload': {event_data_from_activity_client}")
+        if not source_adapter_id or not isinstance(payload, dict):
+            logger.error(f"Event from ActivityClient missing 'source_adapter_id' or valid 'payload' dict: {event_data_from_activity_client}")
             return
 
-        event_type_from_adapter = adapter_payload.get("event_type") # e.g., "direct_message", "channel_message"
-        
-        logger.debug(f"ExternalEventRouter routing event: Adapter='{source_adapter_id}', Type='{event_type_from_adapter}', AdapterPayload='{adapter_payload}'")
+        # Extract the raw event type and data from the nested payload
+        event_type_from_adapter = payload.get("event_type_from_adapter")
+        adapter_data = payload.get("adapter_data")
 
-        if event_type_from_adapter == "direct_message":
-            await self._handle_direct_message(source_adapter_id, adapter_payload)
-        elif event_type_from_adapter == "channel_message":
-            await self._handle_channel_message(source_adapter_id, adapter_payload)
-        elif event_type_from_adapter == "user_added_to_channel": # Or similar system event
-            await self._handle_system_notification(source_adapter_id, adapter_payload)
-        # Add more elif blocks for other event_type_from_adapter as needed
+        if not event_type_from_adapter or not isinstance(adapter_data, dict):
+            logger.error(f"Event payload missing 'event_type_from_adapter' or valid 'adapter_data' dict: {payload}")
+            return
+
+        logger.debug(f"ExternalEventRouter routing event: Adapter='{source_adapter_id}', Type='{event_type_from_adapter}', AdapterData='{adapter_data}'")
+
+        # --- Routing Logic based on event_type_from_adapter ---
+        if event_type_from_adapter == "message_received":
+            # We need to determine if this is a DM or channel message
+            # TODO: Implement reliable DM detection logic
+            if self._is_direct_message(adapter_data): 
+                await self._handle_direct_message(source_adapter_id, adapter_data)
+            else:
+                await self._handle_channel_message(source_adapter_id, adapter_data)
+        elif event_type_from_adapter == "message_updated":
+            await self._handle_message_updated(source_adapter_id, adapter_data)
+        elif event_type_from_adapter == "message_deleted":
+            await self._handle_message_deleted(source_adapter_id, adapter_data)
+        elif event_type_from_adapter == "reaction_added":
+            await self._handle_reaction_added(source_adapter_id, adapter_data)
+        elif event_type_from_adapter == "reaction_removed":
+            await self._handle_reaction_removed(source_adapter_id, adapter_data)
+        # --- NEW: Handle Conversation Started --- 
+        elif event_type_from_adapter == "conversation_started":
+             await self._handle_conversation_started(source_adapter_id, adapter_data)
+        # ----------------------------------------
+        # TODO: Handle system notifications (user_added_to_channel etc.) if needed
+        # elif event_type_from_adapter == "user_added_to_channel":
+        #     await self._handle_system_notification(source_adapter_id, adapter_data)
         else:
-            logger.warning(f"ExternalEventRouter: Unhandled event type '{event_type_from_adapter}' from adapter '{source_adapter_id}'. Payload: {adapter_payload}")
+            logger.warning(f"ExternalEventRouter: Unhandled event type '{event_type_from_adapter}' from adapter '{source_adapter_id}'. Data: {adapter_data}")
 
+    # --- Placeholder for DM detection --- (NEEDS IMPLEMENTATION)
+    def _is_direct_message(self, adapter_data: Dict[str, Any]) -> bool:
+        """
+        Determines if a message is a Direct Message based on the adapter data.
+
+        Checks for an explicit 'is_direct_message' boolean flag in the adapter_data.
+        If the flag is present, its value is returned.
+        If the flag is absent, defaults to False (assuming channel message).
+
+        Args:
+            adapter_data: The dictionary containing data specific to the adapter event.
+
+        Returns:
+            True if the event is identified as a direct message, False otherwise.
+        """
+        if 'is_direct_message' in adapter_data:
+            is_dm = adapter_data.get('is_direct_message')
+            if isinstance(is_dm, bool):
+                logger.debug(f"Found 'is_direct_message': {is_dm} in adapter_data for conversation: {adapter_data.get('conversation_id')}")
+                return is_dm
+            else:
+                logger.warning(f"Found 'is_direct_message' key in adapter_data, but its value is not a boolean: {is_dm}. Treating as non-DM.")
+                return False
+        else:
+            # Defaulting to False if the key is not present
+            logger.debug(f"'is_direct_message' key not found in adapter_data for conversation: {adapter_data.get('conversation_id')}. Assuming channel message.")
+            return False
+
+    # --- Placeholder for finding target space --- (NEEDS IMPLEMENTATION)
+    async def _find_target_space_for_conversation(self, source_adapter_id: str, conversation_id: str, adapter_data: Dict[str, Any]) -> Optional[Space]:
+        """
+        Finds the target InnerSpace or SharedSpace for an event based on 
+        adapter ID, conversation ID, and the provided adapter_data.
+
+        Uses the 'is_direct_message' flag in adapter_data if present.
+        If True, finds the agent configured to handle DMs for the source_adapter_id 
+        and returns their InnerSpace.
+        If False or absent, constructs the expected SharedSpace ID and attempts to retrieve it.
+        
+        Args:
+            source_adapter_id: The unique ID of the adapter connection.
+            conversation_id: The ID of the conversation from the external platform.
+            adapter_data: The raw data dictionary from the adapter, expected to contain 
+                          'is_direct_message' (optional).
+
+        Returns:
+            The target Space instance (InnerSpace or SharedSpace) or None if not found/ambiguous.
+        """
+        is_dm = adapter_data.get('is_direct_message')
+
+        if is_dm is True: 
+            # --- Handle Direct Message Routing --- 
+            logger.debug(f"Finding InnerSpace for DM: adapter={source_adapter_id}, conv={conversation_id}")
+            responsible_agent_id = None
+            found_agents = []
+
+            # Find agent(s) responsible for DMs from this adapter
+            for agent_config in self.agent_configs:
+                if source_adapter_id in agent_config.handles_direct_messages_from_adapter_ids:
+                    found_agents.append(agent_config.agent_id)
+            
+            if len(found_agents) == 1:
+                responsible_agent_id = found_agents[0]
+                logger.debug(f"Found responsible agent: {responsible_agent_id}")
+            elif len(found_agents) == 0:
+                logger.error(f"Cannot route DM for conv '{conversation_id}' from adapter '{source_adapter_id}': No agent configured to handle DMs from this adapter.")
+                return None
+            else: # More than one agent found - configuration error
+                logger.error(f"Ambiguous DM target for conv '{conversation_id}' from adapter '{source_adapter_id}': Multiple agents handle DMs: {found_agents}")
+                return None
+            
+            # Retrieve the InnerSpace for the identified agent
+            target_inner_space = self.space_registry.get_inner_space_for_agent(responsible_agent_id)
+            if not target_inner_space:
+                logger.error(f"Found agent '{responsible_agent_id}' responsible for DM conv '{conversation_id}', but their InnerSpace could not be retrieved.")
+                return None
+            
+            return target_inner_space
+            
+        else: 
+            # --- Handle Channel/Shared Space Routing --- 
+            if is_dm is False:
+                 logger.debug(f"Finding SharedSpace (is_dm=False): adapter={source_adapter_id}, conv={conversation_id}")
+            else: # is_dm flag was missing
+                 logger.debug(f"Finding SharedSpace (is_dm flag missing): adapter={source_adapter_id}, conv={conversation_id}")
+                 
+            shared_space_id = f"shared_{source_adapter_id}_{conversation_id}"
+            target_shared_space = self.space_registry.get_space(shared_space_id)
+            
+            if target_shared_space:
+                logger.debug(f"Found existing SharedSpace: {shared_space_id}")
+                return target_shared_space
+            else:
+                # Important: Do not create SharedSpaces on the fly for update/delete/reaction events
+                # as context might be missing. The space should exist from a prior message_received.
+                logger.warning(f"Could not find SharedSpace '{shared_space_id}' for non-DM event. Event may be ignored if space context is required.")
+                return None
+        
     async def _construct_timeline_context_for_space(self, target_space: Space) -> Dict[str, Any]:
         """
         Constructs a basic timeline context for appending an event to a space.
@@ -94,14 +240,21 @@ class ExternalEventRouter:
         # letting the TimelineComponent append to the head of the specified timeline.
         return {"timeline_id": primary_timeline_id}
 
-
-    async def _handle_direct_message(self, source_adapter_id: str, dm_payload: Dict[str, Any]):
+    # --- MODIFIED HANDLERS ---
+    async def _handle_direct_message(self, source_adapter_id: str, adapter_data: Dict[str, Any]):
         """
-        Handles a direct message, routing it to the recipient agent's InnerSpace.
+        Handles a direct message, routing it to the recipient agent's InnerSpace
+        and notifying HostEventLoop to potentially trigger a cycle.
+        (Assumes _is_direct_message already determined this is a DM)
         """
-        recipient_agent_id = dm_payload.get("recipient_connectome_agent_id")
+        # Need a way to map conversation_id/adapter_name to the target agent_id
+        # This logic needs to be defined based on how adapters report DMs.
+        # Let's assume adapter_data contains 'recipient_connectome_agent_id' for now.
+        recipient_agent_id = adapter_data.get("recipient_connectome_agent_id") 
         if not recipient_agent_id:
-            logger.error(f"DM from adapter '{source_adapter_id}' missing 'recipient_connectome_agent_id'. Payload: {dm_payload}")
+            # Fallback: try to infer from conversation_id? Needs helper function.
+            # recipient_agent_id = self._map_dm_conversation_to_agent(source_adapter_id, adapter_data.get('conversation_id'))
+            logger.error(f"DM from adapter '{source_adapter_id}' missing 'recipient_connectome_agent_id' in adapter_data. Cannot route DM. Data: {adapter_data}")
             return
 
         target_inner_space: Optional[InnerSpace] = self.space_registry.get_inner_space_for_agent(recipient_agent_id)
@@ -109,24 +262,30 @@ class ExternalEventRouter:
             logger.error(f"Could not route DM: InnerSpace for agent_id '{recipient_agent_id}' not found.")
             return
 
-        dm_handler_element_id = f"dms_{source_adapter_id}" # Convention for target element in InnerSpace
-
-        connectome_dm_event = {
-            # Header for Space.receive_event
-            "event_type": "connectome_internal_dm", # Connectome's internal event type for the DAG
-            "target_element_id": dm_handler_element_id, # Element within InnerSpace to handle this
-
-            # Actual payload for the DM handler component
-            "payload": {
+        # Construct the internal event payload using fields from adapter_data
+        try:
+            sender_info = adapter_data.get('sender', {})
+            connectome_dm_event_payload = {
                 "source_adapter_id": source_adapter_id,
-                "timestamp": dm_payload.get("timestamp", time.time()),
-                "sender_external_id": dm_payload.get("sender_external_id"),
-                "sender_display_name": dm_payload.get("sender_display_name"),
-                "text": dm_payload.get("text"),
-                "original_message_id_external": dm_payload.get("message_id_external"),
-                # Include the full original payload if downstream components might need other fields
-                "original_adapter_payload": dm_payload 
+                "timestamp": adapter_data.get("timestamp", time.time()), # Use adapter time if available
+                "sender_external_id": sender_info.get("user_id"),
+                "sender_display_name": sender_info.get("display_name"),
+                "text": adapter_data.get("text"),
+                "is_dm": True,
+                # Pass mentions if provided (though less common in DMs)
+                "mentions": adapter_data.get("mentions", []), 
+                "original_message_id_external": adapter_data.get("message_id"),
+                "external_channel_id": adapter_data.get("conversation_id"), # Store conversation ID
+                "original_adapter_data": adapter_data # Keep original for full context if needed later
             }
+        except Exception as e:
+             logger.error(f"Error constructing DM event payload from adapter_data: {e}. Data: {adapter_data}", exc_info=True)
+             return
+             
+        connectome_dm_event = {
+            "event_type": "message_received", # Connectome internal type
+            "target_element_id": f"dms_{source_adapter_id}", # Target element convention
+            "payload": connectome_dm_event_payload
         }
         
         timeline_context = await self._construct_timeline_context_for_space(target_inner_space)
@@ -134,20 +293,38 @@ class ExternalEventRouter:
         try:
             target_inner_space.receive_event(connectome_dm_event, timeline_context)
             logger.info(f"DM from '{source_adapter_id}' for agent '{recipient_agent_id}' routed to InnerSpace.")
+            
+            # --- Notify HostEventLoop ---
+            current_time = time.monotonic()
+            # Construct payload for mark_agent_for_cycle with expected fields
+            mark_payload = {
+                 "event_type": "message_received", # Pass the type mark_agent expects
+                 "source_adapter_id": source_adapter_id,
+                 "is_dm": True,
+                 "text_content": adapter_data.get("text", ""),
+                 "mentions": adapter_data.get("mentions", []),
+                 "payload": adapter_data # Also pass the original adapter data if needed elsewhere
+            }
+            self.mark_agent_for_cycle(recipient_agent_id, mark_payload, current_time) 
+            logger.debug(f"Called mark_agent_for_cycle for agent {recipient_agent_id} due to DM.")
+            
         except Exception as e:
-            logger.error(f"Error in InnerSpace {target_inner_space.id} receiving DM: {e}", exc_info=True)
+            logger.error(f"Error in InnerSpace {target_inner_space.id} receiving DM or marking agent: {e}", exc_info=True)
 
-    async def _handle_channel_message(self, source_adapter_id: str, channel_msg_payload: Dict[str, Any]):
+    async def _handle_channel_message(self, source_adapter_id: str, adapter_data: Dict[str, Any]):
         """
         Handles a public channel message, routing it to a SharedSpace.
+        Then, checks ALL configured agents to see if they were mentioned.
+        (Assumes _is_direct_message already determined this is NOT a DM)
         """
-        external_channel_id = channel_msg_payload.get("channel_id_external")
+        external_channel_id = adapter_data.get("conversation_id") # Channel ID is in conversation_id
         if not external_channel_id:
-            logger.error(f"Channel message from adapter '{source_adapter_id}' missing 'channel_id_external'. Payload: {channel_msg_payload}")
+            logger.error(f"Channel message from adapter '{source_adapter_id}' missing 'conversation_id' in adapter_data. Data: {adapter_data}")
             return
 
         shared_space_identifier = f"shared_{source_adapter_id}_{external_channel_id}"
-        shared_space_name = channel_msg_payload.get("channel_name_external", f"{source_adapter_id}-{external_channel_id}")
+        # Use channel name from adapter_data if available, else default
+        shared_space_name = adapter_data.get("channel_name", f"{source_adapter_id}-{external_channel_id}")
         
         target_shared_space: Optional[Space] = self.space_registry.get_or_create_shared_space(
             identifier=shared_space_identifier,
@@ -160,24 +337,29 @@ class ExternalEventRouter:
             logger.error(f"Failed to get or create SharedSpace '{shared_space_identifier}'. Message cannot be routed.")
             return
         
-        chat_element_id_in_shared_space = f"chat_{external_channel_id}" # Convention for target element in SharedSpace
+        # Construct internal event payload
+        try:
+            sender_info = adapter_data.get('sender', {})
+            connectome_channel_event_payload = {
+                "source_adapter_id": source_adapter_id,
+                "timestamp": adapter_data.get("timestamp", time.time()),
+                "sender_external_id": sender_info.get("user_id"),
+                "sender_display_name": sender_info.get("display_name"),
+                "text": adapter_data.get("text"),
+                "is_dm": False,
+                "mentions": adapter_data.get("mentions", []), # Pass mentions if adapter provides
+                "original_message_id_external": adapter_data.get("message_id"),
+                "external_channel_id": external_channel_id,
+                "original_adapter_data": adapter_data
+            }
+        except Exception as e:
+             logger.error(f"Error constructing channel message event payload from adapter_data: {e}. Data: {adapter_data}", exc_info=True)
+             return
 
         connectome_channel_event = {
-            # Header for Space.receive_event
-            "event_type": "connectome_internal_channel_message",
-            "target_element_id": chat_element_id_in_shared_space,
-
-            # Actual payload
-            "payload": {
-                "source_adapter_id": source_adapter_id,
-                "timestamp": channel_msg_payload.get("timestamp", time.time()),
-                "sender_external_id": channel_msg_payload.get("sender_external_id"),
-                "sender_display_name": channel_msg_payload.get("sender_display_name"),
-                "text": channel_msg_payload.get("text"),
-                "original_message_id_external": channel_msg_payload.get("message_id_external"),
-                "external_channel_id": external_channel_id,
-                "original_adapter_payload": channel_msg_payload
-            }
+            "event_type": "message_received", # Connectome internal type
+            "target_element_id": f"chat_{external_channel_id}", # Target element convention
+            "payload": connectome_channel_event_payload
         }
         
         timeline_context = await self._construct_timeline_context_for_space(target_shared_space)
@@ -185,49 +367,321 @@ class ExternalEventRouter:
         try:
             target_shared_space.receive_event(connectome_channel_event, timeline_context)
             logger.info(f"Channel message from '{source_adapter_id}' channel '{external_channel_id}' routed to SharedSpace '{shared_space_identifier}'.")
-        except Exception as e:
-            logger.error(f"Error in SharedSpace {target_shared_space.id} receiving channel message: {e}", exc_info=True)
-
-    async def _handle_system_notification(self, source_adapter_id: str, notification_payload: Dict[str, Any]):
-        """
-        Handles system notifications, routing them to the affected agent's InnerSpace.
-        """
-        affected_agent_id = notification_payload.get("affected_connectome_agent_id")
-        if not affected_agent_id:
-            logger.error(f"System notification from '{source_adapter_id}' missing 'affected_connectome_agent_id'. Payload: {notification_payload}")
-            return
-
-        target_inner_space: Optional[InnerSpace] = self.space_registry.get_inner_space_for_agent(affected_agent_id)
-        if not target_inner_space:
-            logger.warning(f"Could not route system notification: InnerSpace for agent_id '{affected_agent_id}' not found.")
-            return
-
-        system_notification_handler_element_id = "system_notifications_handler" # Convention for target element
-
-        connectome_system_event = {
-            # Header for Space.receive_event
-            "event_type": "connectome_internal_system_notification",
-            "target_element_id": system_notification_handler_element_id,
             
-            # Actual payload
-            "payload": {
-                "source_adapter_id": source_adapter_id,
-                "notification_type_from_adapter": notification_payload.get("system_event_subtype"),
-                "timestamp": notification_payload.get("timestamp", time.time()),
-                "details": notification_payload.get("details", {}),
-                "original_adapter_payload": notification_payload
+            # --- Check all agents for mentions --- 
+            current_time = time.monotonic()
+            logger.debug(f"Checking {len(self.agent_configs)} agents for mentions in channel message...")
+            # Construct payload for mark_agent_for_cycle with expected fields
+            mark_payload = {
+                 "event_type": "message_received",
+                 "source_adapter_id": source_adapter_id,
+                 "is_dm": False,
+                 "text_content": adapter_data.get("text", ""),
+                 # Extract mentions from adapter_data if available in a standard format
+                 "mentions": adapter_data.get("mentions", []), 
+                 "payload": adapter_data
             }
-        }
-        
-        timeline_context = await self._construct_timeline_context_for_space(target_inner_space)
-        
-        try:
-            target_inner_space.receive_event(connectome_system_event, timeline_context)
-            logger.info(f"System notification from '{source_adapter_id}' for agent '{affected_agent_id}' routed to InnerSpace.")
+            for agent_config in self.agent_configs:
+                try:
+                    # Pass the reconstructed payload
+                    self.mark_agent_for_cycle(agent_config.agent_id, mark_payload, current_time)
+                except Exception as mark_err:
+                    logger.error(f"Error calling mark_agent_for_cycle for agent {agent_config.agent_id} on channel message: {mark_err}", exc_info=True)
+            logger.debug("Finished checking agents for mentions.")
+            
         except Exception as e:
-            logger.error(f"Error in InnerSpace {target_inner_space.id} receiving system notification: {e}", exc_info=True)
+            logger.error(f"Error in SharedSpace {target_shared_space.id} receiving channel message or during agent mention check: {e}", exc_info=True)
+
+    # --- NEW HANDLERS --- (Need Implementation)
+    async def _handle_message_updated(self, source_adapter_id: str, adapter_data: Dict[str, Any]):
+        logger.info(f"Handling 'message_updated' event from {source_adapter_id}. Data: {adapter_data}")
+        conversation_id = adapter_data.get("conversation_id")
+        message_id = adapter_data.get("message_id")
+        if not conversation_id or not message_id:
+            logger.error("message_updated event missing conversation_id or message_id.")
+            return
+            
+        target_space = await self._find_target_space_for_conversation(source_adapter_id, conversation_id, adapter_data)
+        if not target_space:
+            logger.error(f"Cannot route message_updated: Target space not found for conversation {conversation_id}.")
+            return
+            
+        # Construct internal event payload
+        event_payload = {
+            "source_adapter_id": source_adapter_id,
+            "original_message_id_external": message_id,
+            "external_conversation_id": conversation_id,
+            "new_text": adapter_data.get("new_text"),
+            "timestamp": adapter_data.get("timestamp", time.time()),
+            "original_adapter_data": adapter_data
+        }
+        connectome_event = {
+            "event_type": "connectome_message_updated",
+            "target_element_id": f"chat_{conversation_id}", # Or appropriate target
+            "payload": event_payload
+        }
+        timeline_context = await self._construct_timeline_context_for_space(target_space)
+        try:
+            target_space.receive_event(connectome_event, timeline_context)
+            logger.info(f"message_updated event routed to space {target_space.id}")
+        except Exception as e:
+            logger.error(f"Error routing message_updated event: {e}", exc_info=True)
+
+    async def _handle_message_deleted(self, source_adapter_id: str, adapter_data: Dict[str, Any]):
+        logger.info(f"Handling 'message_deleted' event from {source_adapter_id}. Data: {adapter_data}")
+        conversation_id = adapter_data.get("conversation_id")
+        message_id = adapter_data.get("message_id")
+        if not conversation_id or not message_id:
+            logger.error("message_deleted event missing conversation_id or message_id.")
+            return
+            
+        target_space = await self._find_target_space_for_conversation(source_adapter_id, conversation_id, adapter_data)
+        if not target_space:
+            logger.error(f"Cannot route message_deleted: Target space not found for conversation {conversation_id}.")
+            return
+            
+        event_payload = {
+            "source_adapter_id": source_adapter_id,
+            "original_message_id_external": message_id,
+            "external_conversation_id": conversation_id,
+            "timestamp": adapter_data.get("timestamp", time.time()), # May not be provided
+            "original_adapter_data": adapter_data
+        }
+        connectome_event = {
+            "event_type": "connectome_message_deleted",
+            "target_element_id": f"chat_{conversation_id}", # Or appropriate target
+            "payload": event_payload
+        }
+        timeline_context = await self._construct_timeline_context_for_space(target_space)
+        try:
+            target_space.receive_event(connectome_event, timeline_context)
+            logger.info(f"message_deleted event routed to space {target_space.id}")
+        except Exception as e:
+            logger.error(f"Error routing message_deleted event: {e}", exc_info=True)
+
+    async def _handle_reaction_added(self, source_adapter_id: str, adapter_data: Dict[str, Any]):
+        logger.info(f"Handling 'reaction_added' event from {source_adapter_id}. Data: {adapter_data}")
+        conversation_id = adapter_data.get("conversation_id")
+        message_id = adapter_data.get("message_id")
+        emoji = adapter_data.get("emoji")
+        if not conversation_id or not message_id or not emoji:
+            logger.error("reaction_added event missing conversation_id, message_id, or emoji.")
+            return
+            
+        target_space = await self._find_target_space_for_conversation(source_adapter_id, conversation_id, adapter_data)
+        if not target_space:
+            logger.error(f"Cannot route reaction_added: Target space not found for conversation {conversation_id}.")
+            return
+            
+        event_payload = {
+            "source_adapter_id": source_adapter_id,
+            "original_message_id_external": message_id,
+            "external_conversation_id": conversation_id,
+            "emoji": emoji,
+            "user_external_id": adapter_data.get('user', {}).get('user_id'), # If adapter provides who reacted
+            "user_display_name": adapter_data.get('user', {}).get('display_name'),
+            "timestamp": adapter_data.get("timestamp", time.time()),
+            "original_adapter_data": adapter_data
+        }
+        connectome_event = {
+            "event_type": "connectome_reaction_added",
+            "target_element_id": f"chat_{conversation_id}", # Or appropriate target
+            "payload": event_payload
+        }
+        timeline_context = await self._construct_timeline_context_for_space(target_space)
+        try:
+            target_space.receive_event(connectome_event, timeline_context)
+            logger.info(f"reaction_added event routed to space {target_space.id}")
+        except Exception as e:
+            logger.error(f"Error routing reaction_added event: {e}", exc_info=True)
+
+    async def _handle_reaction_removed(self, source_adapter_id: str, adapter_data: Dict[str, Any]):
+        logger.info(f"Handling 'reaction_removed' event from {source_adapter_id}. Data: {adapter_data}")
+        conversation_id = adapter_data.get("conversation_id")
+        message_id = adapter_data.get("message_id")
+        emoji = adapter_data.get("emoji")
+        if not conversation_id or not message_id or not emoji:
+            logger.error("reaction_removed event missing conversation_id, message_id, or emoji.")
+            return
+            
+        target_space = await self._find_target_space_for_conversation(source_adapter_id, conversation_id, adapter_data)
+        if not target_space:
+            logger.error(f"Cannot route reaction_removed: Target space not found for conversation {conversation_id}.")
+            return
+            
+        event_payload = {
+            "source_adapter_id": source_adapter_id,
+            "original_message_id_external": message_id,
+            "external_conversation_id": conversation_id,
+            "emoji": emoji,
+            "user_external_id": adapter_data.get('user', {}).get('user_id'), # If adapter provides who reacted
+            "user_display_name": adapter_data.get('user', {}).get('display_name'),
+            "timestamp": adapter_data.get("timestamp", time.time()),
+            "original_adapter_data": adapter_data
+        }
+        connectome_event = {
+            "event_type": "connectome_reaction_removed",
+            "target_element_id": f"chat_{conversation_id}", # Or appropriate target
+            "payload": event_payload
+        }
+        timeline_context = await self._construct_timeline_context_for_space(target_space)
+        try:
+            target_space.receive_event(connectome_event, timeline_context)
+            logger.info(f"reaction_removed event routed to space {target_space.id}")
+        except Exception as e:
+            logger.error(f"Error routing reaction_removed event: {e}", exc_info=True)
+
+    async def _handle_conversation_started(self, source_adapter_id: str, adapter_data: Dict[str, Any]):
+        """
+        Handles the 'conversation_started' event, typically received when joining
+        a new channel or starting a connection, containing message history.
+
+        Ensures the SharedSpace exists and replays the history onto its timeline.
+        """
+        logger.info(f"Handling 'conversation_started' event from {source_adapter_id}. Data keys: {adapter_data.keys()}")
+        conversation_id = adapter_data.get("conversation_id")
+        history = adapter_data.get("history") # List of message dicts
+
+        if not conversation_id:
+            logger.error("conversation_started event missing 'conversation_id'. Cannot process.")
+            return
+        if not isinstance(history, list):
+            logger.error(f"conversation_started event for '{conversation_id}' missing 'history' list or it's not a list. Cannot process history.")
+            history = [] # Process without history if it's invalid
+
+        # --- Ensure Shared Space Exists --- 
+        shared_space_identifier = f"shared_{source_adapter_id}_{conversation_id}"
+        # Use channel name from adapter_data if available, else default
+        # Note: conversation_started might not have channel_name readily available
+        shared_space_name = adapter_data.get("channel_name", f"{source_adapter_id}-{conversation_id}")
+        
+        target_shared_space: Optional[Space] = self.space_registry.get_or_create_shared_space(
+            identifier=shared_space_identifier,
+            name=shared_space_name,
+            description=f"Shared space for {source_adapter_id} conversation {conversation_id}",
+            metadata={"source_adapter": source_adapter_id, "external_conversation_id": conversation_id}
+        )
+        
+        if not target_shared_space:
+            logger.error(f"Failed to get or create SharedSpace '{shared_space_identifier}' for conversation_started event. History cannot be processed.")
+            return
+
+        logger.info(f"Ensured SharedSpace '{shared_space_identifier}' exists. Processing {len(history)} history messages...")
+
+        # --- Replay History --- 
+        timeline_context = await self._construct_timeline_context_for_space(target_shared_space)
+        processed_count = 0
+        error_count = 0
+
+        for message_dict in history:
+            if not isinstance(message_dict, dict):
+                logger.warning(f"Skipping invalid history item (not a dict) in '{conversation_id}': {message_dict}")
+                error_count += 1
+                continue
+                
+            try:
+                # Construct the standard message_received payload from the history item
+                sender_info = message_dict.get('sender', {})
+                # History items might use different keys, adapt as needed
+                history_message_payload = {
+                    "source_adapter_id": source_adapter_id, # Use the current adapter ID
+                    "timestamp": message_dict.get("timestamp", time.time()),
+                    "sender_external_id": sender_info.get("user_id"),
+                    "sender_display_name": sender_info.get("display_name", "Unknown Sender"),
+                    "text": message_dict.get("text"),
+                    "is_dm": False, # Assume history is from shared context
+                    "mentions": message_dict.get("mentions", []), 
+                    "original_message_id_external": message_dict.get("message_id"),
+                    "external_channel_id": conversation_id, # Use the main conversation ID
+                    "original_adapter_data": message_dict # Store original history item
+                    # Add other fields if available/needed, e.g., attachments, thread_id
+                }
+
+                connectome_history_event = {
+                    "event_type": "message_received", # Treat history items as received messages
+                    "target_element_id": f"chat_{conversation_id}", # Target the conventional chat element
+                    "payload": history_message_payload
+                }
+                
+                # Receive the historical event onto the space's timeline
+                target_shared_space.receive_event(connectome_history_event, timeline_context)
+                processed_count += 1
+
+            except Exception as e:
+                logger.error(f"Error processing history message for '{conversation_id}': {e}. Message data: {message_dict}", exc_info=True)
+                error_count += 1
+        
+        logger.info(f"Finished processing history for '{conversation_id}'. Processed: {processed_count}, Errors: {error_count}")
+
+    # --- NEW HANDLER for History Response --- 
+    async def _handle_history_received(self, source_adapter_id: str, conversation_id: str, messages: List[Dict[str, Any]], adapter_data: Dict[str, Any]):
+        """
+        Handles the internally routed 'connectome_history_received' event.
+        Finds the target space and replays the provided messages onto its timeline.
+        """
+        logger.info(f"Handling 'connectome_history_received' event for conv '{conversation_id}' from {source_adapter_id} with {len(messages)} messages.")
+
+        # --- Find Target Space --- 
+        # Use the adapter_data passed along with the history payload for context
+        target_space = await self._find_target_space_for_conversation(source_adapter_id, conversation_id, adapter_data)
+        
+        if not target_space:
+            logger.error(f"Failed to find target space for history received for conv '{conversation_id}'. History cannot be processed.")
+            return
+
+        logger.info(f"Found target space '{target_space.id}'. Processing {len(messages)} history messages...")
+
+        # --- Replay History (Similar to conversation_started) --- 
+        timeline_context = await self._construct_timeline_context_for_space(target_space)
+        processed_count = 0
+        error_count = 0
+
+        # Determine if context is DM based on the space type found
+        is_dm_context = isinstance(target_space, InnerSpace)
+
+        for message_dict in messages:
+            if not isinstance(message_dict, dict):
+                logger.warning(f"Skipping invalid history item (not a dict) in '{conversation_id}': {message_dict}")
+                error_count += 1
+                continue
+                
+            try:
+                # Construct the standard message_received payload from the history item
+                sender_info = message_dict.get('sender', {})
+                history_message_payload = {
+                    "source_adapter_id": source_adapter_id, 
+                    "timestamp": message_dict.get("timestamp", time.time()),
+                    "sender_external_id": sender_info.get("user_id"),
+                    "sender_display_name": sender_info.get("display_name", "Unknown Sender"),
+                    "text": message_dict.get("text"),
+                    "is_dm": is_dm_context, # Set based on the target space type
+                    "mentions": message_dict.get("mentions", []), 
+                    "original_message_id_external": message_dict.get("message_id"),
+                    "external_channel_id": conversation_id, 
+                    "original_adapter_data": message_dict 
+                }
+
+                connectome_history_event = {
+                    "event_type": "message_received", 
+                    "target_element_id": f"chat_{conversation_id}", # Adjust target if needed
+                    "payload": history_message_payload
+                }
+                
+                target_space.receive_event(connectome_history_event, timeline_context)
+                processed_count += 1
+
+            except Exception as e:
+                logger.error(f"Error processing history message for '{conversation_id}': {e}. Message data: {message_dict}", exc_info=True)
+                error_count += 1
+        
+        logger.info(f"Finished processing history for '{conversation_id}'. Processed: {processed_count}, Errors: {error_count}")
+
+    # --- Removed _handle_system_notification for brevity --- 
+    # Re-add if system events need specific handling
 
 # Example of how HostEventLoop would call this (conceptual):
 # async def some_method_in_host_event_loop(self, event_from_ac: Dict[str,Any], timeline_ctx_from_ac: Dict[str,Any]):
 #    if self.external_event_router:
+#        # Pass the mark_agent_for_cycle callback during ExternalEventRouter initialization
+#        # router = ExternalEventRouter(self.space_registry, self.mark_agent_for_cycle) 
 #        await self.external_event_router.route_external_event(event_from_ac, timeline_ctx_from_ac)

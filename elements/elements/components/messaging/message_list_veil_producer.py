@@ -5,7 +5,7 @@ Generates VEIL representation for a list of messages.
 import logging
 from typing import Dict, Any, Optional, List
 
-from ...base import Component
+from ..base_component import VeilProducer
 # Assuming MessageListComponent is in the same directory
 from .message_list import MessageListComponent, MessageType 
 
@@ -22,7 +22,7 @@ VEIL_EXTERNAL_ID_PROP = "external_msg_id"
 VEIL_ADAPTER_ID_PROP = "adapter_id"
 VEIL_EDITED_FLAG_PROP = "is_edited"
 
-class MessageListVeilProducer(Component):
+class MessageListVeilProducer(VeilProducer):
     """
     Generates VEIL representation based on the state of a sibling MessageListComponent.
     Handles both full VEIL generation and potentially delta calculation (basic implementation).
@@ -66,6 +66,8 @@ class MessageListVeilProducer(Component):
                 "veil_id": internal_id, # Use internal ID for delta tracking
                 "node_type": VEIL_MESSAGE_NODE_TYPE,
                 "properties": {
+                    "structural_role": "list_item",
+                    "content_nature": "chat_message",
                     VEIL_SENDER_PROP: msg_data.get('sender_name', 'Unknown'),
                     VEIL_TIMESTAMP_PROP: msg_data.get('timestamp'), # Assuming timestamp is suitable format
                     VEIL_CONTENT_PROP: msg_data.get('text', ''),
@@ -85,6 +87,8 @@ class MessageListVeilProducer(Component):
             "veil_id": f"{self.owner.id}_message_list_root",
             "node_type": VEIL_CONTAINER_TYPE,
             "properties": {
+                "structural_role": "container",
+                "content_nature": "message_list",
                 "element_id": self.owner.id,
                 "element_name": self.owner.name,
                 "message_count": len(message_nodes)
@@ -132,6 +136,8 @@ class MessageListVeilProducer(Component):
                     "veil_id": internal_id,
                     "node_type": VEIL_MESSAGE_NODE_TYPE,
                     "properties": {
+                        "structural_role": "list_item",
+                        "content_nature": "chat_message",
                         VEIL_SENDER_PROP: msg.get('sender_name', 'Unknown'),
                         VEIL_TIMESTAMP_PROP: msg.get('timestamp'),
                         VEIL_CONTENT_PROP: msg.get('text', ''),
