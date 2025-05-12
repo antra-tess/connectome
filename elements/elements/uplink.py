@@ -14,8 +14,8 @@ if TYPE_CHECKING:
 from .base import BaseElement, MountType
 
 from .space import Space # Inherits Space functionality (Container, Timeline)
-from .components import ToolProviderComponent, VeilProducer
-from .components.uplink import UplinkConnectionComponent, RemoteStateCacheComponent
+from .components import ToolProviderComponent
+from .components.uplink import UplinkConnectionComponent, RemoteStateCacheComponent, UplinkVeilProducerComponent
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -31,7 +31,7 @@ class UplinkProxy(Space):
     - Uplink connection management (`UplinkConnectionComponent`)
     - Remote state caching (`RemoteStateCacheComponent`)
     - Uplink-specific tools (`ToolProviderComponent`)
-    - Representation (`VeilProducer`)
+    - Representation (`UplinkVeilProducerComponent`)
     """
     
     # Uplink has an exterior representation (this might be inferred from VeilProducer later)
@@ -93,8 +93,8 @@ class UplinkProxy(Space):
         else:
              self._register_uplink_tools() # Register tools if provider exists
              
-        # Basic Veil Producer - A specific UplinkVeilProducer could override methods
-        self._veil_producer = self.add_component(VeilProducer, renderable_id=f"uplink_{element_id}")
+        # Use the specific UplinkVeilProducerComponent
+        self._veil_producer = self.add_component(UplinkVeilProducerComponent, renderable_id=f"uplink_{element_id}")
         if not self._veil_producer:
              logger.error(f"Failed to add VeilProducer component to UplinkProxy {element_id}")
 
