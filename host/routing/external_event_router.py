@@ -319,7 +319,7 @@ class ExternalEventRouter:
     async def _handle_channel_message(self, source_adapter_id: str, adapter_data: Dict[str, Any]):
         """
         Handles a public channel message, routing it to a SharedSpace.
-        Then, checks ALL configured agents to see if they were mentioned.
+        Then, checks ALL configured agents to see if they were mentioned and ensures an uplink.
         (Assumes _is_direct_message already determined this is NOT a DM)
         """
         external_channel_id = adapter_data.get("conversation_id") # Channel ID is in conversation_id
@@ -328,14 +328,15 @@ class ExternalEventRouter:
             return
 
         shared_space_identifier = f"shared_{source_adapter_id}_{external_channel_id}"
-        # Use channel name from adapter_data if available, else default
         shared_space_name = adapter_data.get("channel_name", f"{source_adapter_id}-{external_channel_id}")
         
         target_shared_space: Optional[Space] = self.space_registry.get_or_create_shared_space(
             identifier=shared_space_identifier,
             name=shared_space_name,
             description=f"Shared space for {source_adapter_id} channel {external_channel_id}",
-            metadata={"source_adapter": source_adapter_id, "external_channel_id": external_channel_id}
+            adapter_id=source_adapter_id,             # EXPLICITLY PASS
+            external_conversation_id=external_channel_id, # EXPLICITLY PASS
+            metadata={"source_adapter": source_adapter_id, "external_channel_id": external_channel_id} # Keep metadata for other uses if any
         )
         
         if not target_shared_space:
@@ -352,19 +353,19 @@ class ExternalEventRouter:
                 "sender_display_name": sender_info.get("display_name"),
                 "text": adapter_data.get("text"),
                 "is_dm": False,
-                "mentions": adapter_data.get("mentions", []), # Pass mentions if adapter provides
+                "mentions": adapter_data.get("mentions", []),
                 "original_message_id_external": adapter_data.get("message_id"),
                 "external_channel_id": external_channel_id,
                 "original_adapter_data": adapter_data,
                 "attachments": adapter_data.get("attachments", [])
             }
         except Exception as e:
-             logger.error(f"Error constructing channel message event payload from adapter_data: {e}. Data: {adapter_data}", exc_info=True)
-             return
+            logger.error(f"Error constructing channel message event payload from adapter_data: {e}. Data: {adapter_data}", exc_info=True)
+            return
 
         connectome_channel_event = {
             "event_type": "message_received", # Connectome internal type
-            "target_element_id": f"chat_{external_channel_id}", # Target element convention
+            "target_element_id": f"chat_{external_channel_id}", # Target element convention for SharedSpace's internal representation
             "payload": connectome_channel_event_payload
         }
         
@@ -374,29 +375,66 @@ class ExternalEventRouter:
             target_shared_space.receive_event(connectome_channel_event, timeline_context)
             logger.info(f"Channel message from '{source_adapter_id}' channel '{external_channel_id}' routed to SharedSpace '{shared_space_identifier}'.")
             
-            # --- Check all agents for mentions --- 
-            current_time = time.monotonic()
-            logger.debug(f"Checking {len(self.agent_configs)} agents for mentions in channel message...")
-            # Construct payload for mark_agent_for_cycle with expected fields
-            mark_payload = {
-                 "event_type": "message_received",
-                 "source_adapter_id": source_adapter_id,
-                 "is_dm": False,
-                 "text_content": adapter_data.get("text", ""),
-                 # Extract mentions from adapter_data if available in a standard format
-                 "mentions": adapter_data.get("mentions", []), 
-                 "payload": adapter_data
-            }
-            for agent_config in self.agent_configs:
-                try:
-                    # Pass the reconstructed payload
-                    self.mark_agent_for_cycle(agent_config.agent_id, mark_payload, current_time)
-                except Exception as mark_err:
-                    logger.error(f"Error calling mark_agent_for_cycle for agent {agent_config.agent_id} on channel message: {mark_err}", exc_info=True)
-            logger.debug("Finished checking agents for mentions.")
+            # --- Refined Uplink and Cycling Logic ---
+            # 1. Ensure uplinks for all agents configured for this adapter (for passive awareness)
+            agents_configured_for_adapter = set()
+            for agent_cfg in self.agent_configs:
+                # TODO: Refine this condition. Should there be a separate config for channel visibility/uplinks?
+                # For now, using handles_direct_messages_from_adapter_ids implies general interest in the adapter.
+                if source_adapter_id in agent_cfg.handles_direct_messages_from_adapter_ids:
+                    agents_configured_for_adapter.add(agent_cfg.agent_id)
+            
+            logger.info(f"Agents configured for adapter '{source_adapter_id}' (will ensure uplinks): {agents_configured_for_adapter}")
+            for agent_id_for_uplink in agents_configured_for_adapter:
+                agent_inner_space = self.space_registry.get_inner_space_for_agent(agent_id_for_uplink)
+                if agent_inner_space:
+                    logger.debug(f"Ensuring uplink to '{target_shared_space.id}' for agent '{agent_id_for_uplink}' in InnerSpace '{agent_inner_space.id}'.")
+                    uplink_manager = agent_inner_space.get_uplink_manager()
+                    if uplink_manager:
+                        uplink_element = uplink_manager.ensure_uplink_to_shared_space(
+                            shared_space_id=target_shared_space.id,
+                            shared_space_name=target_shared_space.name,
+                            shared_space_description=target_shared_space.description
+                        )
+                        if uplink_element:
+                            logger.info(f"Successfully ensured uplink (ID: {uplink_element.id}) for agent '{agent_id_for_uplink}' to SharedSpace '{target_shared_space.id}'.")
+                        else:
+                            logger.error(f"Failed to ensure uplink for agent '{agent_id_for_uplink}' to SharedSpace '{target_shared_space.id}'.")
+                    else:
+                        logger.error(f"Agent '{agent_id_for_uplink}'s InnerSpace does not have UplinkManager. Cannot ensure uplink.")
+                else:
+                    logger.warning(f"Could not find InnerSpace for agent '{agent_id_for_uplink}' to ensure uplink to '{target_shared_space.id}'.")
+
+            # 2. Mark agents for cycle ONLY IF they were mentioned
+            mentioned_agent_ids = {mention.get("user_id") for mention in adapter_data.get("mentions", []) if mention.get("user_id")}
+
+            if mentioned_agent_ids:
+                logger.info(f"Channel message mentioned agents: {mentioned_agent_ids}. These will be marked for cycle.")
+                mark_payload = {
+                    "event_type": "message_received", # HostEventLoop expects this key
+                    "source_adapter_id": source_adapter_id,
+                    "is_dm": False,
+                    "text_content": adapter_data.get("text", ""),
+                    "mentions": adapter_data.get("mentions", []), # Pass full mention objects
+                    "payload": adapter_data # Original adapter data
+                }
+                current_time = time.monotonic()
+                for agent_id_to_cycle in mentioned_agent_ids:
+                    # Verify this agent_id is among our configured agents before cycling
+                    is_configured_agent = any(cfg.agent_id == agent_id_to_cycle for cfg in self.agent_configs)
+                    if is_configured_agent:
+                        try:
+                            self.mark_agent_for_cycle(agent_id_to_cycle, mark_payload, current_time)
+                            logger.debug(f"Marked agent '{agent_id_to_cycle}' for cycle due to mention.")
+                        except Exception as mark_err:
+                            logger.error(f"Error calling mark_agent_for_cycle for mentioned agent {agent_id_to_cycle}: {mark_err}", exc_info=True)
+                    else:
+                        logger.warning(f"Agent ID '{agent_id_to_cycle}' was mentioned but is not a configured agent. Not cycling.")
+            else:
+                logger.debug("No specific agent mentions in channel message. No agents marked for cycle based on mentions.")
             
         except Exception as e:
-            logger.error(f"Error in SharedSpace {target_shared_space.id} receiving channel message or during agent mention check: {e}", exc_info=True)
+            logger.error(f"Error in SharedSpace {target_shared_space.id} receiving channel message or during agent uplink/mention check: {e}", exc_info=True)
 
     # --- NEW HANDLERS --- (Need Implementation)
     async def _handle_message_updated(self, source_adapter_id: str, adapter_data: Dict[str, Any]):
@@ -565,6 +603,8 @@ class ExternalEventRouter:
             identifier=shared_space_identifier,
             name=shared_space_name,
             description=f"Shared space for {source_adapter_id} conversation {conversation_id}",
+            adapter_id=source_adapter_id,             # EXPLICITLY PASS
+            external_conversation_id=conversation_id, # EXPLICITLY PASS
             metadata={"source_adapter": source_adapter_id, "external_conversation_id": conversation_id}
         )
         

@@ -539,7 +539,13 @@ class SpaceRegistry:
             logger.warning("No socket client available for message propagation")
             return False
 
-    def get_or_create_shared_space(self, identifier: str, name: Optional[str] = None, description: Optional[str] = "Shared Space", metadata: Optional[Dict[str, Any]] = None) -> Optional[Space]:
+    def get_or_create_shared_space(self, 
+                                   identifier: str, 
+                                   name: Optional[str] = None, 
+                                   description: Optional[str] = "Shared Space",
+                                   adapter_id: Optional[str] = None,             # NEW
+                                   external_conversation_id: Optional[str] = None, # NEW
+                                   metadata: Optional[Dict[str, Any]] = None) -> Optional[Space]:
         """
         Gets a SharedSpace by its identifier, or creates it if it doesn't exist.
         A SharedSpace is an instance of the base Space class.
@@ -548,7 +554,9 @@ class SpaceRegistry:
             identifier: Unique identifier for the SharedSpace.
             name: Human-readable name for the SharedSpace if created. Defaults to identifier.
             description: Description for the SharedSpace if created.
-            metadata: Optional additional metadata for the space if created.
+            adapter_id: Optional adapter ID for the space. If not provided, attempts to parse from identifier.
+            external_conversation_id: Optional external conversation ID. If not provided, attempts to parse from identifier.
+            metadata: Optional additional metadata for the space if created (currently not directly used by Space constructor).
 
         Returns:
             The existing or newly created Space instance, or None if creation failed.
@@ -561,14 +569,34 @@ class SpaceRegistry:
         logger.info(f"SharedSpace with identifier '{identifier}' not found. Creating new one.")
         space_name = name if name else identifier
         
+        # Attempt to parse adapter_id and external_conversation_id from identifier
+        # if not explicitly provided.
+        parsed_adapter_id = adapter_id
+        parsed_external_conv_id = external_conversation_id
+
+        if not parsed_adapter_id and not parsed_external_conv_id:
+            parts = identifier.split('_')
+            # Expected format: "shared_adapterid_conversationid" (at least 3 parts)
+            if len(parts) >= 3 and parts[0] == "shared":
+                parsed_adapter_id = parts[1]
+                parsed_external_conv_id = "_".join(parts[2:]) # Join remaining parts for conversation ID
+                logger.info(f"Parsed adapter_id='{parsed_adapter_id}' and external_conv_id='{parsed_external_conv_id}' from identifier '{identifier}'.")
+            else:
+                logger.warning(f"Could not parse adapter_id and external_conversation_id from identifier '{identifier}'. They will be None for the new Space.")
+
         try:
-            # Assuming elements.elements.space.Space is the correct class to instantiate
-            # and its constructor matches this.
-            # We need to import Space from elements.elements.space
-            new_shared_space = Space(element_id=identifier, name=space_name, description=description)
-            # You might want to pass metadata to the Space constructor if it accepts it,
-            # or set it via a method after creation.
-            # e.g., if new_shared_space.set_metadata(metadata)
+            new_shared_space = Space(
+                element_id=identifier, 
+                name=space_name, 
+                description=description,
+                adapter_id=parsed_adapter_id,                 # PASS PARSED/PROVIDED
+                external_conversation_id=parsed_external_conv_id # PASS PARSED/PROVIDED
+            )
+            
+            # metadata handling could be added here if Space constructor or a setter uses it
+            # if metadata and hasattr(new_shared_space, 'set_metadata'):
+            #    new_shared_space.set_metadata(metadata)
+
 
             if self.register_space(new_shared_space):
                 logger.info(f"Successfully created and registered SharedSpace: {space_name} ({identifier})")

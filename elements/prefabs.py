@@ -43,7 +43,9 @@ PREFABS = {
         "element_constructor_arg_keys": ["remote_space_id", "name", "description"], # Keys for UplinkProxy constructor from element_config
         "components": [
             # UplinkProxy's __init__ adds its own core components:
-            # UplinkConnectionComponent, RemoteStateCacheComponent, UplinkVeilProducerComponent, ToolProviderComponent
+            # UplinkConnectionComponent, RemoteStateCacheComponent, UplinkVeilProducerComponent, ToolProviderComponent.
+            # MessageActionHandler is added here to provide tools for messaging via the uplink.
+            {"type": "MessageActionHandler"}
         ],
         "required_configs_for_element": ["remote_space_id", "name"] # 'description' is optional in constructor
     },

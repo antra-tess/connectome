@@ -8,6 +8,7 @@ import logging
 from typing import Dict, Any, Optional, List, Type, Callable
 import inspect
 import time
+import re # For _generate_safe_id_string
 
 from .space import Space  # Inherit from Space to get Container and Timeline functionality
 from .base import BaseElement, MountType
@@ -18,6 +19,7 @@ from .components.factory_component import ElementFactoryComponent
 from .components.base_component import VeilProducer, Component
 from .components.hud.hud_component import HUDComponent # Explicitly import if kept
 from .components.dm_manager_component import DirectMessageManagerComponent # NEWLY ADDED
+from .components.uplink_manager_component import UplinkManagerComponent # NEWLY ADDED
 
 # Import the specific Space Veil Producer
 from .components.space.space_veil_producer import SpaceVeilProducer
@@ -110,6 +112,7 @@ class InnerSpace(Space):
         self._tool_provider = None
         self._element_factory = None
         self._dm_manager = None # NEWLY ADDED
+        self._uplink_manager = None # NEWLY ADDED
         # self._global_attention = None # REMOVED
         self._hud = None
         # self._context_manager = None # REMOVED
@@ -127,11 +130,35 @@ class InnerSpace(Space):
         self._element_factory = self.add_component(ElementFactoryComponent)
         if not self._element_factory:
             logger.error(f"Failed to add ElementFactoryComponent to InnerSpace {self.id}")
+        else:
+            # --- Automatically create a default scratchpad for the agent ---
+            scratchpad_id = f"scratchpad_{self.agent_id}"
+            logger.info(f"[{self.id}] Attempting to create default scratchpad element '{scratchpad_id}'.")
+            scratchpad_config = {
+                "name": "Agent Scratchpad",
+                "description": f"Default scratchpad for agent {self.agent_id}"
+            }
+            creation_result = self._element_factory.handle_create_element_from_prefab(
+                element_id_str=scratchpad_id,
+                prefab_name="simple_scratchpad",
+                element_config=scratchpad_config 
+            )
+            if creation_result and creation_result.get("success"):
+                logger.info(f"[{self.id}] Successfully created and mounted default scratchpad element '{scratchpad_id}'.")
+            else:
+                error_msg = creation_result.get("error", "Unknown error") if creation_result else "Factory returned None"
+                logger.error(f"[{self.id}] Failed to create default scratchpad for agent {self.agent_id}: {error_msg}")
+            # ------------------------------------------------------------------
             
         # Add DirectMessageManagerComponent NEWLY ADDED
         self._dm_manager = self.add_component(DirectMessageManagerComponent)
         if not self._dm_manager:
             logger.error(f"Failed to add DirectMessageManagerComponent to InnerSpace {self.id}")
+
+        # NEW: Add UplinkManagerComponent
+        self._uplink_manager = self.add_component(UplinkManagerComponent)
+        if not self._uplink_manager:
+            logger.error(f"Failed to add UplinkManagerComponent to InnerSpace {self.id}")
 
         # Add HUD component for rendering agent context
         hud_kwargs = {'llm_provider': llm_provider} if llm_provider else {}
@@ -147,6 +174,7 @@ class InnerSpace(Space):
             for component_type in additional_components:
                 if component_type in [ToolProviderComponent, ElementFactoryComponent, 
                                      DirectMessageManagerComponent, # NEWLY ADDED
+                                     UplinkManagerComponent, # NEWLY ADDED
                                      # GlobalAttentionComponent, # REMOVED
                                      HUDComponent 
                                      # ContextManagerComponent # REMOVED
@@ -209,6 +237,7 @@ class InnerSpace(Space):
         self._propagate_callback_to_component(ToolProviderComponent, callback)
         self._propagate_callback_to_component(ElementFactoryComponent, callback)
         self._propagate_callback_to_component(DirectMessageManagerComponent, callback) # NEWLY ADDED
+        self._propagate_callback_to_component(UplinkManagerComponent, callback) # NEWLY ADDED
         self._propagate_callback_to_component(BaseAgentLoopComponent, callback)
         # Add other components as needed
     
@@ -504,6 +533,10 @@ class InnerSpace(Space):
         """Get the DirectMessageManager component.""" # NEWLY ADDED
         return self._dm_manager # NEWLY ADDED
         
+    def get_uplink_manager(self) -> Optional[UplinkManagerComponent]: # NEWLY ADDED
+        """Get the UplinkManagerComponent.""" # NEWLY ADDED
+        return self._uplink_manager # NEWLY ADDED
+        
     def get_hud(self) -> Optional[HUDComponent]:
         """Get the HUD component."""
         return self._hud
@@ -567,10 +600,20 @@ class InnerSpace(Space):
     def get_connected_spaces(self) -> List[str]:
         """
         Get IDs of all spaces this InnerSpace is connected to via UplinkProxy elements.
-        
-        Returns:
-            List of space IDs
+        Delegates to UplinkManagerComponent if available.
         """
+        if self._uplink_manager:
+            # Assuming UplinkManagerComponent's list_active_uplinks_tool returns a dict
+            # with an 'active_uplinks' list of dicts, each having 'remote_space_id'
+            tool_result = self._uplink_manager.list_active_uplinks_tool()
+            if tool_result.get("success"):
+                return [uplink.get("remote_space_id") for uplink in tool_result.get("active_uplinks", []) if uplink.get("remote_space_id")]
+            else:
+                logger.error(f"[{self.id}] get_connected_spaces: Error from UplinkManager: {tool_result.get('error')}")
+                return [] # Return empty on error to avoid downstream issues
+        
+        # Fallback (original logic, less efficient if UplinkManager is present but fails to provide)
+        logger.warning(f"[{self.id}] get_connected_spaces: UplinkManagerComponent not available or failed. Using fallback scan.")
         connected_spaces = []
         for element in self.get_mounted_elements().values():
             # Check if this is an UplinkProxy (through duck typing to avoid import cycles)
@@ -581,16 +624,30 @@ class InnerSpace(Space):
     def get_uplink_for_space(self, remote_space_id: str) -> Optional[BaseElement]:
         """
         Get the UplinkProxy element for a specific remote space.
-        
-        Args:
-            remote_space_id: ID of the remote space
-            
-        Returns:
-            UplinkProxy element or None if not found
+        Delegates to UplinkManagerComponent.
         """
-        for element in self.get_mounted_elements().values():
-            if (hasattr(element, 'remote_space_id') and 
-                element.remote_space_id == remote_space_id and 
-                callable(getattr(element, 'get_connection_component', None))):
-                return element
-            return None
+        if self._uplink_manager:
+            return self._uplink_manager.get_uplink_for_space(remote_space_id)
+        
+        logger.warning(f"[{self.id}] get_uplink_for_space: UplinkManagerComponent not available. Cannot get uplink for {remote_space_id}.")
+        return None
+
+    def ensure_uplink_to_shared_space(
+        self, 
+        shared_space_id: str, 
+        shared_space_name: Optional[str] = "Shared Space", 
+        shared_space_description: Optional[str] = "Uplink to a shared space"
+    ) -> Optional[BaseElement]:
+        """
+        Ensures an UplinkProxy to the specified SharedSpace exists and is active.
+        Delegates to UplinkManagerComponent.
+        """
+        if self._uplink_manager:
+            return self._uplink_manager.ensure_uplink_to_shared_space(
+                shared_space_id=shared_space_id,
+                shared_space_name=shared_space_name,
+                shared_space_description=shared_space_description
+            )
+        
+        logger.error(f"[{self.id}] ensure_uplink_to_shared_space: UplinkManagerComponent not available. Cannot ensure uplink to {shared_space_id}.")
+        return None
