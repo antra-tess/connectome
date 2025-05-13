@@ -10,19 +10,14 @@ import inspect
 import time
 
 from .space import Space  # Inherit from Space to get Container and Timeline functionality
-from .base import BaseElement, Component, MountType
+from .base import BaseElement, MountType
 
 # Import core components needed by InnerSpace
-from .components import (
-    ToolProviderComponent, 
-    VeilProducer, 
-    ElementFactoryComponent,
-    GlobalAttentionComponent,
-    ContextManagerComponent,
-    HUDComponent,
-    CoreToolsComponent,
-    MessagingToolsComponent
-)
+from .components.tool_provider import ToolProviderComponent 
+from .components.factory_component import ElementFactoryComponent
+from .components.base_component import VeilProducer, Component
+from .components.hud.hud_component import HUDComponent # Explicitly import if kept
+from .components.dm_manager_component import DirectMessageManagerComponent # NEWLY ADDED
 
 # Import the specific Space Veil Producer
 from .components.space.space_veil_producer import SpaceVeilProducer
@@ -114,9 +109,10 @@ class InnerSpace(Space):
         # Initialize component references (will be populated during initialization)
         self._tool_provider = None
         self._element_factory = None
-        self._global_attention = None
+        self._dm_manager = None # NEWLY ADDED
+        # self._global_attention = None # REMOVED
         self._hud = None
-        self._context_manager = None
+        # self._context_manager = None # REMOVED
         self._agent_loop = None
         
         # --- Add Core InnerSpace Components ---
@@ -132,26 +128,17 @@ class InnerSpace(Space):
         if not self._element_factory:
             logger.error(f"Failed to add ElementFactoryComponent to InnerSpace {self.id}")
             
-        # Add global attention component for managing attention requests
-        self._global_attention = self.add_component(GlobalAttentionComponent)
-        if not self._global_attention:
-            logger.error(f"Failed to add GlobalAttentionComponent to InnerSpace {self.id}")
-            
+        # Add DirectMessageManagerComponent NEWLY ADDED
+        self._dm_manager = self.add_component(DirectMessageManagerComponent)
+        if not self._dm_manager:
+            logger.error(f"Failed to add DirectMessageManagerComponent to InnerSpace {self.id}")
+
         # Add HUD component for rendering agent context
         hud_kwargs = {'llm_provider': llm_provider} if llm_provider else {}
         self._hud = self.add_component(HUDComponent, **hud_kwargs)
         if not self._hud:
             logger.error(f"Failed to add HUDComponent to InnerSpace {self.id}")
             
-        # Add context manager for handling agent memory and context
-        self._context_manager = self.add_component(ContextManagerComponent)
-        if not self._context_manager:
-            logger.error(f"Failed to add ContextManagerComponent to InnerSpace {self.id}")
-            
-        # Add tools components
-        self.add_component(CoreToolsComponent)
-        self.add_component(MessagingToolsComponent)
-        
         # Add VEIL producer for representing InnerSpace - Use SpaceVeilProducer
         self.add_component(SpaceVeilProducer)
         
@@ -159,8 +146,11 @@ class InnerSpace(Space):
         if additional_components:
             for component_type in additional_components:
                 if component_type in [ToolProviderComponent, ElementFactoryComponent, 
-                                     GlobalAttentionComponent, HUDComponent, 
-                                     ContextManagerComponent]:
+                                     DirectMessageManagerComponent, # NEWLY ADDED
+                                     # GlobalAttentionComponent, # REMOVED
+                                     HUDComponent 
+                                     # ContextManagerComponent # REMOVED
+                                     ]:
                     # Skip components that we already added
                     logger.warning(f"Skipping duplicate component: {component_type.__name__}")
                     continue
@@ -216,8 +206,9 @@ class InnerSpace(Space):
         self._outgoing_action_callback = callback
         
         # Propagate to components that might need it
-        self._propagate_callback_to_component(CoreToolsComponent, callback)
-        self._propagate_callback_to_component(MessagingToolsComponent, callback)
+        self._propagate_callback_to_component(ToolProviderComponent, callback)
+        self._propagate_callback_to_component(ElementFactoryComponent, callback)
+        self._propagate_callback_to_component(DirectMessageManagerComponent, callback) # NEWLY ADDED
         self._propagate_callback_to_component(BaseAgentLoopComponent, callback)
         # Add other components as needed
     
@@ -274,10 +265,13 @@ class InnerSpace(Space):
                             # Let's use docstring for now, assuming first line is description
                             docstring = inspect.getdoc(attr_value) or ""
                             description = docstring.split('\n')[0] if docstring else f"Tool '{tool_name}' from {component.COMPONENT_TYPE}"
+                            
+                            # --- REVERTED: Inspect parameters ---
                             # Parameter descriptions are harder from docstring reliably
                             param_descriptions = {} # Placeholder
+                            # --- END REVERTED ---
                             
-                            # Check if tool already exists (e.g. from CoreToolsComponent)
+                            # Check if tool already exists (e.g. from another component automatically registering it)
                             if tool_name in tool_provider.list_tools():
                                  logger.debug(f"Tool '{tool_name}' already registered. Skipping registration from {component.COMPONENT_TYPE}.")
                                  skipped_count += 1
@@ -287,7 +281,7 @@ class InnerSpace(Space):
                             tool_provider.register_tool_function(
                                 name=tool_name,
                                 description=description,
-                                parameter_descriptions=param_descriptions,
+                                parameter_descriptions=param_descriptions, # Will be {}
                                 tool_func=attr_value
                             )
                             registered_count += 1
@@ -424,10 +418,10 @@ class InnerSpace(Space):
             source_element_id: ID of the element requesting attention
             request_data: Optional additional data about the request
         """
-        if self._global_attention:
-            self._global_attention.register_attention_request(source_element_id, request_data or {})
-        else:
-            logger.warning(f"Cannot register attention request: GlobalAttentionComponent unavailable")
+        # if self._global_attention: # REMOVED
+        #     self._global_attention.register_attention_request(source_element_id, request_data or {}) # REMOVED
+        # else: # REMOVED
+        logger.warning(f"Cannot register attention request: GlobalAttentionComponent functionality removed or unavailable.")
     
     def clear_attention(self, source_element_id: str) -> None:
         """
@@ -436,10 +430,10 @@ class InnerSpace(Space):
         Args:
             source_element_id: ID of the element clearing its attention request
         """
-        if self._global_attention:
-            self._global_attention.clear_attention_request(source_element_id)
-        else:
-            logger.warning(f"Cannot clear attention request: GlobalAttentionComponent unavailable")
+        # if self._global_attention: # REMOVED
+        #     self._global_attention.clear_attention_request(source_element_id) # REMOVED
+        # else: # REMOVED
+        logger.warning(f"Cannot clear attention request: GlobalAttentionComponent functionality removed or unavailable.")
             
     def get_attention_requests(self) -> Dict[str, Dict[str, Any]]:
         """
@@ -448,8 +442,9 @@ class InnerSpace(Space):
         Returns:
             Dictionary mapping element IDs to their attention requests
         """
-        if self._global_attention:
-            return self._global_attention.get_attention_requests()
+        # if self._global_attention: # REMOVED
+        #     return self._global_attention.get_attention_requests() # REMOVED
+        logger.warning(f"Cannot get attention requests: GlobalAttentionComponent functionality removed or unavailable.")
         return {}
     
     # --- Agent Loop Control Methods ---
@@ -505,17 +500,13 @@ class InnerSpace(Space):
         """Get the element factory component."""
         return self._element_factory
         
-    def get_global_attention(self) -> Optional[GlobalAttentionComponent]:
-        """Get the global attention component."""
-        return self._global_attention
+    def get_dm_manager(self) -> Optional[DirectMessageManagerComponent]: # NEWLY ADDED
+        """Get the DirectMessageManager component.""" # NEWLY ADDED
+        return self._dm_manager # NEWLY ADDED
         
     def get_hud(self) -> Optional[HUDComponent]:
         """Get the HUD component."""
         return self._hud
-        
-    def get_context_manager(self) -> Optional[ContextManagerComponent]:
-        """Get the context manager component."""
-        return self._context_manager
     
     # --- Event Handling ---
     def handle_event(self, event: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
@@ -560,9 +551,13 @@ class InnerSpace(Space):
         # --- End Trigger Agent Loop Logic ---
 
         # Direct attention events to the global attention component if not already handled
-        elif event_type in ["attention_requested", "attention_cleared"] and self._global_attention:
-            if not handled:  # Avoid double-handling
-                handled = self._global_attention.handle_event(event, timeline_context)
+        elif event_type in ["attention_requested", "attention_cleared"]: # MODIFIED condition
+            if not handled:
+                logger.warning(f"InnerSpace received attention event '{event_type}' but GlobalAttentionComponent is not available.")
+                # Event is not "handled" by a specific component here, but we acknowledge it.
+                # Set handled to True if we consider logging it as handling.
+                # For now, let it fall through, HostEventLoop might still see it if it bubbles up.
+                pass # Or handled = True if logging is enough.
                 
         # Add any other InnerSpace-specific event handling here
                 

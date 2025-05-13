@@ -13,6 +13,18 @@ Defines standard configurations for creating common elements.
 #                     to a list of keys that MUST be provided in the 
 #                     'config_overrides' when creating from this prefab.
 
+# Define a dictionary of element prefabs
+# Each prefab specifies:
+# - description: A human-readable description of what the prefab creates.
+# - element_class_name: (Optional) The class name of the element to instantiate (defaults to BaseElement if not specified or if ElementFactory doesn't have specific logic).
+# - element_constructor_arg_keys: (Optional) A list of keys from the `element_config` that should be passed as direct arguments to the element's constructor.
+# - components: A list of component specifications. Each spec is a dict:
+#   - "type": The string type of the component to add (must match COMPONENT_TYPE).
+#   - "config": (Optional) A dictionary of configuration values for this component instance.
+# - required_configs_for_element: (Optional) A list of keys that MUST be present in the `element_config` passed to the factory, primarily for setting up the element itself.
+# - element_attributes_from_config: (Optional) A dictionary mapping keys from `element_config` to attribute names that will be set on the created element instance.
+# - required_component_configs: (Optional) A dictionary where keys are component types (strings) and values are lists of required config keys for that specific component.
+
 PREFABS = {
     "simple_scratchpad": {
         "description": "A basic element for storing text notes.",
@@ -22,7 +34,40 @@ PREFABS = {
             {"type": "ToolProviderComponent"}, # Tool exposure
             {"type": "ScratchpadVeilProducer"} # VEIL representation
         ],
-        "required_configs": {} # No special required configs for these components
+        "required_configs_for_element": [] 
+    },
+
+    "standard_uplink_proxy": {
+        "description": "Creates an UplinkProxy to connect to a remote Space. Requires 'remote_space_id' in element_config.",
+        "element_class_name": "UplinkProxy", # Specifies the class to instantiate
+        "element_constructor_arg_keys": ["remote_space_id", "name", "description"], # Keys for UplinkProxy constructor from element_config
+        "components": [
+            # UplinkProxy's __init__ adds its own core components:
+            # UplinkConnectionComponent, RemoteStateCacheComponent, UplinkVeilProducerComponent, ToolProviderComponent
+        ],
+        "required_configs_for_element": ["remote_space_id", "name"] # 'description' is optional in constructor
+    },
+
+    "direct_message_session": {
+        "description": "A BaseElement configured to represent and handle a direct message session with a user on a specific adapter.",
+        "element_class_name": "BaseElement", # Explicitly BaseElement
+        "components": [
+            {"type": "MessageListComponent"},
+            {"type": "MessageActionHandler"},
+            {"type": "MessageListVeilProducer"},
+            {"type": "ToolProviderComponent"}
+        ],
+        "required_configs_for_element": [ 
+            "dm_adapter_id",
+            "dm_external_conversation_id", 
+            "dm_recipient_info" 
+        ],
+        "element_attributes_from_config": {
+            "dm_adapter_id": "dm_adapter_id", 
+            "dm_external_conversation_id": "dm_external_conversation_id", 
+            "dm_recipient_info": "dm_recipient_info" 
+        },
+        "required_component_configs": {}
     },
     
     # --- Add more prefabs here ---

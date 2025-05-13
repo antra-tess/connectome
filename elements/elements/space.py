@@ -28,7 +28,10 @@ class Space(BaseElement):
     # Space is a container for other elements
     IS_SPACE = True
     
-    def __init__(self, element_id: str, name: str, description: str, **kwargs):
+    def __init__(self, element_id: str, name: str, description: str, 
+                 adapter_id: Optional[str] = None, 
+                 external_conversation_id: Optional[str] = None, 
+                 **kwargs):
         """
         Initialize the space.
         
@@ -36,9 +39,15 @@ class Space(BaseElement):
             element_id: Unique identifier for this space
             name: Human-readable name for this space
             description: Description of this space's purpose
+            adapter_id: Optional ID of the adapter this space might be associated with (e.g., for SharedSpaces).
+            external_conversation_id: Optional external ID (e.g., channel ID) this space might represent.
             **kwargs: Passthrough for BaseElement
         """
         super().__init__(element_id=element_id, name=name, description=description, **kwargs)
+        
+        # Store adapter and external conversation IDs if provided (especially for SharedSpaces)
+        self.adapter_id = adapter_id
+        self.external_conversation_id = external_conversation_id
         
         # Initialize space with required components
         # Store references for easier delegation, though get_component could also be used.
@@ -75,7 +84,7 @@ class Space(BaseElement):
         """Get a mounted element by ID (delegates to ContainerComponent)."""
         if not self._container:
             logger.error(f"[{self.id}] Cannot get mounted element: ContainerComponent unavailable.")
-        return None
+            return None
         return self._container.get_mounted_element(mount_id)
     
     def get_mounted_elements(self) -> Dict[str, BaseElement]:
@@ -204,67 +213,88 @@ class Space(BaseElement):
         logger.debug(f"[{self.id}] Unregistered uplink listener: {callback}")
 
     # NEW: Frame end processing method
-    def on_frame_end(self):
+    def on_frame_end(self) -> None:
         """
-        Processes the end of a frame: calculates VEIL deltas for all child elements
-        with VeilProducers, caches them, and notifies listeners.
+        Called by the HostEventLoop (or owning Space) after its processing frame.
+        Sends cached VEIL deltas to all registered uplink listeners.
         """
-        logger.debug(f"[{self.id}] Starting on_frame_end processing...")
-        all_deltas_in_frame: List[Dict[str, Any]] = []
-        processed_elements = set() # Track elements to avoid duplicate processing if mounted multiple times
-
-        mounted_elements = self.get_mounted_elements() # Use the delegation method
-
-        for mount_id, element in mounted_elements.items():
-            if element.id in processed_elements:
-                continue # Skip if already processed via another mount point
-            processed_elements.add(element.id)
-
-            # Find VeilProducer components on this element
-            veil_producers = element.get_components_by_type(VeilProducer) # Get all instances
-
-            if not veil_producers:
-                 # This debug message might be too verbose if many elements don't have VeilProducers
-                 # logger.debug(f"[{self.id}] Element {element.name} ({element.id}) has no VeilProducer components.")
-                 continue
-
-            for producer_component in veil_producers:
-                if hasattr(producer_component, 'calculate_delta') and callable(producer_component.calculate_delta):
-                    try:
-                        delta = producer_component.calculate_delta()
-                        if delta: # Only collect non-empty deltas
-                            if isinstance(delta, list):
-                                all_deltas_in_frame.extend(delta)
-                                logger.debug(f"[{self.id}] Collected {len(delta)} delta operations from {producer_component.__class__.__name__} on element {element.id}")
-                            else:
-                                 logger.warning(f"[{self.id}] VeilProducer {producer_component.__class__.__name__} on element {element.id} returned non-list delta: {type(delta)}. Skipping.")
-                    except Exception as e:
-                        logger.error(f"[{self.id}] Error calling calculate_delta on {producer_component.__class__.__name__} for element {element.id}: {e}", exc_info=True)
-                else:
-                     logger.warning(f"[{self.id}] Found VeilProducer component {producer_component.__class__.__name__} on {element.id} without a callable calculate_delta method.")
-
-
-        # Cache the collected deltas for this frame
-        # TODO: Decide on caching strategy - replace, append, timestamp? Replacing for now.
-        self._cached_deltas = all_deltas_in_frame
-        logger.debug(f"[{self.id}] Total deltas collected in frame: {len(self._cached_deltas)}")
-
-        # Notify listeners if new deltas were generated
-        if self._cached_deltas and self._uplink_listeners:
-            logger.info(f"[{self.id}] Notifying {len(self._uplink_listeners)} uplink listeners of new VEIL deltas.")
-            # Pass a copy of the deltas to listeners
-            deltas_to_send = list(self._cached_deltas)
-            for listener in list(self._uplink_listeners): # Iterate over a copy in case listener modifies the set
+        if self._cached_deltas:
+            logger.debug(f"[{self.id}] on_frame_end: Sending {len(self._cached_deltas)} cached deltas to {len(self._uplink_listeners)} listeners.")
+            for listener_callback in self._uplink_listeners:
                 try:
-                    # Consider if listeners should PULL the data instead?
-                    # Passing deltas directly for now.
-                    listener(deltas_to_send)
+                    listener_callback(self._cached_deltas)
                 except Exception as e:
-                    logger.error(f"[{self.id}] Error notifying uplink listener {listener}: {e}", exc_info=True)
-                    # Optionally unregister faulty listeners?
-                    # self.unregister_uplink_listener(listener)
+                    logger.error(f"[{self.id}] Error calling uplink listener: {e}", exc_info=True)
+            self._cached_deltas.clear()
+        else:
+            logger.debug(f"[{self.id}] on_frame_end: No deltas to send.")
+            
+    # --- Uplink Support Methods ---
+    def get_space_metadata_for_uplink(self) -> Dict[str, Any]:
+        """
+        Provides essential metadata about this space for an UplinkProxy 
+        during its initial synchronization.
+        
+        Returns:
+            A dictionary containing space ID, name, description, and potentially
+            adapter-specific identifiers if available from a component.
+        """
+        metadata = {
+            "space_id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "element_type": self.__class__.__name__,
+            "adapter_id": self.adapter_id, 
+            "external_conversation_id": self.external_conversation_id
+        }
+        # Example: If a space represents an external channel, it might have a component
+        # holding this info. For now, this is illustrative.
+        # channel_info_comp = self.get_component_by_type("ChannelInfoComponent")
+        # if channel_info_comp:
+        #     metadata["adapter_id"] = channel_info_comp.get_adapter_id()
+        #     metadata["external_conversation_id"] = channel_info_comp.get_external_id()
+            
+        logger.debug(f"[{self.id}] Providing metadata for uplink: {metadata}")
+        return metadata
 
-        logger.debug(f"[{self.id}] Finished on_frame_end processing.")
+    def get_full_veil_snapshot(self) -> Optional[Dict[str, Any]]:
+        """
+        Generates and returns a full VEIL snapshot of this space and its contents.
+        Delegates to the SpaceVeilProducerComponent if present.
+        
+        Returns:
+            A dictionary representing the full VEIL state, or None if generation fails.
+        """
+        veil_producer = self.get_component_by_type("SpaceVeilProducerComponent")
+        if veil_producer and hasattr(veil_producer, 'produce_veil'):
+            logger.debug(f"[{self.id}] Generating full VEIL snapshot via SpaceVeilProducerComponent.")
+            try:
+                # Assuming produce_veil() with no arguments means full snapshot
+                # and it needs the current element_states which it can get from self.element
+                # or the producer is already observing the space.
+                # The VeilProducer's produce_veil usually takes element_states.
+                # For a SpaceVeilProducer, it might need to gather states from mounted elements.
+                # Let's assume its produce_veil can operate on its owner (the Space) directly.
+                return veil_producer.produce_veil() 
+            except Exception as e:
+                logger.error(f"[{self.id}] Error generating VEIL snapshot from SpaceVeilProducerComponent: {e}", exc_info=True)
+                return None
+        else:
+            logger.warning(f"[{self.id}] SpaceVeilProducerComponent not found or 'produce_veil' method missing. Cannot generate full VEIL snapshot.")
+            # Fallback: return basic space info if no producer
+            return {
+                "element_id": self.id,
+                "name": self.name,
+                "description": self.description,
+                "element_type": self.__class__.__name__,
+                "mounted_elements": {mount_id: elem.name for mount_id, elem in self.get_mounted_elements().items()},
+                "components": [comp.COMPONENT_TYPE for comp in self.get_components().values()],
+                "veil_status": "producer_missing"
+            }
+
+    # --- Lifecycle & Debug --- 
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(id={self.id}, name={self.name}, description={self.description})"
 
     # Optional: Method for listeners to pull cached deltas if needed
     def get_cached_deltas(self) -> List[Dict[str, Any]]:

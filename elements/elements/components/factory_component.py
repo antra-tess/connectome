@@ -5,6 +5,7 @@ within its InnerSpace.
 """
 import logging
 from typing import Dict, Any, Optional, List, Type
+import inspect
 
 from ..base import BaseElement
 from .base_component import Component, BaseComponent # Import BaseComponent for type check
@@ -19,10 +20,20 @@ from ..inner_space import InnerSpace # Specifically expect InnerSpace
 # Import PREFABS from the dedicated module
 from elements.prefabs import PREFABS
 
+# --- For dynamic element class instantiation ---
+from ..uplink import UplinkProxy # Will be used by name lookup
+# Add other element types here if they can be created by prefab
+
 logger = logging.getLogger(__name__)
 
-# --- Prefab Definitions ---
-# MOVED to elements/prefabs.py
+# A simple lookup for element classes by name
+# This can be expanded or made more sophisticated (e.g., using component_registry pattern for elements)
+ELEMENT_CLASS_LOOKUP = {
+    "BaseElement": BaseElement,
+    "Space": Space,
+    "UplinkProxy": UplinkProxy,
+    # Add InnerSpace if it can be created this way (less common for agent to create its own InnerSpace)
+}
 
 @register_component
 class ElementFactoryComponent(Component):
@@ -84,8 +95,10 @@ class ElementFactoryComponent(Component):
         self,
         prefab_name: str,
         element_id: str, 
-        name: str, 
-        config_overrides: Optional[Dict[str, Dict[str, Any]]] = None
+        # 'name' will be part of element_config now
+        # name: str, 
+        element_config: Optional[Dict[str, Any]] = None, # New arg for element-level constructor/config
+        component_config_overrides: Optional[Dict[str, Dict[str, Any]]] = None # Renamed for clarity
     ) -> Dict[str, Any]:
         """
         Logic for the 'create_element_from_prefab' tool.
@@ -94,66 +107,191 @@ class ElementFactoryComponent(Component):
         Args:
             prefab_name: The name of the prefab to use (see list_available_prefabs).
             element_id: The desired unique ID for the new element.
-            name: The human-readable name for the new element.
-            config_overrides: Optional. A dictionary where keys are component type names
-                              and values are dictionaries of config settings to 
-                              override or provide for that component.
-                              E.g., {"MessageListComponent": {"channel_id": "12345"}}
+            element_config: Optional. Dictionary of configuration values for the element itself,
+                            used for its constructor arguments (e.g., {"name": "My Uplink", "remote_space_id": "xyz"}).
+            component_config_overrides: Optional. A dictionary where keys are component type names
+                                      and values are dictionaries of config settings to 
+                                      override or provide for that component.
+                                      E.g., {"MessageListComponent": {"channel_id": "12345"}}
 
         Returns:
             A dictionary result: { "success": bool, "result": str, "error": Optional[str] }
         """
-        config_overrides = config_overrides or {}
+        element_config = element_config or {}
+        component_config_overrides = component_config_overrides or {}
         
         # 1. Find prefab
         prefab_data = PREFABS.get(prefab_name)
         if not prefab_data:
             return { "success": False, "result": None, "error": f"Prefab '{prefab_name}' not found." }
 
-        # 2. Construct final component configurations
+        # --- Element Class and Constructor Args --- 
+        element_class_name = prefab_data.get("element_class_name", "BaseElement")
+        element_class = ELEMENT_CLASS_LOOKUP.get(element_class_name)
+        if not element_class:
+            return { "success": False, "result": None, "error": f"Element class '{element_class_name}' specified in prefab not found."}
+
+        # Check for required element_config keys
+        required_element_keys = prefab_data.get("required_element_config_keys", [])
+        missing_element_keys = []
+        for req_key in required_element_keys:
+            if req_key not in element_config or element_config[req_key] is None:
+                missing_element_keys.append(req_key)
+        if missing_element_keys:
+            error_msg = f"Missing required keys in element_config for prefab '{prefab_name}': {', '.join(missing_element_keys)}"
+            return { "success": False, "result": None, "error": error_msg }
+
+        # Prepare element constructor arguments
+        element_constructor_args = {"element_id": element_id} # element_id is always passed
+        # Add other args specified by prefab's element_constructor_arg_keys from element_config
+        constructor_arg_keys_from_prefab = prefab_data.get("element_constructor_arg_keys", [])
+        for key in constructor_arg_keys_from_prefab:
+            if key in element_config:
+                element_constructor_args[key] = element_config[key]
+            # else: # Do not error if not present, constructor might have defaults
+            #    logger.warning(f"Constructor key '{key}' for {element_class_name} not found in element_config, using default if any.")
+        
+        # --- Component Configurations (similar to before) ---
         final_component_configs = []
         prefab_components = prefab_data.get("components", [])
-        required_configs = prefab_data.get("required_configs", {})
+        required_component_configs = prefab_data.get("required_configs", {}) # For component-specific required keys
         missing_requirements = []
 
         for base_comp_config in prefab_components:
-            comp_type = base_comp_config.get("type")
-            if not comp_type:
+            comp_type_name = base_comp_config.get("type")
+            if not comp_type_name:
                  logger.warning(f"Prefab '{prefab_name}' has invalid component entry: {base_comp_config}. Skipping.")
                  continue
             
-            # Start with base config from prefab
             final_config = base_comp_config.get("config", {}).copy()
             
-            # Apply overrides provided by the agent
-            if comp_type in config_overrides:
-                override = config_overrides[comp_type]
+            if comp_type_name in component_config_overrides:
+                override = component_config_overrides[comp_type_name]
                 if isinstance(override, dict):
                     final_config.update(override)
                 else:
-                    logger.warning(f"Invalid override format for {comp_type} in prefab '{prefab_name}'. Expected dict, got {type(override)}. Ignoring override.")
+                    logger.warning(f"Invalid override format for {comp_type_name} in prefab '{prefab_name}'. Expected dict, got {type(override)}. Ignoring override.")
             
-            # Check for required configurations
-            if comp_type in required_configs:
-                for req_key in required_configs[comp_type]:
+            if comp_type_name in required_component_configs:
+                for req_key in required_component_configs[comp_type_name]:
                     if req_key not in final_config or final_config[req_key] is None:
-                        missing_requirements.append(f"Component '{comp_type}' requires config key '{req_key}'.")
+                        missing_requirements.append(f"Component '{comp_type_name}' requires config key '{req_key}'.")
                         
-            final_component_configs.append({"type": comp_type, "config": final_config})
+            final_component_configs.append({"type": comp_type_name, "config": final_config})
             
-        # Check if all requirements were met
         if missing_requirements:
-            error_msg = f"Missing required configurations for prefab '{prefab_name}': {'; '.join(missing_requirements)}"
+            error_msg = f"Missing required configurations for prefab '{prefab_name}' components: {'; '.join(missing_requirements)}"
             logger.error(error_msg)
             return { "success": False, "result": None, "error": error_msg }
 
-        # 3. Call the base element creation logic
-        # Pass the fully constructed list of component configs
-        return self.handle_create_element(
-            element_id=element_id, 
-            name=name, 
-            component_configs=final_component_configs
-        )
+        # --- Create and Mount Element (using modified logic) ---
+        inner_space = self._get_inner_space()
+        if not inner_space:
+            return { "success": False, "result": None, "error": "Cannot create element: Owner is not an InnerSpace." }
+
+        if inner_space.get_element_by_id(element_id) or inner_space.id == element_id:
+            return { "success": False, "result": None, "error": f"Element ID '{element_id}' already exists in this InnerSpace." }
+
+        logger.info(f"Attempting to create element '{element_constructor_args.get('name', element_id)}' (ID: {element_id}) from prefab '{prefab_name}' of type {element_class_name}.")
+        
+        try:
+            # 1. Instantiate the specific element class
+            # Pass SpaceRegistry if the element class constructor accepts it (like UplinkProxy)
+            if 'space_registry' in inspect.signature(element_class.__init__).parameters and hasattr(inner_space, '_space_registry'):
+                element_constructor_args['space_registry'] = inner_space._space_registry
+            
+            new_element = element_class(**element_constructor_args)
+            new_element.set_parent_space(inner_space) # Essential for components during their init
+
+            # 2. Add components (from prefab, with overrides applied)
+            if not isinstance(final_component_configs, list):
+                 raise ValueError("final_component_configs must be a list.")
+                 
+            for comp_spec in final_component_configs:
+                comp_type_name = comp_spec["type"]
+                comp_args = comp_spec.get("config", {}).copy()
+                
+                # If component already added by element constructor (e.g. UplinkProxy adds its own core ones),
+                # this would either re-add (if add_component allows) or could be skipped.
+                # For now, assume add_component handles this or we only list non-default components in prefab.
+                existing_comp = new_element.get_component_by_type(comp_type_name)
+                if existing_comp:
+                    logger.debug(f"Component of type '{comp_type_name}' already exists on element {element_id}. Skipping addition from prefab.")
+                    # Optionally, could try to reconfigure it: if hasattr(existing_comp, 'configure'): existing_comp.configure(**comp_args)
+                    continue
+
+                component_class_to_add = find_component_class(comp_type_name)
+                if component_class_to_add:
+                    # Inject dependencies if MessageActionHandler (or others in future)
+                    if hasattr(component_class_to_add, 'INJECTED_DEPENDENCIES') and hasattr(inner_space, '_outgoing_action_callback'):
+                        if 'outgoing_action_callback' in component_class_to_add.INJECTED_DEPENDENCIES:
+                            comp_args['outgoing_action_callback'] = inner_space._outgoing_action_callback
+                    
+                    # Instantiate component, passing element and config
+                    # The component's __init__ should accept 'element' as first arg if it needs it.
+                    # Most of our components take element_id, name in constructor, but add_component in BaseElement
+                    # handles wrapping and setting the owner. Here, we directly instantiate.
+                    # Let's assume component constructors are flexible or primarily use kwargs from config.
+                    # A safer way is new_element.add_component(component_class_to_add, **comp_args) if add_component takes type and kwargs
+                    
+                    # Simplification: Assume add_component on BaseElement can take type and config args
+                    added_comp_instance = new_element.add_component(component_class_to_add, **comp_args)
+                    if added_comp_instance:
+                        logger.debug(f"Added component '{comp_type_name}' to element {element_id} via prefab.")
+                    else:
+                        # add_component should log its own error if it failed
+                        raise ValueError(f"Failed to add component '{comp_type_name}' to element {element_id} via prefab.")
+                else:
+                    raise ValueError(f"Component type '{comp_type_name}' for prefab not found or invalid.")
+
+            # 3. Mount the fully configured element in the InnerSpace
+            mount_success = inner_space.mount_element(new_element)
+            if not mount_success:
+                 raise RuntimeError(f"Failed to mount newly created element {element_id} into InnerSpace {inner_space.id}.")
+
+            # 3.5 Finalize element setup (e.g., register local tools)
+            new_element.finalize_setup() # Ensure this method exists on BaseElement/subclasses
+
+            # 4. Record creation event on InnerSpace timeline (similar to handle_create_element)
+            timeline_comp = inner_space.get_timeline()
+            if timeline_comp:
+                 event_payload = {
+                     "event_type": "element_created_from_prefab",
+                     "data": {
+                         "factory_component_id": self.id,
+                         "prefab_name": prefab_name,
+                         "new_element_id": element_id,
+                         "new_element_name": new_element.name,
+                         "element_class": new_element.__class__.__name__,
+                         "component_types": [c.COMPONENT_TYPE for c in new_element.get_components().values()]
+                     }
+                 }
+                 timeline_comp.add_event_to_primary_timeline(event_payload)
+            
+            # --- NEW: Set element attributes from element_config based on prefab hint ---
+            attributes_to_set_map = prefab_data.get("element_attributes_from_config", {})
+            if attributes_to_set_map:
+                logger.debug(f"Setting attributes on element {new_element.id} from element_config based on prefab hints: {attributes_to_set_map}")
+                for config_key, attribute_name in attributes_to_set_map.items():
+                    if config_key in element_config:
+                        value_to_set = element_config[config_key]
+                        try:
+                            setattr(new_element, attribute_name, value_to_set)
+                            logger.debug(f"Set attribute '{attribute_name}' on element {new_element.id} to: {value_to_set}")
+                        except Exception as e:
+                            logger.error(f"Error setting attribute '{attribute_name}' on element {new_element.id} from config key '{config_key}': {e}", exc_info=True)
+                    else:
+                        logger.warning(f"Prefab '{prefab_name}' specified setting attribute '{attribute_name}' from config key '{config_key}', but key was not found in element_config.")
+            # --- END NEW --- 
+
+            result_msg = f"Element '{new_element.name}' ({element_id}) created successfully from prefab '{prefab_name}' with {len(new_element.get_components())} components."
+            logger.info(result_msg)
+            return { "success": True, "result": result_msg, "error": None }
+
+        except Exception as e:
+            error_msg = f"Failed to create element '{element_id}' from prefab '{prefab_name}': {e}"
+            logger.error(error_msg, exc_info=True)
+            return { "success": False, "result": None, "error": error_msg }
 
     def handle_create_element(self, element_id: str, name: str, component_configs: List[Dict[str, Any]]) -> Dict[str, Any]:
         """

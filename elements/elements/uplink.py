@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 from .base import BaseElement, MountType
 
 from .space import Space # Inherits Space functionality (Container, Timeline)
-from .components import ToolProviderComponent
+from .components import ToolProviderComponent, ToolParameter
 from .components.uplink import UplinkConnectionComponent, RemoteStateCacheComponent, UplinkVeilProducerComponent
 
 # Configure logging
@@ -65,170 +65,164 @@ class UplinkProxy(Space):
         """
         super().__init__(element_id, name, description)
         
-        # Store basic remote info accessible to tools/VEIL
-        self.remote_space_id = remote_space_id
-        self.remote_space_info = remote_space_info or {}
-        self._space_registry = space_registry
+        # Initialize core components for Uplink functionality
+        self._connection_component: UplinkConnectionComponent = self.add_component(UplinkConnectionComponent, remote_space_id=remote_space_id, space_registry=space_registry)
+        self._cache_component: RemoteStateCacheComponent = self.add_component(RemoteStateCacheComponent) # Will sync using remote_space_id and space_registry
+        self._veil_producer_component: UplinkVeilProducerComponent = self.add_component(UplinkVeilProducerComponent) # Produces VEIL from cached state
+        self._tool_provider_component: ToolProviderComponent = self.add_component(ToolProviderComponent) # For uplink-specific actions
         
-        # --- Add Uplink Components --- 
-        self._connection_comp = self.add_component(
-            UplinkConnectionComponent, 
-            remote_space_id=remote_space_id,
-            sync_interval=sync_interval,
-            space_registry=self._space_registry, 
-            delta_callback=self.handle_remote_deltas
-        )
-        if not self._connection_comp:
-            logger.error(f"Failed to add UplinkConnectionComponent to UplinkProxy {element_id}")
-            
-        self._cache_comp = self.add_component(RemoteStateCacheComponent, 
-                                              remote_space_id=remote_space_id, 
-                                              cache_ttl=cache_ttl)
-        if not self._cache_comp:
-             logger.error(f"Failed to add RemoteStateCacheComponent to UplinkProxy {element_id}")
+        # Store for RemoteStateCacheComponent and potentially others
+        self._space_registry = space_registry 
+        self.remote_space_id = remote_space_id # Made public for easier access by components
 
-        self._tool_provider = self.add_component(ToolProviderComponent)
-        if not self._tool_provider:
-             logger.error(f"Failed to add ToolProviderComponent component to UplinkProxy {element_id}")
-        else:
-             self._register_uplink_tools() # Register tools if provider exists
-             
-        # Use the specific UplinkVeilProducerComponent
-        self._veil_producer = self.add_component(UplinkVeilProducerComponent, renderable_id=f"uplink_{element_id}")
-        if not self._veil_producer:
-             logger.error(f"Failed to add VeilProducer component to UplinkProxy {element_id}")
-
-        # Note: ContainerComponent and TimelineComponent are added by the parent Space class
+        # This will hold information about the remote space, populated by RemoteStateCacheComponent
+        self.remote_space_info: Dict[str, Any] = {
+            "name": remote_space_info.get("name", remote_space_id),
+            "type": remote_space_info.get("type", "Unknown"),
+            "info": remote_space_info or {}
+        }
         
         logger.info(f"Created uplink proxy: {name} ({element_id}) -> {remote_space_id}")
     
     # --- Tool Registration --- 
     def _register_uplink_tools(self) -> None:
         """Register tools specific to uplink proxies using ToolProviderComponent."""
-        if not self._tool_provider:
+        if not self._tool_provider_component:
              logger.warning(f"Cannot register uplink tools for {self.id}, ToolProviderComponent missing.")
              return
         
-        @self._tool_provider.register_tool(
+        # Define parameter schemas
+        sync_remote_state_params: List[ToolParameter] = [
+            {"name": "force", "type": "boolean", "description": "Set true to ignore cache TTL.", "required": False}
+        ]
+        get_connection_spans_params: List[ToolParameter] = [
+            {"name": "limit", "type": "integer", "description": "Max number of spans to return.", "required": False}
+        ]
+        enable_auto_sync_params: List[ToolParameter] = [
+            {"name": "interval", "type": "integer", "description": "Sync interval in seconds.", "required": False}
+        ]
+        get_history_bundles_params: List[ToolParameter] = [
+            {"name": "span_ids", "type": "array", "description": "List of span IDs to retrieve. Gets all cached if omitted.", "required": False, "items": {"type": "string"}}
+        ]
+
+        @self._tool_provider_component.register_tool(
             name="connect_to_remote",
             description="Connect to the remote space associated with this uplink.",
-            parameter_descriptions={}
+            parameters_schema=[] # No parameters
         )
         def connect_to_remote_tool() -> Dict[str, Any]:
             """Tool to connect via UplinkConnectionComponent."""
-            if not self._connection_comp:
+            if not self._connection_component:
                 return {"success": False, "error": "Connection component unavailable"}
-            success = self._connection_comp.connect()
+            success = self._connection_component.connect()
             # Return current state after attempting connection
             return {
                 "success": success,
                 "status": "Connected." if success else "Connection failed.",
-                "connection_state": self._connection_comp.get_connection_state()
+                "connection_state": self._connection_component.get_connection_state()
             }
         
-        @self._tool_provider.register_tool(
+        @self._tool_provider_component.register_tool(
             name="disconnect_from_remote",
             description="Disconnect from the remote space.",
-            parameter_descriptions={}
+            parameters_schema=[] # No parameters
         )
         def disconnect_from_remote_tool() -> Dict[str, Any]:
             """Tool to disconnect via UplinkConnectionComponent."""
-            if not self._connection_comp:
+            if not self._connection_component:
                 return {"success": False, "error": "Connection component unavailable"}
-            success = self._connection_comp.disconnect()
+            success = self._connection_component.disconnect()
             return {
                 "success": success,
                 "status": "Disconnected." if success else "Disconnection failed.",
-                "connection_state": self._connection_comp.get_connection_state() # State after disconnect
+                "connection_state": self._connection_component.get_connection_state() # State after disconnect
             }
         
-        @self._tool_provider.register_tool(
+        @self._tool_provider_component.register_tool(
             name="sync_remote_state",
             description="Manually trigger synchronization with the remote space.",
-            parameter_descriptions={"force": "Boolean, set true to ignore cache TTL (optional, default false)"}
+            parameters_schema=sync_remote_state_params
         )
         def sync_remote_state_tool(force: bool = False) -> Dict[str, Any]:
             """Tool to sync state via RemoteStateCacheComponent."""
-            if not self._cache_comp:
+            if not self._cache_component:
                  return {"success": False, "error": "Cache component unavailable"}
             # Sync is triggered here. The component handles connection checks.
-            success = self._cache_comp.sync_remote_state()
+            success = self._cache_component.sync_remote_state()
             status = "Sync successful." if success else "Sync failed (maybe not connected?)."
             return {
                 "success": success,
                 "status": status,
-                "last_sync_attempt": self._cache_comp._state.get("last_sync_attempt"),
-                "last_successful_sync": self._cache_comp._state.get("last_successful_sync")
+                "last_sync_attempt": self._cache_component._state.get("last_sync_attempt"),
+                "last_successful_sync": self._cache_component._state.get("last_successful_sync")
             }
         
-        @self._tool_provider.register_tool(
+        @self._tool_provider_component.register_tool(
             name="get_connection_state",
             description="Get the current connection status of the uplink.",
-            parameter_descriptions={}
+            parameters_schema=[] # No parameters
         )
         def get_connection_state_tool() -> Dict[str, Any]:
             """Tool to get connection state from UplinkConnectionComponent."""
-            if not self._connection_comp:
+            if not self._connection_component:
                  return {"success": False, "error": "Connection component unavailable"}
             return {
                 "success": True,
-                "connection_state": self._connection_comp.get_connection_state()
+                "connection_state": self._connection_component.get_connection_state()
             }
             
-        @self._tool_provider.register_tool(
+        @self._tool_provider_component.register_tool(
             name="get_connection_spans",
             description="Get recent periods when the agent was connected via this uplink.",
-            parameter_descriptions={"limit": "Max number of spans to return (optional)"}
+            parameters_schema=get_connection_spans_params
         )
         def get_connection_spans_tool(limit: Optional[int] = None) -> Dict[str, Any]:
             """Tool to get connection spans from UplinkConnectionComponent."""
-            if not self._connection_comp:
+            if not self._connection_component:
                  return {"success": False, "error": "Connection component unavailable"}
-            spans = self._connection_comp.get_connection_spans(limit=limit)
+            spans = self._connection_component.get_connection_spans(limit=limit)
             return {"success": True, "connection_spans": spans}
         
-        @self._tool_provider.register_tool(
+        @self._tool_provider_component.register_tool(
             name="enable_auto_sync",
             description="Enable automatic background synchronization of remote state.",
-            parameter_descriptions={
-                "interval": "Sync interval in seconds (optional, defaults to cache TTL)"
-            }
+            parameters_schema=enable_auto_sync_params
         )
         def enable_auto_sync_tool(interval: Optional[int] = None) -> Dict[str, Any]:
             """Tool to enable auto-sync via RemoteStateCacheComponent."""
-            if not self._cache_comp:
+            if not self._cache_component:
                  return {"success": False, "error": "Cache component unavailable"}
-            self._cache_comp.enable_auto_sync(interval)
+            self._cache_component.enable_auto_sync(interval)
             return {
                 "success": True,
                 "status": "Auto-sync enabled.",
-                "auto_sync_is_active": self._cache_comp._auto_sync_enabled, # Check state after enabling
-                "check_interval_approx_seconds": self._cache_comp._state.get("cache_ttl")
+                "auto_sync_is_active": self._cache_component._auto_sync_enabled, # Check state after enabling
+                "check_interval_approx_seconds": self._cache_component._state.get("cache_ttl")
             }
         
-        @self._tool_provider.register_tool(
+        @self._tool_provider_component.register_tool(
             name="disable_auto_sync",
             description="Disable automatic background synchronization.",
-            parameter_descriptions={}
+            parameters_schema=[] # No parameters
         )
         def disable_auto_sync_tool() -> Dict[str, Any]:
             """Tool to disable auto-sync via RemoteStateCacheComponent."""
-            if not self._cache_comp:
+            if not self._cache_component:
                  return {"success": False, "error": "Cache component unavailable"}
-            self._cache_comp.disable_auto_sync()
-            return {"success": True, "status": "Auto-sync disabled.", "auto_sync_is_active": self._cache_comp._auto_sync_enabled}
+            self._cache_component.disable_auto_sync()
+            return {"success": True, "status": "Auto-sync disabled.", "auto_sync_is_active": self._cache_component._auto_sync_enabled}
             
         # Tool to get cached history bundles (useful for rendering/VEIL)
-        @self._tool_provider.register_tool(
+        @self._tool_provider_component.register_tool(
             name="get_history_bundles",
             description="Get cached history bundles from the remote space.",
-            parameter_descriptions={ "span_ids": "List of span IDs to retrieve (optional, gets all cached if omitted)" }
+            parameters_schema=get_history_bundles_params
         )
         def get_history_bundles_tool(span_ids: Optional[List[str]] = None) -> Dict[str, Any]:
             """Tool to get history bundles from RemoteStateCacheComponent."""
-            if not self._cache_comp:
+            if not self._cache_component:
                  return {"success": False, "error": "Cache component unavailable", "history_bundles": {}}
-            bundles = self._cache_comp.get_history_bundles(span_ids=span_ids)
+            bundles = self._cache_component.get_history_bundles(span_ids=span_ids)
             return {"success": True, "history_bundles": bundles}
             
     # --- State Representation (Could be customized in a dedicated VeilProducer subclass) ---
@@ -239,12 +233,12 @@ class UplinkProxy(Space):
         """
         interior = super().get_interior_state() # Gets state from Space components (Timeline, Container)
         
-        conn_state = self._connection_comp.get_connection_state() if self._connection_comp else {}
+        conn_state = self._connection_component.get_connection_state() if self._connection_component else {}
         # Get potentially synced remote state from cache
         # Pass force=False to avoid triggering sync just for viewing state
-        cache_content = self._cache_comp.get_synced_remote_state(force_sync=False) if self._cache_comp else {}
-        history_bundles = self._cache_comp.get_history_bundles() if self._cache_comp else {}
-        conn_spans = self._connection_comp.get_connection_spans() if self._connection_comp else []
+        cache_content = self._cache_component.get_synced_remote_state(force_sync=False) if self._cache_component else {}
+        history_bundles = self._cache_component.get_history_bundles() if self._cache_component else {}
+        conn_spans = self._connection_component.get_connection_spans() if self._connection_component else []
         
         interior.update({
             "element_type": "UplinkProxy",
@@ -254,8 +248,8 @@ class UplinkProxy(Space):
             "cache": {
                  "content": cache_content,
                  "history_bundles": history_bundles,
-                 "last_successful_sync": self._cache_comp._state.get("last_successful_sync") if self._cache_comp else None,
-                 "auto_sync_enabled": self._cache_comp._auto_sync_enabled if self._cache_comp else False
+                 "last_successful_sync": self._cache_component._state.get("last_successful_sync") if self._cache_component else None,
+                 "auto_sync_enabled": self._cache_component._auto_sync_enabled if self._cache_component else False
             },
             "connection_spans": conn_spans
         })
@@ -277,8 +271,8 @@ class UplinkProxy(Space):
                   "type": self.__class__.__name__
              }
              
-        conn_state = self._connection_comp.get_connection_state() if self._connection_comp else {}
-        last_sync = self._cache_comp._state.get("last_successful_sync") if self._cache_comp else None
+        conn_state = self._connection_component.get_connection_state() if self._connection_component else {}
+        last_sync = self._cache_component._state.get("last_successful_sync") if self._cache_component else None
 
         exterior.update({
             "element_type": "UplinkProxy",
@@ -292,10 +286,10 @@ class UplinkProxy(Space):
     
     # --- Convenience Getters --- 
     def get_connection_component(self) -> Optional[UplinkConnectionComponent]:
-        return self._connection_comp
+        return self._connection_component
         
     def get_cache_component(self) -> Optional[RemoteStateCacheComponent]:
-        return self._cache_comp
+        return self._cache_component
 
     # --- NEW: Delta Handler ---
     def handle_remote_deltas(self, deltas: List[Dict[str, Any]]):
@@ -304,9 +298,9 @@ class UplinkProxy(Space):
         Delegates delta application to the cache component.
         """
         logger.info(f"[{self.id}] Received {len(deltas)} VEIL delta(s) from remote space {self.remote_space_id}.")
-        if self._cache_comp:
+        if self._cache_component:
             try:
-                self._cache_comp.apply_deltas(deltas)
+                self._cache_component.apply_deltas(deltas)
             except Exception as e:
                 logger.error(f"[{self.id}] Error applying remote deltas in cache component: {e}", exc_info=True)
         else:
@@ -321,7 +315,7 @@ class UplinkProxy(Space):
     #     event_type = event.get("event_type")
     #     if event_type == "uplink_connected":
     #          logger.info(f"Uplink {self.id} connected, requesting initial sync.")
-    #          if self._cache_comp:
+    #          if self._cache_component:
     #               # Trigger sync request event
     #               self.handle_event({"event_type": "sync_request", "data": {"force": True}}, timeline_context)
     #               handled = True # Consider it handled
@@ -373,11 +367,11 @@ class UplinkProxy(Space):
         include_active = options.get('include_active', True)
         
         # Start with completed spans
-        spans = self._connection_comp.get_connection_spans(limit=limit)
+        spans = self._connection_component.get_connection_spans(limit=limit)
         
         # Include active span if requested
-        if include_active and self._connection_comp.get_connection_spans(limit=1):
-            spans.append(self._connection_comp.get_connection_spans(limit=1)[0])
+        if include_active and self._connection_component.get_connection_spans(limit=1):
+            spans.append(self._connection_component.get_connection_spans(limit=1)[0])
             
         # Sort by start time (newest first)
         spans.sort(key=lambda span: span.get('start_time', 0), reverse=True)

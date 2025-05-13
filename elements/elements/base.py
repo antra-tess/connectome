@@ -4,7 +4,7 @@ Base class for all elements in the Component-based architecture.
 """
 
 import logging
-from typing import Dict, Any, Optional, List, Callable, Set, Tuple, Literal, Type, TYPE_CHECKING
+from typing import Dict, Any, Optional, List, Callable, Set, Tuple, Literal, Type, TYPE_CHECKING, Union
 import uuid
 import time
 import enum
@@ -191,22 +191,28 @@ class BaseElement:
         """
         return self._components.get(component_id)
     
-    def get_component_by_type(self, component_type: str) -> Optional['Component']:
-        """
-        Get a component by type.
-        
-        Args:
-            component_type: Type string (COMPONENT_TYPE) of component to get
-            
-        Returns:
-            The first component matching the specified type, or None if not found
-        """
-        for component in self._components.values():
-            # Ensure the component instance has the attribute before checking
-            if hasattr(component, 'COMPONENT_TYPE') and component.COMPONENT_TYPE == component_type:
-                return component
-        # Removed erroneous second return None inside the loop
-        return None # Return None only after checking all components
+    def get_component_by_type(self, component_type: Union[str, Type[Component]]) -> Optional[Component]:
+        """Get a component by its type (class or string identifier)."""
+        target_type_name = component_type if isinstance(component_type, str) else component_type.COMPONENT_TYPE
+        for comp in self._components.values():
+            # Check class hierarchy for matches if component_type is a class
+            if not isinstance(component_type, str) and isinstance(comp, component_type):
+                return comp
+            # Fallback to checking COMPONENT_TYPE string
+            if hasattr(comp, 'COMPONENT_TYPE') and comp.COMPONENT_TYPE == target_type_name:
+                return comp
+        return None
+
+    def get_components_by_type(self, component_type: Union[str, Type[Component]]) -> List[Component]:
+        """Get all components matching a given type (class or string identifier)."""
+        matches = []
+        target_type_name = component_type if isinstance(component_type, str) else component_type.COMPONENT_TYPE
+        for comp in self._components.values():
+            if not isinstance(component_type, str) and isinstance(comp, component_type):
+                matches.append(comp)
+            elif hasattr(comp, 'COMPONENT_TYPE') and comp.COMPONENT_TYPE == target_type_name:
+                matches.append(comp)
+        return matches
     
     def get_components(self) -> Dict[str, 'Component']:
         """
@@ -332,11 +338,15 @@ class BaseElement:
 
     def finalize_setup(self) -> None:
         """
-        Call this after all components have been added to the element
-        to perform final setup steps like tool registration.
+        Called after the element and all its initial components have been added and configured.
+        Allows the element to perform any final initialization steps, such as registering
+        tools from its components if it has a ToolProvider.
         """
-        self._register_component_tools()
-        logger.debug(f"Final setup completed for Element {self.id}")
+        # Example: If this element has a ToolProvider, it might register tools from other components.
+        # tool_provider = self.get_component_by_type("ToolProviderComponent")
+        # if tool_provider and hasattr(tool_provider, 'discover_and_register_tools'):
+        #     tool_provider.discover_and_register_tools(self) # Pass self to scan
+        pass
 
     def _register_component_tools(self) -> None:
         """
@@ -391,3 +401,10 @@ class BaseElement:
         
         if registered_count > 0 or skipped_count > 0:
             logger.info(f"[{self.id}] Local tool registration complete. Registered: {registered_count}, Skipped: {skipped_count}.")
+
+    def _on_cleanup(self) -> bool:
+        """
+        Called when the element is being destroyed or removed.
+        """
+        # Implement cleanup logic here
+        return True

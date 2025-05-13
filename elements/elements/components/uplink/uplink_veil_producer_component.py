@@ -33,6 +33,8 @@ class UplinkVeilProducer(VeilProducer):
         self._state.setdefault('_last_generated_cache_veil_ids', set())
         # Optional: Store a shallow copy of last node properties for update detection
         self._state.setdefault('_last_node_properties', {})
+        # Store the latest full snapshot received, if needed for direct access
+        self._state.setdefault('_current_full_snapshot', None)
         logger.debug(f"UplinkVeilProducer initialized for Element {self.owner.id}")
 
     def _get_cache_component(self) -> Optional[RemoteStateCacheComponent]:
@@ -80,7 +82,7 @@ class UplinkVeilProducer(VeilProducer):
         self._state['_last_node_properties'] = {
             nid: node.get("properties", {}) for nid, node in cached_nodes_dict.items()
         }
-
+        self._state['_current_full_snapshot'] = root_veil_node # Cache the generated full VEIL
 
         return root_veil_node
 
@@ -141,8 +143,33 @@ class UplinkVeilProducer(VeilProducer):
         # Update state for next delta calculation
         self._state['_last_generated_cache_veil_ids'] = current_ids
         self._state['_last_node_properties'] = current_node_properties
-
+        # After calculating delta, the full snapshot is implicitly based on these current_ids/props
+        # No need to update _current_full_snapshot here as it reflects the last get_full_veil() call
 
         if delta_operations:
             logger.info(f"[{self.owner.id}] Calculated Uplink VEIL delta with {len(delta_operations)} operations.")
         return delta_operations
+
+    def on_cache_updated(self, new_full_snapshot_data: Dict[str, Any]) -> None:
+        """
+        Called by RemoteStateCacheComponent when its cache has been fully updated 
+        (e.g., after a successful sync_remote_state).
+        This signals that the producer should reset its delta tracking baseline.
+
+        Args:
+            new_full_snapshot_data: The complete new state from the remote cache.
+                                   While passed, this producer typically re-fetches from
+                                   the cache component directly when needed.
+        """
+        logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Cache updated notification received. Resetting delta baseline.")
+        # Reset the baseline for delta calculation.
+        # The next call to calculate_delta will treat everything in the updated 
+        # RemoteStateCacheComponent as new.
+        self._state['_last_generated_cache_veil_ids'] = set()
+        self._state['_last_node_properties'] = {}
+        # Optionally, we could store the new_full_snapshot_data here if we wanted to avoid
+        # an immediate re-fetch in get_full_veil, but current design re-fetches.
+        self._state['_current_full_snapshot'] = None # Invalidate any previously stored full snapshot
+        
+        # Important: After this, the next on_frame_end will cause calculate_delta
+        # to generate a potentially large delta representing the full new state.

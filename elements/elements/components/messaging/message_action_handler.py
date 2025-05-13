@@ -3,9 +3,10 @@ Message Action Handler Component
 Provides tools/actions for interacting with messaging elements (e.g., sending messages).
 """
 import logging
-from typing import Dict, Any, Optional, TYPE_CHECKING, Tuple
+from typing import Dict, Any, Optional, TYPE_CHECKING, Tuple, List
 
 from ...base import Component
+from ..tool_provider import ToolParameter # Import the new ToolParameter type
 
 # Assuming MessageListComponent is used for context, but not strictly required by handler itself
 from .message_list import MessageListComponent 
@@ -16,6 +17,7 @@ if TYPE_CHECKING:
     from host.event_loop import OutgoingActionCallback # In host directory
     from elements.elements.inner_space import InnerSpace # To check if owner is InnerSpace for DMs
     from elements.elements.space import Space # To check if owner is Space (SharedSpace context)
+    from elements.elements.uplink import UplinkProxy # For type checking
 
 logger = logging.getLogger(__name__)
 
@@ -33,40 +35,89 @@ class MessageActionHandler(Component):
         'outgoing_action_callback': '_outgoing_action_callback'
     }
     
-    def __init__(self, element_id: str, name: str, outgoing_action_callback: Optional['OutgoingActionCallback'] = None, **kwargs):
-        super().__init__(element_id, name, **kwargs)
+    def __init__(self, element: Optional[BaseElement] = None, outgoing_action_callback: Optional['OutgoingActionCallback'] = None, **kwargs): # Added element, updated kwargs
+        super().__init__(element, **kwargs) # Pass element and kwargs
         self._outgoing_action_callback = outgoing_action_callback
         if not self._outgoing_action_callback:
-             logger.warning(f"MessageActionHandler {self.id} initialized without an outgoing_action_callback. Cannot send external messages.")
+             logger.warning(f"MessageActionHandler {self.id if self.id else 'UNKNOWN_ID'} initialized without an outgoing_action_callback. Cannot send external messages.")
 
     def initialize(self, **kwargs) -> None:
         """Registers tools after initialization."""
         super().initialize(**kwargs)
         self._register_messaging_tools()
-        logger.debug(f"MessageActionHandler initialized and tools registered for Element {self.owner.id}")
+        logger.debug(f"MessageActionHandler initialized and tools registered for Element {self.owner.id if self.owner else 'Unknown'}")
 
     def set_outgoing_action_callback(self, callback: 'OutgoingActionCallback'):
         """Allows setting the callback after initialization if needed."""
         self._outgoing_action_callback = callback
-        logger.debug(f"Outgoing action callback set for MessageActionHandler {self.id}")
+        logger.debug(f"Outgoing action callback set for MessageActionHandler {self.id if self.id else 'UNKNOWN_ID'}")
 
     def _register_messaging_tools(self):
         """Registers messaging-related tools with the ToolProviderComponent."""
         tool_provider: Optional['ToolProviderComponent'] = self.get_sibling_component("ToolProviderComponent")
         if not tool_provider:
-            logger.error(f"[{self.owner.id}] Cannot register messaging tools: ToolProviderComponent not found.")
+            logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] Cannot register messaging tools: ToolProviderComponent not found.")
             return
+
+        # --- Define Parameter Schemas ---
+        send_message_params: List[ToolParameter] = [
+            {"name": "text", "type": "string", "description": "The content of the message to send.", "required": True},
+            {"name": "reply_to_external_id", "type": "string", "description": "Optional external ID of the message being replied to.", "required": False},
+            {
+                "name": "attachments", "type": "array", "description": "Optional list of attachment objects to send.", "required": False,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "URL of the attachment."},
+                        "filename": {"type": "string", "description": "Filename of the attachment."},
+                        "attachment_type": {"type": "string", "description": "MIME type (e.g., 'image/png')."}
+                    },
+                    "required": ["url"] # Example: URL is required for an attachment object
+                }
+            }
+        ]
+
+        delete_message_params: List[ToolParameter] = [
+            {"name": "message_external_id", "type": "string", "description": "The external ID of the message to delete.", "required": True}
+        ]
+
+        edit_message_params: List[ToolParameter] = [
+            {"name": "message_external_id", "type": "string", "description": "The external ID of the message to edit.", "required": True},
+            {"name": "new_text", "type": "string", "description": "The new text content for the message.", "required": True}
+        ]
+
+        add_reaction_params: List[ToolParameter] = [
+            {"name": "message_external_id", "type": "string", "description": "The external ID of the message to react to.", "required": True},
+            {"name": "emoji", "type": "string", "description": "The emoji to add as a reaction (e.g., '👍', ':smile:').", "required": True}
+        ]
+        
+        remove_reaction_params: List[ToolParameter] = [
+            {"name": "message_external_id", "type": "string", "description": "The external ID of the message to remove reaction from.", "required": True},
+            {"name": "emoji", "type": "string", "description": "The emoji reaction to remove (e.g., '👍', ':smile:').", "required": True}
+        ]
+
+        fetch_history_params: List[ToolParameter] = [
+            {"name": "conversation_id", "type": "string", "description": "The external ID of the conversation/channel to fetch history from.", "required": True},
+            {"name": "before_ms", "type": "integer", "description": "Fetch messages before this UTC timestamp in milliseconds. (Optional)", "required": False},
+            {"name": "after_ms", "type": "integer", "description": "Fetch messages after this UTC timestamp in milliseconds. (Optional)", "required": False},
+            {"name": "limit", "type": "integer", "description": "Maximum number of messages to fetch (e.g., 100). (Optional)", "required": False}
+        ]
+
+        get_attachment_params: List[ToolParameter] = [
+            {"name": "attachment_id", "type": "string", "description": "The unique ID of the attachment to fetch.", "required": True},
+            {"name": "conversation_id", "type": "string", "description": "Optional external ID of the conversation the attachment belongs to (if context is ambiguous).", "required": False},
+            {"name": "message_external_id", "type": "string", "description": "Optional external ID of the message the attachment belongs to (for context).", "required": False}
+        ]
 
         # --- Register send_message Tool --- 
         @tool_provider.register_tool(
             name="send_message",
             description="Sends a message to the chat context represented by this element.",
-            parameter_descriptions={
-                "text": "The content of the message to send (required, string)",
-                "reply_to_external_id": "Optional external ID of the message being replied to (string)"
-            }
+            parameters=send_message_params
         )
-        def send_message_tool(text: str, reply_to_external_id: Optional[str] = None) -> Dict[str, Any]:
+        def send_message_tool(text: str, 
+                              reply_to_external_id: Optional[str] = None, 
+                              attachments: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
             """Handles sending a message, determining if it's DM or channel based on context."""
             if not self._outgoing_action_callback:
                 return {"success": False, "error": "Outgoing action callback is not configured."}
@@ -109,15 +160,16 @@ class MessageActionHandler(Component):
             # This structure should match what ActivityClient.handle_outgoing_action expects
             action_request = {
                 "target_module": "ActivityClient",
-                "action_type": "send_message", # Corresponds to ActivityClient handling
+                "action_type": "send_message", # Generic action type for ActivityClient
                 "payload": {
                     "adapter_id": adapter_id,
-                    "conversation_id": conversation_id, # Channel ID or Recipient ID
+                    "conversation_id": conversation_id,
                     "text": text,
-                    "reply_to_external_id": reply_to_external_id,
-                    # Include agent ID/name if needed by ActivityClient for history recording
-                    "requesting_element_id": self.owner.id, # ID of the element initiating the send
-                    "requesting_agent_id": self.owner.parent.id if (hasattr(self.owner, 'parent') and self.owner.parent and hasattr(self.owner.parent, 'IS_INNER_SPACE')) else None # Best guess for agent ID
+                    "reply_to_external_id": reply_to_external_id, # Pass along for threading
+                    "attachments": attachments or [], # Pass along attachments
+                    "requesting_element_id": self.owner.id, # For context/logging in ActivityClient
+                    # Add agent_id if the owner is in an InnerSpace for better tracking
+                    "requesting_agent_id": self.owner.parent.id if (hasattr(self.owner, 'parent') and self.owner.parent and hasattr(self.owner.parent, 'IS_INNER_SPACE')) else None
                 }
             }
             
@@ -132,10 +184,8 @@ class MessageActionHandler(Component):
         # --- Register delete_message Tool --- 
         @tool_provider.register_tool(
             name="delete_message",
-            description="Deletes a message specified by its external ID.",
-            parameter_descriptions={
-                "message_external_id": "The external ID of the message to delete (required, string)"
-            }
+            description="Deletes a message specified by its external ID from the conversation this element represents.",
+            parameters=delete_message_params
         )
         def delete_message_tool(message_external_id: str) -> Dict[str, Any]:
             """Handles deleting a message using its external ID."""
@@ -173,10 +223,7 @@ class MessageActionHandler(Component):
         @tool_provider.register_tool(
             name="edit_message",
             description="Edits an existing message specified by its external ID.",
-            parameter_descriptions={
-                "message_external_id": "The external ID of the message to edit (required, string)",
-                "new_text": "The new text content for the message (required, string)"
-            }
+            parameters=edit_message_params
         )
         def edit_message_tool(message_external_id: str, new_text: str) -> Dict[str, Any]:
             """Handles editing a message using its external ID."""
@@ -215,10 +262,7 @@ class MessageActionHandler(Component):
         @tool_provider.register_tool(
             name="add_reaction",
             description="Adds an emoji reaction to a message specified by its external ID.",
-            parameter_descriptions={
-                "message_external_id": "The external ID of the message to react to (required, string)",
-                "emoji": "The emoji to add as a reaction (required, string, e.g., '👍', ':smile:')"
-            }
+            parameters=add_reaction_params
         )
         def add_reaction_tool(message_external_id: str, emoji: str) -> Dict[str, Any]:
             """Handles adding a reaction to a message using its external ID."""
@@ -257,10 +301,7 @@ class MessageActionHandler(Component):
         @tool_provider.register_tool(
             name="remove_reaction",
             description="Removes an emoji reaction (previously added by this agent/bot) from a message specified by its external ID.",
-            parameter_descriptions={
-                "message_external_id": "The external ID of the message to remove the reaction from (required, string)",
-                "emoji": "The emoji reaction to remove (required, string, e.g., '👍', ':smile:')"
-            }
+            parameters=remove_reaction_params
         )
         def remove_reaction_tool(message_external_id: str, emoji: str) -> Dict[str, Any]:
             """Handles removing a reaction from a message using its external ID."""
@@ -295,39 +336,110 @@ class MessageActionHandler(Component):
                  logger.error(f"[{self.owner.id}] Error dispatching remove_reaction action: {e}", exc_info=True)
                  return {"success": False, "error": f"Error dispatching remove reaction request: {e}"}
 
+        # --- Register fetch_history Tool ---
+        @tool_provider.register_tool(
+            name="fetch_message_history",
+            description="Fetches historical messages for a specific conversation from the adapter.",
+            parameters=fetch_history_params
+        )
+        def fetch_history_tool(conversation_id: str, # Explicitly required by tool
+                                 before_ms: Optional[int] = None,
+                                 after_ms: Optional[int] = None,
+                                 limit: Optional[int] = 100) -> Dict[str, Any]:
+            # This tool might be called by an agent loop that doesn't have a `calling_context`
+            # in the same way a direct user tool might.
+            # For now, we pass an empty dict for calling_context.
+            # The agent loop should ideally provide its own ID.
+            return self.handle_fetch_history(
+                conversation_id=conversation_id,
+                before_ms=before_ms,
+                after_ms=after_ms,
+                limit=limit,
+                calling_context={} # Placeholder
+            )
+
+        # --- Register get_attachment Tool ---
+        @tool_provider.register_tool(
+            name="get_message_attachment_content",
+            description="Requests the content of a specific attachment from a message, via the adapter.",
+            parameters=get_attachment_params
+        )
+        def get_attachment_tool(attachment_id: str,
+                                  conversation_id: Optional[str] = None,
+                                  message_external_id: Optional[str] = None) -> Dict[str, Any]:
+            return self.handle_get_attachment(
+                attachment_id=attachment_id,
+                conversation_id=conversation_id,
+                message_external_id=message_external_id,
+                calling_context={} # Placeholder
+            )
+
     # --- Helper to get context --- (Could be improved)
     def _get_message_context(self, use_external_conversation_id: Optional[str] = None) -> Dict[str, Any]:
         """Helper to determine adapter_id and conversation_id based on owner/parent context."""
         adapter_id = None
-        conversation_id = None
-        try:
-            if use_external_conversation_id:
-                conversation_id = use_external_conversation_id
-            if hasattr(self.owner, 'parent') and self.owner.parent:
-                parent_space = self.owner.parent
-                if hasattr(parent_space, 'IS_INNER_SPACE') and parent_space.IS_INNER_SPACE:
-                    # DM Context - Owning element needs to provide details
-                    if hasattr(self.owner, 'get_adapter_id'): adapter_id = self.owner.get_adapter_id()
-                    if hasattr(self.owner, 'get_dm_recipient_id'): conversation_id = self.owner.get_dm_recipient_id()
-                elif hasattr(parent_space, 'IS_SPACE'): # SharedSpace Context
-                    if hasattr(parent_space, 'metadata'):
-                        adapter_id = parent_space.metadata.get('source_adapter')
-                        conversation_id = parent_space.metadata.get('external_channel_id')
-            if not adapter_id or not conversation_id:
-                logger.warning(f"[{self.owner.id}] Failed to determine valid message context (adapter: {adapter_id}, conversation: {conversation_id})")
-                return {"success": False, "error": f"Failed to determine adapter context for conversation {conversation_id}"}
-        except Exception as e:
-            logger.error(f"[{self.owner.id}] Error determining message context: {e}", exc_info=True)
-            return {"success": False, "error": f"Error determining message context: {e}"}
+        conversation_id_for_action = None 
+        
+        owner_element = self.owner
+        if not owner_element:
+            logger.error(f"[{self.id if self.id else 'Unknown'}] MessageActionHandler has no owner element. Cannot determine context.")
+            return {"success": False, "error": "MessageActionHandler has no owner element."}
+
+        # Case 1: Owner is an UplinkProxy. Context comes from remote_space_info.
+        # A robust check would be `isinstance(self.owner, UplinkProxy)` but that can cause circular imports.
+        if hasattr(owner_element, 'remote_space_id') and \
+           hasattr(owner_element, 'IS_SPACE') and \
+           hasattr(owner_element, 'remote_space_info') and \
+           isinstance(owner_element.remote_space_info, dict):
             
-        return {"success": True, "adapter_id": adapter_id, "conversation_id": conversation_id}
+            uplink_proxy = owner_element # self.owner is the UplinkProxy
+            adapter_id = uplink_proxy.remote_space_info.get('adapter_id')
+            conversation_id_for_action = use_external_conversation_id if use_external_conversation_id else uplink_proxy.remote_space_info.get('external_conversation_id')
+            logger.debug(f"[{owner_element.id}] Uplink context: adapter='{adapter_id}', remote_conv_id='{conversation_id_for_action}'")
+
+        # Case 2: Owner element is directly within an InnerSpace (likely a DM element).
+        elif owner_element.parent_space and hasattr(owner_element.parent_space, 'IS_INNER_SPACE') and owner_element.parent_space.IS_INNER_SPACE:
+            # DM Context. The DM Element (owner_element) itself should have adapter_id and external_conversation_id (recipient_id)
+            # These should be set on the DM element during its creation by DMManagerComponent using the prefab.
+            if hasattr(owner_element, 'adapter_id'):
+                adapter_id = owner_element.adapter_id
+            else: # Fallback to checking attributes set by older DM prefab
+                if hasattr(owner_element, 'get_adapter_id'): adapter_id = owner_element.get_adapter_id()
+
+            # The 'external_conversation_id' on the DM element is the recipient's ID.
+            ext_conv_id_attr = getattr(owner_element, 'external_conversation_id', None)
+            if not ext_conv_id_attr and hasattr(owner_element, 'get_dm_recipient_id'): # older fallback
+                ext_conv_id_attr = owner_element.get_dm_recipient_id()
+            
+            conversation_id_for_action = use_external_conversation_id if use_external_conversation_id else ext_conv_id_attr
+            logger.debug(f"[{owner_element.id}] InnerSpace DM context: adapter='{adapter_id}', recipient_id='{conversation_id_for_action}'")
+            
+        # Case 3: Owner element is within a SharedSpace (e.g. ChatElement in a channel space).
+        elif owner_element.parent_space and hasattr(owner_element.parent_space, 'IS_SPACE'):
+            shared_space = owner_element.parent_space
+            # The SharedSpace itself should have adapter_id and external_conversation_id (channel_id)
+            adapter_id = getattr(shared_space, 'adapter_id', None)
+            ext_conv_id_attr = getattr(shared_space, 'external_conversation_id', None)
+            conversation_id_for_action = use_external_conversation_id if use_external_conversation_id else ext_conv_id_attr
+            logger.debug(f"[{owner_element.id}] SharedSpace Channel context from Space '{shared_space.id}': adapter='{adapter_id}', channel_id='{conversation_id_for_action}'")
+        
+        else:
+            logger.warning(f"[{owner_element.id}] Could not determine message context. Owner: {owner_element.name}, ParentSpace: {owner_element.parent_space}")
+            return {"success": False, "error": "Could not determine message context (DM, Channel, or Uplink)."}
+
+        if not adapter_id or not conversation_id_for_action:
+            err_msg = f"Failed to determine valid message context (adapter: {adapter_id}, conversation_id_for_action: {conversation_id_for_action})."
+            logger.warning(f"[{owner_element.id}] {err_msg}")
+            return {"success": False, "error": err_msg}
+            
+        return {"success": True, "adapter_id": adapter_id, "conversation_id": conversation_id_for_action}
         
     def handle_fetch_history(self, 
                              conversation_id: str,
                              before_ms: Optional[int] = None,
                              after_ms: Optional[int] = None,
                              limit: Optional[int] = 100, 
-                             calling_context: Dict[str, Any] = None):
+                             calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]: # Added Optional to calling_context
         """
         Tool to request historical messages for a conversation from the adapter.
 
@@ -341,42 +453,33 @@ class MessageActionHandler(Component):
         Returns:
             Result of the action dispatch (e.g., confirmation or error).
         """
-        if not calling_context:
-            logger.warning(f"[{self.owner.id}] handle_fetch_history called without calling_context.")
-            # Potentially raise error or return failure? For now, proceed but log.
-            calling_context = {}
+        calling_context = calling_context or {} # Ensure calling_context is a dict
             
-        # --- Determine Context (Adapter ID) ---
-        # Use the helper, assuming it can find the context for the owner element
         context_result = self._get_message_context(use_external_conversation_id=conversation_id)
-        if not context_result['success']:
-             logger.error(f"[{self.owner.id}] Failed to get message context for handle_fetch_history: {context_result['error']}")
-             # TODO: Return a structured error to the LLM?
-             return { "status": "error", "message": f"Failed to determine adapter context for conversation {conversation_id}" }
+        if not context_result.get('success'):
+             return { "success": False, "error": context_result.get('error', f"Failed to determine adapter context for conversation {conversation_id}") }
         
         adapter_id = context_result['adapter_id']
-        # We already have conversation_id from args
         
-        logger.info(f"[{self.owner.id}] Preparing fetch_history action for adapter '{adapter_id}', conv '{conversation_id}'.")
+        logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] Preparing fetch_history action for adapter '{adapter_id}', conv '{conversation_id}'.")
         
         payload = {
             "adapter_id": adapter_id,
-            "conversation_id": conversation_id,
-            "before": before_ms, # Pass along Nones if not provided
-            "after": after_ms,
+            "conversation_id": conversation_id, # This is the external_id
+            "before_timestamp_ms": before_ms, 
+            "after_timestamp_ms": after_ms,
             "limit": limit,
-            # Pass necessary context for potential response handling/history recording
-            "requesting_element_id": self.owner.id, 
-            "calling_loop_id": calling_context.get('loop_component_id')
+            "requesting_element_id": self.owner.id if self.owner else None,
+            "calling_loop_id": calling_context.get('loop_component_id') # From AgentLoop
         }
         
-        return self._dispatch_action("fetch_history", payload, calling_context)
+        return self._dispatch_action("fetch_message_history", payload) # "fetch_message_history" is the ActivityClient action
 
     def handle_get_attachment(self, 
                               attachment_id: str,
-                              conversation_id: Optional[str] = None, # Optional, try context first
-                              message_external_id: Optional[str] = None, # Optional, for context
-                              calling_context: Dict[str, Any] = None):
+                              conversation_id: Optional[str] = None, 
+                              message_external_id: Optional[str] = None, 
+                              calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]: # Added Optional to calling_context
         """
         Tool to request the content of a specific attachment from the adapter.
 
@@ -389,46 +492,49 @@ class MessageActionHandler(Component):
         Returns:
             Result of the action dispatch (e.g., confirmation or error).
         """
-        if not calling_context:
-            logger.warning(f"[{self.owner.id}] handle_get_attachment called without calling_context.")
-            calling_context = {}
-        if not attachment_id:
-            return { "status": "error", "message": "attachment_id is required."}
+        calling_context = calling_context or {}
+        if not attachment_id: # Should be caught by schema validation by LLM call
+            return { "success": False, "error": "attachment_id is required."}
 
-        # --- Determine Context (Adapter ID & Conversation ID) ---
-        adapter_id = None
-        conv_id_to_use = conversation_id # Prioritize explicitly passed ID
+        context_result = self._get_message_context(use_external_conversation_id=conversation_id)
+        if not context_result.get('success'):
+            return { "success": False, "error": context_result.get('error', f"Failed to determine adapter context for attachment {attachment_id}") }
         
-        if not conv_id_to_use:
-            # If not passed, try to get from context
-            context_result = self._get_message_context()
-            if not context_result['success']:
-                logger.error(f"[{self.owner.id}] Failed to get message context for handle_get_attachment: {context_result['error']}")
-                return { "status": "error", "message": f"Failed to determine adapter context for attachment {attachment_id}" }
-            adapter_id = context_result['adapter_id']
-            conv_id_to_use = context_result['conversation_id']
-        else:
-            # If conv_id was passed, we still need the adapter_id from context
-            context_result = self._get_message_context(use_external_conversation_id=conv_id_to_use)
-            if not context_result['success']:
-                logger.error(f"[{self.owner.id}] Failed to get adapter context for handle_get_attachment (conv_id provided): {context_result['error']}")
-                return { "status": "error", "message": f"Failed to determine adapter context for conversation {conv_id_to_use}" }
-            adapter_id = context_result['adapter_id']
+        adapter_id = context_result['adapter_id']
+        # If conversation_id was passed to tool, it's used. Otherwise, context_result['conversation_id'] is used.
+        actual_conversation_id = conversation_id if conversation_id else context_result['conversation_id']
         
-        if not adapter_id or not conv_id_to_use:
-            return { "status": "error", "message": f"Could not determine adapter_id ({adapter_id}) or conversation_id ({conv_id_to_use}) for getting attachment."}
+        if not adapter_id or not actual_conversation_id:
+            return { "success": False, "error": f"Could not determine adapter_id ({adapter_id}) or conversation_id ({actual_conversation_id}) for getting attachment."}
 
-        logger.info(f"[{self.owner.id}] Preparing get_attachment action for adapter '{adapter_id}', conv '{conv_id_to_use}', attachment '{attachment_id}'.")
+        logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] Preparing get_attachment action for adapter '{adapter_id}', conv '{actual_conversation_id}', attachment '{attachment_id}'.")
 
         payload = {
             "adapter_id": adapter_id,
-            "conversation_id": conv_id_to_use,
+            "conversation_id": actual_conversation_id,
             "attachment_id": attachment_id,
-            "message_external_id": message_external_id, # Pass along if provided
-            "requesting_element_id": self.owner.id, 
-            "calling_loop_id": calling_context.get('loop_component_id')
+            "message_external_id": message_external_id,
+            "requesting_element_id": self.owner.id if self.owner else None,
+            "calling_loop_id": calling_context.get('loop_component_id') # From AgentLoop
         }
         
-        return self._dispatch_action("get_attachment", payload, calling_context)
+        return self._dispatch_action("get_attachment_content", payload) # "get_attachment_content" is ActivityClient action
 
-    # --- Register other tools as needed ---
+    def _dispatch_action(self, action_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Helper to dispatch an action via the outgoing_action_callback."""
+        if not self._outgoing_action_callback:
+            logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] Cannot dispatch '{action_type}': Outgoing action callback not configured.")
+            return {"success": False, "error": "Outgoing action callback is not configured."}
+
+        action_request = {
+            "target_module": "ActivityClient",
+            "action_type": action_type, # This is the type ActivityClient expects
+            "payload": payload
+        }
+        try:
+            self._outgoing_action_callback(action_request)
+            logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] Dispatched '{action_type}' to ActivityClient with payload: {payload}")
+            return {"success": True, "status": f"'{action_type}' request sent to outgoing queue."}
+        except Exception as e:
+            logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] Error dispatching '{action_type}' action: {e}", exc_info=True)
+            return {"success": False, "error": f"Error dispatching '{action_type}' request: {e}"}
