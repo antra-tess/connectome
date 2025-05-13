@@ -122,6 +122,8 @@ class ExternalEventRouter:
             await self._handle_history_received(source_adapter_id, payload.get("conversation_id"), payload.get("messages", []), adapter_data)
         elif event_type_from_adapter == "connectome_attachment_received":
             await self._handle_attachment_received(source_adapter_id, payload.get("conversation_id"), payload)
+        elif event_type_from_adapter == "connectome_attachment_data_received":
+            await self._handle_attachment_data_received(source_adapter_id, adapter_data)
         else:
             logger.warning(f"ExternalEventRouter: Unhandled event type '{event_type_from_adapter}' from adapter '{source_adapter_id}'. Data: {adapter_data}")
 
@@ -762,6 +764,72 @@ class ExternalEventRouter:
             logger.info(f"Routed connectome_attachment_received event for attachment '{attachment_id}' to space '{target_space.id}'.")
         except Exception as e:
             logger.error(f"Error routing connectome_attachment_received event: {e}", exc_info=True)
+
+    # --- NEW HANDLER for Fetched Attachment Data ---
+    async def _handle_attachment_data_received(self, source_adapter_id: str, adapter_data_with_content: Dict[str, Any]):
+        """
+        Handles an event from ActivityClient containing the actual fetched content of an attachment.
+        Routes this data to the appropriate space to update the message/attachment state.
+
+        Args:
+            source_adapter_id: The adapter that fetched the data.
+            adapter_data_with_content: The payload from ActivityClient. Expected to contain:
+                - conversation_id: ID of the original conversation.
+                - original_message_id_external: ID of the message this attachment belongs to.
+                - attachment_id: ID of the attachment.
+                - filename: Name of the file.
+                - content_type: MIME type of the content.
+                - content: The actual attachment content (e.g., bytes or base64 string).
+                - adapter_data: Crucially, this nested dict must contain routing info
+                                for _find_target_space_for_conversation (e.g., is_dm, recipient_id).
+        """
+        conversation_id = adapter_data_with_content.get("conversation_id")
+        original_message_id = adapter_data_with_content.get("original_message_id_external")
+        attachment_id = adapter_data_with_content.get("attachment_id")
+        
+        logger.info(f"Handling 'connectome_attachment_data_received' for conv '{conversation_id}', msg '{original_message_id}', attachment '{attachment_id}' from {source_adapter_id}.")
+
+        if not all([conversation_id, original_message_id, attachment_id]):
+            logger.error(f"_handle_attachment_data_received: Missing key identifiers in payload. Data: {adapter_data_with_content}")
+            return
+
+        # This nested adapter_data is crucial for routing to the correct space (DM or Channel)
+        routing_adapter_data = adapter_data_with_content.get("adapter_data")
+        if not isinstance(routing_adapter_data, dict):
+            logger.error(f"_handle_attachment_data_received: 'adapter_data' for routing is missing or not a dict in payload. Data: {adapter_data_with_content}")
+            return
+
+        target_space = await self._find_target_space_for_conversation(source_adapter_id, conversation_id, routing_adapter_data)
+        if not target_space:
+            logger.error(f"_handle_attachment_data_received: Target space not found for conv '{conversation_id}'. Attachment data for '{attachment_id}' cannot be delivered.")
+            return
+
+        # Prepare payload for the internal event to be stored in the space
+        internal_event_payload = {
+            "source_adapter_id": source_adapter_id,
+            "external_conversation_id": conversation_id,
+            "original_message_id_external": original_message_id,
+            "attachment_id": attachment_id,
+            "filename": adapter_data_with_content.get("filename"),
+            "content_type": adapter_data_with_content.get("content_type"),
+            "content": adapter_data_with_content.get("content"), # The actual content
+            "status": "content_available",
+            "timestamp": adapter_data_with_content.get("timestamp", time.time())
+        }
+
+        connectome_internal_event = {
+            "event_type": "attachment_content_available", # New internal event type
+            # Target a generic chat element or the message element if messages are elements
+            "target_element_id": f"chat_{conversation_id}", 
+            "payload": internal_event_payload
+        }
+
+        timeline_context = await self._construct_timeline_context_for_space(target_space)
+        try:
+            target_space.receive_event(connectome_internal_event, timeline_context)
+            logger.info(f"Routed 'attachment_content_available' for attachment '{attachment_id}' to space '{target_space.id}'.")
+        except Exception as e:
+            logger.error(f"Error routing 'attachment_content_available' event to space '{target_space.id}': {e}", exc_info=True)
 
     # --- Removed _handle_system_notification for brevity --- 
     # Re-add if system events need specific handling

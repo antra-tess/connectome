@@ -234,7 +234,7 @@ class Space(BaseElement):
         """
         Provides essential metadata about this space for an UplinkProxy 
         during its initial synchronization.
-        
+            
         Returns:
             A dictionary containing space ID, name, description, and potentially
             adapter-specific identifiers if available from a component.
@@ -261,7 +261,7 @@ class Space(BaseElement):
         """
         Generates and returns a full VEIL snapshot of this space and its contents.
         Delegates to the SpaceVeilProducerComponent if present.
-        
+            
         Returns:
             A dictionary representing the full VEIL state, or None if generation fails.
         """

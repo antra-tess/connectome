@@ -28,6 +28,7 @@ class MessageListComponent(Component):
         "connectome_message_updated",         # Use Connectome-defined types for delete/edit
         "connectome_reaction_added",          # For handling added reactions
         "connectome_reaction_removed",        # For handling removed reactions
+        "attachment_content_available"        # NEW: For when fetched attachment content arrives
     ]
 
     def initialize(self, max_messages: Optional[int] = None, **kwargs) -> None:
@@ -75,6 +76,8 @@ class MessageListComponent(Component):
                 return self._handle_reaction_added(event_payload)
             elif event_type == "connectome_reaction_removed":
                 return self._handle_reaction_removed(event_payload)
+            elif event_type == "attachment_content_available": # NEW
+                return self._handle_attachment_content_available(event_payload)
             # -------------------
             # Add handlers for other types here
             else:
@@ -86,6 +89,23 @@ class MessageListComponent(Component):
         """Adds a new message to the list."""
         # Extract relevant fields from the message_data (which is the payload of the connectome event)
         internal_message_id = f"msg_{self.owner.id}_{int(time.time()*1000)}_{len(self._state['_messages'])}" # Generate unique ID within this list
+        
+        # Process attachments to include potential inline content
+        processed_attachments = []
+        for att_data in message_data.get('attachments', []):
+            if isinstance(att_data, dict):
+                processed_attachments.append({
+                    "attachment_id": att_data.get("attachment_id"),
+                    "filename": att_data.get("filename"),
+                    "content_type": att_data.get("content_type"),
+                    "size": att_data.get("size"),
+                    "url": att_data.get("url"), # Keep original URL if present
+                    "content": att_data.get("content"), # Store inline content if provided
+                    # Add other metadata fields from att_data if necessary
+                })
+            else:
+                logger.warning(f"[{self.owner.id}] Skipping non-dict attachment data: {att_data}")
+
         new_message: MessageType = {
             'internal_id': internal_message_id,
             'timestamp': message_data.get('timestamp', time.time()),
@@ -94,11 +114,10 @@ class MessageListComponent(Component):
             'text': message_data.get('text'),
             'original_external_id': message_data.get('original_message_id_external'), # For correlation
             'adapter_id': message_data.get('source_adapter_id'),
-            # Add more fields as needed: reactions, read_status, attachments, is_edited etc.
             'is_edited': False,
             'reactions': {},
             'read_by': [],
-            'attachments': message_data.get('attachments', []) # Store attachments
+            'attachments': processed_attachments # Use processed attachments
         }
 
         self._state['_messages'].append(new_message)
@@ -295,6 +314,45 @@ class MessageListComponent(Component):
             return self._state['_messages'][idx]
         return None
         
+    def _handle_attachment_content_available(self, event_payload: Dict[str, Any]) -> bool:
+        """
+        Updates an existing message's attachment with fetched content.
+        Triggered by 'attachment_content_available' event.
+        """
+        original_message_external_id = event_payload.get('original_message_id_external')
+        attachment_id_to_update = event_payload.get('attachment_id')
+        content = event_payload.get('content')
+
+        if not all([original_message_external_id, attachment_id_to_update]):
+            logger.warning(f"[{self.owner.id}] 'attachment_content_available' event missing 'original_message_id_external' or 'attachment_id'. Payload: {event_payload}")
+            return False
+
+        message_to_update = None
+        for msg in self._state['_messages']:
+            if msg.get('original_external_id') == original_message_external_id:
+                message_to_update = msg
+                break
+        
+        if not message_to_update:
+            logger.warning(f"[{self.owner.id}] Cannot update attachment content: Message with external ID '{original_message_external_id}' not found.")
+            return False
+
+        attachment_found = False
+        for att in message_to_update.get('attachments', []):
+            if att.get('attachment_id') == attachment_id_to_update:
+                att['content'] = content
+                # Optionally update other fields like 'status' or 'content_retrieved_timestamp'
+                att['status'] = 'content_available' 
+                logger.info(f"[{self.owner.id}] Content for attachment '{attachment_id_to_update}' added to message '{original_message_external_id}'.")
+                attachment_found = True
+                break
+        
+        if not attachment_found:
+            logger.warning(f"[{self.owner.id}] Cannot update attachment content: Attachment with ID '{attachment_id_to_update}' not found in message '{original_message_external_id}'.")
+            return False
+            
+        return True
+
     # --- Other potential methods ---
     # def mark_message_read(self, internal_id: str, user_id: str): ...
     # def add_reaction(self, internal_id: str, reaction: str, user_id: str): ...
