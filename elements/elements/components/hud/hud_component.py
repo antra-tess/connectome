@@ -31,8 +31,8 @@ class HUDComponent(Component):
         'llm_provider': '_llm_provider'
     }
 
-    def __init__(self, element=None, llm_provider: Optional['LLMProviderInterface'] = None, **kwargs):
-        super().__init__(element, **kwargs)
+    def __init__(self, llm_provider: Optional['LLMProviderInterface'] = None, **kwargs):
+        super().__init__(**kwargs)
         self._llm_provider = llm_provider # Optional LLM for advanced processing
 
     def initialize(self, **kwargs) -> None:

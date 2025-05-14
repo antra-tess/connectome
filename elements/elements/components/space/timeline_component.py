@@ -42,6 +42,7 @@ class TimelineComponent(Component):
             logger.info(f"TimelineComponent initialized for Element {self.owner.id}. Created default timeline '{DEFAULT_TIMELINE_ID}'.")
         else:
             logger.debug(f"TimelineComponent initialized for Element {self.owner.id}. Existing state loaded.")
+        return True
 
     def _create_timeline(self, timeline_id: str, is_primary: bool = False, fork_from: Optional[Dict[str, str]] = None):
         """Internal helper to create timeline metadata and root event."""
@@ -74,6 +75,13 @@ class TimelineComponent(Component):
         
         if is_primary:
             self.designate_primary_timeline(timeline_id)
+
+
+    def add_event_to_primary_timeline(self, event_payload: Dict[str, Any]) -> Optional[str]:
+        """
+        Adds an event to the primary timeline.
+        """
+        return self.add_event_to_timeline(event_payload, timeline_context={'timeline_id': self._state['_primary_timeline_id']})
 
     def add_event_to_timeline(self, event_payload: Dict[str, Any], timeline_context: Dict[str, Any]) -> Optional[str]:
         """

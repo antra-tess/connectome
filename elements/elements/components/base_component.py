@@ -36,15 +36,14 @@ class Component:
     # Define dependencies - other component types that must be present
     DEPENDENCIES: List[str] = []
     
-    def __init__(self, element=None):
+    def __init__(self, *args, **kwargs):
         """
         Initialize the component.
         
-        Args:
-            element: The Element this component is attached to
+        The 'owner' attribute (referencing the Element this component is attached to)
+        is expected to be set by the owning Element after construction.
         """
         self.id = f"{self.COMPONENT_TYPE}_{uuid.uuid4().hex[:8]}"
-        self.element = element
         self._state = {}
         
         # Initialize lifecycle state
@@ -52,6 +51,9 @@ class Component:
         self._is_enabled = True
         
         logger.debug(f"Created component: {self.COMPONENT_TYPE} ({self.id})")
+
+    def get_sibling_component(self, component_type) -> Optional['Component']:
+        return self.owner.get_component_by_type(component_type)
     
     def initialize(self) -> bool:
         """

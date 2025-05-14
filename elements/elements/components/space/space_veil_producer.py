@@ -4,7 +4,6 @@ from typing import Dict, Any, Optional, List, Set, Type
 # Need Component base class and potentially Space/BaseElement for type hints/checks
 from ..base_component import Component, VeilProducer
 from ...base import BaseElement # For checking children
-from ...space import Space # For checking owner type
 # Import the registry decorator
 from elements.component_registry import register_component
 
@@ -43,6 +42,7 @@ class SpaceVeilProducer(VeilProducer):
         # Track properties of the space itself last time
         self._state.setdefault('_last_space_properties', self._get_current_space_properties())
         logger.debug(f"SpaceVeilProducer initialized for Element {self.owner.id}")
+        return True
 
     def _get_current_space_properties(self) -> Dict[str, Any]:
         """Extracts properties of the Space element itself for VEIL."""
@@ -73,6 +73,7 @@ class SpaceVeilProducer(VeilProducer):
         """
         Generates the complete VEIL structure for the Space, including children.
         """
+        from ...space import Space # For checking owner type
         if not isinstance(self.owner, Space):
             logger.error(f"[{self.owner.id}] SpaceVeilProducer attached to non-Space element: {type(self.owner)}. Cannot generate VEIL.")
             return None
@@ -122,6 +123,7 @@ class SpaceVeilProducer(VeilProducer):
         """
         Calculates the changes (delta) for the Space, aggregating child deltas.
         """
+        from ...space import Space # For checking owner type
         if not isinstance(self.owner, Space):
             logger.error(f"[{self.owner.id}] SpaceVeilProducer attached to non-Space element: {type(self.owner)}. Cannot calculate delta.")
             return None

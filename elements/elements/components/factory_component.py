@@ -7,15 +7,14 @@ import logging
 from typing import Dict, Any, Optional, List, Type
 import inspect
 
-from ..base import BaseElement
-from .base_component import Component, BaseComponent # Import BaseComponent for type check
+from ..base import BaseElement, MountType
+from .base_component import Component # Import BaseComponent for type check
 
 # Use the new component registry
 from elements.component_registry import COMPONENT_REGISTRY, find_component_class, register_component
 
 # Need access to parent Space to mount elements
 from ..space import Space 
-from ..inner_space import InnerSpace # Specifically expect InnerSpace
 
 # Import PREFABS from the dedicated module
 from elements.prefabs import PREFABS
@@ -46,6 +45,7 @@ class ElementFactoryComponent(Component):
     # and access to the Component Registry.
 
     def initialize(self, **kwargs) -> None:
+        from ..inner_space import InnerSpace # Specifically expect InnerSpace
         """Initializes the component."""
         super().initialize(**kwargs)
         # Ensure owner is an InnerSpace for mounting capabilities
@@ -56,7 +56,8 @@ class ElementFactoryComponent(Component):
              logger.error("Component Registry is empty! ElementFactory cannot function. Was scan_and_load_components called?")
         logger.debug(f"ElementFactoryComponent initialized for Element {self.owner.id if self.owner else 'Unknown'}")
 
-    def _get_inner_space(self) -> Optional[InnerSpace]:
+    def _get_inner_space(self) -> Optional[Any]:
+        from ..inner_space import InnerSpace # Specifically expect InnerSpace
         """Helper to get the owner cast as InnerSpace."""
         if isinstance(self.owner, InnerSpace):
             return self.owner
@@ -201,7 +202,8 @@ class ElementFactoryComponent(Component):
                 element_constructor_args['space_registry'] = inner_space._space_registry
             
             new_element = element_class(**element_constructor_args)
-            new_element.set_parent_space(inner_space) # Essential for components during their init
+            new_element._set_parent(inner_space.id, MountType.INCLUSION) # Corrected: Use _set_parent and provide MountType
+            new_element.set_registry(inner_space._space_registry)
 
             # 2. Add components (from prefab, with overrides applied)
             if not isinstance(final_component_configs, list):
@@ -253,20 +255,18 @@ class ElementFactoryComponent(Component):
             new_element.finalize_setup() # Ensure this method exists on BaseElement/subclasses
 
             # 4. Record creation event on InnerSpace timeline (similar to handle_create_element)
-            timeline_comp = inner_space.get_timeline()
-            if timeline_comp:
-                 event_payload = {
-                     "event_type": "element_created_from_prefab",
-                     "data": {
-                         "factory_component_id": self.id,
-                         "prefab_name": prefab_name,
-                         "new_element_id": element_id,
-                         "new_element_name": new_element.name,
-                         "element_class": new_element.__class__.__name__,
-                         "component_types": [c.COMPONENT_TYPE for c in new_element.get_components().values()]
-                     }
-                 }
-                 timeline_comp.add_event_to_primary_timeline(event_payload)
+            event_payload = {
+                "event_type": "element_created_from_prefab",
+                "data": {
+                    "factory_component_id": self.id,
+                    "prefab_name": prefab_name,
+                    "new_element_id": element_id,
+                    "new_element_name": new_element.name,
+                    "element_class": new_element.__class__.__name__,
+                    "component_types": [c.COMPONENT_TYPE for c in new_element.get_components().values()]
+                }
+            }
+            inner_space.add_event_to_primary_timeline(event_payload)
             
             # --- NEW: Set element attributes from element_config based on prefab hint ---
             attributes_to_set_map = prefab_data.get("element_attributes_from_config", {})
@@ -286,14 +286,14 @@ class ElementFactoryComponent(Component):
 
             result_msg = f"Element '{new_element.name}' ({element_id}) created successfully from prefab '{prefab_name}' with {len(new_element.get_components())} components."
             logger.info(result_msg)
-            return { "success": True, "result": result_msg, "error": None }
+            return { "success": True, "result": result_msg, "error": None, "element": new_element}
 
         except Exception as e:
             error_msg = f"Failed to create element '{element_id}' from prefab '{prefab_name}': {e}"
             logger.error(error_msg, exc_info=True)
             return { "success": False, "result": None, "error": error_msg }
 
-    def handle_create_element(self, element_id: str, name: str, component_configs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def handle_create_element(self, element_id: str, name: str, component_configs: List[Dict[str, Any]], description: str = "") -> Dict[str, Any]:
         """
         Logic for the 'create_element' tool.
         Creates a new BaseElement with the specified components and mounts it 
@@ -319,9 +319,9 @@ class ElementFactoryComponent(Component):
         logger.info(f"Attempting to create dynamic element: ID='{element_id}', Name='{name}'")
         try:
             # 1. Create the base element instance
-            new_element = BaseElement(element_id=element_id, name=name)
+            new_element = BaseElement(element_id=element_id, name=name, description=description) # Added description
             # Set parent space reference immediately for components needing it during init
-            new_element.set_parent_space(inner_space)
+            new_element._set_parent(inner_space.id, MountType.INCLUSION) # Corrected: Use _set_parent and provide MountType
 
             # 2. Add components based on config
             if not isinstance(component_configs, list):
@@ -363,18 +363,16 @@ class ElementFactoryComponent(Component):
             new_element.finalize_setup()
 
             # 4. Record creation event on InnerSpace timeline
-            timeline_comp = inner_space.get_timeline()
-            if timeline_comp:
-                 event_payload = {
-                     "event_type": "element_created_dynamically",
-                     "data": {
+            event_payload = {
+                "event_type": "element_created_dynamically",
+                "data": {
                          "factory_component_id": self.id,
                          "new_element_id": element_id,
                          "new_element_name": name,
                          "component_types": [c.get('type') for c in component_configs if c.get('type')]
                      }
                  }
-                 timeline_comp.add_event_to_primary_timeline(event_payload)
+            inner_space.add_event_to_primary_timeline(event_payload)
             
             result_msg = f"Element '{name}' ({element_id}) created successfully with {len(new_element.get_components())} components."
             logger.info(result_msg)

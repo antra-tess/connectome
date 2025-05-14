@@ -44,11 +44,11 @@ class UplinkConnectionComponent(Component):
         # "disconnect_request"
     ]
     
-    def __init__(self, element=None, remote_space_id: Optional[str] = None, 
+    def __init__(self, remote_space_id: Optional[str] = None,
                  sync_interval: int = 60,
                  space_registry: Optional['SpaceRegistry'] = None,
-                 delta_callback: Optional[Callable[[List[Dict[str, Any]]], None]] = None):
-        super().__init__(element)
+                 delta_callback: Optional[Callable[[List[Dict[str, Any]]], None]] = None, **kwargs):
+        super().__init__(**kwargs)
         self.remote_space_id = remote_space_id or "unknown_remote"
         self._space_registry = space_registry
         self._delta_callback = delta_callback
@@ -67,12 +67,23 @@ class UplinkConnectionComponent(Component):
             "connection_spans": [], # List of {'start_time': ..., 'end_time': ...}
             "current_span_start": None
         }
+        # _space_registry and _delta_callback are passed in, no need to get from owner element initially
+
+    def initialize(self, **kwargs) -> None:
+        super().initialize(**kwargs)
+        # Initialization logic that depends on self.owner can go here
+        # For example, if _space_registry or _delta_callback were NOT passed via __init__:
+        # if self.owner and hasattr(self.owner, '_space_registry'):
+        #     self._space_registry = self.owner._space_registry
+        # if self.owner and hasattr(self.owner, '_delta_callback'):
+        #      self._delta_callback = self.owner._delta_callback # Assuming owner (UplinkProxy) has it
+        logger.debug(f"UplinkConnectionComponent initialized for {self.owner.id if self.owner else 'UnknownOwner'}")
 
     def _get_timeline_comp(self) -> Optional[TimelineComponent]:
         """Helper to get the associated TimelineComponent."""
-        if not self.element:
+        if not self.owner: # Changed from self.element
             return None
-        return self.element.get_component_by_type("timeline")
+        return self.owner.get_component_by_type("timeline") # Changed from self.element
 
     def connect(self) -> bool:
         """
@@ -256,7 +267,7 @@ class UplinkConnectionComponent(Component):
             "event_id": f"{event_type}_{uuid.uuid4().hex[:8]}",
             "event_type": event_type,
             "timestamp": int(time.time() * 1000),
-            "element_id": self.element.id if self.element else None,
+            "element_id": self.owner.id if self.owner else None, # Changed from self.element
             "data": data
         }
         timeline_comp.add_event_to_timeline(event_data, {"timeline_id": primary_timeline})

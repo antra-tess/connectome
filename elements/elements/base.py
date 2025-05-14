@@ -10,9 +10,7 @@ import time
 import enum
 import inspect # For tool registration
 
-from .components import Component
-from .components.base_component import Component as BaseComponent
-from .components.tool_provider import ToolProviderComponent # Needed for registration target
+from .components.base_component import Component
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -62,7 +60,7 @@ class BaseElement:
         Args:
             element_id: Unique identifier for this element
             name: Human-readable name for this element
-            description: Description of this element's purpose
+            descriptfion: Description of this element's purpose
         """
         self.id = element_id
         self.name = name
@@ -121,9 +119,11 @@ class BaseElement:
         # Create the component
         try:
             # Pass self (the element) to the component constructor
-            component = component_type(element=self, **kwargs)
+            # component = component_type(owner=self, **kwargs) # Old way
+            component = component_type(**kwargs) # Instantiate without owner
+            component.owner = self # Set owner attribute directly
         except Exception as e:
-            logger.error(f"Error creating component of type {component_type.__name__} for {self.id}: {e}", exc_info=True)
+            logger.error(f"Error creating component of type {component_type.__name__} for {self.id}: {e}, kwargs: {kwargs}", exc_info=True)
             return None
         
         # Check if we already have a component of this type
@@ -137,8 +137,10 @@ class BaseElement:
         #     return None
         
         # Initialize the component
-        if not component.initialize():
-            logger.error(f"Failed to initialize component {component.COMPONENT_TYPE}")
+        try:
+            component.initialize()
+        except BaseException as e:    
+            logger.error(f"Failed to initialize component {component.COMPONENT_TYPE}: {e}", exc_info=True)
             return None
         
         # Add to components dictionary using component type as key for easier lookup?
@@ -272,6 +274,45 @@ class BaseElement:
             "parent_id": parent_id,
             "mount_type": mount_type.value
         }
+
+    def get_parent_object(self) -> Optional['BaseElement']: # Or Optional['Space'] might be more accurate if parent is always Space
+        """
+        Retrieves the actual parent object of this element using the stored parent_id and the SpaceRegistry.
+        
+        Returns:
+            The parent BaseElement (likely a Space instance) or None if not found or if registry is unavailable.
+        """
+        if not self._parent_element:
+            logger.debug(f"[{self.id}] No parent information tuple (_parent_element) available.")
+            return None
+        
+        parent_id, _ = self._parent_element # mount_type is not needed for lookup here
+        
+        if not parent_id:
+            logger.debug(f"[{self.id}] Parent ID is not set in _parent_element tuple.")
+            return None
+
+        registry = self.get_registry()
+        if not registry:
+            logger.warning(f"[{self.id}] Cannot get parent object: SpaceRegistry not set on this element.")
+            return None
+
+        # Attempt to get the parent as a Space first, as this is the common case for context.
+        # SpaceRegistry.get_space() returns Optional[Space], and Space is a BaseElement.
+        parent_obj = registry.get_space(parent_id)
+        if parent_obj:
+            return parent_obj
+        
+        # Optional: Fallback if the parent might be a non-Space element also registered.
+        # For messaging context, parent is almost always a Space.
+        # if hasattr(registry, 'get_element'):
+        #     parent_obj = registry.get_element(parent_id)
+        #     if parent_obj:
+        #         logger.debug(f"[{self.id}] Found parent object with ID '{parent_id}' via registry's get_element method.")
+        #         return parent_obj
+
+        logger.warning(f"[{self.id}] Could not find parent object (Space) with ID '{parent_id}' via registry's get_space method.")
+        return None
     
     def cleanup(self) -> bool:
         """
@@ -355,6 +396,7 @@ class BaseElement:
         element's own ToolProviderComponent (if present).
         """
         # Find the ToolProviderComponent on this element
+        from .components.tool_provider import ToolProviderComponent # Needed for registration target
         tool_provider = self.get_component_by_type(ToolProviderComponent)
         if not tool_provider:
             # No tool provider on this element, nothing to do.
@@ -408,3 +450,42 @@ class BaseElement:
         """
         # Implement cleanup logic here
         return True
+
+    def receive_event(self, event_payload: Dict[str, Any], timeline_context: Dict[str, Any]) -> None:
+        """
+        Receive an event and dispatch it to components.
+        This is the standard entry point for an element to process an event.
+        Spaces will override this to also record to their timeline first.
+        
+        Args:
+            event_payload: The core data of the event.
+            timeline_context: Timeline context (may be less relevant for non-Space elements
+                              unless they need to act based on which timeline triggered this).
+        """
+        logger.debug(f"[{self.id}] BaseElement received event: Type='{event_payload.get('event_type')}', Target='{event_payload.get('target_element_id')}'")
+        # Simply delegate to the existing handle_event which dispatches to components.
+        # Components will receive this event_payload directly.
+        self.handle_event(event_payload, timeline_context)
+
+    def handle_event(self, event: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
+        """
+        Handle an event by delegating to components.
+        
+        Args:
+            event: Event data (this is the event_payload received by receive_event)
+            timeline_context: Timeline context for this event
+            
+        Returns:
+            True if the event was handled by any component, False otherwise
+        """
+        handled = False
+        for component_id, component in self._components.items(): # Iterate with ID for better logging
+            if hasattr(component, 'handle_event') and callable(component.handle_event):
+                try:
+                    if component.handle_event(event, timeline_context):
+                        logger.debug(f"[{self.id}] Event '{event.get('event_type')}' handled by component: {component_id} ({component.COMPONENT_TYPE if hasattr(component, 'COMPONENT_TYPE') else 'UnknownComponentType'})")
+                        handled = True
+                        # Allow multiple components to handle if needed, or break if exclusive
+                except Exception as comp_err:
+                     logger.error(f"[{self.id}] Error in component '{component_id} ({component.COMPONENT_TYPE if hasattr(component, 'COMPONENT_TYPE') else 'UnknownComponentType'})' handling event: {comp_err}", exc_info=True)
+        return handled

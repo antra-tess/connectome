@@ -28,10 +28,11 @@ Defines standard configurations for creating common elements.
 PREFABS = {
     "simple_scratchpad": {
         "description": "A basic element for storing text notes.",
+        "element_constructor_arg_keys": ["name", "description"],
         "components": [
             {"type": "NoteStorageComponent"}, # State
+            {"type": "ToolProviderComponent"}, # Tools
             {"type": "ScratchpadActionHandler"}, # Logic/Tools
-            {"type": "ToolProviderComponent"}, # Tool exposure
             {"type": "ScratchpadVeilProducer"} # VEIL representation
         ],
         "required_configs_for_element": [] 
@@ -40,7 +41,7 @@ PREFABS = {
     "standard_uplink_proxy": {
         "description": "Creates an UplinkProxy to connect to a remote Space. Requires 'remote_space_id' in element_config.",
         "element_class_name": "UplinkProxy", # Specifies the class to instantiate
-        "element_constructor_arg_keys": ["remote_space_id", "name", "description"], # Keys for UplinkProxy constructor from element_config
+        "element_constructor_arg_keys": ["remote_space_id", "name", "description", "remote_space_info"], # Added "remote_space_info"
         "components": [
             # UplinkProxy's __init__ adds its own core components:
             # UplinkConnectionComponent, RemoteStateCacheComponent, UplinkVeilProducerComponent, ToolProviderComponent.
@@ -53,11 +54,12 @@ PREFABS = {
     "direct_message_session": {
         "description": "A BaseElement configured to represent and handle a direct message session with a user on a specific adapter.",
         "element_class_name": "BaseElement", # Explicitly BaseElement
+        "element_constructor_arg_keys": ["name", "description",],
         "components": [
+            {"type": "ToolProviderComponent"},
             {"type": "MessageListComponent"},
             {"type": "MessageActionHandler"},
             {"type": "MessageListVeilProducer"},
-            {"type": "ToolProviderComponent"}
         ],
         "required_configs_for_element": [ 
             "dm_adapter_id",

@@ -8,7 +8,7 @@ from typing import Dict, Any, Optional, List, Callable, Type, Set
 import uuid
 import time
 
-from .base import BaseElement, MountType, Component, VeilProducer
+from .base import BaseElement, MountType
 from .components.space import ContainerComponent, TimelineComponent
 
 # Configure logging
@@ -27,6 +27,8 @@ class Space(BaseElement):
     
     # Space is a container for other elements
     IS_SPACE = True
+
+    EVENT_TYPES = []
     
     def __init__(self, element_id: str, name: str, description: str, 
                  adapter_id: Optional[str] = None, 
@@ -102,6 +104,17 @@ class Space(BaseElement):
          return self._container.get_mounted_elements_info()
 
     # --- Timeline Methods (Delegated) ---
+    def get_timeline(self) -> Optional[TimelineComponent]:
+        """Get the timeline component."""
+        return self.get_component_by_type(TimelineComponent)
+
+    def add_event_to_primary_timeline(self, event_payload: Dict[str, Any]) -> Optional[str]:
+        """Add an event to the primary timeline (delegates to TimelineComponent)."""
+        if not self._timeline:
+            logger.error(f"[{self.id}] Cannot add event to timeline: TimelineComponent unavailable.")
+            return None
+        return self._timeline.add_event_to_primary_timeline(event_payload)
+
     def add_event_to_timeline(self, event_payload: Dict[str, Any], timeline_context: Dict[str, Any]) -> Optional[str]:
         """Add an event to a timeline (delegates to TimelineComponent)."""
         if not self._timeline:
@@ -130,6 +143,24 @@ class Space(BaseElement):
             return []
         return self._timeline.get_timeline_events(timeline_id, start_event_id, limit)
         
+    # --- NEW: Method to find an element by ID ---
+    def get_element_by_id(self, element_id: str) -> Optional[BaseElement]:
+        """
+        Finds an element by its ID. 
+        Checks if it's the Space itself or one of its directly mounted elements.
+        """
+        if self.id == element_id:
+            return self
+        
+        # Check mounted elements by their actual element ID (not just mount_id)
+        if self._container:
+            for mounted_element in self._container.get_mounted_elements().values():
+                if mounted_element.id == element_id:
+                    return mounted_element
+        
+        logger.debug(f"[{self.id}] Element with ID '{element_id}' not found in this space or its direct children.")
+        return None
+
     # --- Core Event Processing --- 
     def receive_event(self, event_payload: Dict[str, Any], timeline_context: Dict[str, Any]) -> None:
         """
@@ -180,15 +211,16 @@ class Space(BaseElement):
         if target_element_id:
             mounted_element = self.get_mounted_element(target_element_id)
             if mounted_element:
-                 if hasattr(mounted_element, 'receive_event') and callable(mounted_element.receive_event):
-                      logger.debug(f"[{self.id}] Routing event '{new_event_id}' to mounted element: {target_element_id}")
-                      try:
-                           # Child element receives the same event payload and timeline context
-                           mounted_element.receive_event(event_payload, timeline_context) 
-                      except Exception as mounted_err:
-                           logger.error(f"[{self.id}] Error in mounted element '{target_element_id}' receiving event '{new_event_id}': {mounted_err}", exc_info=True)
-                 else:
-                      logger.warning(f"[{self.id}] Mounted element '{target_element_id}' found but has no receive_event method.")
+                if hasattr(mounted_element, 'receive_event') and callable(mounted_element.receive_event):
+                    logger.debug(f"[{self.id}] Routing event '{new_event_id}' to mounted element: {target_element_id}")
+                    try:
+                        # Child element receives the same event payload and timeline context
+                        mounted_element.receive_event(event_payload, timeline_context) 
+                    except Exception as mounted_err:
+                        logger.error(f"[{self.id}] Error in mounted element '{target_element_id}' receiving event '{new_event_id}': {mounted_err}", exc_info=True)
+                else:
+                    logger.warning(f"[{self.id}] Mounted element '{target_element_id}' found but has no receive_event method.")
+                    raise ValueError(f"Mounted element '{target_element_id}' has no receive_event method.")
             else:
                  # This could happen if the event targets an element nested deeper
                  # We rely on parent elements routing downwards. If it wasn't found here,

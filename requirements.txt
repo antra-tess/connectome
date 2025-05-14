@@ -7,7 +7,6 @@ pydantic-settings>=2.0.0                       # Settings management with Pydant
 asyncio>=3.4.3                                 # Asynchronous I/O
 
 # LLM Providers
-openai>=1.0.0                                  # For OpenAI API
 litellm>=1.0.0                                 # For model interaction abstraction
 tiktoken>=0.5.0                                # For token counting (used by context manager)
 

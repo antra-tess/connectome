@@ -49,29 +49,29 @@ class ToolProviderComponent(Component):
     """
     COMPONENT_TYPE = "ToolProviderComponent"
 
-    def __init__(self, element: Optional[BaseElement] = None, **kwargs):
-        super().__init__(element, **kwargs)
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
         # _tools will store:
         # {
         #   "tool_name": StoredToolDefinition, ...
         # }
         self._tools: Dict[str, StoredToolDefinition] = {}
-        logger.debug(f"ToolProviderComponent initialized for Element {self.owner.id if self.owner else 'unowned'}")
+        logger.debug(f"ToolProviderComponent initialized")
 
     def initialize(self, **kwargs) -> None:
         """Initializes the component."""
         super().initialize(**kwargs)
         # No specific initialization actions needed beyond base class for now.
 
-    def register_tool(self, name: str, description: str, parameters: List[ToolParameter]) -> Callable:
+    def register_tool(self, name: str, description: str, parameters_schema: List[ToolParameter]) -> Callable:
         """
         Decorator to register a callable as a tool.
 
         Args:
             name: The unique name of the tool.
             description: A human-readable description of what the tool does.
-            parameters: A list of dictionaries, where each dictionary defines a parameter
-                        according to ToolParameter TypedDict structure.
+            parameters_schema: A list of dictionaries, where each dictionary defines a parameter
+                             according to ToolParameter TypedDict structure.
         
         Returns:
             The decorator that registers the function.
@@ -80,9 +80,9 @@ class ToolProviderComponent(Component):
             raise ValueError("Tool name must be a non-empty string.")
         if not isinstance(description, str):
             raise ValueError("Tool description must be a string.")
-        if not isinstance(parameters, list):
+        if not isinstance(parameters_schema, list):
             raise ValueError("Parameters must be a list of parameter definition dictionaries.")
-        for param in parameters:
+        for param in parameters_schema:
             if not isinstance(param, dict) or not all(k in param for k in ['name', 'type', 'description', 'required']):
                 raise ValueError(f"Invalid parameter definition: {param}. Must include name, type, description, required.")
             if not isinstance(param['name'], str) or not param['name']:
@@ -95,7 +95,7 @@ class ToolProviderComponent(Component):
                  raise ValueError(f"Parameter required must be a boolean in {param}")
 
         def decorator(func: Callable) -> Callable:
-            self.register_tool_function(name, description, parameters, func)
+            self.register_tool_function(name, description, parameters_schema, func)
             return func
         return decorator
 

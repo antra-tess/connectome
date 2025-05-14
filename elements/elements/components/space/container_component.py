@@ -3,7 +3,7 @@ Container Component
 Manages child elements mounted within a Space.
 """
 import logging
-from typing import Dict, Any, Optional, TYPE_CHECKING, List
+from typing import Dict, Any, Optional, TYPE_CHECKING, List, Tuple
 
 from ...base import Component, MountType
 from ..base_component import Component as BaseComponent
@@ -28,10 +28,11 @@ class ContainerComponent(BaseComponent):
         """Initializes the component state."""
         super().initialize(**kwargs)
         # _mounted_elements structure: { mount_id: {"element": BaseElement, "mount_type": MountType} }
-        self._state.setdefault('_mounted_elements', {}) 
-        logger.debug(f"ContainerComponent initialized for Element {self.owner.id}")
+        self._state.setdefault('_mounted_elements', {})
+        logger.debug(f"ContainerComponent initialized for Element {self.owner.id if self.owner else 'Unknown'}")
+        return True
 
-    def mount_element(self, element: 'BaseElement', mount_id: Optional[str] = None, mount_type: MountType = MountType.INCLUSION) -> bool:
+    def mount_element(self, element: 'BaseElement', mount_id: Optional[str] = None, mount_type: MountType = MountType.INCLUSION,) -> Tuple[bool, Optional[str]]:
         """
         Mounts a child element.
 
@@ -43,57 +44,42 @@ class ContainerComponent(BaseComponent):
         Returns:
             True if mounting was successful, False otherwise.
         """
-        if not hasattr(element, 'id'): # Basic check for element validity
-            logger.error(f"[{self.owner.id}] Cannot mount invalid object: {element}")
-            return False
+        if not self.owner:
+            logger.error("Cannot mount element: ContainerComponent has no owner element.")
+            return False, None
             
-        final_mount_id = mount_id if mount_id else element.id
-        if not final_mount_id:
-            logger.error(f"[{self.owner.id}] Cannot mount element: Mount ID cannot be empty (element ID: {element.id}).")
-            return False
+        # Use provided mount_id or generate one from element.id
+        actual_mount_id = mount_id if mount_id else element.id
 
-        if final_mount_id in self._state['_mounted_elements']:
-            logger.error(f"[{self.owner.id}] Cannot mount element '{element.id}': Mount ID '{final_mount_id}' already exists.")
-            return False
+        if actual_mount_id in self._state['_mounted_elements']:
+            logger.warning(f"Element with mount_id '{actual_mount_id}' already mounted in {self.owner.id if self.owner else 'Unknown'}.")
+            return False, actual_mount_id
 
-        # Optional: Check if element with same ID is already mounted
-        # for mount_info in self._state['_mounted_elements'].values():
-        #     if mount_info['element'].id == element.id:
-        #         logger.error(f"[{self.owner.id}] Cannot mount element '{element.id}': Element instance already mounted under mount_id '{mount_info['element'].id}'.") # This logic needs mount_id retrieval
-        #         return False
+        # Set parent on the mounted element
+        element._set_parent(self.owner.id if self.owner else 'Unknown', mount_type)
 
-        # Set parent relationship
-        element.parent = self.owner 
-
-        self._state['_mounted_elements'][final_mount_id] = {
+        self._state['_mounted_elements'][actual_mount_id] = {
             'element': element,
             'mount_type': mount_type
         }
-        logger.info(f"[{self.owner.id}] Element '{element.name}' ({element.id}) mounted as '{final_mount_id}' (Type: {mount_type.name}).")
+        logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] Element '{element.name}' ({element.id}) mounted as '{actual_mount_id}' (Type: {mount_type}).")
         
-        # Record the mount event in the owner Space's timeline
-        if hasattr(self.owner, 'add_event_to_timeline'):
-            mount_event_payload = {
+        # Record event on the Space's timeline
+        if self.owner and hasattr(self.owner, 'add_event_to_timeline'):
+            event_payload = {
                 'event_type': 'element_mounted',
-                'payload': {
-                    'mount_id': final_mount_id,
+                'data': {
+                    'mount_id': actual_mount_id,
                     'element_id': element.id,
                     'element_name': element.name,
                     'element_type': element.__class__.__name__,
-                    'mount_type': mount_type.name
-                }
+                    'mount_type': mount_type.name if isinstance(mount_type, MountType) else str(mount_type)
+                },
+                'context': {"component_id": self.id}
             }
-            # Assume appending to the primary timeline of the owner Space
-            timeline_context = {}
-            if hasattr(self.owner, 'get_primary_timeline'):
-                primary_timeline = self.owner.get_primary_timeline()
-                if primary_timeline:
-                    timeline_context['timeline_id'] = primary_timeline
-            self.owner.add_event_to_timeline(mount_event_payload, timeline_context)
-        else:
-            logger.warning(f"[{self.owner.id}] Owner Space does not have add_event_to_timeline method. Mount event not recorded.")
-            
-        return True
+            self.owner.add_event_to_timeline(event_payload, timeline_context={})
+        
+        return True, actual_mount_id
 
     def unmount_element(self, mount_id: str) -> bool:
         """
@@ -105,64 +91,69 @@ class ContainerComponent(BaseComponent):
         Returns:
             True if unmounting was successful, False otherwise.
         """
-        mount_info = self._state['_mounted_elements'].get(mount_id)
-        if not mount_info:
-            logger.warning(f"[{self.owner.id}] Cannot unmount element: Mount ID '{mount_id}' not found.")
+        if not self.owner:
+            logger.error("Cannot unmount element: ContainerComponent has no owner element.")
             return False
 
-        element_instance = mount_info.get('element')
-        if element_instance:
-            element_instance.parent = None # Clear parent relationship
-            logger.info(f"[{self.owner.id}] Element '{element_instance.name}' ({element_instance.id}) unmounted from '{mount_id}'.")
-        else:
-            logger.warning(f"[{self.owner.id}] Mount point '{mount_id}' existed but had no element instance.")
-
-        element_id_unmounted = element_instance.id if element_instance else None
-        element_name_unmounted = element_instance.name if element_instance else None
-
-        del self._state['_mounted_elements'][mount_id]
+        if mount_id not in self._state['_mounted_elements']:
+            logger.warning(f"Element with mount_id '{mount_id}' not found in {self.owner.id if self.owner else 'Unknown'}.")
+            return False
         
-        # Record the unmount event in the owner Space's timeline
-        if hasattr(self.owner, 'add_event_to_timeline'):
-            unmount_event_payload = {
-                'event_type': 'element_unmounted',
-                'payload': {
-                    'mount_id': mount_id,
-                    'element_id': element_id_unmounted, # May be None if element was missing
-                    'element_name': element_name_unmounted
-                }
+        mounted_info = self._state['_mounted_elements'][mount_id]
+        element_to_unmount = mounted_info["element"]
+        
+        # Cleanup the element being unmounted
+        element_to_unmount.cleanup()
+        element_to_unmount._clear_parent()
+        
+        del self._state['_mounted_elements'][mount_id]
+        logger.info(f"Unmounted element '{element_to_unmount.name}' (mount_id: {mount_id}) from {self.owner.id if self.owner else 'Unknown'}.")
+        
+        # Record event on the Space's timeline
+        if self.owner and hasattr(self.owner, 'add_event_to_timeline'):
+            event_payload = {
+                'event_type': "element_unmounted",
+                'data': {
+                    "unmounted_element_id": element_to_unmount.id,
+                    "unmounted_element_name": element_to_unmount.name,
+                    "mount_id": mount_id,
+                    "unmounted_from_element_id": self.owner.id
+                },
+                'context': {"component_id": self.id}
             }
-            # Assume appending to the primary timeline
-            timeline_context = {}
-            if hasattr(self.owner, 'get_primary_timeline'):
-                primary_timeline = self.owner.get_primary_timeline()
-                if primary_timeline:
-                    timeline_context['timeline_id'] = primary_timeline
-            self.owner.add_event_to_timeline(unmount_event_payload, timeline_context)
-        else:
-            logger.warning(f"[{self.owner.id}] Owner Space does not have add_event_to_timeline method. Unmount event not recorded.")
+            self.owner.add_event_to_timeline(event_payload, timeline_context={})
             
         return True
 
     def get_mounted_element(self, mount_id: str) -> Optional['BaseElement']:
-        """Gets a mounted element instance by its mount ID."""
-        mount_info = self._state['_mounted_elements'].get(mount_id)
-        return mount_info.get('element') if mount_info else None
+        """Gets a mounted element by its mount ID."""
+        mounted_info = self._state['_mounted_elements'].get(mount_id)
+        return mounted_info["element"] if mounted_info else None
 
     def get_mounted_elements(self) -> Dict[str, 'BaseElement']:
-        """Gets a dictionary mapping mount_id to mounted element instances."""
-        return {mount_id: info['element'] for mount_id, info in self._state['_mounted_elements'].items() if 'element' in info}
+        """Gets all mounted elements, keyed by their mount ID."""
+        return {mount_id: info["element"] for mount_id, info in self._state['_mounted_elements'].items()}
 
-    def get_mounted_elements_info(self) -> Dict[str, Dict[str, Any]]:
-        """Gets metadata about mounted elements (ID, name, type), keyed by mount ID."""
-        info_dict = {}
+    def get_mounted_elements_with_info(self) -> Dict[str, Dict[str, Any]]:
+        """Gets all mounted elements with their mount info (element and mount_type)."""
+        return self._state['_mounted_elements'].copy()
+
+    # --- VEIL Production (Optional) ---
+    def produce_veil_structure(self) -> List[Dict[str, Any]]:
+        """Produces a VEIL structure for the mounted elements."""
+        veil_nodes = []
+        if not self.owner:
+            logger.warning(f"ContainerComponent ({self.id}) cannot produce VEIL: no owner element.")
+            return veil_nodes
+            
         for mount_id, info in self._state['_mounted_elements'].items():
             element = info.get('element')
             if element:
-                info_dict[mount_id] = {
+                veil_nodes.append({
+                    'mount_id': mount_id,
                     'element_id': element.id,
                     'element_name': element.name,
                     'element_type': element.__class__.__name__,
                     'mount_type': info.get('mount_type', MountType.UNKNOWN).name
-                }
-        return info_dict
+                })
+        return veil_nodes

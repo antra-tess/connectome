@@ -8,6 +8,7 @@ from typing import Dict, Any, Optional, List
 from ..base_component import VeilProducer
 # Assuming MessageListComponent is in the same directory
 from .message_list import MessageListComponent, MessageType 
+from elements.component_registry import register_component
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ VEIL_EDITED_FLAG_PROP = "is_edited"
 VEIL_ATTACHMENT_METADATA_PROP = "attachment_metadata"
 VEIL_ATTACHMENT_CONTENT_NODE_TYPE = "attachment_content_item"
 
+@register_component
 class MessageListVeilProducer(VeilProducer):
     """
     Generates VEIL representation based on the state of a sibling MessageListComponent.

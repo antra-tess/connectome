@@ -14,8 +14,8 @@ if TYPE_CHECKING:
 from .base import BaseElement, MountType
 
 from .space import Space # Inherits Space functionality (Container, Timeline)
-from .components import ToolProviderComponent, ToolParameter
-from .components.uplink import UplinkConnectionComponent, RemoteStateCacheComponent, UplinkVeilProducerComponent
+from .components.tool_provider import ToolProviderComponent, ToolParameter
+from .components.uplink import UplinkConnectionComponent, RemoteStateCacheComponent, UplinkVeilProducer
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -31,7 +31,7 @@ class UplinkProxy(Space):
     - Uplink connection management (`UplinkConnectionComponent`)
     - Remote state caching (`RemoteStateCacheComponent`)
     - Uplink-specific tools (`ToolProviderComponent`)
-    - Representation (`UplinkVeilProducerComponent`)
+    - Representation (`UplinkVeilProducer`)
     """
     
     # Uplink has an exterior representation (this might be inferred from VeilProducer later)
@@ -68,7 +68,7 @@ class UplinkProxy(Space):
         # Initialize core components for Uplink functionality
         self._connection_component: UplinkConnectionComponent = self.add_component(UplinkConnectionComponent, remote_space_id=remote_space_id, space_registry=space_registry)
         self._cache_component: RemoteStateCacheComponent = self.add_component(RemoteStateCacheComponent) # Will sync using remote_space_id and space_registry
-        self._veil_producer_component: UplinkVeilProducerComponent = self.add_component(UplinkVeilProducerComponent) # Produces VEIL from cached state
+        self._veil_producer_component: UplinkVeilProducer = self.add_component(UplinkVeilProducer) # Produces VEIL from cached state
         self._tool_provider_component: ToolProviderComponent = self.add_component(ToolProviderComponent) # For uplink-specific actions
         
         # Store for RemoteStateCacheComponent and potentially others

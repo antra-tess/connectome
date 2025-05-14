@@ -6,19 +6,19 @@ import logging
 import asyncio
 from typing import Dict, Any, Optional, TYPE_CHECKING, List, Set
 
-from .base import Component, BaseAgentLoopComponent
+from .base import Component
 from elements.component_registry import register_component
 
 # NEW: Import LLMMessage for correct provider interaction
 from llm.provider_interface import LLMMessage
 # NEW: Import LLMToolDefinition for passing tools
 from llm.provider_interface import LLMToolDefinition, LLMToolCall
+from .components.tool_provider import ToolProviderComponent
 
 if TYPE_CHECKING:
     from .inner_space import InnerSpace
     from llm.provider_interface import LLMProvider
-    from .components.hud import HUDComponent # Assuming HUDComponent is in .components.hud
-    from .components.tool_provider import ToolProviderComponent # Assuming ToolProviderComponent is in .components.tool_provider
+    from .components.hud.hud_component import HUDComponent # Assuming HUDComponent is in .components.hud
     from host.event_loop import OutgoingActionCallback
 
 
@@ -36,13 +36,16 @@ class BaseAgentLoopComponent(Component):
         'parent_inner_space': 'self' 
     }
 
-    def __init__(self, element_id: str, name: str, parent_inner_space: 'InnerSpace', system_prompt_template: Optional[str] = None, **kwargs):
-        super().__init__(element_id, name, **kwargs)
-        if not parent_inner_space: # Should be guaranteed by InnerSpace's injection
+    def __init__(self, parent_inner_space: 'InnerSpace', system_prompt_template: Optional[str] = None, agent_loop_name: Optional[str] = None, **kwargs):
+        super().__init__(**kwargs)
+        if not parent_inner_space:
             raise ValueError("BaseAgentLoopComponent requires a parent_inner_space instance.")
         self.parent_inner_space: 'InnerSpace' = parent_inner_space
-        self._system_prompt_template = system_prompt_template or "You are AI assistant '{agent_name}'. Be helpful." # Default fallback
+        self._system_prompt_template = system_prompt_template or "You are AI assistant '{agent_name}'. Be helpful."
         
+        # Use agent_loop_name for logging if provided, otherwise use component ID or a default
+        self.agent_loop_name = agent_loop_name or f"{self.COMPONENT_TYPE}_{self.id[:8]}"
+
         # Convenience accessors, assuming parent_inner_space is correctly typed and populated
         self._llm_provider: Optional['LLMProvider'] = self.parent_inner_space._llm_provider
         self._hud_component: Optional['HUDComponent'] = self.parent_inner_space.get_hud()
@@ -50,12 +53,12 @@ class BaseAgentLoopComponent(Component):
         self._outgoing_action_callback: Optional['OutgoingActionCallback'] = self.parent_inner_space._outgoing_action_callback
 
         if not self._llm_provider:
-            logger.error(f"{self.name} ({self.id}): LLMProvider not available from parent InnerSpace.")
+            logger.error(f"{self.agent_loop_name} ({self.id}): LLMProvider not available from parent InnerSpace.")
         if not self._hud_component:
-            logger.error(f"{self.name} ({self.id}): HUDComponent not available from parent InnerSpace.")
+            logger.error(f"{self.agent_loop_name} ({self.id}): HUDComponent not available from parent InnerSpace.")
         # ToolProvider and outgoing_action_callback might be optional for some loops.
 
-        logger.info(f"{self.COMPONENT_TYPE} '{self.name}' ({self.id}) initialized for InnerSpace '{self.parent_inner_space.name}'.")
+        logger.info(f"{self.COMPONENT_TYPE} '{self.agent_loop_name}' ({self.id}) initialized for InnerSpace '{self.parent_inner_space.name}'.")
 
     async def trigger_cycle(self):
         """
@@ -68,12 +71,12 @@ class BaseAgentLoopComponent(Component):
         if not self._hud_component:
             self._hud_component = self.parent_inner_space.get_hud()
             if not self._hud_component:
-                 logger.error(f"{self.name} ({self.id}): HUDComponent could not be retrieved on demand.")
+                 logger.error(f"{self.agent_loop_name} ({self.id}): HUDComponent could not be retrieved on demand.")
         return self._hud_component
 
     def _get_llm_provider(self) -> Optional['LLMProvider']:
         if not self._llm_provider: # Should have been set in init
-             logger.error(f"{self.name} ({self.id}): LLMProvider not available.")
+             logger.error(f"{self.agent_loop_name} ({self.id}): LLMProvider not available.")
         return self._llm_provider
 
     def _get_tool_provider(self) -> Optional['ToolProviderComponent']:
@@ -101,46 +104,44 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
     """
     COMPONENT_TYPE = "SimpleRequestResponseLoopComponent"
 
-    def __init__(self, element_id: str, name: str, parent_inner_space: 'InnerSpace', system_prompt_template: Optional[str] = None, **kwargs):
-        super().__init__(element_id, name, parent_inner_space, system_prompt_template=system_prompt_template, **kwargs)
+    def __init__(self, parent_inner_space: 'InnerSpace', system_prompt_template: Optional[str] = None, agent_loop_name: Optional[str] = None, **kwargs):
+        super().__init__(parent_inner_space=parent_inner_space, system_prompt_template=system_prompt_template, agent_loop_name=agent_loop_name, **kwargs)
         # Additional initialization specific to this loop type, if any.
 
     async def trigger_cycle(self):
-        logger.info(f"{self.name} ({self.id}): Cycle triggered in InnerSpace '{self.parent_inner_space.name}'.")
+        logger.info(f"{self.agent_loop_name} ({self.id}): Cycle triggered in InnerSpace '{self.parent_inner_space.name}'.")
 
         hud = self._get_hud()
         llm_provider = self._get_llm_provider()
         tool_provider = self._get_tool_provider() # Get InnerSpace's provider
 
         if not hud:
-            logger.error(f"{self.name} ({self.id}): HUDComponent not available. Aborting cycle.")
+            logger.error(f"{self.agent_loop_name} ({self.id}): HUDComponent not available. Aborting cycle.")
             return
         if not llm_provider:
-            logger.error(f"{self.name} ({self.id}): LLMProvider not available. Aborting cycle.")
+            logger.error(f"{self.agent_loop_name} ({self.id}): LLMProvider not available. Aborting cycle.")
             return
 
         try:
             # 1. Prepare context using HUD
-            logger.debug(f"{self.name} ({self.id}): Preparing LLM context via HUD...")
+            logger.debug(f"{self.agent_loop_name} ({self.id}): Preparing LLM context via HUD...")
             render_options = {"render_style": "clean"}
             llm_context_string = await hud.get_agent_context(options=render_options)
             if not llm_context_string:
-                logger.warning(f"{self.name} ({self.id}): HUD generated an empty context string. Aborting cycle.")
+                logger.warning(f"{self.agent_loop_name} ({self.id}): HUD generated an empty context string. Aborting cycle.")
                 return
             
             # Optional: Record context to timeline
             try:
-                timeline_comp = self.parent_inner_space.get_timeline()
-                if timeline_comp:
-                    timeline_comp.add_event_to_primary_timeline({
-                        "event_type": "agent_context_generated",
-                        "data": {
-                            "loop_component_id": self.id,
-                            "context_preview": llm_context_string[:250] + ('...' if len(llm_context_string) > 250 else ''),
-                            "context_length": len(llm_context_string),
-                            "render_options": render_options
-                        }
-                    })
+                self.parent_inner_space.add_event_to_primary_timeline({
+                    "event_type": "agent_context_generated",
+                    "data": {
+                        "loop_component_id": self.id,
+                        "context_preview": llm_context_string[:250] + ('...' if len(llm_context_string) > 250 else ''),
+                        "context_length": len(llm_context_string),
+                        "render_options": render_options
+                    }
+                })
             except Exception as tl_err:
                 logger.error(f"Error recording agent context to timeline: {tl_err}", exc_info=True)
 
@@ -187,7 +188,7 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                 logger.debug("No tools found on InnerSpace or children.")
 
             # 3. Send context and aggregated tools to LLM
-            logger.debug(f"{self.name} ({self.id}): Sending context and tools to LLM...")
+            logger.debug(f"{self.agent_loop_name} ({self.id}): Sending context and tools to LLM...")
             
             # Format the system prompt
             formatted_system_prompt = self._system_prompt_template.format(agent_name=self.parent_inner_space.name)
@@ -199,11 +200,11 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
             llm_response_obj = llm_provider.complete(messages=messages, tools=aggregated_tools)
             
             if not llm_response_obj:
-                logger.warning(f"{self.name} ({self.id}): LLM returned no response object. Aborting cycle.")
+                logger.warning(f"{self.agent_loop_name} ({self.id}): LLM returned no response object. Aborting cycle.")
                 return
 
             llm_response_text = llm_response_obj.content # May be None if tool call occurs
-            logger.info(f"{self.name} ({self.id}): Received LLM response. Finish reason: {llm_response_obj.finish_reason}")
+            logger.info(f"{self.agent_loop_name} ({self.id}): Received LLM response. Finish reason: {llm_response_obj.finish_reason}")
             if llm_response_text:
                  logger.debug(f"LLM Response Text Content: {llm_response_text[:100]}...")
             if llm_response_obj.tool_calls:
@@ -254,12 +255,12 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
             
             # 5. If NO tool calls, process text content via HUD for actions/response
             elif llm_response_text:
-                logger.debug(f"{self.name} ({self.id}): No tool calls detected. Processing text response via HUD...")
+                logger.debug(f"{self.agent_loop_name} ({self.id}): No tool calls detected. Processing text response via HUD...")
                 processed_actions = await hud.process_llm_response(llm_response_text)
                 
                 # --- Dispatch Actions from Text --- 
                 if processed_actions and isinstance(processed_actions, list):
-                    logger.info(f"{self.name} ({self.id}): Dispatching {len(processed_actions)} actions extracted by HUD from text.")
+                    logger.info(f"{self.agent_loop_name} ({self.id}): Dispatching {len(processed_actions)} actions extracted by HUD from text.")
                     callback = self._get_outgoing_action_callback() # Get callback here
                     for action_request in processed_actions:
                         if not isinstance(action_request, dict) or not action_request.get("action_name"):
@@ -295,19 +296,17 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                         else:
                             logger.warning(f"Could not dispatch text action: No target_module or target_element_id. Action: {action_request}")
                 else:
-                    logger.info(f"{self.name} ({self.id}): No actions extracted by HUD from text response.")
+                    logger.info(f"{self.agent_loop_name} ({self.id}): No actions extracted by HUD from text response.")
             else:
-                 logger.info(f"{self.name} ({self.id}): LLM response had no tool calls and no text content.")
+                 logger.info(f"{self.agent_loop_name} ({self.id}): LLM response had no tool calls and no text content.")
 
         except Exception as e:
-            logger.error(f"{self.name} ({self.id}): Error during cognitive cycle: {e}", exc_info=True)
+            logger.error(f"{self.agent_loop_name} ({self.id}): Error during cognitive cycle: {e}", exc_info=True)
         finally:
-            logger.info(f"{self.name} ({self.id}): Cycle finished.")
+            logger.info(f"{self.agent_loop_name} ({self.id}): Cycle finished.")
 
 
 # --- Multi-Step Loop --- 
-
-from .base import BaseAgentLoopComponent # Ensure BaseAgentLoopComponent is imported correctly
 from elements.component_registry import register_component # Already imported for SimpleRequestResponseLoop
 
 @register_component
@@ -330,25 +329,23 @@ class MultiStepToolLoopComponent(BaseAgentLoopComponent):
     # New event for structured tool call dispatch
     EVENT_TYPE_STRUCTURED_TOOL_ACTION_DISPATCHED = "structured_tool_action_dispatched"
 
-    def __init__(self, element_id: str, name: str, parent_inner_space: 'InnerSpace', system_prompt_template: Optional[str] = None, **kwargs):
-        super().__init__(element_id, name, parent_inner_space, system_prompt_template=system_prompt_template, **kwargs)
-        logger.info(f"{self.COMPONENT_TYPE} '{self.name}' ({self.id}) initialized.")
+    def __init__(self, parent_inner_space: 'InnerSpace', system_prompt_template: Optional[str] = None, agent_loop_name: Optional[str] = None, **kwargs):
+        super().__init__(parent_inner_space=parent_inner_space, system_prompt_template=system_prompt_template, agent_loop_name=agent_loop_name, **kwargs)
+        logger.info(f"{self.COMPONENT_TYPE} '{self.agent_loop_name}' ({self.id}) initialized.")
 
     def _determine_stage(self, last_relevant_event: Optional[Dict[str, Any]]) -> str:
         """Analyzes the last event to determine the current stage."""
         if not last_relevant_event:
             return "initial_request" # No prior relevant event found
         
-        outer_payload = last_relevant_event.get("payload", {})
-        event_type = outer_payload.get("event_type") # Get type from outer payload
-        # Access data from the *inner* payload where MultiStepLoop stores it
-        inner_payload = outer_payload.get("payload", {})
-        event_data = inner_payload.get("data", {}) 
+        # The event_node's "payload" key contains what the component originally logged.
+        # This payload should directly have "event_type" and "data".
+        event_payload = last_relevant_event.get("payload", {})
+        event_type = event_payload.get("event_type")
+        event_data = event_payload.get("data", {}) 
 
         if event_type == self.EVENT_TYPE_TOOL_RESULT_RECEIVED:
-             # Assuming tool results also follow the inner payload structure
-             # We might need to adjust if tool result events have a different shape
-             return "tool_result_received" # Ready to process the result
+             return "tool_result_received" 
         elif event_type == self.EVENT_TYPE_STRUCTURED_TOOL_ACTION_DISPATCHED:
              return "waiting_for_tool_result"
         elif event_type == self.EVENT_TYPE_TOOL_ACTION_DISPATCHED: # Legacy/text-based dispatch
@@ -371,16 +368,15 @@ class MultiStepToolLoopComponent(BaseAgentLoopComponent):
              return "initial_request"
 
     async def trigger_cycle(self):
-        logger.info(f"{self.name} ({self.id}): Multi-step cycle triggered in InnerSpace '{self.parent_inner_space.name}'.")
+        logger.info(f"{self.agent_loop_name} ({self.id}): Multi-step cycle triggered in InnerSpace '{self.parent_inner_space.name}'.")
 
         hud = self._get_hud()
         llm_provider = self._get_llm_provider()
-        timeline_comp = self.parent_inner_space.get_timeline()
         callback = self._get_outgoing_action_callback()
         tool_provider = self._get_tool_provider() # Get tool provider
 
-        if not hud or not llm_provider or not timeline_comp:
-            logger.error(f"{self.name} ({self.id}): Missing critical components (HUD, LLM, Timeline). Aborting cycle.")
+        if not hud or not llm_provider or not self.parent_inner_space:
+            logger.error(f"{self.agent_loop_name} ({self.id}): Missing critical components (HUD, LLM, Timeline). Aborting cycle.")
             return
 
         try:
@@ -393,10 +389,15 @@ class MultiStepToolLoopComponent(BaseAgentLoopComponent):
             ]
             # Corrected filter criteria to point to the actual data locations
             filter_criteria = {
-                 "payload.payload.data.loop_component_id": self.id, # Points to inner payload's data
-                 "payload.event_type__in": relevant_event_types # Points to outer payload's event_type
+                 "payload.data.loop_component_id": self.id, # Corrected: targets payload.data
+                 "payload.event_type__in": relevant_event_types # Correct: targets payload.event_type
             }
             try:
+                 # Ensure we get a timeline component instance before calling methods on it
+                 timeline_comp = self.parent_inner_space.get_timeline()
+                 if not timeline_comp:
+                     logger.error(f"{self.agent_loop_name} ({self.id}): TimelineComponent not available. Cannot determine stage.")
+                     return "initial_request" # Fallback or error state
                  last_relevant_event = timeline_comp.get_last_relevant_event(filter_criteria=filter_criteria)
             except Exception as query_err:
                  logger.error(f"Error querying timeline: {query_err}", exc_info=True)
@@ -416,11 +417,9 @@ class MultiStepToolLoopComponent(BaseAgentLoopComponent):
                 
                 # Record context generated
                 try:
-                     timeline_comp.add_event_to_primary_timeline({
+                     self.parent_inner_space.add_event_to_primary_timeline({
                          "event_type": self.EVENT_TYPE_AGENT_CONTEXT_GENERATED,
-                         "payload": { # Ensure payload structure consistency
-                              "data": {"loop_component_id": self.id, "stage": current_stage, "context_length": len(context_string)}
-                         }
+                         "data": {"loop_component_id": self.id, "stage": current_stage, "context_length": len(context_string)}
                      })
                 except Exception as e: logger.error(f"Error recording context event: {e}")
 
@@ -509,11 +508,9 @@ class MultiStepToolLoopComponent(BaseAgentLoopComponent):
                                 calling_context=calling_context
                             )
                             # Record the structured dispatch event
-                            timeline_comp.add_event_to_primary_timeline({
+                            self.parent_inner_space.add_event_to_primary_timeline({
                                 "event_type": self.EVENT_TYPE_STRUCTURED_TOOL_ACTION_DISPATCHED,
-                                "payload": { 
-                                     "data": {"loop_component_id": self.id, "tool_call_name": raw_tool_name, "tool_call_params": parameters, "sync_result_preview": str(action_result)[:100]}
-                                }
+                                "data": {"loop_component_id": self.id, "tool_call_name": raw_tool_name, "tool_call_params": parameters, "sync_result_preview": str(action_result)[:100]}
                             })
                             dispatched_tool_action = True
                         except Exception as exec_err: logger.error(f"Error executing structured tool call '{actual_tool_name}' on '{target_element_id}': {exec_err}", exc_info=True)
@@ -531,20 +528,16 @@ class MultiStepToolLoopComponent(BaseAgentLoopComponent):
                                   try: callback(action_request)
                                   except Exception as e: logger.error(f"Error dispatching final external action: {e}")
                         # Record LLM_RESPONSE_PROCESSED event (no tool dispatched)
-                        timeline_comp.add_event_to_primary_timeline({
+                        self.parent_inner_space.add_event_to_primary_timeline({
                              "event_type": self.EVENT_TYPE_LLM_RESPONSE_PROCESSED,
-                             "payload": { 
-                                  "data": {"loop_component_id": self.id, "dispatched_tool_action": False, "final_actions_count": len(final_action_requests)}
-                             }
+                             "data": {"loop_component_id": self.id, "dispatched_tool_action": False, "final_actions_count": len(final_action_requests)}
                         })
                     else:
                          # Record LLM_RESPONSE_PROCESSED event (no tool, no text)
                          logger.info("LLM response had no tool calls and no text content.")
-                         timeline_comp.add_event_to_primary_timeline({
+                         self.parent_inner_space.add_event_to_primary_timeline({
                               "event_type": self.EVENT_TYPE_LLM_RESPONSE_PROCESSED,
-                              "payload": { 
-                                   "data": {"loop_component_id": self.id, "dispatched_tool_action": False, "final_actions_count": 0}
-                              }
+                              "data": {"loop_component_id": self.id, "dispatched_tool_action": False, "final_actions_count": 0}
                          })
 
             # === STAGE: Waiting for Tool Result ===
@@ -562,6 +555,7 @@ class MultiStepToolLoopComponent(BaseAgentLoopComponent):
                  logger.error(f"Reached unknown stage: {current_stage}. Aborting cycle.")
 
         except Exception as e:
-            logger.error(f"{self.name} ({self.id}): Error during multi-step cognitive cycle: {e}", exc_info=True)
+            logger.error(f"{self.agent_loop_name} ({self.id}): Error during multi-step cognitive cycle: {e}", exc_info=True)
         finally:
-            logger.info(f"{self.name} ({self.id}): Multi-step cycle finished.") 
+            logger.info(f"{self.agent_loop_name} ({self.id}): Multi-step cycle finished.") 
+            logger.info(f"{self.agent_loop_name} ({self.id}): Multi-step cycle finished.") 

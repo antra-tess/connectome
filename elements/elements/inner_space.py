@@ -139,7 +139,7 @@ class InnerSpace(Space):
                 "description": f"Default scratchpad for agent {self.agent_id}"
             }
             creation_result = self._element_factory.handle_create_element_from_prefab(
-                element_id_str=scratchpad_id,
+                element_id=scratchpad_id,
                 prefab_name="simple_scratchpad",
                 element_config=scratchpad_config 
             )
@@ -187,19 +187,13 @@ class InnerSpace(Space):
         
         # --- Add Agent Loop Component Last (depends on other components) ---
         # Prepare kwargs for the agent loop component
-        agent_loop_kwargs = {}
-        if hasattr(agent_loop_component_type, 'INJECTED_DEPENDENCIES'):
-            # Map dependencies to their instances
-            for kwarg, dependency in agent_loop_component_type.INJECTED_DEPENDENCIES.items():
-                if dependency == 'llm_provider':
-                    agent_loop_kwargs[kwarg] = llm_provider
-                elif dependency == 'outgoing_action_callback':
-                    agent_loop_kwargs[kwarg] = outgoing_action_callback
-                # Handle other possible dependencies as needed
-        
-        # Pass the system prompt template to the agent loop constructor
-        if self._system_prompt_template:
-             agent_loop_kwargs['system_prompt_template'] = self._system_prompt_template
+        agent_loop_kwargs = {
+            "parent_inner_space": self, # Directly pass self as parent_inner_space
+            "system_prompt_template": self._system_prompt_template,
+            "agent_loop_name": f"{self.name}_AgentLoop" # Provide a name for the loop
+        }
+        # The llm_provider and outgoing_action_callback are accessed by the loop *through* parent_inner_space.
+        # Additional INJECTED_DEPENDENCIES can be added here if a specific loop type requires them directly.
         
         # Add the agent loop component
         self._agent_loop = self.add_component(agent_loop_component_type, **agent_loop_kwargs)
@@ -310,7 +304,7 @@ class InnerSpace(Space):
                             tool_provider.register_tool_function(
                                 name=tool_name,
                                 description=description,
-                                parameter_descriptions=param_descriptions, # Will be {}
+                                parameters_schema=[], # Changed from parameter_descriptions=param_descriptions
                                 tool_func=attr_value
                             )
                             registered_count += 1

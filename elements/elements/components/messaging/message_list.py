@@ -8,6 +8,7 @@ import time
 from typing import Dict, Any, Optional, List
 
 from ...base import Component
+from elements.component_registry import register_component
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +16,7 @@ logger = logging.getLogger(__name__)
 # This can be expanded later (e.g., with reactions, read_status, edits)
 MessageType = Dict[str, Any] 
 
+@register_component
 class MessageListComponent(Component):
     """
     Maintains an ordered list of messages based on events recorded in the timeline.
@@ -49,50 +51,47 @@ class MessageListComponent(Component):
         Processes relevant timeline events to update the message list.
         Expects `event_node['payload']` to contain the actual event details.
         """
-        event_payload = event_node.get('payload', {})
+        event_payload = event_node.get('payload', {}) # This is the inner payload
         event_type = event_payload.get('event_type')
         target_element = event_payload.get('target_element_id')
 
         # Ensure the event is targeted at the element this component is attached to
-        # Note: This check might be overly strict if messages are *about* this element
-        # but not directly targeted at it (e.g., system messages in a channel element).
-        # For now, assume direct targeting based on router logic.
         if target_element != self.owner.id:
             logger.trace(f"[{self.owner.id}] MessageListComponent ignoring event targeted at {target_element}")
             return False # Not for us
 
         if event_type in self.HANDLED_EVENT_TYPES:
             logger.debug(f"[{self.owner.id}] MessageListComponent handling event: {event_type}")
-            # --- Updated Logic --- 
+            # Message handlers now expect the *actual content* payload, 
+            # which is event_payload['payload'] if event_payload itself has a nested structure,
+            # or just event_payload if it's flat.
+            # For "message_received" from a Space, event_payload['payload'] is the adapter_data.
+            
+            actual_content_payload = event_payload.get('payload', event_payload) # Default to event_payload if no deeper 'payload' key
             if event_type == "message_received":
-                # Pass the event_payload directly, as it contains the message data
-                return self._handle_new_message(event_payload)
-            # Use the new event types defined in the router for delete/edit
+                return self._handle_new_message(actual_content_payload)
             elif event_type == "connectome_message_deleted": 
-                return self._handle_delete_message(event_payload)
+                return self._handle_delete_message(actual_content_payload)
             elif event_type == "connectome_message_updated":
-                return self._handle_edit_message(event_payload)
+                return self._handle_edit_message(actual_content_payload)
             elif event_type == "connectome_reaction_added":
-                return self._handle_reaction_added(event_payload)
+                return self._handle_reaction_added(actual_content_payload)
             elif event_type == "connectome_reaction_removed":
-                return self._handle_reaction_removed(event_payload)
-            elif event_type == "attachment_content_available": # NEW
-                return self._handle_attachment_content_available(event_payload)
-            # -------------------
-            # Add handlers for other types here
+                return self._handle_reaction_removed(actual_content_payload)
+            elif event_type == "attachment_content_available":
+                return self._handle_attachment_content_available(actual_content_payload)
             else:
                 logger.warning(f"[{self.owner.id}] No specific handler implemented for event type '{event_type}' in MessageListComponent.")
         
         return False # Event type not handled by this component
 
-    def _handle_new_message(self, message_data: Dict[str, Any]) -> bool:
-        """Adds a new message to the list."""
-        # Extract relevant fields from the message_data (which is the payload of the connectome event)
-        internal_message_id = f"msg_{self.owner.id}_{int(time.time()*1000)}_{len(self._state['_messages'])}" # Generate unique ID within this list
+    def _handle_new_message(self, message_content: Dict[str, Any]) -> bool:
+        """Adds a new message to the list. message_content is the actual message data (e.g., adapter_data)."""
+        # Extract relevant fields from the message_content
+        internal_message_id = f"msg_{self.owner.id}_{int(time.time()*1000)}_{len(self._state['_messages'])}"
         
-        # Process attachments to include potential inline content
         processed_attachments = []
-        for att_data in message_data.get('attachments', []):
+        for att_data in message_content.get('attachments', []):
             if isinstance(att_data, dict):
                 processed_attachments.append({
                     "attachment_id": att_data.get("attachment_id"),
@@ -108,21 +107,21 @@ class MessageListComponent(Component):
 
         new_message: MessageType = {
             'internal_id': internal_message_id,
-            'timestamp': message_data.get('timestamp', time.time()),
-            'sender_id': message_data.get('sender_external_id'), # Or sender_connectome_id if available
-            'sender_name': message_data.get('sender_display_name', 'Unknown Sender'),
-            'text': message_data.get('text'),
-            'original_external_id': message_data.get('original_message_id_external'), # For correlation
-            'adapter_id': message_data.get('source_adapter_id'),
+            'timestamp': message_content.get('timestamp', time.time()),
+            'sender_id': message_content.get('sender_external_id'),
+            'sender_name': message_content.get('sender_display_name', 'Unknown Sender'),
+            'text': message_content.get('text'),
+            'original_external_id': message_content.get('original_message_id_external'),
+            'adapter_id': message_content.get('source_adapter_id'), # Assumes this is in message_content
             'is_edited': False,
             'reactions': {},
             'read_by': [],
-            'attachments': processed_attachments # Use processed attachments
+            'attachments': processed_attachments
         }
 
         self._state['_messages'].append(new_message)
         self._state['_message_map'][internal_message_id] = len(self._state['_messages']) - 1
-        
+
         # Optional: Enforce max_messages limit
         if self._max_messages and len(self._state['_messages']) > self._max_messages:
             oldest_message = self._state['_messages'].pop(0)
@@ -137,15 +136,12 @@ class MessageListComponent(Component):
         # TODO: Could this component emit a local event like "message_list_updated"?
         return True
 
-    def _handle_delete_message(self, delete_data: Dict[str, Any]) -> bool:
+    def _handle_delete_message(self, delete_content: Dict[str, Any]) -> bool:
         """
         Removes a message based on its ID.
-        Requires an event payload containing message identifiers.
+        delete_content is the actual data for deletion (e.g., from event_payload['payload']).
         """
-        # We need a reliable way to identify the message to delete.
-        # Option 1: Use original_external_id if the delete event provides it.
-        # Option 2: Use an internal ID if the original event returned one that was stored.
-        original_external_id = delete_data.get('original_message_id_external')
+        original_external_id = delete_content.get('original_message_id_external')
         internal_id_to_delete = None
         
         if original_external_id:
@@ -166,22 +162,20 @@ class MessageListComponent(Component):
                 logger.warning(f"[{self.owner.id}] Could not delete message: External ID '{original_external_id}' not found.")
                 return False
         else:
-            # TODO: Implement deletion by internal ID if available in delete_data
-            logger.warning(f"[{self.owner.id}] Message deletion event lacked necessary identifier. Payload: {delete_data}")
+            logger.warning(f"[{self.owner.id}] Message deletion event lacked necessary identifier. Payload: {delete_content}")
             return False
 
-    def _handle_edit_message(self, edit_data: Dict[str, Any]) -> bool:
+    def _handle_edit_message(self, edit_content: Dict[str, Any]) -> bool:
         """
         Updates the content of an existing message.
-        Requires message identifier and new text in payload.
+        edit_content is the actual data for edit (e.g., from event_payload['payload']).
         """
-        # Expects edit_data to be the payload generated by ExternalEventRouter
-        original_external_id = edit_data.get('original_message_id_external')
-        new_text = edit_data.get('new_text')
-        edit_timestamp = edit_data.get('timestamp', time.time())
+        original_external_id = edit_content.get('original_message_id_external')
+        new_text = edit_content.get('new_text')
+        edit_timestamp = edit_content.get('timestamp', time.time())
         
         if not original_external_id or new_text is None:
-             logger.warning(f"[{self.owner.id}] Message edit event lacked necessary identifier or new_text. Payload: {edit_data}")
+             logger.warning(f"[{self.owner.id}] Message edit event lacked necessary identifier or new_text. Payload: {edit_content}")
              return False
              
         # Find message by external ID (inefficient)
@@ -202,18 +196,18 @@ class MessageListComponent(Component):
             logger.warning(f"[{self.owner.id}] Could not edit message: External ID '{original_external_id}' not found.")
             return False
 
-    def _handle_reaction_added(self, reaction_data: Dict[str, Any]) -> bool:
+    def _handle_reaction_added(self, reaction_content: Dict[str, Any]) -> bool:
         """
         Adds a reaction to an existing message.
-        Expects reaction_data to be the payload generated by ExternalEventRouter.
+        reaction_content is the actual data for the reaction (e.g., from event_payload['payload']).
         """
-        original_external_id = reaction_data.get('original_message_id_external')
-        emoji = reaction_data.get('emoji')
-        user_id = reaction_data.get('user_external_id') # Can be None if adapter doesn't provide
-        user_name = reaction_data.get('user_display_name', 'Unknown User') # For logging/context
+        original_external_id = reaction_content.get('original_message_id_external')
+        emoji = reaction_content.get('emoji')
+        user_id = reaction_content.get('user_external_id')
+        user_name = reaction_content.get('user_display_name', 'Unknown User')
 
         if not original_external_id or not emoji:
-            logger.warning(f"[{self.owner.id}] Reaction event lacked message ID or emoji. Payload: {reaction_data}")
+            logger.warning(f"[{self.owner.id}] Reaction event lacked message ID or emoji. Payload: {reaction_content}")
             return False
 
         message_to_update = None
@@ -247,18 +241,18 @@ class MessageListComponent(Component):
             logger.warning(f"[{self.owner.id}] Could not add reaction: Message with external ID '{original_external_id}' not found.")
             return False
 
-    def _handle_reaction_removed(self, reaction_data: Dict[str, Any]) -> bool:
+    def _handle_reaction_removed(self, reaction_content: Dict[str, Any]) -> bool:
         """
         Removes a reaction from an existing message.
-        Expects reaction_data to be the payload generated by ExternalEventRouter.
+        reaction_content is the actual data for reaction removal (e.g., from event_payload['payload']).
         """
-        original_external_id = reaction_data.get('original_message_id_external')
-        emoji = reaction_data.get('emoji')
-        user_id = reaction_data.get('user_external_id') # Can be None
-        user_name = reaction_data.get('user_display_name', 'Unknown User')
+        original_external_id = reaction_content.get('original_message_id_external')
+        emoji = reaction_content.get('emoji')
+        user_id = reaction_content.get('user_external_id')
+        user_name = reaction_content.get('user_display_name', 'Unknown User')
 
         if not original_external_id or not emoji:
-            logger.warning(f"[{self.owner.id}] Reaction removal event lacked message ID or emoji. Payload: {reaction_data}")
+            logger.warning(f"[{self.owner.id}] Reaction removal event lacked message ID or emoji. Payload: {reaction_content}")
             return False
 
         message_to_update = None
@@ -314,17 +308,18 @@ class MessageListComponent(Component):
             return self._state['_messages'][idx]
         return None
         
-    def _handle_attachment_content_available(self, event_payload: Dict[str, Any]) -> bool:
+    def _handle_attachment_content_available(self, attachment_payload_content: Dict[str, Any]) -> bool:
         """
         Updates an existing message's attachment with fetched content.
         Triggered by 'attachment_content_available' event.
+        attachment_payload_content is the actual data for this event (e.g., from event_payload['payload']).
         """
-        original_message_external_id = event_payload.get('original_message_id_external')
-        attachment_id_to_update = event_payload.get('attachment_id')
-        content = event_payload.get('content')
+        original_message_external_id = attachment_payload_content.get('original_message_id_external')
+        attachment_id_to_update = attachment_payload_content.get('attachment_id')
+        content = attachment_payload_content.get('content')
 
         if not all([original_message_external_id, attachment_id_to_update]):
-            logger.warning(f"[{self.owner.id}] 'attachment_content_available' event missing 'original_message_id_external' or 'attachment_id'. Payload: {event_payload}")
+            logger.warning(f"[{self.owner.id}] 'attachment_content_available' event missing 'original_message_id_external' or 'attachment_id'. Payload: {attachment_payload_content}")
             return False
 
         message_to_update = None

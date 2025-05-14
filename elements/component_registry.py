@@ -74,7 +74,7 @@ def scan_and_load_components(package_path: str = 'elements.elements.components')
             except Exception as e:
                  logger.error(f"Error loading module {modname} during component scan: {e}", exc_info=True)
         
-        logger.info(f"Component scan complete. Imported {count} potential component modules. Registry size: {len(COMPONENT_REGISTRY)}")
+        logger.info(f"Component scan complete. Imported {count} potential component modules. Registry size: {len(COMPONENT_REGISTRY)}. Registry: {COMPONENT_REGISTRY.keys()}")
         
     except ImportError:
         logger.error(f"Could not import the base component package: {package_path}")

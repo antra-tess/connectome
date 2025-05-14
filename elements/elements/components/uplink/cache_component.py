@@ -39,8 +39,8 @@ class RemoteStateCacheComponent(Component):
         "sync_request" # External trigger to sync
     ]
     
-    def __init__(self, element=None, cache_ttl: int = 300, remote_space_id: Optional[str] = None):
-        super().__init__(element)
+    def __init__(self, cache_ttl: int = 300, remote_space_id: Optional[str] = None, **kwargs):
+        super().__init__(**kwargs)
         self.remote_space_id = remote_space_id or "unknown_remote"
         # State stores cached data and metadata
         self._state = {
@@ -57,19 +57,30 @@ class RemoteStateCacheComponent(Component):
         self._auto_sync_timer = None
         self._auto_sync_task = None
         self._auto_sync_stop_event = None
-        self._space_registry_ref: Optional["SpaceRegistry"] = None # Will be set if possible
+        self._space_registry_ref: Optional["SpaceRegistry"] = None # Will be set in initialize
         
+        # REMOVED: Try to get space_registry from the owner UplinkProxy
+        # if hasattr(self.element, '_space_registry') and self.element._space_registry:
+        #     self._space_registry_ref = self.element._space_registry
+        # else:
+        #     logger.warning(f"[{self.element.id}/{self.COMPONENT_TYPE}] SpaceRegistry not found on owner element. Initial sync might be limited.")
+
+    def initialize(self, **kwargs) -> None:
+        """Initializes the component after it's been added to an element."""
+        super().initialize(**kwargs)
         # Try to get space_registry from the owner UplinkProxy
-        if hasattr(self.element, '_space_registry') and self.element._space_registry:
-            self._space_registry_ref = self.element._space_registry
+        if self.owner and hasattr(self.owner, '_space_registry') and self.owner._space_registry:
+            self._space_registry_ref = self.owner._space_registry
         else:
-            logger.warning(f"[{self.element.id}/{self.COMPONENT_TYPE}] SpaceRegistry not found on owner element. Initial sync might be limited.")
+            owner_id_for_log = self.owner.id if self.owner else "UnknownOwner"
+            logger.warning(f"[{owner_id_for_log}/{self.COMPONENT_TYPE}] SpaceRegistry not found on owner element. Initial sync might be limited.")
+        logger.debug(f"RemoteStateCacheComponent initialized for {self.owner.id if self.owner else 'UnknownOwner'}")
 
     def _get_connection_comp(self) -> Optional[UplinkConnectionComponent]:
         """Helper to get the associated UplinkConnectionComponent."""
-        if not self.element:
+        if not self.owner:
             return None
-        return self.element.get_component_by_type("uplink_connection")
+        return self.owner.get_component_by_type("uplink_connection")
 
     def sync_remote_state(self, force: bool = False) -> bool:
         """
@@ -83,24 +94,24 @@ class RemoteStateCacheComponent(Component):
             True if synchronization was successful (or attempted and no new data),
             False if a significant error occurred (e.g., remote space not found).
         """
-        logger.info(f"[{self.element.id}/{self.COMPONENT_TYPE}] Attempting to sync remote state for space ID: {self.element.remote_space_id}") 
+        logger.info(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Attempting to sync remote state for space ID: {self.remote_space_id}") 
         self._state["last_sync_attempt"] = time.time()
 
-        if not isinstance(self.element, UplinkProxy):
-            logger.error(f"[{self.element.id}/{self.COMPONENT_TYPE}] Owner element is not an UplinkProxy. Cannot sync.")
+        if not self.owner or not isinstance(self.owner, UplinkProxy):
+            logger.error(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Owner element is not an UplinkProxy. Cannot sync.")
             return False
             
-        uplink_proxy_element: "UplinkProxy" = self.element 
+        uplink_proxy_element: "UplinkProxy" = self.owner 
 
         if not self._space_registry_ref:
-            logger.error(f"[{self.element.id}/{self.COMPONENT_TYPE}] SpaceRegistry reference not available. Cannot find remote space.")
+            logger.error(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] SpaceRegistry reference not available. Cannot find remote space.")
             return False
 
         remote_space_id = uplink_proxy_element.remote_space_id
         remote_space: Optional["Space"] = self._space_registry_ref.get_space(remote_space_id)
 
         if not remote_space:
-            logger.error(f"[{self.element.id}/{self.COMPONENT_TYPE}] Remote space '{remote_space_id}' not found in SpaceRegistry.")
+            logger.error(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Remote space '{remote_space_id}' not found in SpaceRegistry.")
             # Update remote_space_info to reflect that it's currently unreachable
             uplink_proxy_element.remote_space_info.update({
                 "status": "unreachable",
@@ -110,45 +121,45 @@ class RemoteStateCacheComponent(Component):
 
         # 1. Fetch and update remote_space_info on the UplinkProxy element
         try:
-            logger.debug(f"[{self.element.id}/{self.COMPONENT_TYPE}] Fetching metadata from remote space '{remote_space_id}'.")
+            logger.debug(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Fetching metadata from remote space '{remote_space_id}'.")
             metadata = remote_space.get_space_metadata_for_uplink()
             if metadata:
                 uplink_proxy_element.remote_space_info.update(metadata)
                 uplink_proxy_element.remote_space_info["status"] = "reachable"
                 uplink_proxy_element.remote_space_info["last_metadata_sync"] = time.time()
-                logger.info(f"[{self.element.id}/{self.COMPONENT_TYPE}] Updated remote_space_info: {uplink_proxy_element.remote_space_info}")
+                logger.info(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Updated remote_space_info: {uplink_proxy_element.remote_space_info}")
             else:
-                logger.warning(f"[{self.element.id}/{self.COMPONENT_TYPE}] Remote space '{remote_space_id}' returned no metadata.")
+                logger.warning(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Remote space '{remote_space_id}' returned no metadata.")
                 # Keep existing info but mark as potentially stale or issue fetching
                 uplink_proxy_element.remote_space_info["status"] = "metadata_fetch_failed"
 
         except Exception as e:
-            logger.error(f"[{self.element.id}/{self.COMPONENT_TYPE}] Error fetching metadata from '{remote_space_id}': {e}", exc_info=True)
+            logger.error(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Error fetching metadata from '{remote_space_id}': {e}", exc_info=True)
             uplink_proxy_element.remote_space_info["status"] = "metadata_fetch_error"
             # Do not necessarily return False here, could still attempt VEIL sync if desired
 
         # 2. Fetch full VEIL snapshot from the remote space
         try:
-            logger.debug(f"[{self.element.id}/{self.COMPONENT_TYPE}] Fetching full VEIL snapshot from remote space '{remote_space_id}'.")
+            logger.debug(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Fetching full VEIL snapshot from remote space '{remote_space_id}'.")
             full_veil_snapshot = remote_space.get_full_veil_snapshot()
             if full_veil_snapshot:
                 self._cached_state = full_veil_snapshot # Replace current cache with the full snapshot
                 self._state["last_successful_sync"] = time.time()
                 self._state["last_data_hash"] = hash(str(full_veil_snapshot)) # Basic change detection
-                logger.info(f"[{self.element.id}/{self.COMPONENT_TYPE}] Successfully synced full VEIL snapshot. New hash: {self._state['last_data_hash']}")
+                logger.info(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Successfully synced full VEIL snapshot. New hash: {self._state['last_data_hash']}")
                 
                 # Notify the UplinkVeilProducer that the cache has been updated
-                uplink_veil_producer = self.element.get_component_by_type("UplinkVeilProducerComponent")
+                uplink_veil_producer = self.owner.get_component_by_type("UplinkVeilProducerComponent")
                 if uplink_veil_producer and hasattr(uplink_veil_producer, 'on_cache_updated'):
                     uplink_veil_producer.on_cache_updated(self._cached_state)
                 return True
             else:
-                logger.warning(f"[{self.element.id}/{self.COMPONENT_TYPE}] Remote space '{remote_space_id}' returned no VEIL snapshot.")
+                logger.warning(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Remote space '{remote_space_id}' returned no VEIL snapshot.")
                 # Don't clear existing cache if snapshot fetch fails, keep potentially stale data.
                 return False # Indicate sync was not fully successful
 
         except Exception as e:
-            logger.error(f"[{self.element.id}/{self.COMPONENT_TYPE}] Error fetching VEIL snapshot from '{remote_space_id}': {e}", exc_info=True)
+            logger.error(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Error fetching VEIL snapshot from '{remote_space_id}': {e}", exc_info=True)
             return False
 
     def get_synced_remote_state(self, force_sync: bool = False) -> Dict[str, Any]:
@@ -219,10 +230,10 @@ class RemoteStateCacheComponent(Component):
         Structure of cache assumed to be { veil_id: node_data }
         """
         if not isinstance(deltas, list):
-            logger.warning(f"[{self.element.id if self.element else 'cache'}] Invalid delta format received: not a list.")
+            logger.warning(f"[{self.owner.id if self.owner else 'cache'}] Invalid delta format received: not a list.")
             return
 
-        logger.debug(f"[{self.element.id if self.element else 'cache'}] Applying {len(deltas)} deltas to cache for {self.remote_space_id}.")
+        logger.debug(f"[{self.owner.id if self.owner else 'cache'}] Applying {len(deltas)} deltas to cache for {self.remote_space_id}.")
         cache_modified = False
         # Ensure cache exists
         if "remote_state_cache" not in self._state:
@@ -287,7 +298,7 @@ class RemoteStateCacheComponent(Component):
              # Maybe a more specific event like "uplink_cache_updated_via_delta"?
 
              # --- Notify the UplinkVeilProducer --- 
-             uplink_veil_producer = self.element.get_component_by_type("UplinkVeilProducerComponent")
+             uplink_veil_producer = self.owner.get_component_by_type("UplinkVeilProducerComponent")
              if uplink_veil_producer and hasattr(uplink_veil_producer, 'on_cache_updated'):
                  # Pass the current full state of the cache after deltas applied
                  # The on_cache_updated method in UplinkVeilProducer expects the full snapshot data
