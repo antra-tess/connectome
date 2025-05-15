@@ -57,6 +57,7 @@ class ContainerComponent(BaseComponent):
 
         # Set parent on the mounted element
         element._set_parent(self.owner.id if self.owner else 'Unknown', mount_type)
+        element._set_mount_id(actual_mount_id)
 
         self._state['_mounted_elements'][actual_mount_id] = {
             'element': element,

@@ -101,8 +101,27 @@ class UplinkManagerComponent(Component):
 
         # --- Get remote space info for the UplinkProxy constructor ---
         remote_space_metadata: Optional[Dict[str, Any]] = None
-        if self.owner and hasattr(self.owner, 'space_registry') and self.owner.space_registry:
-            remote_space_instance = self.owner.space_registry.get_space(shared_space_id)
+        registry_to_use: Optional[SpaceRegistry] = None
+
+        if self.owner and hasattr(self.owner, 'get_registry'):
+            registry_to_use = self.owner.get_registry()
+            if registry_to_use:
+                logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Successfully retrieved SpaceRegistry via owner.get_registry().")
+            else:
+                logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] owner.get_registry() returned None. Attempting direct .space_registry attribute.")
+                if hasattr(self.owner, 'space_registry') and self.owner.space_registry:
+                    registry_to_use = self.owner.space_registry
+                    logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Successfully retrieved SpaceRegistry via owner.space_registry attribute.")
+                else:
+                    logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] SpaceRegistry also not available via direct owner.space_registry attribute.")
+        elif self.owner and hasattr(self.owner, 'space_registry') and self.owner.space_registry:
+            logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] owner.get_registry() not available, but direct .space_registry attribute found.")
+            registry_to_use = self.owner.space_registry
+        else:
+            logger.error(f"[{self.owner.id if self.owner else 'NoOwner'}/{self.COMPONENT_TYPE}] Owner is None or has no means to get SpaceRegistry.")
+
+        if registry_to_use:
+            remote_space_instance = registry_to_use.get_space(shared_space_id)
             if remote_space_instance and hasattr(remote_space_instance, 'get_space_metadata_for_uplink'):
                 remote_space_metadata = remote_space_instance.get_space_metadata_for_uplink()
             elif remote_space_instance:
@@ -119,7 +138,7 @@ class UplinkManagerComponent(Component):
             else:
                 logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Could not retrieve instance of remote space {shared_space_id} from registry.")
         else:
-            logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] SpaceRegistry not available via owner. Cannot get remote_space_info.")
+            logger.error(f"[{self.owner.id if self.owner else 'NoOwner'}/{self.COMPONENT_TYPE}] SpaceRegistry could not be obtained. Cannot get remote_space_info.")
         # --- End get remote space info ---
 
         safe_remote_id_part = self._generate_safe_id_string(shared_space_id)

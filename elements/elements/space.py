@@ -27,7 +27,7 @@ class Space(BaseElement):
     
     # Space is a container for other elements
     IS_SPACE = True
-
+    
     EVENT_TYPES = []
     
     def __init__(self, element_id: str, name: str, description: str, 
@@ -160,7 +160,7 @@ class Space(BaseElement):
         
         logger.debug(f"[{self.id}] Element with ID '{element_id}' not found in this space or its direct children.")
         return None
-
+            
     # --- Core Event Processing --- 
     def receive_event(self, event_payload: Dict[str, Any], timeline_context: Dict[str, Any]) -> None:
         """
@@ -208,24 +208,40 @@ class Space(BaseElement):
                      logger.error(f"[{self.id}] Error in component '{comp_name}' handling event '{new_event_id}': {comp_err}", exc_info=True)
         
         # 3. Dispatch event to targeted *child* element, if specified
-        if target_element_id:
-            mounted_element = self.get_mounted_element(target_element_id)
+        # Use the original event_payload (the first argument to this method) for dispatching to child
+        original_target_element_id = event_payload.get("target_element_id") 
+
+        if original_target_element_id:
+            # Ensure lookup is by actual element ID if mounted_elements keys are mount_ids that might differ
+            # For now, assuming get_mounted_element can handle element_id or mount_id.
+            # Or, iterate values:
+            mounted_element = None
+            if self._container: # Check if ContainerComponent exists
+                direct_child = self._container.get_mounted_element(original_target_element_id)
+                if direct_child and direct_child.id == original_target_element_id:
+                    mounted_element = direct_child
+                else: # Fallback: iterate if mount_id != element_id
+                    for elem in self._container.get_mounted_elements().values():
+                        if elem.id == original_target_element_id:
+                            mounted_element = elem
+                            break
+            
             if mounted_element:
                 if hasattr(mounted_element, 'receive_event') and callable(mounted_element.receive_event):
-                    logger.debug(f"[{self.id}] Routing event '{new_event_id}' to mounted element: {target_element_id}")
+                    logger.debug(f"[{self.id}] Routing event (ID: '{new_event_id}', Type: '{event_payload.get('event_type')}') to mounted element: {mounted_element.id}")
                     try:
-                        # Child element receives the same event payload and timeline context
+                        # Child element receives the original event_payload and timeline context
                         mounted_element.receive_event(event_payload, timeline_context) 
                     except Exception as mounted_err:
-                        logger.error(f"[{self.id}] Error in mounted element '{target_element_id}' receiving event '{new_event_id}': {mounted_err}", exc_info=True)
+                        logger.error(f"[{self.id}] Error in mounted element '{mounted_element.id}' receiving event '{new_event_id}': {mounted_err}", exc_info=True)
                 else:
-                    logger.warning(f"[{self.id}] Mounted element '{target_element_id}' found but has no receive_event method.")
-                    raise ValueError(f"Mounted element '{target_element_id}' has no receive_event method.")
+                    logger.warning(f"[{self.id}] Mounted element '{original_target_element_id}' found but has no receive_event method.")
+                    raise ValueError(f"Mounted element '{original_target_element_id}' has no receive_event method.")
             else:
                  # This could happen if the event targets an element nested deeper
                  # We rely on parent elements routing downwards. If it wasn't found here,
                  # it means the target wasn't a direct child.
-                 logger.debug(f"[{self.id}] Event '{new_event_id}' targets element '{target_element_id}', which is not directly mounted here.")
+                 logger.debug(f"[{self.id}] Event '{new_event_id}' targets element '{original_target_element_id}', which is not directly mounted here.")
         else:
              # Event was not targeted at a specific child element
              logger.debug(f"[{self.id}] Event '{new_event_id}' ({event_type}) processed by Space components.")
@@ -334,10 +350,21 @@ class Space(BaseElement):
         # Consider clearing cache after retrieval? Or timestamping?
         return list(self._cached_deltas) # Return a copy
 
-    # --- Action Execution --- 
-    def execute_action_on_element(self, element_id: str, action_name: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
+    def receive_delta(self, delta: List[Dict[str, Any]]) -> None:
         """
-        Execute an action on an element in this space.
+        Receives a VEIL delta from an UplinkProxy and adds it to the Space's timeline.
+        """
+        event_payload = {
+            "event_type": "Veil Delta Calculated",
+            "delta": delta
+        }
+        self.add_event_to_timeline(event_payload, {"timeline_id": self.get_primary_timeline()})
+        self._cached_deltas.extend(delta)
+
+    # --- Action Execution --- 
+    async def execute_action_on_element(self, element_id: str, action_name: str, parameters: Dict[str, Any], calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Allows this Space to execute an action (tool) on one of its mounted child elements.
         Finds the element (either self or a mounted child) and delegates to its ToolProviderComponent.
         """
         target_element: Optional[BaseElement] = None
@@ -356,39 +383,40 @@ class Space(BaseElement):
                 if elem.id == element_id:
                      target_element = elem
                      logger.debug(f"[{self.id}] Found target element by element_id '{element_id}' instead of mount_id.")
-                     break
+                break
             
             if not target_element:
                 return {"success": False, "error": f"[{self.id}] Target element '{element_id}' not found in this space."} 
 
         # Execute the action on the found element
-        tool_provider = target_element.get_component_by_type("ToolProviderComponent") # Use string for safety
-        if tool_provider and hasattr(tool_provider, 'execute_tool'):
-            logger.info(f"[{self.id}] Executing action '{action_name}' on element '{target_element.name}' ({target_element.id}).")
-            try:
-                # Assume execute_tool handles parameter unpacking etc.
-                result = tool_provider.execute_tool(action_name, **parameters)
-                
-                # Record action execution event
-                action_event_payload = {
-                    'event_type': 'action_executed',
-                    'target_element_id': target_element.id, # Record which element was acted upon
-                    'payload': {
-                        'action_name': action_name,
-                        'parameters': parameters,
-                        'result': result # Include the result
-                    }
-                }
-                # Use default timeline context (primary timeline)
-                timeline_context = {}
-                primary_timeline = self.get_primary_timeline()
-                if primary_timeline:
-                    timeline_context['timeline_id'] = primary_timeline
-                self.add_event_to_timeline(action_event_payload, timeline_context)
-                
-                return result if isinstance(result, dict) else {"success": True, "result": result}
-            except Exception as e:
-                 logger.error(f"[{self.id}] Error executing action '{action_name}' on element '{target_element.id}': {e}", exc_info=True)
-                 return {"success": False, "error": f"Error executing action: {e}"} 
-        else:
-            return {"success": False, "error": f"Element '{target_element.name}' ({target_element.id}) does not have a runnable ToolProviderComponent."} 
+        tool_provider = target_element.get_component_by_type("ToolProviderComponent")
+        if not tool_provider:
+            err_msg = f"Cannot execute action '{action_name}' on element '{element_id}': Target element does not have a ToolProviderComponent."
+            logger.error(f"[{self.id}] {err_msg}")
+            return {"success": False, "error": err_msg}
+
+        # Execute the tool via the ToolProviderComponent
+        logger.info(f"[{self.id}] Executing action '{action_name}' on element '{target_element.name}' ({target_element.id}). Params: {parameters}. Context: {calling_context}")
+        action_result = await tool_provider.execute_tool(action_name, **parameters)
+        
+        # TODO: Consider recording the action_result or a summary as an event on the Space's timeline?
+        # For example, if an agent successfully sends a message, that could be a timeline event.
+        
+        # Record action execution event
+        action_event_payload = {
+            'event_type': 'action_executed',
+            'target_element_id': target_element.id, # Record which element was acted upon
+            'payload': {
+                'action_name': action_name,
+                'parameters': parameters,
+                'result': action_result # Include the result
+            }
+        }
+        # Use default timeline context (primary timeline)
+        timeline_context = {}
+        primary_timeline = self.get_primary_timeline()
+        if primary_timeline:
+            timeline_context['timeline_id'] = primary_timeline
+        self.add_event_to_timeline(action_event_payload, timeline_context)
+        
+        return action_result if isinstance(action_result, dict) else {"success": True, "result": action_result} 

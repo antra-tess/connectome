@@ -4,6 +4,8 @@ Provides tools/actions for interacting with messaging elements (e.g., sending me
 """
 import logging
 from typing import Dict, Any, Optional, TYPE_CHECKING, Tuple, List
+import uuid # Added for generating unique request IDs
+import time # Added for timestamp
 
 from ...base import Component, BaseElement
 from ..tool_provider import ToolParameter # Import the new ToolParameter type
@@ -113,54 +115,117 @@ class MessageActionHandler(Component):
         # --- Register send_message Tool --- 
         @tool_provider.register_tool(
             name="send_message",
-            description="Sends a message to the chat context represented by this element.",
+            description="Sends a message to the current conversation (DM or channel).",
             parameters_schema=send_message_params
         )
-        def send_message_tool(text: str, 
-                              reply_to_external_id: Optional[str] = None, 
-                              attachments: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-            """Handles sending a message, determining if it's DM or channel based on context."""
-            if not self._outgoing_action_callback:
-                return {"success": False, "error": "Outgoing action callback is not configured."}
-            if not text:
-                 return {"success": False, "error": "Message text cannot be empty."}
+        async def send_message_tool(text: str,
+                                    attachments: Optional[List[Dict[str, Any]]] = None,
+                                    reply_to_external_id: Optional[str] = None) -> Dict[str, Any]:
+            """
+            Tool function to send a message.
+            The message is sent to the context (DM or channel) where this MessageActionHandler's owner resides.
+            """
+            logger.info(f"[{self.owner.id}] MessageActionHandler.send_message_tool called. Text: '{text[:50]}...'")
 
-            # Determine context: DM (in InnerSpace) or Channel (in SharedSpace)?
-            # This requires knowing the nature of the owning element and its space.
-            retrieved_adapter_id: Optional[str] = None
-            retrieved_conversation_id: Optional[str] = None # This might be channel ID or recipient ID for DMs
-            
-            # Use _get_message_context to determine adapter_id and conversation_id
             retrieved_adapter_id, retrieved_conversation_id = self._get_message_context()
+            # is_dm_context = context.get('is_dm_context', False) # This was commented out; _get_message_context doesn't return this.
+            requesting_agent_id = self._get_requesting_agent_id() # Get agent_id for sender info
 
             if not retrieved_adapter_id or not retrieved_conversation_id:
-                logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] send_message_tool: _get_message_context failed to return valid adapter_id or conversation_id.")
-                return {"success": False, "error": "Cannot determine context (DM or Channel) for sending message. Adapter/Conversation ID missing."}
-            
-            # Construct the action request for the HostEventLoop outgoing queue
+                error_msg = f"Cannot determine context (adapter_id: {retrieved_adapter_id}, conversation_id: {retrieved_conversation_id}) for sending message."
+                logger.error(f"[{self.owner.id}] {error_msg}")
+                # await self._add_error_to_timeline(error_msg) # Consider how to report this back
+                return {"success": False, "error": error_msg, "message_id": None}
+
+            if self._outgoing_action_callback is None:
+                error_msg = "Outgoing action callback is not set. Cannot send message."
+                logger.error(f"[{self.owner.id}] {error_msg}")
+                # await self._add_error_to_timeline(error_msg)
+                return {"success": False, "error": error_msg, "message_id": None}
+
+            # --- Add message to MessageListComponent as 'pending_send' ---
+            msg_list_comp = self.owner.get_component_by_type("MessageListComponent")
+            internal_request_id = f"msg_req_{self.owner.id}_{uuid.uuid4().hex[:12]}" # Unique ID for this request
+
+            if msg_list_comp:
+                agent_name = self._get_requesting_agent_name()
+
+                # Ensure attachments is a list of dicts if provided
+                final_attachments = []
+                if attachments:
+                    if isinstance(attachments, list):
+                        for att in attachments:
+                            if isinstance(att, dict):
+                                final_attachments.append(att)
+                            else:
+                                logger.warning(f"[{self.owner.id}] send_message_tool: Skipping non-dict attachment: {att}")
+                    else:
+                        logger.warning(f"[{self.owner.id}] send_message_tool: Attachments argument was not a list: {attachments}")
+                        attachments = [] # Reset to empty list
+
+                msg_list_comp.add_pending_message(
+                    internal_request_id=internal_request_id,
+                    text=text,
+                    sender_id=requesting_agent_id or "unknown_agent", # Agent's own ID
+                    sender_name=agent_name, # Agent's display name
+                    timestamp=time.time(),
+                    attachments=final_attachments, # Use processed attachments
+                    reply_to_external_id=reply_to_external_id,
+                    adapter_id=retrieved_adapter_id
+                )
+                logger.info(f"[{self.owner.id}] Added pending message (req_id: {internal_request_id}) to MessageListComponent.")
+            else:
+                logger.warning(f"[{self.owner.id}] MessageListComponent not found. Cannot add pending message locally before sending.")
+                # Decide if we should proceed or return error if MessageListComponent is vital
+                # For now, we'll proceed but this is a potential issue.
+
+            # ------------------------------------------------------------
+
             # This structure should match what ActivityClient.handle_outgoing_action expects
             action_request = {
                 "target_module": "ActivityClient",
                 "action_type": "send_message", # Generic action type for ActivityClient
                 "payload": {
+                    "internal_request_id": internal_request_id, # <<< NEW: For tracking confirmation
                     "adapter_id": retrieved_adapter_id,
                     "conversation_id": retrieved_conversation_id,
                     "text": text,
-                    "reply_to_external_id": reply_to_external_id, # Pass along for threading
+                    "reply_to_external_id": reply_to_external_id,
                     "attachments": attachments or [], # Pass along attachments
                     "requesting_element_id": self.owner.id, # For context/logging in ActivityClient
-                    # Add agent_id if the owner is in an InnerSpace for better tracking
-                    "requesting_agent_id": self._get_requesting_agent_id() 
+                    "requesting_agent_id": requesting_agent_id
                 }
             }
+
+            logger.debug(f"[{self.owner.id}] Dispatching send_message action request: {action_request}")
             
             try:
-                self._outgoing_action_callback(action_request)
-                logger.info(f"[{self.owner.id}] Dispatched 'send_message' action to adapter '{retrieved_adapter_id}' for conversation '{retrieved_conversation_id}'.")
-                return {"success": True, "status": "Message sent to outgoing queue."} 
+                # The callback itself (ActivityClient.handle_outgoing_action via HostEventLoop)
+                # will return a confirmation of *receipt by ActivityClient*, not delivery by adapter.
+                # The actual adapter delivery confirmation will come as an async event later.
+                # For the tool's immediate return, we assume ActivityClient accepted it.
+                dispatch_result = await self._outgoing_action_callback(action_request)
+                
+                if dispatch_result and dispatch_result.get("success"):
+                    logger.info(f"[{self.owner.id}] Send message action successfully dispatched to ActivityClient for req_id: {internal_request_id}.")
+                    # The message_id returned here is from ActivityClient's perspective (e.g. internal queue id)
+                    # not the final external message ID from the platform.
+                    return {"success": True, "status": "pending_confirmation", "internal_request_id": internal_request_id, "message_id": dispatch_result.get("message_id")}
+                else:
+                    error_msg = f"Failed to dispatch send_message action to ActivityClient. Result: {dispatch_result}"
+                    logger.error(f"[{self.owner.id}] {error_msg} for req_id: {internal_request_id}")
+                    # Optionally: Update the pending message in MessageListComponent to 'failed' immediately if dispatch fails
+                    if msg_list_comp:
+                        # This would require a method in MessageListComponent to update status by internal_request_id
+                        # msg_list_comp.update_pending_message_status(internal_request_id, "failed_to_send", error_msg)
+                        pass # For now, rely on later explicit failure event from adapter if it gets that far
+                    return {"success": False, "error": error_msg, "message_id": None}
+
             except Exception as e:
-                 logger.error(f"[{self.owner.id}] Error dispatching send_message action via callback: {e}", exc_info=True)
-                 return {"success": False, "error": f"Error dispatching message: {e}"}
+                error_msg = f"Exception during send_message dispatch: {e}"
+                logger.exception(f"[{self.owner.id}] {error_msg} for req_id: {internal_request_id}")
+                # Optionally: Update pending message to 'failed'
+                return {"success": False, "error": error_msg, "message_id": None}
 
         # --- Register delete_message Tool --- 
         @tool_provider.register_tool(
@@ -521,6 +586,23 @@ class MessageActionHandler(Component):
             return self.owner.agent_id
             
         return None
+    
+    def _get_requesting_agent_name(self) -> Optional[str]:
+        from elements.elements.inner_space import InnerSpace
+        """Helper to get agent_name if the owner's context is an InnerSpace."""
+        if not self.owner:
+            return None
+        
+        parent_obj = self.owner.get_parent_object()
+        if parent_obj and isinstance(parent_obj, InnerSpace) and hasattr(parent_obj, 'agent_id'):
+            return parent_obj.agent_name
+        
+        # If the owner itself is an InnerSpace (e.g. tools directly on InnerSpace)
+        if isinstance(self.owner, InnerSpace) and hasattr(self.owner, 'agent_id'):
+            return self.owner.agent_id
+            
+        return None
+
 
     def handle_fetch_history(self, 
                              conversation_id: str,

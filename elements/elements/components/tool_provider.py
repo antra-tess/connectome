@@ -6,6 +6,7 @@ The AgentLoopComponent (or similar) uses this component to discover and execute 
 """
 import logging
 from typing import Dict, Any, Callable, List, Optional, Tuple, TypedDict
+import asyncio
 
 from ..base import Component, BaseElement
 # Import the registry decorator
@@ -202,7 +203,7 @@ class ToolProviderComponent(Component):
             ))
         return llm_tools
 
-    def execute_tool(self, tool_name: str, **kwargs: Any) -> Dict[str, Any]:
+    async def execute_tool(self, tool_name: str, **kwargs: Any) -> Dict[str, Any]:
         """
         Executes a registered tool by its name with the given keyword arguments.
 
@@ -223,7 +224,12 @@ class ToolProviderComponent(Component):
         
         try:
             logger.info(f"Executing tool '{tool_name}' on Element {self.owner.id if self.owner else 'unknown'} with params: {kwargs}")
-            result = tool_func(**kwargs)
+            
+            # MODIFIED: Await if the tool function is a coroutine
+            if asyncio.iscoroutinefunction(tool_func):
+                result = await tool_func(**kwargs)
+            else:
+                result = tool_func(**kwargs)
             
             if not isinstance(result, dict):
                 logger.warning(f"Tool '{tool_name}' did not return a dictionary. Wrapping result. Original: {result}")

@@ -49,7 +49,6 @@ class BaseAgentLoopComponent(Component):
         # Convenience accessors, assuming parent_inner_space is correctly typed and populated
         self._llm_provider: Optional['LLMProvider'] = self.parent_inner_space._llm_provider
         self._hud_component: Optional['HUDComponent'] = self.parent_inner_space.get_hud()
-        self._tool_provider: Optional['ToolProviderComponent'] = self.parent_inner_space.get_component(ToolProviderComponent)
         self._outgoing_action_callback: Optional['OutgoingActionCallback'] = self.parent_inner_space._outgoing_action_callback
 
         if not self._llm_provider:
@@ -82,7 +81,7 @@ class BaseAgentLoopComponent(Component):
     def _get_tool_provider(self) -> Optional['ToolProviderComponent']:
         # Ensure this helper can return None gracefully
         if not hasattr(self, '_tool_provider'): # Check if attribute exists
-             self._tool_provider = self.parent_inner_space.get_component(ToolProviderComponent)
+             self._tool_provider = self.get_sibling_component(ToolProviderComponent)
         return self._tool_provider
         
     def _get_outgoing_action_callback(self) -> Optional['OutgoingActionCallback']:
@@ -90,6 +89,51 @@ class BaseAgentLoopComponent(Component):
             self._outgoing_action_callback = self.parent_inner_space._outgoing_action_callback
         return self._outgoing_action_callback
 
+    def aggregate_tools(self) -> List[LLMToolDefinition]:
+        """
+        Aggregate tools from InnerSpace and its children.
+        """
+        aggregated_tools: List[LLMToolDefinition] = []
+        processed_tool_names: Set[str] = set() # Track names to avoid duplicates
+        tool_provider = self._get_tool_provider()
+        if tool_provider:
+            try:
+                inner_space_tools = tool_provider.get_llm_tool_definitions()
+                for tool_def in inner_space_tools:
+                    if tool_def.name not in processed_tool_names:
+                            aggregated_tools.append(tool_def)
+                            processed_tool_names.add(tool_def.name)
+            except Exception as tool_err:
+                logger.critical(f"Error getting InnerSpace tool definitions: {tool_err}", exc_info=True)
+        
+        # Get tools from mounted children
+        mounted_elements = self.parent_inner_space.get_mounted_elements()
+        for child_id, child_element in mounted_elements.items():
+            try:
+                child_tool_provider = child_element.get_component_by_type(ToolProviderComponent)
+                assert child_tool_provider is not None, f"Child element {child_id} has no ToolProviderComponent."
+                if child_tool_provider:
+                    child_tools = child_tool_provider.get_llm_tool_definitions()
+                    for tool_def in child_tools:
+                        # Prefix child tool name with element ID
+                        prefixed_name = f"{child_element.id}::{tool_def.name}"
+                        if prefixed_name not in processed_tool_names:
+                            # Create a new LLMToolDefinition with the prefixed name
+                            prefixed_tool_def = LLMToolDefinition(
+                                name=prefixed_name,
+                                description=tool_def.description,
+                                parameters=tool_def.parameters
+                            )
+                            aggregated_tools.append(prefixed_tool_def)
+                            processed_tool_names.add(prefixed_name)
+            except Exception as child_tool_err:
+                logger.error(f"Error getting tools from child element {child_id}: {child_tool_err}", exc_info=True)
+
+        if aggregated_tools:
+            logger.debug(f"Aggregated {len(aggregated_tools)} tool definitions to pass to LLM.")
+        else:
+            logger.debug("No tools found on InnerSpace or children.")
+        return aggregated_tools
 
 @register_component
 class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
@@ -113,7 +157,6 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
 
         hud = self._get_hud()
         llm_provider = self._get_llm_provider()
-        tool_provider = self._get_tool_provider() # Get InnerSpace's provider
 
         if not hud:
             logger.error(f"{self.agent_loop_name} ({self.id}): HUDComponent not available. Aborting cycle.")
@@ -146,46 +189,7 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                 logger.error(f"Error recording agent context to timeline: {tl_err}", exc_info=True)
 
             # 2. Aggregate Tools from InnerSpace and its Children
-            aggregated_tools: List[LLMToolDefinition] = []
-            processed_tool_names: Set[str] = set() # Track names to avoid duplicates
-
-            # Get tools directly from InnerSpace
-            if tool_provider:
-                try:
-                    inner_space_tools = tool_provider.get_llm_tool_definitions()
-                    for tool_def in inner_space_tools:
-                        if tool_def.name not in processed_tool_names:
-                             aggregated_tools.append(tool_def)
-                             processed_tool_names.add(tool_def.name)
-                except Exception as tool_err:
-                    logger.error(f"Error getting InnerSpace tool definitions: {tool_err}", exc_info=True)
-            
-            # Get tools from mounted children
-            mounted_elements = self.parent_inner_space.get_mounted_elements()
-            for child_id, child_element in mounted_elements.items():
-                 try:
-                     child_tool_provider = child_element.get_component(ToolProviderComponent)
-                     if child_tool_provider:
-                         child_tools = child_tool_provider.get_llm_tool_definitions()
-                         for tool_def in child_tools:
-                             # Prefix child tool name with element ID
-                             prefixed_name = f"{child_element.id}::{tool_def.name}"
-                             if prefixed_name not in processed_tool_names:
-                                 # Create a new LLMToolDefinition with the prefixed name
-                                 prefixed_tool_def = LLMToolDefinition(
-                                     name=prefixed_name,
-                                     description=tool_def.description,
-                                     parameters=tool_def.parameters
-                                 )
-                                 aggregated_tools.append(prefixed_tool_def)
-                                 processed_tool_names.add(prefixed_name)
-                 except Exception as child_tool_err:
-                      logger.error(f"Error getting tools from child element {child_id}: {child_tool_err}", exc_info=True)
-
-            if aggregated_tools:
-                logger.debug(f"Aggregated {len(aggregated_tools)} tool definitions to pass to LLM.")
-            else:
-                logger.debug("No tools found on InnerSpace or children.")
+            aggregated_tools = self.aggregate_tools()
 
             # 3. Send context and aggregated tools to LLM
             logger.debug(f"{self.agent_loop_name} ({self.id}): Sending context and tools to LLM...")
@@ -306,9 +310,6 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
             logger.info(f"{self.agent_loop_name} ({self.id}): Cycle finished.")
 
 
-# --- Multi-Step Loop --- 
-from elements.component_registry import register_component # Already imported for SimpleRequestResponseLoop
-
 @register_component
 class MultiStepToolLoopComponent(BaseAgentLoopComponent):
     """
@@ -373,7 +374,6 @@ class MultiStepToolLoopComponent(BaseAgentLoopComponent):
         hud = self._get_hud()
         llm_provider = self._get_llm_provider()
         callback = self._get_outgoing_action_callback()
-        tool_provider = self._get_tool_provider() # Get tool provider
 
         if not hud or not llm_provider or not self.parent_inner_space:
             logger.error(f"{self.agent_loop_name} ({self.id}): Missing critical components (HUD, LLM, Timeline). Aborting cycle.")
@@ -424,37 +424,7 @@ class MultiStepToolLoopComponent(BaseAgentLoopComponent):
                 except Exception as e: logger.error(f"Error recording context event: {e}")
 
                 # --- Aggregate Tools (InnerSpace + Children) --- 
-                aggregated_tools: List[LLMToolDefinition] = []
-                processed_tool_names: Set[str] = set()
-                # Get tools from InnerSpace
-                if tool_provider:
-                    try:
-                        inner_space_tools = tool_provider.get_llm_tool_definitions()
-                        for tool_def in inner_space_tools:
-                            if tool_def.name not in processed_tool_names:
-                                aggregated_tools.append(tool_def)
-                                processed_tool_names.add(tool_def.name)
-                    except Exception as tool_err: logger.error(f"Error getting InnerSpace tools: {tool_err}", exc_info=True)
-                # Get tools from children
-                mounted_elements = self.parent_inner_space.get_mounted_elements()
-                for child_id, child_element in mounted_elements.items():
-                    try:
-                        child_tool_provider = child_element.get_component(ToolProviderComponent)
-                        if child_tool_provider:
-                            child_tools = child_tool_provider.get_llm_tool_definitions()
-                            for tool_def in child_tools:
-                                prefixed_name = f"{child_element.id}::{tool_def.name}"
-                                if prefixed_name not in processed_tool_names:
-                                    prefixed_tool_def = LLMToolDefinition(
-                                        name=prefixed_name,
-                                        description=tool_def.description,
-                                        parameters=tool_def.parameters
-                                    )
-                                    aggregated_tools.append(prefixed_tool_def)
-                                    processed_tool_names.add(prefixed_name)
-                    except Exception as child_tool_err: logger.error(f"Error getting child {child_id} tools: {child_tool_err}", exc_info=True)
-                if aggregated_tools: logger.debug(f"Aggregated {len(aggregated_tools)} tool definitions.")
-                # ---------------------------------------------
+                aggregated_tools = self.aggregate_tools()
 
                 # Call LLM with aggregated tools
                 logger.debug(f"Calling LLM for stage '{current_stage}'...")

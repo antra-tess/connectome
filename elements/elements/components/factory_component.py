@@ -95,11 +95,12 @@ class ElementFactoryComponent(Component):
     def handle_create_element_from_prefab(
         self,
         prefab_name: str,
-        element_id: str, 
+        element_id: str,
         # 'name' will be part of element_config now
-        # name: str, 
+        # name: str,
         element_config: Optional[Dict[str, Any]] = None, # New arg for element-level constructor/config
-        component_config_overrides: Optional[Dict[str, Dict[str, Any]]] = None # Renamed for clarity
+        component_config_overrides: Optional[Dict[str, Dict[str, Any]]] = None, # Renamed for clarity
+        mount_id_override: Optional[str] = None # NEW: For specifying a custom mount_id
     ) -> Dict[str, Any]:
         """
         Logic for the 'create_element_from_prefab' tool.
@@ -114,6 +115,8 @@ class ElementFactoryComponent(Component):
                                       and values are dictionaries of config settings to 
                                       override or provide for that component.
                                       E.g., {"MessageListComponent": {"channel_id": "12345"}}
+            mount_id_override: Optional. If provided, this ID will be used to mount the element
+                               in the parent InnerSpace. Defaults to element_id.
 
         Returns:
             A dictionary result: { "success": bool, "result": str, "error": Optional[str] }
@@ -247,9 +250,12 @@ class ElementFactoryComponent(Component):
                     raise ValueError(f"Component type '{comp_type_name}' for prefab not found or invalid.")
 
             # 3. Mount the fully configured element in the InnerSpace
-            mount_success = inner_space.mount_element(new_element)
+            actual_mount_id_to_use = mount_id_override if mount_id_override else new_element.id
+            mount_success, final_mount_id = inner_space.mount_element(new_element, mount_id=actual_mount_id_to_use) # Pass actual_mount_id_to_use
             if not mount_success:
-                 raise RuntimeError(f"Failed to mount newly created element {element_id} into InnerSpace {inner_space.id}.")
+                 # This ideally shouldn't fail if ID was checked, but handle just in case.
+                 # mount_element in ContainerComponent logs its own errors.
+                 raise RuntimeError(f"Failed to mount newly created element {element_id} (attempted mount_id: {actual_mount_id_to_use}) into InnerSpace {inner_space.id}. Mount ID reported by mount: {final_mount_id}")
 
             # 3.5 Finalize element setup (e.g., register local tools)
             new_element.finalize_setup() # Ensure this method exists on BaseElement/subclasses
@@ -262,6 +268,7 @@ class ElementFactoryComponent(Component):
                     "prefab_name": prefab_name,
                     "new_element_id": element_id,
                     "new_element_name": new_element.name,
+                    "mount_id": final_mount_id, # Report the actual mount_id used
                     "element_class": new_element.__class__.__name__,
                     "component_types": [c.COMPONENT_TYPE for c in new_element.get_components().values()]
                 }
@@ -354,7 +361,7 @@ class ElementFactoryComponent(Component):
 
             # 3. Mount the fully configured element in the InnerSpace
             # Using default MountType.INCLUSION
-            mount_success = inner_space.mount_element(new_element)
+            mount_success, _ = inner_space.mount_element(new_element)
             if not mount_success:
                  # This ideally shouldn't fail if ID was checked, but handle just in case.
                  raise RuntimeError(f"Failed to mount newly created element {element_id} into InnerSpace {inner_space.id}.")

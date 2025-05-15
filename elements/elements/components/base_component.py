@@ -293,3 +293,10 @@ class VeilProducer(Component):
     """
     COMPONENT_TYPE = "VeilProducer"
     
+    def emit_delta(self) -> None:
+        """
+        Emits the calculated delta to the owning element's timeline.
+        """
+        delta_operations = self.calculate_delta()
+        if delta_operations:
+            self.owner.receive_delta(delta_operations)

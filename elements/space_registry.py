@@ -71,6 +71,26 @@ class SpaceRegistry:
         """Gets the InnerSpace registered for a specific agent_id."""
         return self._agent_inner_spaces.get(agent_id)
 
+    def find_element_deep(self, element_id: str) -> Optional[BaseElement]:
+        """
+        Finds an element by its ID, searching top-level elements and then
+        recursively within each registered Space.
+        """
+        # 1. Check top-level elements (which includes all registered Spaces)
+        element = self._elements.get(element_id)
+        if element:
+            return element
+
+        # 2. If not found, search within each registered Space
+        for space in self._spaces.values():
+            # Space.get_element_by_id checks the space itself and its direct children
+            found_in_space = space.get_element_by_id(element_id)
+            if found_in_space:
+                return found_in_space
+        
+        logger.warning(f"[SpaceRegistry] Element with ID '{element_id}' not found through deep search.")
+        return None
+
     def route_event(self, event_data: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
         """
         Routes an incoming event to the appropriate Space.

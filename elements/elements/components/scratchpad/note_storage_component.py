@@ -32,20 +32,26 @@ class NoteStorageComponent(Component):
         Returns:
             True if the note was added successfully, False otherwise.
         """
+        is_note_written = False
         if not isinstance(note_content, str): # Basic validation
             logger.warning(f"[{self.owner.id if self.owner else 'Unknown'}] Attempted to add invalid note content type: {type(note_content)}")
-            return False
+            is_note_written = False
         if not note_content: # Disallow empty notes
             logger.warning(f"[{self.owner.id if self.owner else 'Unknown'}] Attempted to add empty note content.")
-            return False
+            is_note_written = False
             
         try:
             self._state['_notes'].append(note_content)
             logger.debug(f"[{self.owner.id if self.owner else 'Unknown'}] Note added to state. Current count: {len(self._state['_notes'])}")
-            return True
+            is_note_written = True
         except Exception as e:
             logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] Error adding note to state: {e}", exc_info=True)
-            return False
+            is_note_written = False
+        
+        if is_note_written:
+            veil_producer = self.get_sibling_component("ScratchpadVeilProducer")
+            veil_producer.emit_delta()
+        return is_note_written
 
     def get_notes_from_state(self) -> List[str]:
         """
@@ -64,16 +70,22 @@ class NoteStorageComponent(Component):
         Returns:
             True if notes were cleared successfully, False otherwise.
         """
+        is_notes_cleared = False
         try:
             original_note_count = len(self._state.get('_notes', []))
             if original_note_count == 0:
                 logger.debug(f"[{self.owner.id if self.owner else 'Unknown'}] clear_notes_in_state called, but no notes exist in state.")
                 # No action needed, considered success
-                return True
+                is_notes_cleared = True
                 
             self._state['_notes'] = []
             logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] All notes cleared from state (removed {original_note_count} notes).")
-            return True
+            is_notes_cleared = True
         except Exception as e:
             logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] Error clearing notes from state: {e}", exc_info=True)
-            return False 
+            is_notes_cleared = False 
+        
+        if is_notes_cleared:
+            veil_producer = self.get_sibling_component("ScratchpadVeilProducer")
+            veil_producer.emit_delta()
+        return is_notes_cleared

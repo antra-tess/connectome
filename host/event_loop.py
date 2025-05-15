@@ -173,37 +173,36 @@ class HostEventLoop:
                 event_type = event_data.get("event_type")
                 event_id = event_data.get("event_id", "unknown")
                 payload = event_data.get("payload", {}) # Get payload safely
-                logger.debug(f"Processing incoming event {event_id} ({event_type}) from queue. Source Adapter: {event_data.get('source_adapter_id')}")
+            logger.debug(f"Processing incoming event {event_id} ({event_type}) from queue. Source Adapter: {event_data.get('source_adapter_id')}")
 
-                # Routing via ExternalEventRouter is primary for adapter events
-                if event_data.get("source_adapter_id"):
-                    try:
-                        # ExternalEventRouter will call self.mark_agent_for_cycle if needed
-                        await self.external_event_router.route_external_event(event_data, timeline_context)
-                    except Exception as ext_router_err:
-                        logger.error(f"Error in ExternalEventRouter for event {event_id}: {ext_router_err}", exc_info=True)
+            # Routing via ExternalEventRouter is primary for adapter events
+            if event_data.get("source_adapter_id"):
+                try:
+                    # ExternalEventRouter will call self.mark_agent_for_cycle if needed
+                    await self.external_event_router.route_external_event(event_data, timeline_context)
+                except Exception as ext_router_err:
+                    logger.error(f"Error in ExternalEventRouter for event {event_id}: {ext_router_err}", exc_info=True)
                     self._incoming_event_queue.task_done()
-                    continue
-                
-                # Handling for internal events (e.g., tool results not from an adapter)
-                # These events must contain enough info to identify the target agent_id
-                # Example: a tool result being placed back onto an InnerSpace timeline
-                # The InnerSpace itself (or component that recorded it) should then call mark_agent_for_cycle
-                # This loop no longer tries to guess the target agent for internal events.
-                # If an internal event is put on the queue and isn't an adapter event, it's assumed 
-                # that the system component that enqueued it is also responsible for calling mark_agent_for_cycle
-                # if that event is supposed to trigger a cycle.
-                # The old logic for internal event routing is removed for simplification here.
-                # It needs to be handled by the component that generates such internal events.
-                # For example, InnerSpace.execute_element_action, when it records a tool_result_received,
-                # should call self.host_event_loop.mark_agent_for_cycle(...).
-                # This requires InnerSpace to have a reference to the HostEventLoop.
 
-                # For now, if an event reaches here and is not from an adapter, we log it.
-                # The component responsible for this internal event needs to be updated
-                # to call mark_agent_for_cycle itself.
-                if not event_data.get("source_adapter_id"):
-                    logger.warning(f"Internal event {event_id} received in HEL queue. Cycle triggering for this event must be handled by the event source by calling mark_agent_for_cycle.")
+            # Handling for internal events (e.g., tool results not from an adapter)
+            # These events must contain enough info to identify the target agent_id
+            # Example: a tool result being placed back onto an InnerSpace timeline
+            # The InnerSpace itself (or component that recorded it) should then call mark_agent_for_cycle
+            # This loop no longer tries to guess the target agent for internal events.
+            # If an internal event is put on the queue and isn't an adapter event, it's assumed 
+            # that the system component that enqueued it is also responsible for calling mark_agent_for_cycle
+            # if that event is supposed to trigger a cycle.
+            # The old logic for internal event routing is removed for simplification here.
+            # It needs to be handled by the component that generates such internal events.
+            # For example, InnerSpace.execute_element_action, when it records a tool_result_received,
+            # should call self.host_event_loop.mark_agent_for_cycle(...).
+            # This requires InnerSpace to have a reference to the HostEventLoop.
+
+            # For now, if an event reaches here and is not from an adapter, we log it.
+            # The component responsible for this internal event needs to be updated
+            # to call mark_agent_for_cycle itself.
+            if not event_data.get("source_adapter_id"):
+                logger.warning(f"Internal event {event_id} received in HEL queue. Cycle triggering for this event must be handled by the event source by calling mark_agent_for_cycle.")
 
                 self._incoming_event_queue.task_done()
         except Exception as e:
@@ -270,22 +269,22 @@ class HostEventLoop:
                           self._pending_agent_cycles.remove(agent_id)
                           
                 for agent_id in agents_to_run_now:
-                     # target_shell = self.shell_modules.get(agent_id) # Removed
-                     target_inner_space = self.space_registry.get_inner_space_for_agent(agent_id)
-                     if target_inner_space:
-                         agent_loop_component = target_inner_space.get_agent_loop_component()
-                         if agent_loop_component:
-                             logger.info(f"Agent cycle triggered for {agent_id} via InnerSpace's AgentLoopComponent.")
-                             self._last_agent_cycle_time[agent_id] = now
-                             try:
-                                 # Assuming AgentLoopComponent has a method like trigger_cycle or run_cognitive_cycle
-                                 await agent_loop_component.trigger_cycle() 
-                             except Exception as cycle_error:
-                                 logger.error(f"Error during agent cycle trigger for {agent_id} via AgentLoopComponent: {cycle_error}", exc_info=True)
-                         else:
-                             logger.error(f"Could not trigger agent cycle: AgentLoopComponent not found in InnerSpace for {agent_id}.")
-                     else:
-                          logger.error(f"Could not trigger agent cycle: InnerSpace for {agent_id} not found in SpaceRegistry.")
+                    # target_shell = self.shell_modules.get(agent_id) # Removed
+                    target_inner_space = self.space_registry.get_inner_space_for_agent(agent_id)
+                    if target_inner_space:
+                        agent_loop_component = target_inner_space.get_agent_loop_component()
+                        if agent_loop_component:
+                            logger.info(f"Agent cycle triggered for {agent_id} via InnerSpace's AgentLoopComponent.")
+                        self._last_agent_cycle_time[agent_id] = now
+                        try:
+                                # Assuming AgentLoopComponent has a method like trigger_cycle or run_cognitive_cycle
+                                await agent_loop_component.trigger_cycle() 
+                        except Exception as cycle_error:
+                                logger.error(f"Error during agent cycle trigger for {agent_id} via AgentLoopComponent: {cycle_error}", exc_info=True)
+                        else:
+                            logger.error(f"Could not trigger agent cycle: AgentLoopComponent not found in InnerSpace for {agent_id}.")
+                    else:
+                        logger.error(f"Could not trigger agent cycle: InnerSpace for {agent_id} not found in SpaceRegistry.")
 
                 # NEW STEP 5: Process on_frame_end for all registered spaces
                 try:

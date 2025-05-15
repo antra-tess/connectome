@@ -161,6 +161,7 @@ async def amain():
                    inner_space = InnerSpace(
                        element_id=f"innerspace_{agent_id}",
                        name=f"{agent_name}_InnerSpace",
+                       agent_name=agent_name,
                        description=agent_config.description,
                        agent_id=agent_id, # <<< Pass agent_id
                        llm_provider=agent_llm_provider,

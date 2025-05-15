@@ -45,6 +45,9 @@ class LLMToolDefinition:
         self.description = description
         self.parameters = parameters
 
+    def __str__(self):
+        return f"ToolDefinition(name={self.name}, description={self.description}, parameters={self.parameters})"
+
 
 class LLMToolCall:
     """Representation of a tool call made by an LLM."""

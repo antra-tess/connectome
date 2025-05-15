@@ -215,6 +215,3 @@ class MessageListVeilProducer(VeilProducer):
             logger.info(f"[{self.owner.id}] Calculated VEIL delta with {len(delta_operations)} operations.")
         return delta_operations
 
-    # Note: This VeilProducer doesn't handle events directly.
-    # It relies on being called (e.g., by a FrameAndDeltaManager) 
-    # when its owning element's state might have changed.

@@ -40,28 +40,29 @@ class ScratchpadVeilProducer(VeilProducer):
     def _get_current_notes_from_owner(self) -> List[Any]:
         """Helper to retrieve notes from the owning ScratchpadElement."""
         if not self.owner:
-            return []
+            return ([], True)
         # Option 1: Assume a get_notes() method exists
         if hasattr(self.owner, 'get_notes') and callable(self.owner.get_notes):
             try:
-                return self.owner.get_notes() # Expected: List[str] or List[Dict]
+                return (self.owner.get_notes(), False) # Expected: List[str] or List[Dict]
             except Exception as e:
                 logger.error(f"[{self.owner.id}] Error calling get_notes() on owner: {e}")
-                return []
+                return ([], True)
         # Option 2: Fallback to accessing a protected attribute (less ideal)
         elif hasattr(self.owner, '_notes'):
             notes = getattr(self.owner, '_notes')
-            return notes if isinstance(notes, list) else []
+            return (notes, False) if isinstance(notes, list) else ([], True)
         else:
             logger.warning(f"[{self.owner.id}] ScratchpadVeilProducer cannot find notes on owner. Owner type: {type(self.owner)}")
-            return []
+            return ([], False)
 
     def get_full_veil(self) -> Optional[Dict[str, Any]]:
         """
         Generates the complete VEIL structure for the scratchpad notes.
         """
-        current_notes = self._get_current_notes_from_owner()
-        
+        current_notes, is_error = self._get_current_notes_from_owner()
+        if is_error:
+            return None
         # Create child nodes for each note
         # Assuming notes are simple strings for now
         child_veil_nodes = []
@@ -75,7 +76,7 @@ class ScratchpadVeilProducer(VeilProducer):
             note_id = hashlib.md5(str(note_content).encode()).hexdigest()[:8] 
             
             child_node = {
-                "veil_id": f"{self.owner.id}_note_{note_id}",
+                "veil_id": f"{self.owner.id}_scratchpad_note_{note_id}",
                 "node_type": VEIL_NOTE_ITEM_TYPE,
                 "properties": {
                     "structural_role": "list_item",
@@ -88,10 +89,23 @@ class ScratchpadVeilProducer(VeilProducer):
             }
             child_veil_nodes.append(child_node)
             processed_notes_for_delta.append(note_content) # Use content for simple delta
+        if not child_veil_nodes and not is_error:
+            # NEW: Add a placeholder node if scratchpad is empty
+            placeholder_node = {
+                "veil_id": f"{self.owner.id}_scratchpad_empty_placeholder",
+                "node_type": "scratchpad_placeholder", # New specific node type
+                "properties": {
+                    "structural_role": "placeholder",
+                    "content_nature": "status_message",
+                    "text": "Scratchpad is empty. You can add notes here."
+                },
+                "children": []
+            }
+            child_veil_nodes.append(placeholder_node)
 
         # Create the root container node for the scratchpad
         root_veil_node = {
-            "veil_id": f"{self.owner.id}_scratchpad_root", 
+            "veil_id": f"{self.owner.id}_scratchpad", 
             "node_type": VEIL_SCRATCHPAD_ROOT_TYPE,
             "properties": {
                 "structural_role": "container",

@@ -69,6 +69,7 @@ class InnerSpace(Space):
         self,
         element_id: str,
         name: str,
+        agent_name: str,
         description: str,
         agent_id: str,
         llm_provider: 'LLMProviderInterface',
@@ -102,6 +103,7 @@ class InnerSpace(Space):
         
         # Store key dependencies
         self.agent_id = agent_id
+        self.agent_name = agent_name
         self._llm_provider = llm_provider
         self._outgoing_action_callback = outgoing_action_callback
         self._space_registry = space_registry

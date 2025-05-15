@@ -1,5 +1,6 @@
 import logging
 from typing import Dict, Any, Optional, List, TYPE_CHECKING
+from datetime import datetime, timezone
 
 from ..base_component import Component
 # Needs access to the SpaceVeilProducer on the owner (InnerSpace)
@@ -47,7 +48,7 @@ class HUDComponent(Component):
         if not self.owner:
             return None
         # Assuming SpaceVeilProducer is the primary/only VEIL producer on InnerSpace
-        return self.owner.get_component(SpaceVeilProducer)
+        return self.get_sibling_component("SpaceVeilProducer")
 
     # def _get_global_attention(self) -> Optional[GlobalAttentionComponent]:
     #     """Helper to get the GlobalAttentionComponent from the owning InnerSpace."""
@@ -119,6 +120,27 @@ class HUDComponent(Component):
 
     # --- Rendering Helpers --- 
 
+    def _render_space_root(self, node: Dict[str, Any], attention: Dict[str, Any], options: Dict[str, Any], indent_str: str, node_info: str) -> str:
+        """Renders the root node of a space VEIL."""
+        props = node.get("properties", {})
+        element_name = props.get("element_name", "Unknown Space")
+        element_type = props.get("element_type", "Space")
+        is_inner_space = props.get("is_inner_space", False)
+
+        header = f"{indent_str}[Space: {element_name} ({element_type})]"
+        if is_inner_space:
+            header += " (Agent's Inner Space)"
+        
+        output = f"{header}{indent_str}" # Dynamic separator length
+        # Children are handled by the main loop, so this renderer just provides the header.
+        return output
+
+    def _render_scratchpad_placeholder(self, node: Dict[str, Any], attention: Dict[str, Any], options: Dict[str, Any], indent_str: str, node_info: str) -> str:
+        """Renders the placeholder for an empty scratchpad."""
+        props = node.get("properties", {})
+        text = props.get("text", "Scratchpad is empty.")
+        return f"{indent_str}<em>{text}</em>"
+
     def _render_default(self, node: Dict[str, Any], attention: Dict[str, Any], options: Dict[str, Any], indent_str: str, node_info: str) -> str:
         """Default fallback renderer - shows type and dumps properties."""
         props = node.get("properties", {})
@@ -148,12 +170,21 @@ class HUDComponent(Component):
         props = node.get("properties", {})
         sender = props.get("sender_name", "Unknown")
         text = props.get("text_content", "")
-        timestamp = props.get("timestamp", "") # Prefer raw timestamp if available for sorting/display
-        # TODO: Convert timestamp to human-readable format based on options?
+        timestamp_iso_val = props.get("timestamp_iso", "") 
         is_edited = props.get("is_edited", False)
 
+        formatted_timestamp = "[timestamp N/A]"
+        if isinstance(timestamp_iso_val, (int, float)):
+            try:
+                dt_object = datetime.fromtimestamp(timestamp_iso_val, tz=timezone.utc)
+                formatted_timestamp = dt_object.strftime("%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+                formatted_timestamp = "[invalid timestamp]"
+        elif isinstance(timestamp_iso_val, str) and timestamp_iso_val:
+            formatted_timestamp = timestamp_iso_val # If it's already a string, use as is
+
         # Simple chat format
-        output = f"{indent_str}{sender}: {text}"
+        output = f"{indent_str}<timestamp>{formatted_timestamp}</timestamp> <sender>{sender}</sender>: <message>{text}</message>"
         if is_edited:
             output += " (edited)"
         
@@ -222,7 +253,7 @@ class HUDComponent(Component):
         rendering_hint = props.get("rendering_hint")
 
         # Determine rendering style
-        render_style = options.get("render_style", "clean") # Default to clean
+        render_style = options.get("render_style", "verbose_tags") # Default to clean
         use_verbose_tags = (render_style == "verbose_tags")
 
         # Basic info string for logging/default rendering
@@ -231,8 +262,12 @@ class HUDComponent(Component):
         # Decide which renderer to use based on hints/type (Order matters)
         render_func = self._render_default # Default fallback
         
-        if content_nature == "chat_message":
+        if content_nature == "space_summary":
+            render_func = self._render_space_root
+        elif content_nature == "chat_message":
             render_func = self._render_chat_message
+        elif node_type == "scratchpad_placeholder": # NEW DISPATCH RULE
+            render_func = self._render_scratchpad_placeholder
         elif content_nature == "uplink_summary":
              render_func = self._render_uplink_summary
         elif node_type == "attachment_content_item": # From VEIL_ATTACHMENT_CONTENT_NODE_TYPE
@@ -251,7 +286,7 @@ class HUDComponent(Component):
 
         # Optional: Add opening tag if verbose style is enabled
         if use_verbose_tags:
-             output += f"{indent_str}<{node_type} (Role: {structural_role or 'N/A'}, Nature: {content_nature or 'N/A'}) id='{node_id}'>\n"
+             output += f"{indent_str}<{node_type} id='{node_id}'>\n"
              # Increase indent for content within tags
              content_indent_str = indent_str + "  "
         else:

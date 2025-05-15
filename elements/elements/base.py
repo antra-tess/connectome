@@ -489,3 +489,24 @@ class BaseElement:
                 except Exception as comp_err:
                      logger.error(f"[{self.id}] Error in component '{component_id} ({component.COMPONENT_TYPE if hasattr(component, 'COMPONENT_TYPE') else 'UnknownComponentType'})' handling event: {comp_err}", exc_info=True)
         return handled
+
+    def _set_mount_id(self, mount_id: str) -> None:
+        """
+        Set the mount ID for this element.
+        """
+        self._mount_id = mount_id
+        logger.debug(f"[{self.id}] Set mount ID to '{mount_id}'")
+
+    @property
+    def mount_id(self) -> str:
+        """
+        Get the mount ID for this element.
+        """
+        return self._mount_id
+
+    def receive_delta(self, delta: List[Dict[str, Any]]) -> None:
+        parent = self.get_parent_object()
+        if parent and hasattr(parent, 'receive_delta'):
+            parent.receive_delta(delta)
+        else:
+            logger.warning(f"[{self.id}] No owner or receive_delta method on owner for element {self.id}")

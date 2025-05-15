@@ -90,20 +90,24 @@ class DirectMessageManagerComponent(Component):
             new_element_id = f"dm_elem_{adapter_id}_{user_external_id.replace(':', '_').replace('@', '_')}_{self._generate_short_uuid()}"
 
 
-            new_dm_element = element_factory.handle_create_element_from_prefab(
+            new_dm_element_result = element_factory.handle_create_element_from_prefab(
                 prefab_name=DM_ELEMENT_PREFAB_NAME,
-                element_id=new_element_id,
+                element_id=new_element_id, # The element's own unique ID
+                mount_id_override=mount_id,  # The desired alias for mounting
                 element_config=element_config
-            )['element']
+            )
 
-            if new_dm_element:
+            if new_dm_element_result and new_dm_element_result.get('success') and new_dm_element_result.get('element'):
+                new_dm_element = new_dm_element_result['element']
+                final_mount_id = new_dm_element_result.get('mount_id', mount_id) # Use mount_id from result if available
                 self._state["active_dm_sessions"][session_key] = new_dm_element.id
-                self._state["dm_element_mount_ids"][session_key] = mount_id # Store the mount_id used
-                logger.info(f"Successfully created and mounted DM session element '{new_dm_element.id}' (mounted as '{mount_id}') for {session_key}.")
-                return {"success": True, "status": "created", "element_id": new_dm_element.id, "mount_id": mount_id}
+                self._state["dm_element_mount_ids"][session_key] = final_mount_id # Store the mount_id used
+                logger.info(f"Successfully created and mounted DM session element '{new_dm_element.id}' (mounted as '{final_mount_id}') for {session_key}.")
+                return {"success": True, "status": "created", "element_id": new_dm_element.id, "mount_id": final_mount_id}
             else:
-                logger.error(f"Failed to create DM session element for {session_key} using prefab.")
-                return {"success": False, "error": "Failed to create DM session element."}
+                error_msg = new_dm_element_result.get('error', "Failed to create DM session element.") if new_dm_element_result else "Factory returned None or error."
+                logger.error(f"Failed to create DM session element for {session_key} using prefab: {error_msg}")
+                return {"success": False, "error": f"Failed to create DM session element: {error_msg}"}
         
         logger.info(f"DM tools registered for DirectMessageManagerComponent on {self.owner.id}")
         
@@ -140,11 +144,10 @@ class DirectMessageManagerComponent(Component):
                 session_key = (source_adapter_id, external_conversation_id)
                 dm_element_id = self._state["active_dm_sessions"].get(session_key)
                 dm_element_mount_id = self._state["dm_element_mount_ids"].get(session_key)
-                
                 target_dm_element: Optional['BaseElement'] = None
                 if dm_element_id and dm_element_mount_id:
                     target_dm_element = self.owner.get_mounted_element(dm_element_mount_id)
-                    if not target_dm_element or target_dm_element.id != dm_element_id:
+                    if not target_dm_element or target_dm_element.mount_id != dm_element_mount_id:
                         logger.warning(f"DM session element for {session_key} was in map (id: {dm_element_id}, mount: {dm_element_mount_id}) but not found/mismatched when fetched. Will try to recreate.")
                         target_dm_element = None # Force recreation
                 
@@ -178,18 +181,22 @@ class DirectMessageManagerComponent(Component):
                         }
                     }
                     
-                    target_dm_element = element_factory.handle_create_element_from_prefab(
+                    creation_result = element_factory.handle_create_element_from_prefab(
                         prefab_name=DM_ELEMENT_PREFAB_NAME,
-                        element_id=new_element_id_for_dm,
+                        element_id=new_element_id_for_dm, # Element's own unique ID
+                        mount_id_override=mount_id, # The desired alias for mounting
                         element_config=element_config
-                    )['element']
+                    )
 
-                    if target_dm_element:
+                    if creation_result and creation_result.get('success') and creation_result.get('element'):
+                        target_dm_element = creation_result['element']
+                        final_mount_id = creation_result.get('mount_id', mount_id) # Use mount_id from result
                         self._state["active_dm_sessions"][session_key] = target_dm_element.id
-                        self._state["dm_element_mount_ids"][session_key] = mount_id
-                        logger.info(f"Created and mounted new DM session element '{target_dm_element.id}' (mounted as '{mount_id}') for {session_key}.")
+                        self._state["dm_element_mount_ids"][session_key] = final_mount_id
+                        logger.info(f"Created and mounted new DM session element '{target_dm_element.id}' (mounted as '{final_mount_id}') for {session_key}.")
                     else:
-                        logger.error(f"Failed to create DM session element for {session_key} on incoming message.")
+                        error_msg = creation_result.get('error') if creation_result else "Creation failed"
+                        logger.error(f"Failed to create DM session element for {session_key} on incoming message: {error_msg}")
                         return False # Critical failure
                 # Now, forward the original event (with its full payload) to the target DM element
                 if target_dm_element and hasattr(target_dm_element, 'receive_event'):
@@ -247,11 +254,11 @@ class DirectMessageManagerComponent(Component):
         dm_element_mount_id = self._state["dm_element_mount_ids"].get(session_key)
         if dm_element_id and dm_element_mount_id and self.owner:
             # Check if the DM element is mounted on the owner
-            mounted_element = self.owner.get_mounted_element(dm_element_id)
+            mounted_element = self.owner.get_mounted_element(dm_element_mount_id) # USE MOUNT ID HERE
             if mounted_element and mounted_element.id == dm_element_id:
                 return mounted_element
             else:
-                logger.warning(f"{mounted_element.id}. DM element for {session_key} (id: {dm_element_id}, mount: {dm_element_mount_id}) in map but not found/mismatched on owner.")
+                logger.warning(f"DM element for {session_key} (id: {dm_element_id}, mount: {dm_element_mount_id}) in map but not found/mismatched on owner.")
                 # Clean up stale entry if element is no longer there or ID mismatch
                 self._state["active_dm_sessions"].pop(session_key, None)
                 self._state["dm_element_mount_ids"].pop(session_key, None)

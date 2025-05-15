@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 # This can be expanded later (e.g., with reactions, read_status, edits)
 MessageType = Dict[str, Any] 
 
+# Internal event types for message send lifecycle
+CONNECTOME_MESSAGE_SEND_CONFIRMED = "connectome_message_send_confirmed"
+CONNECTOME_MESSAGE_SEND_FAILED = "connectome_message_send_failed"
+
 @register_component
 class MessageListComponent(Component):
     """
@@ -30,7 +34,9 @@ class MessageListComponent(Component):
         "connectome_message_updated",         # Use Connectome-defined types for delete/edit
         "connectome_reaction_added",          # For handling added reactions
         "connectome_reaction_removed",        # For handling removed reactions
-        "attachment_content_available"        # NEW: For when fetched attachment content arrives
+        "attachment_content_available",       # NEW: For when fetched attachment content arrives
+        CONNECTOME_MESSAGE_SEND_CONFIRMED,    # NEW: For outgoing message success
+        CONNECTOME_MESSAGE_SEND_FAILED        # NEW: For outgoing message failure
     ]
 
     def initialize(self, max_messages: Optional[int] = None, **kwargs) -> None:
@@ -57,7 +63,7 @@ class MessageListComponent(Component):
 
         # Ensure the event is targeted at the element this component is attached to
         if target_element != self.owner.id:
-            logger.trace(f"[{self.owner.id}] MessageListComponent ignoring event targeted at {target_element}")
+            logger.error(f"[{self.owner.id}] MessageListComponent ignoring event targeted at {target_element}")
             return False # Not for us
 
         if event_type in self.HANDLED_EVENT_TYPES:
@@ -69,21 +75,26 @@ class MessageListComponent(Component):
             
             actual_content_payload = event_payload.get('payload', event_payload) # Default to event_payload if no deeper 'payload' key
             if event_type == "message_received":
-                return self._handle_new_message(actual_content_payload)
+                self._handle_new_message(actual_content_payload)
             elif event_type == "connectome_message_deleted": 
-                return self._handle_delete_message(actual_content_payload)
+                self._handle_delete_message(actual_content_payload)
             elif event_type == "connectome_message_updated":
-                return self._handle_edit_message(actual_content_payload)
+                self._handle_edit_message(actual_content_payload)
             elif event_type == "connectome_reaction_added":
-                return self._handle_reaction_added(actual_content_payload)
+                self._handle_reaction_added(actual_content_payload)
             elif event_type == "connectome_reaction_removed":
-                return self._handle_reaction_removed(actual_content_payload)
+                self._handle_reaction_removed(actual_content_payload)
             elif event_type == "attachment_content_available":
-                return self._handle_attachment_content_available(actual_content_payload)
+                self._handle_attachment_content_available(actual_content_payload)
+            elif event_type == CONNECTOME_MESSAGE_SEND_CONFIRMED: # NEW
+                self._handle_message_send_confirmed(actual_content_payload)
+            elif event_type == CONNECTOME_MESSAGE_SEND_FAILED: # NEW
+                self._handle_message_send_failed(actual_content_payload)
             else:
                 logger.warning(f"[{self.owner.id}] No specific handler implemented for event type '{event_type}' in MessageListComponent.")
-        
-        return False # Event type not handled by this component
+                return False # Event type not handled by this component
+            veil_producer = self.get_sibling_component("MessageListVeilProducer")
+            veil_producer.emit_delta()
 
     def _handle_new_message(self, message_content: Dict[str, Any]) -> bool:
         """Adds a new message to the list. message_content is the actual message data (e.g., adapter_data)."""
@@ -116,7 +127,10 @@ class MessageListComponent(Component):
             'is_edited': False,
             'reactions': {},
             'read_by': [],
-            'attachments': processed_attachments
+            'attachments': processed_attachments,
+            'status': "received", # Default for incoming messages
+            'internal_request_id': None, # Not applicable for incoming
+            'error_details': None # Not applicable for incoming
         }
 
         self._state['_messages'].append(new_message)
@@ -129,7 +143,8 @@ class MessageListComponent(Component):
             # Need to update indices in _message_map after pop(0) - this makes pop(0) expensive.
             # Using a deque or different structure might be better if max_messages is small and frequent.
             # For simplicity now, we'll rebuild map (inefficient for large lists!)
-            self._rebuild_message_map()
+            if self._state['_messages']: # Ensure list is not empty before trying to rebuild map from a popped message
+                self._rebuild_message_map() # Inefficient!
             logger.debug(f"[{self.owner.id}] Pruned oldest message due to max_messages limit.")
             
         logger.info(f"[{self.owner.id}] New message added. Total messages: {len(self._state['_messages'])}")
@@ -347,6 +362,146 @@ class MessageListComponent(Component):
             return False
             
         return True
+
+    # --- NEW: Method for adding a pending outgoing message ---
+    def add_pending_message(self,
+                            internal_request_id: str,
+                            text: str,
+                            sender_id: str, # Agent's own ID
+                            sender_name: str, # Agent's display name
+                            timestamp: float,
+                            attachments: Optional[List[Dict[str, Any]]] = None,
+                            reply_to_external_id: Optional[str] = None, # If agent is replying
+                            adapter_id: Optional[str] = None # The adapter this message is going to
+                           ) -> Optional[str]:
+        """
+        Adds a new message initiated by the local agent to the list with 'pending_send' status.
+        This is typically called by MessageActionHandler before dispatching to ActivityClient.
+        Returns the internal_id of the added message, or None if failed.
+        """
+        internal_message_id = f"msg_pending_{self.owner.id}_{int(time.time()*1000)}_{len(self._state['_messages'])}"
+        
+        processed_attachments = []
+        if attachments:
+            for att_data in attachments:
+                if isinstance(att_data, dict):
+                    processed_attachments.append({
+                        # Using fields expected by MessageType, adapt if attachment structure differs for outgoing
+                        "attachment_id": att_data.get("attachment_id"), # Might be generated by adapter later
+                        "filename": att_data.get("filename"),
+                        "content_type": att_data.get("content_type", att_data.get("attachment_type")), # Handle both
+                        "size": att_data.get("size"),
+                        "url": att_data.get("url"), 
+                        "content": att_data.get("content"), 
+                    })
+                else:
+                    logger.warning(f"[{self.owner.id}] Skipping non-dict attachment data in add_pending_message: {att_data}")
+
+        new_message: MessageType = {
+            'internal_id': internal_message_id,
+            'timestamp': timestamp,
+            'sender_id': sender_id, 
+            'sender_name': sender_name,
+            'text': text,
+            'original_external_id': None, # Will be filled upon confirmation
+            'reply_to_external_id': reply_to_external_id, # Store if it's a reply
+            'adapter_id': adapter_id, 
+            'is_edited': False,
+            'reactions': {},
+            'read_by': [],
+            'attachments': processed_attachments,
+            'status': "pending_send", # Key change for outgoing messages
+            'internal_request_id': internal_request_id, # For matching confirmation
+            'error_details': None
+        }
+
+        self._state['_messages'].append(new_message)
+        self._state['_message_map'][internal_message_id] = len(self._state['_messages']) - 1
+        
+        logger.info(f"[{self.owner.id}] Pending outgoing message (req_id: {internal_request_id}) added. Total messages: {len(self._state['_messages'])}")
+        
+        # Optional: Enforce max_messages limit (might prune old confirmed messages)
+        if self._max_messages and len(self._state['_messages']) > self._max_messages:
+            oldest_message = self._state['_messages'].pop(0)
+            if oldest_message and 'internal_id' in oldest_message:
+                 del self._state['_message_map'][oldest_message['internal_id']]
+                 self._rebuild_message_map() # Inefficient!
+                 logger.debug(f"[{self.owner.id}] Pruned oldest message due to max_messages limit while adding pending message.")
+        
+        return internal_message_id
+
+    # --- NEW: Handlers for outgoing message lifecycle ---
+    def _handle_message_send_confirmed(self, confirm_content: Dict[str, Any]) -> bool:
+        """
+        Updates a pending message to 'sent' status upon confirmation from adapter.
+        confirm_content is expected to contain:
+        - internal_request_id: str
+        - external_message_ids: List[str] (IDs assigned by the external platform)
+        - confirmed_timestamp: Optional[float]
+        """
+        internal_req_id = confirm_content.get('internal_request_id')
+        external_ids = confirm_content.get('external_message_ids')
+
+        if not internal_req_id or not external_ids:
+            logger.warning(f"[{self.owner.id}] Message send confirmation missing 'internal_request_id' or 'external_message_ids'. Payload: {confirm_content}")
+            return False
+
+        message_to_update: Optional[MessageType] = None
+        # Find by internal_request_id (can be slow, consider map if performance is an issue)
+        idx_to_update = -1
+        for idx, msg in enumerate(self._state['_messages']):
+            if msg.get('internal_request_id') == internal_req_id and msg.get('status') == "pending_send":
+                message_to_update = msg
+                idx_to_update = idx
+                break
+        
+        if message_to_update:
+            message_to_update['status'] = "sent"
+            # Assuming the first ID is the primary one for now
+            message_to_update['original_external_id'] = external_ids[0] 
+            if 'confirmed_timestamp' in confirm_content and confirm_content['confirmed_timestamp']:
+                message_to_update['timestamp'] = confirm_content['confirmed_timestamp']
+            
+            # Update in the list directly (if Python list mutation reflects, otherwise reassign)
+            # self._state['_messages'][idx_to_update] = message_to_update # Not strictly needed if dict is mutated in place
+
+            logger.info(f"[{self.owner.id}] Pending message (req_id: {internal_req_id}) confirmed as sent. External ID: {external_ids[0]}.")
+            return True
+        else:
+            logger.warning(f"[{self.owner.id}] Could not find 'pending_send' message with internal_request_id '{internal_req_id}' to confirm.")
+            return False
+
+    def _handle_message_send_failed(self, failure_content: Dict[str, Any]) -> bool:
+        """
+        Updates a pending message to 'failed_to_send' status.
+        failure_content is expected to contain:
+        - internal_request_id: str
+        - error_message: str
+        - failed_timestamp: Optional[float]
+        """
+        internal_req_id = failure_content.get('internal_request_id')
+        error_msg = failure_content.get('error_message')
+
+        if not internal_req_id:
+            logger.warning(f"[{self.owner.id}] Message send failure event missing 'internal_request_id'. Payload: {failure_content}")
+            return False
+
+        message_to_update: Optional[MessageType] = None
+        for msg in self._state['_messages']:
+            if msg.get('internal_request_id') == internal_req_id and msg.get('status') == "pending_send":
+                message_to_update = msg
+                break
+        
+        if message_to_update:
+            message_to_update['status'] = "failed_to_send"
+            message_to_update['error_details'] = error_msg or "Unknown send failure"
+            if 'failed_timestamp' in failure_content and failure_content['failed_timestamp']:
+                message_to_update['timestamp'] = failure_content['failed_timestamp'] # Update to failure time
+            logger.info(f"[{self.owner.id}] Pending message (req_id: {internal_req_id}) marked as failed_to_send. Error: {error_msg}")
+            return True
+        else:
+            logger.warning(f"[{self.owner.id}] Could not find 'pending_send' message with internal_request_id '{internal_req_id}' to mark as failed.")
+            return False
 
     # --- Other potential methods ---
     # def mark_message_read(self, internal_id: str, user_id: str): ...
