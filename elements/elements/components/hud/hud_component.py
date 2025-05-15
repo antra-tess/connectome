@@ -172,6 +172,7 @@ class HUDComponent(Component):
         text = props.get("text_content", "")
         timestamp_iso_val = props.get("timestamp_iso", "") 
         is_edited = props.get("is_edited", False)
+        original_external_id = props.get("external_id")
 
         formatted_timestamp = "[timestamp N/A]"
         if isinstance(timestamp_iso_val, (int, float)):
@@ -188,6 +189,9 @@ class HUDComponent(Component):
         if is_edited:
             output += " (edited)"
         
+        if original_external_id:
+            output += f" [ext_id: {original_external_id}]"
+
         # --- NEW: Render Attachment Metadata ---
         attachment_metadata = props.get("attachment_metadata", [])
         if attachment_metadata:
@@ -246,6 +250,7 @@ class HUDComponent(Component):
         props = node.get("properties", {})
         children = node.get("children", [])
         node_id = node.get("veil_id")
+        external_id = props.get("external_id")
 
         # --- Determine Rendering Strategy --- 
         structural_role = props.get("structural_role")
@@ -257,7 +262,10 @@ class HUDComponent(Component):
         use_verbose_tags = (render_style == "verbose_tags")
 
         # Basic info string for logging/default rendering
+        logger.critical(f"external_id: {external_id}")
         node_info = f"Type='{node_type}', Role='{structural_role}', Nature='{content_nature}', ID='{node_id}'"
+        if external_id:
+            node_info += f", ExternalID='{external_id}'"
 
         # Decide which renderer to use based on hints/type (Order matters)
         render_func = self._render_default # Default fallback

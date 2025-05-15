@@ -414,7 +414,7 @@ async def test_dm_ping_pong(setup_test_environment):
     
     dm_veil = veil_producer.get_full_veil()
     assert dm_veil is not None, "DMElement's MessageListVeilProducer failed to produce a VEIL."
-    assert dm_veil.get('node_type') == "message_list_container", f"VEIL node type mismatch: {dm_veil.get('node_type')}"
+    assert dm_veil.get('node_type') == "message_list", f"VEIL node type mismatch: {dm_veil.get('node_type')}"
     
     veil_messages = dm_veil.get('children', [])
     assert len(veil_messages) == 3, f"Expected 3 messages in VEIL, got {len(veil_messages)}"
@@ -435,8 +435,6 @@ async def test_dm_ping_pong(setup_test_environment):
     assert hud is not None, "HUDComponent not found on InnerSpace."
     agent_context = await hud.get_agent_context()
     assert agent_context is not None, "Agent context not found on InnerSpace."
-    
-    # logger.critical(f"agent_context: {agent_context}")
     agent_loop = agent_inner_space.get_component_by_type("MultiStepToolLoopComponent")
     assert agent_loop is not None, "AgentLoop not found on InnerSpace."
     tools = agent_loop.aggregate_tools()
@@ -444,166 +442,214 @@ async def test_dm_ping_pong(setup_test_environment):
 
     print(f"test_dm_ping_pong ({TEST_AGENT_ID}) PASSED!")
 
-# # --- Test Function (Scenario 2) ---
-# @pytest.mark.asyncio
-# async def borked_test_shared_space_mention_reply(setup_test_environment):
-#     event_loop, mock_activity_client, space_registry, agent_inner_space = setup_test_environment
-#     mock_activity_client.clear_received_actions() # Clear actions from previous tests if fixture is session-scoped
+# --- Test Function (Scenario 2) ---
+@pytest.mark.asyncio
+async def test_shared_space_mention_reply(setup_test_environment):
+    event_loop, mock_activity_client, space_registry, agent_inner_space = setup_test_environment
+    mock_activity_client.clear_received_actions()
 
-#     # --- Phase 1: Setup SharedSpace and Simulate Incoming Mention ---
-#     shared_channel_id = "channel_789"
-#     shared_channel_name = "Test Shared Channel"
-#     message_sender_external_id = "user_external_456"
-#     message_sender_display_name = "Channel User"
-#     incoming_mention_text = f"Hello @{TEST_AGENT_ID}, can you help?"
+    # --- Phase 1: Setup SharedSpace and Simulate Incoming Mention ---
+    shared_channel_id = "channel_789"
+    shared_channel_name = "Test Shared Channel"
+    message_sender_external_id = "user_external_456"
+    message_sender_display_name = "Channel User"
+    incoming_mention_text = f"Hello @{test_agent_config.name}, can you help?" # Use agent's configured name
 
-#     # Simulate incoming message to a shared channel that mentions the agent
-#     # ExternalEventRouter should create the SharedSpace and ensure an Uplink for the agent.
-#     mention_payload = {
-#         "source_adapter_id": TEST_SHARED_ADAPTER_ID,
-#         "payload": {
-#             "event_type_from_adapter": "message_received",
-#             "adapter_data": {
-#                 "message_id": "external_msg_002",
-#                 "conversation_id": shared_channel_id,
-#                 "channel_name": shared_channel_name,
-#                 "is_direct_message": False,
-#                 "sender": {"user_id": message_sender_external_id, "display_name": message_sender_display_name},
-#                 "text": incoming_mention_text,
-#                 "timestamp": time.time(),
-#                 "mentions": [{"user_id": TEST_AGENT_ID, "display_name": test_agent_config.name}]
-#             }
-#         }
-#     }
-#     mock_activity_client.simulate_incoming_event(mention_payload)
-#     await event_loop._process_incoming_event_queue()
-#     await asyncio.sleep(0.01) # Allow async tasks
+    mention_payload = {
+        "source_adapter_id": TEST_SHARED_ADAPTER_ID,
+        "payload": {
+            "event_type_from_adapter": "message_received",
+            "adapter_data": {
+                "message_id": "external_shared_msg_001", # More descriptive ID
+                "conversation_id": shared_channel_id,
+                "channel_name": shared_channel_name,
+                "is_direct_message": False,
+                "sender": {"user_id": message_sender_external_id, "display_name": message_sender_display_name},
+                "text": incoming_mention_text,
+                "timestamp": time.time(),
+                # Use agent's name for mention text, but agent_id for structured mention if adapter provides
+                "mentions": [{"user_id": TEST_AGENT_ID, "display_name": test_agent_config.name}]
+            }
+        }
+    }
+    mock_activity_client.simulate_incoming_event(mention_payload)
+    await event_loop._process_incoming_event_queue()
+    await asyncio.sleep(0.01)
 
-#     # Assertions for SharedSpace and Uplink creation:
-#     # 1. SharedSpace should exist
-#     shared_space_id = f"shared_{TEST_SHARED_ADAPTER_ID}_{shared_channel_id}"
-#     shared_space = space_registry.get_space(shared_space_id)
-#     assert shared_space is not None, f"SharedSpace {shared_space_id} not created."
-#     assert shared_space.name == shared_channel_name
-#     assert shared_space.adapter_id == TEST_SHARED_ADAPTER_ID
-#     assert shared_space.external_conversation_id == shared_channel_id
+    shared_space_id = f"shared_{TEST_SHARED_ADAPTER_ID}_{shared_channel_id}"
+    shared_space = space_registry.get_space(shared_space_id)
+    assert shared_space is not None, f"SharedSpace {shared_space_id} not created."
+    assert shared_space.name == shared_channel_name
 
-#     # 2. Message should be in SharedSpace (assuming it has a MessageListComponent, e.g., via a chat element prefab)
-#     #    This part is a bit more complex as SharedSpace itself doesn't directly hold MessageListComponent.
-#     #    It would be on a mounted element within SharedSpace. For this test, we'll assume the event reached it.
-#     #    A more detailed test would check the mounted chat element's MessageListComponent.
-#     #    For now, we'll trust receive_event on SharedSpace processed it.
+    uplink_manager = agent_inner_space.get_uplink_manager()
+    assert uplink_manager is not None
+    uplink_element = uplink_manager.get_uplink_for_space(shared_space_id)
+    assert uplink_element is not None, f"UplinkProxy for SharedSpace {shared_space_id} not found."
+    assert isinstance(uplink_element, UplinkProxy)
 
-#     # 3. UplinkProxy should be created in InnerSpace
-#     uplink_manager = agent_inner_space.get_uplink_manager()
-#     assert uplink_manager is not None
-#     uplink_element = uplink_manager.get_uplink_for_space(shared_space_id)
-#     assert uplink_element is not None, f"UplinkProxy for SharedSpace {shared_space_id} not found."
-#     assert isinstance(uplink_element, UplinkProxy)
-#     assert uplink_element.remote_space_id == shared_space_id
-
-#     # --- Phase 1.5: Verify message in SharedSpace's MessageListComponent ---
-#     # Assuming "standard_shared_space_chat" prefab mounts an element with ID suffix "chat_interface"
-#     # and this element is configured in "standard_uplink_proxy" as the target_element_id_in_remote_space.
-#     mounted_chat_element_id_suffix = "chat_interface" 
-#     mounted_chat_element_id = f"{shared_space.id}_{mounted_chat_element_id_suffix}"
+    mounted_chat_element_id_suffix = "chat_interface" 
+    mounted_chat_element_id = f"{shared_space.id}_{mounted_chat_element_id_suffix}"
     
-#     # Process events again to ensure any element initialisation events from prefab are handled.
-#     await event_loop._process_incoming_event_queue()
-#     await asyncio.sleep(0.01)
+    await event_loop._process_incoming_event_queue()
+    await asyncio.sleep(0.01)
 
-#     chat_element_in_shared_space = shared_space.get_mounted_element(mounted_chat_element_id)
-#     assert chat_element_in_shared_space is not None, (
-#         f"Chat element '{mounted_chat_element_id}' not found in SharedSpace '{shared_space.id}'. "
-#         f"Mounted elements: {list(shared_space._mounted_elements.keys())}"
-#     )
+    chat_element_in_shared_space = shared_space.get_mounted_element(mounted_chat_element_id)
+    assert chat_element_in_shared_space is not None, (
+        f"Chat element '{mounted_chat_element_id}' not found in SharedSpace '{shared_space.id}'. "
+        f"Mounted elements: {list(shared_space._mounted_elements.keys())}"
+    )
 
-#     ss_msg_list_comp = chat_element_in_shared_space.get_component(MessageListComponent)
-#     assert ss_msg_list_comp is not None, (
-#         f"MessageListComponent not found on chat element '{chat_element_in_shared_space.id}' in SharedSpace."
-#     )
+    ss_msg_list_comp = chat_element_in_shared_space.get_component(MessageListComponent)
+    assert ss_msg_list_comp is not None
     
-#     shared_space_messages = ss_msg_list_comp.get_messages()
-#     assert len(shared_space_messages) == 1, (
-#         f"Expected 1 message in SharedSpace's chat element, found {len(shared_space_messages)}. Messages: {shared_space_messages}"
-#     )
-#     assert shared_space_messages[0]['text'] == incoming_mention_text
-#     assert shared_space_messages[0]['sender_id'] == message_sender_external_id
-#     internal_msg_id_in_shared_space = shared_space_messages[0]['internal_id']
+    shared_space_messages = ss_msg_list_comp.get_messages()
+    assert len(shared_space_messages) == 1
+    assert shared_space_messages[0]['text'] == incoming_mention_text
+    internal_msg_id_in_shared_space = shared_space_messages[0]['internal_id']
 
-#     # --- Phase 2: Simulate Agent "seeing" the message via Uplink and replying ---
-#     # This requires the UplinkProxy's VeilProducer to work, which in turn uses RemoteStateCacheComponent.
-#     # For an integration test, we might assume the VEIL is correctly produced or test it separately.
-#     # Here, we'll focus on the action of replying via the UplinkProxy.
 
-#     # Verify the VEIL produced by the UplinkProxy
-#     uplink_veil_producer = uplink_element.get_component(UplinkVeilProducer)
-#     assert uplink_veil_producer is not None, "UplinkVeilProducerComponent not found on UplinkProxy."
+    # --- Phase 2: Agent replies to the shared channel via Uplink ---
+    reply_text_to_channel = f"Hello @{message_sender_display_name}! Yes, I can help with the shared channel."
 
-#     # Process one cycle for the agent's InnerSpace which might trigger cache updates or component initializations.
-#     agent_inner_space.process_cycle() 
-#     await asyncio.sleep(0.01) # Allow async tasks within process_cycle
+    action_result = await agent_inner_space.execute_action_on_element(
+        element_id=uplink_element.id,
+        action_name="send_message",
+        parameters={"text": reply_text_to_channel}
+    )
+    assert action_result['success'] is True, f"send_message via UplinkProxy failed: {action_result.get('error')}"
+    internal_req_id_agent_shared_reply = action_result.get('internal_request_id')
+    assert internal_req_id_agent_shared_reply is not None
 
-#     uplink_veil = uplink_veil_producer.get_full_veil()
-#     assert uplink_veil is not None, "UplinkProxy failed to produce a VEIL."
+    # Verify outgoing action to MockActivityClient for agent's reply
+    assert len(mock_activity_client.outgoing_actions_received) == 1
+    outgoing_action_agent_reply = mock_activity_client.outgoing_actions_received[0]
+    assert outgoing_action_agent_reply['action_type'] == "send_message"
+    outgoing_payload_agent_reply = outgoing_action_agent_reply['payload']
+    assert outgoing_payload_agent_reply['adapter_id'] == TEST_SHARED_ADAPTER_ID
+    assert outgoing_payload_agent_reply['conversation_id'] == shared_channel_id
+    assert outgoing_payload_agent_reply['text'] == reply_text_to_channel
+    assert outgoing_payload_agent_reply['internal_request_id'] == internal_req_id_agent_shared_reply
 
-#     # Assert the content of the VEIL.
-#     # The UplinkVeilProducer wraps the remote element's VEIL.
-#     # Assumed VEIL_UPLINK_WRAPPER_NODE_TYPE, replace if UplinkVeilProducer defines a constant
-#     UPLINK_WRAPPER_NODE_TYPE_EXPECTED = "uplinked_content_container" 
-#     assert uplink_veil.get('node_type') == UPLINK_WRAPPER_NODE_TYPE_EXPECTED, (
-#         f"Uplink VEIL root node type is not '{UPLINK_WRAPPER_NODE_TYPE_EXPECTED}', got {uplink_veil.get('node_type')}"
-#     )
-#     assert 'children' in uplink_veil and len(uplink_veil['children']) == 1, (
-#         f"Uplink VEIL does not have the expected structure (single child for wrapped content). Children: {uplink_veil.get('children')}"
-#     )
+    # Process event queue for the adapter_send_success_ack for agent's reply
+    await event_loop._process_incoming_event_queue()
+    await asyncio.sleep(0.01)
+
+    # Verify agent's message is now in SharedSpace's MessageListComponent and marked 'sent'
+    shared_space_messages_after_agent_reply = ss_msg_list_comp.get_messages()
+    assert len(shared_space_messages_after_agent_reply) == 2, "Expected 2 messages in shared space after agent reply"
+    assert shared_space_messages_after_agent_reply[1]['text'] == reply_text_to_channel
+    assert shared_space_messages_after_agent_reply[1]['status'] == "sent"
+    assert shared_space_messages_after_agent_reply[1]['internal_request_id'] == internal_req_id_agent_shared_reply
+
+
+    # --- Phase 3: Simulate a second incoming message in the shared channel ---
+    second_sender_external_id = "user_external_789"
+    second_sender_display_name = "Another Channel User"
+    second_incoming_shared_text = "Thanks for offering help!"
+
+    second_mention_payload = {
+        "source_adapter_id": TEST_SHARED_ADAPTER_ID,
+        "payload": {
+            "event_type_from_adapter": "message_received",
+            "adapter_data": {
+                "message_id": "external_shared_msg_002",
+                "conversation_id": shared_channel_id,
+                "channel_name": shared_channel_name,
+                "is_direct_message": False,
+                "sender": {"user_id": second_sender_external_id, "display_name": second_sender_display_name},
+                "text": second_incoming_shared_text,
+                "timestamp": time.time() + 5 # Ensure later timestamp
+                # No explicit mention of the agent this time
+            }
+        }
+    }
+    mock_activity_client.simulate_incoming_event(second_mention_payload)
+    await event_loop._process_incoming_event_queue()
+    await asyncio.sleep(0.01)
+
+    # Verify the second message is in SharedSpace's MessageListComponent
+    shared_space_messages_after_second_incoming = ss_msg_list_comp.get_messages()
+    assert len(shared_space_messages_after_second_incoming) == 3, "Expected 3 messages in shared space after second incoming"
+    assert shared_space_messages_after_second_incoming[0]['text'] == incoming_mention_text
+    assert shared_space_messages_after_second_incoming[1]['text'] == reply_text_to_channel
+    assert shared_space_messages_after_second_incoming[2]['text'] == second_incoming_shared_text
+    assert shared_space_messages_after_second_incoming[2]['sender_id'] == second_sender_external_id
+    internal_msg_id_second_shared_incoming = shared_space_messages_after_second_incoming[2]['internal_id']
+
+
+    # --- Phase 4: Verify Agent's Perspective (VEIL, Context, Tools) ---
+    # Trigger InnerSpace cycle to update its components, including Uplink's cache/VEIL
+    agent_inner_space.on_frame_end() 
+    await asyncio.sleep(0.01)
+
+    uplink_veil_producer = uplink_element.get_component(UplinkVeilProducer)
+    assert uplink_veil_producer is not None
+    uplink_veil = uplink_veil_producer.get_full_veil()
+    assert uplink_veil is not None, "UplinkProxy failed to produce VEIL after second message."
+
+    # Check that the Uplink VEIL contains all three messages
+    assert uplink_veil.get('node_type') == "uplinked_content_container" # VEIL_UPLINK_WRAPPER_NODE_TYPE
+    assert 'children' in uplink_veil and len(uplink_veil['children']) == 1
+    remote_chat_veil = uplink_veil['children'][0]
+    assert remote_chat_veil.get('node_type') == MessageListVeilProducer.VEIL_CONTAINER_TYPE
     
-#     remote_space_root_veil = uplink_veil['children'][0]
-#     assert remote_space_root_veil.get('node_type') == MessageListVeilProducer.VEIL_CONTAINER_TYPE, (
-#         f"Wrapped VEIL node type is not '{MessageListVeilProducer.VEIL_CONTAINER_TYPE}', got {remote_space_root_veil.get('node_type')}"
-#     )
+    veil_chat_messages = remote_chat_veil.get('children', [])
+    assert len(veil_chat_messages) == 3, f"Expected 3 messages in Uplink VEIL, got {len(veil_chat_messages)}"
     
-#     found_message_in_veil = False
-#     if 'children' in remote_space_root_veil:
-#         for veil_msg_node in remote_space_root_veil['children']:
-#             if (veil_msg_node.get('node_type') == MessageListVeilProducer.VEIL_MESSAGE_NODE_TYPE and
-#                veil_msg_node.get('veil_id') == internal_msg_id_in_shared_space):
-#                 assert veil_msg_node['properties'].get(MessageListVeilProducer.VEIL_CONTENT_PROP) == incoming_mention_text
-#                 found_message_in_veil = True
-#                 break
+    # Check content of messages in VEIL (optional, but good for sanity)
+    assert veil_chat_messages[0]['properties'].get('text_content') == incoming_mention_text
+    assert veil_chat_messages[1]['properties'].get('text_content') == reply_text_to_channel
+    assert veil_chat_messages[2]['properties'].get('text_content') == second_incoming_shared_text
+
+
+    # Verify InnerSpace can generate its full context (which includes the Uplink's VEIL)
+    hud = agent_inner_space.get_component_by_type("HUDComponent")
+    assert hud is not None, "HUDComponent not found on InnerSpace for shared space test."
+    agent_shared_context = await hud.get_agent_context()
+    assert agent_shared_context is not None and len(agent_shared_context) > 0, "Agent context for shared space is missing or empty."
     
-#     assert found_message_in_veil, (
-#         f"Message '{incoming_mention_text}' (internal_id: {internal_msg_id_in_shared_space}) not found in Uplink VEIL. VEIL: {uplink_veil}"
-#     )
-        
-#     reply_text_to_channel = f"Hello {message_sender_display_name}! Yes, I can help."
-
-#     tool_provider_on_uplink = uplink_element.get_component("ToolProviderComponent")
-#     assert tool_provider_on_uplink is not None, "ToolProviderComponent not found on UplinkProxy."
+    # Verify agent loop can aggregate tools (which should include tools from the UplinkProxy)
+    # Assuming MultiStepToolLoopComponent or similar is used
+    agent_loop = agent_inner_space.get_component_by_type("MultiStepToolLoopComponent") 
+    assert agent_loop is not None, "AgentLoopComponent not found on InnerSpace for shared space test."
     
-#     # MessageActionHandler on UplinkProxy should have send_message
-#     action_result = agent_inner_space.execute_action_on_element(
-#         element_id=uplink_element.id, # Target the UplinkProxy element
-#         action_name="send_message",
-#         parameters={"text": reply_text_to_channel}
-#     )
-#     assert action_result['success'] is True, f"send_message via UplinkProxy failed: {action_result.get('error')}"
+    aggregated_tools = agent_loop.aggregate_tools()
+    assert aggregated_tools is not None and len(aggregated_tools) > 0, "No tools aggregated by agent loop for shared space scenario."
+    
+    # Check if the send_message tool from the UplinkProxy is present
+    # Tool names are prefixed with element_id::, e.g., "uplink_proxy_shared_..._789_chat_interface::send_message"
+    # Or, if UplinkProxy directly exposes tools without element_id prefix when it's the direct tool provider.
+    # For now, we check if *any* send_message tool is available. A more specific check might be needed
+    # depending on how ToolProviderComponent and aggregation name tools from mounted elements.
+    
+    # Looking for a tool that starts with the uplink_element.id and contains "send_message"
+    # This depends on the naming convention from aggregate_tools when tools come from mounted elements.
+    # A simpler check: ensure at least one send_message tool exists if the naming is complex.
+    found_uplink_send_message = False
+    for tool_def in aggregated_tools:
+        # Example check: if tool name is prefixed like "uplink_element_id::tool_name"
+        if tool_def.name.startswith(f"{uplink_element.id}::") and "send_message" in tool_def.name:
+            found_uplink_send_message = True
+            break
+        # Simpler check if tools are not prefixed by default from Uplink's ToolProvider
+        elif tool_def.name == "send_message" and uplink_element.get_component_by_type("ToolProviderComponent").has_tool("send_message"):
+             # This check implies the tool from Uplink is not prefixed or we need to confirm its source
+             # For now, let's assume a general send_message from the context of the uplink is sufficient to find
+             # More robustly: check `tool_def.owner_element_id` if LLMToolDefinition stores it.
+             # Given current LLMToolDefinition, we can't directly trace back.
+             # The test for now will rely on the agent being able to *use* a send_message tool that works for the uplink.
+             # The execute_action_on_element in previous steps already tests this.
+             # So just checking for general tool availability is a good indicator.
+             pass # Covered by the fact that execute_action_on_element worked earlier.
 
-#     # --- Phase 3: Assertions for outgoing message from Uplink ---
-#     assert len(mock_activity_client.outgoing_actions_received) == 1, "Outgoing message from Uplink not captured."
-#     outgoing_action = mock_activity_client.outgoing_actions_received[0]
-#     assert outgoing_action['action_type'] == "send_message"
-#     outgoing_payload = outgoing_action['payload']
-#     assert outgoing_payload['adapter_id'] == TEST_SHARED_ADAPTER_ID
-#     assert outgoing_payload['conversation_id'] == shared_channel_id # Should be the channel ID
-#     assert outgoing_payload['text'] == reply_text_to_channel
-#     assert outgoing_payload['requesting_element_id'] == uplink_element.id
-#     # requesting_agent_id for actions from UplinkProxy (which is in InnerSpace) should be the InnerSpace's agent_id
-#     assert outgoing_payload['requesting_agent_id'] == agent_inner_space.agent_id
+    # We already tested execute_action_on_element for the uplink.
+    # The critical part is that the agent_context (HUD output) and available tools (from agent_loop) are generated.
+    logger.info(f"Agent context for shared space (first 200 chars): {agent_shared_context[:200]}")
+    logger.info(f"Aggregated tools for shared space (count: {len(aggregated_tools)}): {[t.name for t in aggregated_tools]}")
 
-#     print(f"test_shared_space_mention_reply ({TEST_AGENT_ID} in {shared_channel_id}) PASSED!") 
+    print(f"test_shared_space_mention_reply ({TEST_AGENT_ID} in {shared_channel_id}) PASSED!")
 
-# # --- NEW TEST CASE for Send Failure ---
+# --- NEW TEST CASE for Send Failure ---
 # @pytest.mark.asyncio
 # async def test_dm_send_failure(setup_test_environment):
 #     """

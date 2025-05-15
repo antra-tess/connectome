@@ -13,13 +13,13 @@ from elements.component_registry import register_component
 logger = logging.getLogger(__name__)
 
 # VEIL Node Structure Constants (Example)
-VEIL_CONTAINER_TYPE = "message_list_container"
-VEIL_MESSAGE_NODE_TYPE = "message_item"
+VEIL_CONTAINER_TYPE = "message_list"
+VEIL_MESSAGE_NODE_TYPE = "message"
 VEIL_SENDER_PROP = "sender_name"
 VEIL_TIMESTAMP_PROP = "timestamp_iso"
 VEIL_CONTENT_PROP = "text_content"
 VEIL_INTERNAL_ID_PROP = "connectome_internal_msg_id"
-VEIL_EXTERNAL_ID_PROP = "external_msg_id"
+VEIL_EXTERNAL_ID_PROP = "external_id"
 VEIL_ADAPTER_ID_PROP = "adapter_id"
 VEIL_EDITED_FLAG_PROP = "is_edited"
 VEIL_ATTACHMENT_METADATA_PROP = "attachment_metadata"
