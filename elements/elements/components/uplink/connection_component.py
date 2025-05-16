@@ -8,12 +8,14 @@ from typing import Dict, Any, Optional, List, Callable
 import uuid
 import time
 from datetime import datetime, timedelta
+import asyncio # Added for async sleep
 
 # Type hinting imports
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ....space_registry import SpaceRegistry
     from ....elements.space import Space
+    from elements.elements.uplink import UplinkProxy
 
 from ..base_component import Component
 from ..space.timeline_component import TimelineComponent # Needed to record connection events
@@ -287,3 +289,78 @@ class UplinkConnectionComponent(Component):
               logger.info(f"Cleaning up UplinkConnectionComponent: attempting disconnect from {self.remote_space_id}")
               self.disconnect()
          return True 
+
+    async def send_event_to_remote_space(self, event_payload: Dict[str, Any]) -> bool:
+        """
+        Sends an event (typically an action request) to the connected remote space.
+
+        Args:
+            event_payload: The event data to send to the remote space.
+                         This payload should be structured for the remote space to understand,
+                         e.g., containing action_name, parameters, and target element info.
+
+        Returns:
+            True if the event was successfully dispatched to the remote space, False otherwise.
+        """
+        if not self._state["connected"]:
+            logger.error(f"[{self.owner.id if self.owner else 'N/A'}/{self.COMPONENT_TYPE}] Cannot send event: Not connected to remote space '{self.remote_space_id}'.")
+            return False
+        
+        if not self._space_registry:
+            logger.error(f"[{self.owner.id if self.owner else 'N/A'}/{self.COMPONENT_TYPE}] Cannot send event: SpaceRegistry not available.")
+            return False
+
+        remote_space = self._space_registry.get_space(self.remote_space_id)
+        if not remote_space:
+            logger.error(f"[{self.owner.id if self.owner else 'N/A'}/{self.COMPONENT_TYPE}] Cannot send event: Remote space '{self.remote_space_id}' not found in registry.")
+            return False
+        
+        try:
+            # Assuming remote_space.receive_event is synchronous based on previous reversions
+            # If it were async, this would need to be awaited, and this method would need to be async.
+            # Based on recent changes, Space.receive_event is sync and handles async sub-tasks with create_task.
+            timeline_context = {} # Default/empty timeline context for now
+            primary_timeline = remote_space.get_primary_timeline()
+            if primary_timeline:
+                timeline_context['timeline_id'] = primary_timeline
+            
+            remote_space.receive_event(event_payload, timeline_context)
+            logger.info(f"[{self.owner.id if self.owner else 'N/A'}/{self.COMPONENT_TYPE}] Successfully dispatched event to remote space '{self.remote_space_id}'. Event type: {event_payload.get('event_type')}")
+            return True
+        except Exception as e:
+            logger.error(f"[{self.owner.id if self.owner else 'N/A'}/{self.COMPONENT_TYPE}] Error dispatching event to remote space '{self.remote_space_id}': {e}", exc_info=True)
+            return False
+
+    async def fetch_remote_public_tool_definitions(self) -> Optional[List[Dict[str, Any]]]:
+        """
+        Fetches the public tool definitions from the connected remote space.
+
+        Returns:
+            A list of tool definition dictionaries, or None if fetching fails or not connected.
+        """
+        if not self._state["connected"]:
+            logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Cannot fetch tool definitions: Not connected to remote space '{self.remote_space_id}'.")
+            return None
+        
+        if not self._space_registry:
+            logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Cannot fetch tool definitions: SpaceRegistry not available.")
+            return None
+
+        remote_space_obj: Optional['Space'] = self._space_registry.get_space(self.remote_space_id)
+        if not remote_space_obj:
+            logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Cannot fetch tool definitions: Remote space '{self.remote_space_id}' not found in registry.")
+            return None
+        
+        if not hasattr(remote_space_obj, 'get_public_tool_definitions') or not callable(getattr(remote_space_obj, 'get_public_tool_definitions')):
+            logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Remote space '{self.remote_space_id}' (type: {type(remote_space_obj)}) does not have a callable 'get_public_tool_definitions' method.")
+            return None
+            
+        try:
+            # Space.get_public_tool_definitions() is currently synchronous.
+            # If it became async, this would need `await`.
+            tool_definitions = remote_space_obj.get_public_tool_definitions()
+            logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Successfully fetched {len(tool_definitions)} tool definitions from remote space '{self.remote_space_id}'.")
+            return tool_definitions
+        except Exception as e:
+            logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Error calling get_public_tool_definitions on remote space '{self.remote_space_id}': {e}", exc_info=True)
+            return None 

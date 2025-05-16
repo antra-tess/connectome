@@ -7,6 +7,7 @@ to the appropriate InnerSpace or SharedSpace.
 import logging
 import time # For timestamps if not provided by adapter and for mark_agent_for_cycle
 from typing import Dict, Any, Optional, Callable, List # Added List
+import uuid
 
 # Assuming elements.elements.space.Space is the base class for SharedSpace
 # and elements.elements.inner_space.InnerSpace inherits from it.
@@ -355,37 +356,39 @@ class ExternalEventRouter:
             logger.error(f"Failed to get or create SharedSpace '{shared_space_identifier}'. Message cannot be routed.")
             return
         
-        # Construct internal event payload
+        # Construct internal event payload FOR STANDARDIZED PROCESSING by Space/MessageList etc.
+        # This is the structure that receive_event on Space and then MessageListComponent expect.
         try:
             sender_info = adapter_data.get('sender', {})
-            connectome_channel_event_payload = {
+            # This 'processed_event_data_for_shared_space' is what should be sent to the SharedSpace's receive_event
+            processed_event_data_for_shared_space = {
+                "event_type": "message_received", # Connectome internal type for messages
+                "event_id": adapter_data.get("message_id", f"ext_msg_{uuid.uuid4()}"), # Use adapter's msg_id or generate unique
                 "source_adapter_id": source_adapter_id,
-                "timestamp": adapter_data.get("timestamp", time.time()),
-                "sender_external_id": sender_info.get("user_id"),
-                "sender_display_name": sender_info.get("display_name"),
-                "text": adapter_data.get("text"),
-                "is_dm": False,
-                "mentions": adapter_data.get("mentions", []),
-                "original_message_id_external": adapter_data.get("message_id"),
-                "external_channel_id": external_channel_id,
-                "original_adapter_data": adapter_data,
-                "attachments": adapter_data.get("attachments", [])
+                "conversation_id": external_channel_id, # For context within the SharedSpace/ChatElement
+                "payload": { # Consistent payload structure
+                    "is_dm": False,
+                    "text_content": adapter_data.get("text", ""),
+                    "mentions": adapter_data.get("mentions", []),
+                    "sender_id": sender_info.get("user_id"),
+                    "sender_name": sender_info.get("display_name"),
+                    "timestamp": adapter_data.get("timestamp", time.time()),
+                    "original_message_id_external": adapter_data.get("message_id"), # Keep original ID
+                    "external_channel_id": external_channel_id, # Redundant here, but good for payload consistency
+                    "attachments": adapter_data.get("attachments", []),
+                    "adapter_data": adapter_data # Keep original adapter data nested
+                }
             }
         except Exception as e:
-            logger.error(f"Error constructing channel message event payload from adapter_data: {e}. Data: {adapter_data}", exc_info=True)
+            logger.error(f"Error constructing processed event payload for shared channel message: {e}. Adapter Data: {adapter_data}", exc_info=True)
             return
-
-        connectome_channel_event = {
-            "event_type": "message_received", # Connectome internal type
-            "target_element_id": f"chat_{external_channel_id}", # Target element convention for SharedSpace's internal representation
-            "payload": connectome_channel_event_payload
-        }
         
         timeline_context = await self._construct_timeline_context_for_space(target_shared_space)
 
         try:
-            target_shared_space.receive_event(connectome_channel_event, timeline_context)
-            logger.info(f"Channel message from '{source_adapter_id}' channel '{external_channel_id}' routed to SharedSpace '{shared_space_identifier}'.")
+            # Pass the STANDARDIZED event data to the SharedSpace
+            target_shared_space.receive_event(processed_event_data_for_shared_space, timeline_context)
+            logger.info(f"Channel message from '{source_adapter_id}' channel '{external_channel_id}' routed to SharedSpace '{shared_space_identifier}' with processed event structure.")
             
             # --- Refined Uplink and Cycling Logic ---
             # 1. Ensure uplinks for all agents configured for this adapter (for passive awareness)

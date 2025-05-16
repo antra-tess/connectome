@@ -155,7 +155,7 @@ class MockActivityClient:
                             # 'is_direct_message' would be needed if EER routing for acks relied on it here,
                             # but we are directly using target_element_id_for_confirmation
                             "target_element_id_for_confirmation": target_element_id_for_confirmation,
-                            "external_message_ids": [f"mock_external_msg_id_{internal_request_id}"],
+                            "external_message_ids": ["external_msg_001.1"],
                             "confirmed_timestamp": time.time()
                         }
                     }
@@ -220,7 +220,9 @@ test_agent_config = AgentConfig(
 @pytest.fixture
 def setup_test_environment():
     scan_and_load_components() # Renamed for broader use
-    space_registry = SpaceRegistry()
+    from elements.component_registry import COMPONENT_REGISTRY
+    # logger.critical(f"{COMPONENT_REGISTRY}")
+    space_registry = SpaceRegistry.get_instance()
     
     # Instantiate MockActivityClient first
     mock_activity_client = MockActivityClient()
@@ -261,8 +263,7 @@ def setup_test_environment():
         agent_id=TEST_AGENT_ID,
         llm_provider=llm_provider,
         system_prompt_template=test_agent_config.system_prompt_template,
-        outgoing_action_callback=mock_activity_client.handle_outgoing_action, 
-        space_registry=space_registry,
+        outgoing_action_callback=mock_activity_client.handle_outgoing_action,
         mark_agent_for_cycle_callback=event_loop.mark_agent_for_cycle
     )
     space_registry.register_inner_space(agent_inner_space, TEST_AGENT_ID)
@@ -369,7 +370,7 @@ async def test_dm_ping_pong(setup_test_environment):
     assert messages_after_reply_ack[1]['sender_id'] == TEST_AGENT_ID # Agent is the sender
     assert messages_after_reply_ack[1]['status'] == "sent", "Agent's reply should be 'sent' after ack"
     assert messages_after_reply_ack[1]['internal_request_id'] == internal_req_id_agent_reply
-    assert messages_after_reply_ack[1]['original_external_id'] == f"mock_external_msg_id_{internal_req_id_agent_reply}", "External message ID mismatch after ack"
+    assert messages_after_reply_ack[1]['original_external_id'] == f"external_msg_001.1", "External message ID mismatch after ack"
 
     # --- Simulate a second incoming message from the same user ---
     second_incoming_dm_text = "Thanks for the reply!"
@@ -496,10 +497,9 @@ async def test_shared_space_mention_reply(setup_test_environment):
     chat_element_in_shared_space = shared_space.get_mounted_element(mounted_chat_element_id)
     assert chat_element_in_shared_space is not None, (
         f"Chat element '{mounted_chat_element_id}' not found in SharedSpace '{shared_space.id}'. "
-        f"Mounted elements: {list(shared_space._mounted_elements.keys())}"
+        f"Mounted elements: {list(shared_space.get_mounted_elements().keys())}"
     )
-
-    ss_msg_list_comp = chat_element_in_shared_space.get_component(MessageListComponent)
+    ss_msg_list_comp = chat_element_in_shared_space.get_component_by_type(MessageListComponent)
     assert ss_msg_list_comp is not None
     
     shared_space_messages = ss_msg_list_comp.get_messages()

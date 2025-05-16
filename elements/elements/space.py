@@ -7,9 +7,17 @@ import logging
 from typing import Dict, Any, Optional, List, Callable, Type, Set
 import uuid
 import time
+import asyncio
 
 from .base import BaseElement, MountType
 from .components.space import ContainerComponent, TimelineComponent
+from .components.tool_provider import ToolProviderComponent
+from .components.factory_component import ElementFactoryComponent
+
+# Type checking imports
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from host.event_loop import OutgoingActionCallback # For type hint
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -32,7 +40,8 @@ class Space(BaseElement):
     
     def __init__(self, element_id: str, name: str, description: str, 
                  adapter_id: Optional[str] = None, 
-                 external_conversation_id: Optional[str] = None, 
+                 external_conversation_id: Optional[str] = None,
+                 outgoing_action_callback: Optional['OutgoingActionCallback'] = None,
                  **kwargs):
         """
         Initialize the space.
@@ -43,6 +52,7 @@ class Space(BaseElement):
             description: Description of this space's purpose
             adapter_id: Optional ID of the adapter this space might be associated with (e.g., for SharedSpaces).
             external_conversation_id: Optional external ID (e.g., channel ID) this space might represent.
+            outgoing_action_callback: Optional callback for dispatching actions externally.
             **kwargs: Passthrough for BaseElement
         """
         super().__init__(element_id=element_id, name=name, description=description, **kwargs)
@@ -50,21 +60,35 @@ class Space(BaseElement):
         # Store adapter and external conversation IDs if provided (especially for SharedSpaces)
         self.adapter_id = adapter_id
         self.external_conversation_id = external_conversation_id
+        self._outgoing_action_callback = outgoing_action_callback
         
         # Initialize space with required components
         # Store references for easier delegation, though get_component could also be used.
         self._container: Optional[ContainerComponent] = self.add_component(ContainerComponent)
         self._timeline: Optional[TimelineComponent] = self.add_component(TimelineComponent)
         
+        # NEW: Add ElementFactoryComponent by default
+        factory_kwargs = {}
+        if self._outgoing_action_callback:
+            # If ElementFactoryComponent is updated to take this in __init__
+            factory_kwargs['outgoing_action_callback'] = self._outgoing_action_callback
+        
+        self._element_factory: Optional[ElementFactoryComponent] = self.add_component(ElementFactoryComponent, **factory_kwargs)
+        # assert  False, self._element_factory
         # NEW: Initialize uplink listeners set and delta cache
         self._uplink_listeners: Set[Callable[[List[Dict[str, Any]]], None]] = set()
         self._cached_deltas: List[Dict[str, Any]] = []
         
-        if not self._container or not self._timeline:
+        if not self._container or not self._timeline or not self._element_factory:
             # BaseElement.add_component logs errors, but we might want to raise here
-            logger.critical(f"CRITICAL: Failed to initialize required components (Container/Timeline) for space {self.id}. Space may be unstable.")
+            logger.critical(f"CRITICAL: Failed to initialize required components (Container/Timeline/Factory) for space {self.id}. Space may be unstable.")
             # raise RuntimeError(f"Failed to initialize required components for space {self.id}")
         
+        # If ElementFactoryComponent uses a setter instead of __init__ for callback:
+        if self._element_factory and self._outgoing_action_callback and not factory_kwargs.get('outgoing_action_callback'):
+            if hasattr(self._element_factory, 'set_outgoing_action_callback') and callable(getattr(self._element_factory, 'set_outgoing_action_callback')):
+                self._element_factory.set_outgoing_action_callback(self._outgoing_action_callback)
+
         logger.info(f"Created space: {name} ({self.id})")
     
     # --- Container Methods (Delegated) ---
@@ -231,7 +255,7 @@ class Space(BaseElement):
                     logger.debug(f"[{self.id}] Routing event (ID: '{new_event_id}', Type: '{event_payload.get('event_type')}') to mounted element: {mounted_element.id}")
                     try:
                         # Child element receives the original event_payload and timeline context
-                        mounted_element.receive_event(event_payload, timeline_context) 
+                        mounted_element.receive_event(event_payload, timeline_context)
                     except Exception as mounted_err:
                         logger.error(f"[{self.id}] Error in mounted element '{mounted_element.id}' receiving event '{new_event_id}': {mounted_err}", exc_info=True)
                 else:
@@ -244,7 +268,70 @@ class Space(BaseElement):
                  logger.debug(f"[{self.id}] Event '{new_event_id}' targets element '{original_target_element_id}', which is not directly mounted here.")
         else:
              # Event was not targeted at a specific child element
-             logger.debug(f"[{self.id}] Event '{new_event_id}' ({event_type}) processed by Space components.")
+             # Ensure this logging happens only if no specific child target AND not handled by own components in a way that stops propagation.
+             # For now, this is fine as a general log if no specific target_element_id was in the original event_payload.
+             if not original_target_element_id and not handled_by_component:
+                 logger.debug(f"[{self.id}] Event '{new_event_id}' ({event_type}) processed by Space components (or no specific child target and no component handled it).")
+             elif not original_target_element_id and handled_by_component:
+                 logger.debug(f"[{self.id}] Event '{new_event_id}' ({event_type}) handled by Space component(s); no specific child target.")
+
+        # --- NEW: Handle action_request_for_remote --- 
+        if event_type == "action_request_for_remote":
+            logger.info(f"[{self.id}] Processing event type 'action_request_for_remote' (Event ID: {new_event_id})")
+            target_id_for_action = event_payload.get("remote_target_element_id")
+            action_to_execute = event_payload.get("action_name")
+            params_for_action = event_payload.get("action_parameters")
+            source_uplink_id = event_payload.get("source_uplink_id")
+            source_agent_id = event_payload.get("source_agent_id")
+
+            if not target_id_for_action or not action_to_execute or params_for_action is None: # params can be empty dict
+                logger.error(f"[{self.id}] Malformed 'action_request_for_remote': missing target_id ('{target_id_for_action}'), action_name ('{action_to_execute}'), or parameters. Payload: {event_payload}")
+                return # Stop processing this specific path
+
+            logger.info(f"[{self.id}] Attempting to execute remote action '{action_to_execute}' on target element '{target_id_for_action}' with params: {params_for_action}")
+            
+            # Prepare calling context for the action execution
+            action_calling_context = {
+                "source_type": "remote_uplink_request",
+                "source_uplink_id": source_uplink_id,
+                "source_agent_id": source_agent_id, # The original agent who initiated via uplink
+                "original_event_id": new_event_id, # ID of the action_request_for_remote event itself
+                "timeline_id": timeline_context.get('timeline_id')
+            }
+
+            # Use the existing execute_action_on_element method
+            # This method is async, so if receive_event becomes async, this should be awaited.
+            # For now, if execute_action_on_element needs to be async and called from sync receive_event,
+            # it would require asyncio.create_task or similar, and handling of its result might be deferred.
+            # Assuming Space.execute_action_on_element can be called and completes sufficiently for now.
+            # If execute_action_on_element becomes truly async, receive_event might need to be async too.
+            # For now, let's assume it is okay to call it like this from a synchronous method
+            # or that execute_action_on_element handles its async nature appropriately (e.g. for tool calls)
+            # If execute_action_on_element is async, this needs to be: `asyncio.create_task(self.execute_action_on_element(...))`
+            # And this `receive_event` cannot directly return its result.
+            # Re-checking `execute_action_on_element`: it is indeed async.
+            # This means `receive_event` should ideally be async if it wants to `await` this.
+            # For now, we will log a warning if it's not awaited and proceed. This is a larger refactor point.
+            # TODO: Refactor receive_event to be async if it needs to await async operations like execute_action_on_element.
+            
+            # This is a significant architectural point: event handlers might need to become async.
+            # import asyncio # Keep for create_task
+            try:
+                # Use asyncio.create_task to run the async method from this sync method
+                asyncio.create_task(self.execute_action_on_element(
+                    target_id_for_action, 
+                    action_to_execute, 
+                    params_for_action, 
+                    action_calling_context
+                ))
+                logger.info(f"[{self.id}] Task created for remote action '{action_to_execute}' on '{target_id_for_action}'."
+                            f" IMPORTANT: Result of this async action is not directly handled by this synchronous receive_event.")
+            except RuntimeError as e:
+                # This can happen if no event loop is running, e.g. in some test setups or sync parts of code
+                logger.error(f"[{self.id}] Could not create task for async execute_action_on_element: {e}. "
+                             f"The action '{action_to_execute}' might not be executed. Ensure an event loop is running.")
+            except Exception as e: # Catching general Exception for safety
+                logger.error(f"[{self.id}] Error creating task for async execute_action_on_element for remote action: {e}", exc_info=True)
 
     # NEW methods for listener registration
     def register_uplink_listener(self, callback: Callable[[List[Dict[str, Any]]], None]):
@@ -397,7 +484,7 @@ class Space(BaseElement):
 
         # Execute the tool via the ToolProviderComponent
         logger.info(f"[{self.id}] Executing action '{action_name}' on element '{target_element.name}' ({target_element.id}). Params: {parameters}. Context: {calling_context}")
-        action_result = await tool_provider.execute_tool(action_name, **parameters)
+        action_result = await tool_provider.execute_tool(action_name, calling_context=calling_context, **parameters)
         
         # TODO: Consider recording the action_result or a summary as an event on the Space's timeline?
         # For example, if an agent successfully sends a message, that could be a timeline event.
@@ -420,3 +507,48 @@ class Space(BaseElement):
         self.add_event_to_timeline(action_event_payload, timeline_context)
         
         return action_result if isinstance(action_result, dict) else {"success": True, "result": action_result} 
+
+    def get_public_tool_definitions(self) -> List[Dict[str, Any]]:
+        """
+        Collects tool definitions from this Space and its mounted child elements
+        that have a ToolProviderComponent.
+
+        Returns:
+            A list of dictionaries, where each dictionary contains:
+            - 'provider_element_id': The ID of the element providing the tool.
+            - 'tool_name': The name of the tool.
+            - 'description': The tool's description.
+            - 'parameters_schema': The schema for the tool's parameters.
+        """
+        all_tool_definitions: List[Dict[str, Any]] = []
+
+        # 1. Get tools from this Space itself
+        space_tool_provider = self.get_component_by_type(ToolProviderComponent)
+        if space_tool_provider:
+            raw_tools = space_tool_provider.get_tools_for_llm() # Returns List[LLMToolDefinition]
+            for tool_def in raw_tools:
+                all_tool_definitions.append({
+                    "provider_element_id": self.id,
+                    "tool_name": tool_def["name"],
+                    "description": tool_def["description"],
+                    "parameters_schema": tool_def["parameters_schema"]
+                })
+            logger.debug(f"[{self.id}] Found {len(raw_tools)} tools on Space itself.")
+
+        # 2. Get tools from mounted child elements
+        if self._container: # Ensure ContainerComponent exists
+            for child_element in self._container.get_mounted_elements().values():
+                child_tool_provider = child_element.get_component_by_type(ToolProviderComponent)
+                if child_tool_provider:
+                    child_raw_tools = child_tool_provider.get_tools_for_llm()
+                    for tool_def in child_raw_tools:
+                        all_tool_definitions.append({
+                            "provider_element_id": child_element.id,
+                            "tool_name": tool_def["name"],
+                            "description": tool_def["description"],
+                            "parameters_schema": tool_def["parameters_schema"]
+                        })
+                    logger.debug(f"[{self.id}] Found {len(child_raw_tools)} tools on child element '{child_element.id}'.")
+        
+        logger.info(f"[{self.id}] Collected {len(all_tool_definitions)} public tool definitions in total.")
+        return all_tool_definitions 

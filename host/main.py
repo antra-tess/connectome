@@ -77,8 +77,8 @@ async def amain():
         logger.info(f"LLM Provider created: {settings.llm_provider.type}")
 
         # 2. Space Registry
-        space_registry = SpaceRegistry()
-        logger.info("SpaceRegistry initialized.")
+        space_registry = SpaceRegistry.get_instance() # Use singleton getter
+        logger.info("SpaceRegistry initialized (singleton instance).")
 
         # 3. Activity Client (Placeholder loop, injected later)
         parsed_adapter_configs = [adapter.model_dump(exclude_none=True) for adapter in settings.activity_client_adapter_configs]

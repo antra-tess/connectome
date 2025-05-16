@@ -11,9 +11,14 @@ import traceback
 import time
 import uuid
 
-from elements.elements.base import BaseElement
-from .elements.space import Space
-from .elements.inner_space import InnerSpace
+from elements.elements.base import BaseElement, MountType
+# Removed direct imports of Space and InnerSpace from here
+
+# TYPE_CHECKING block for Space and InnerSpace imports
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .elements.space import Space
+    from .elements.inner_space import InnerSpace
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -25,20 +30,41 @@ class SpaceRegistry:
     Manages spaces and facilitates event routing.
     (Placeholder implementation)
     """
+    _instance: Optional["SpaceRegistry"] = None  # Class variable to hold the singleton instance
+
+    @classmethod
+    def get_instance(cls) -> "SpaceRegistry":
+        """Gets the singleton instance of SpaceRegistry, creating it if necessary."""
+        if cls._instance is None:
+            logger.info("Creating new SpaceRegistry singleton instance.")
+            cls._instance = cls()  # Call __init__ indirectly here
+        return cls._instance
+
     def __init__(self):
-        self._spaces: Dict[str, Space] = {}
+        """Initialize the SpaceRegistry. Should typically only be called once via get_instance()."""
+        # Optional: Enforce singleton nature strictly
+        if SpaceRegistry._instance is not None and SpaceRegistry._instance is not self:
+            # This condition check `is not self` is to allow the first call from get_instance to proceed.
+            raise RuntimeError("SpaceRegistry is a singleton. Use SpaceRegistry.get_instance() to access it.")
+        
+        self._spaces: Dict[str, "Space"] = {}
         self._elements: Dict[str, BaseElement] = {}
-        self._agent_inner_spaces: Dict[str, InnerSpace] = {}
+        self._agent_inner_spaces: Dict[str, "InnerSpace"] = {}
         # TODO: Add mapping for conversation_id/adapter_type to space_id
         self._routing_map: Dict[str, str] = {}
+        self.response_callback: Optional[Callable] = None
+        self.space_observers: Dict[str, List[Callable]] = {}
+        self.socket_client: Optional[Any] = None
         logger.info("SpaceRegistry initialized.")
 
-    def register_space(self, space: Space) -> bool:
+    def register_space(self, space: "Space") -> bool:
         """Registers a Space element."""
+        from .elements.space import Space
         if not isinstance(space, Space):
             logger.error(f"Attempted to register non-Space object: {type(space)}")
             return False
         if space.id in self._spaces:
+            return True
             logger.warning(f"Space {space.id} already registered. Overwriting.")
         self._spaces[space.id] = space
         self._elements[space.id] = space # Also register as a general element
@@ -46,8 +72,9 @@ class SpaceRegistry:
         # TODO: Update routing map based on space properties?
         return True
         
-    def register_inner_space(self, inner_space: InnerSpace, agent_id: str) -> bool:
+    def register_inner_space(self, inner_space: "InnerSpace", agent_id: str) -> bool:
         """Specifically registers an agent's InnerSpace."""
+        from .elements.inner_space import InnerSpace
         if not isinstance(inner_space, InnerSpace):
             logger.error(f"Attempted to register non-InnerSpace object as InnerSpace: {type(inner_space)}")
             return False
@@ -59,7 +86,7 @@ class SpaceRegistry:
         # Also register it as a general space/element
         return self.register_space(inner_space)
 
-    def get_space(self, space_id: str) -> Optional[Space]:
+    def get_space(self, space_id: str) -> Optional["Space"]:
         """Gets a registered Space by its ID."""
         return self._spaces.get(space_id)
         
@@ -67,7 +94,7 @@ class SpaceRegistry:
          """Gets any registered Element (Space or Object) by its ID."""
          return self._elements.get(element_id)
          
-    def get_inner_space_for_agent(self, agent_id: str) -> Optional[InnerSpace]:
+    def get_inner_space_for_agent(self, agent_id: str) -> Optional["InnerSpace"]:
         """Gets the InnerSpace registered for a specific agent_id."""
         return self._agent_inner_spaces.get(agent_id)
 
@@ -180,7 +207,7 @@ class SpaceRegistry:
         
         return True
     
-    def get_spaces(self) -> Dict[str, Space]:
+    def get_spaces(self) -> Dict[str, "Space"]:
         """
         Get all registered spaces.
         
@@ -565,7 +592,7 @@ class SpaceRegistry:
                                    description: Optional[str] = "Shared Space",
                                    adapter_id: Optional[str] = None,             # NEW
                                    external_conversation_id: Optional[str] = None, # NEW
-                                   metadata: Optional[Dict[str, Any]] = None) -> Optional[Space]:
+                                   metadata: Optional[Dict[str, Any]] = None) -> Optional["Space"]:
         """
         Gets a SharedSpace by its identifier, or creates it if it doesn't exist.
         A SharedSpace is an instance of the base Space class.
@@ -581,9 +608,15 @@ class SpaceRegistry:
         Returns:
             The existing or newly created Space instance, or None if creation failed.
         """
+        from .elements.space import Space
         existing_space = self.get_space(identifier)
         if existing_space:
-            logger.debug(f"Found existing SharedSpace with identifier: {identifier}")
+            # Ensure the chat interface element exists even for existing spaces if somehow missed
+            # This is a bit of a safeguard, ideally it's created with the space.
+            # Re-evaluate if this check is still needed or how it should work with factory
+            if not existing_space.get_mounted_element(f"{identifier}_chat_interface"):
+                logger.warning(f"Existing SharedSpace {identifier} missing chat_interface. Attempting to add it via factory.")
+                self._create_chat_interface_in_shared_space_with_factory(existing_space)
             return existing_space
 
         logger.info(f"SharedSpace with identifier '{identifier}' not found. Creating new one.")
@@ -612,7 +645,7 @@ class SpaceRegistry:
                 adapter_id=parsed_adapter_id,                 # PASS PARSED/PROVIDED
                 external_conversation_id=parsed_external_conv_id # PASS PARSED/PROVIDED
             )
-            
+
             # metadata handling could be added here if Space constructor or a setter uses it
             # if metadata and hasattr(new_shared_space, 'set_metadata'):
             #    new_shared_space.set_metadata(metadata)
@@ -620,6 +653,8 @@ class SpaceRegistry:
 
             if self.register_space(new_shared_space):
                 logger.info(f"Successfully created and registered SharedSpace: {space_name} ({identifier})")
+                # NEW: Create and mount the chat interface element using ElementFactoryComponent
+                self._create_chat_interface_in_shared_space_with_factory(new_shared_space)
                 return new_shared_space
             else:
                 # register_space should log its own errors
@@ -628,3 +663,70 @@ class SpaceRegistry:
         except Exception as e:
             logger.error(f"Exception during SharedSpace creation for identifier '{identifier}': {e}", exc_info=True)
             return None
+
+    def _create_chat_interface_in_shared_space_with_factory(self, shared_space: "Space") -> None:
+        """
+        Uses an ElementFactoryComponent on the SharedSpace to create and mount a chat interface.
+        Assumes SharedSpace now has ElementFactoryComponent by default and it's configured
+        with the necessary outgoing_action_callback (which should be self.response_callback).
+        """
+        from .elements.components.factory_component import ElementFactoryComponent
+        if not shared_space or not shared_space.id or not shared_space.adapter_id or not shared_space.external_conversation_id:
+            logger.error(f"Cannot create chat interface: SharedSpace is None or missing critical attributes (id, adapter_id, external_conversation_id). Space: {shared_space}")
+            return
+
+        chat_interface_id = f"{shared_space.id}_chat_interface"
+        if shared_space.get_mounted_element(chat_interface_id):
+            logger.debug(f"Chat interface '{chat_interface_id}' already exists in {shared_space.id}. Skipping creation.")
+            return
+
+        logger.info(f"Creating chat interface for SharedSpace '{shared_space.id}' using its ElementFactoryComponent.")
+
+        # 1. Get the ElementFactoryComponent (should exist by default on SharedSpace now)
+        factory_component = shared_space.get_component_by_type(ElementFactoryComponent)
+        if not factory_component:
+            # This is now unexpected if Space.__init__ guarantees it.
+            logger.error(f"CRITICAL: ElementFactoryComponent not found on SharedSpace '{shared_space.id}'. Cannot create chat interface.")
+            return
+        
+        # Ensure the factory has the correct outgoing_action_callback (SpaceRegistry's response_callback)
+        # Space.__init__ should have passed it if provided at SharedSpace creation. 
+        # If not, or if we need to be certain for SharedSpaces created by SpaceRegistry itself:
+        if hasattr(self, 'response_callback') and self.response_callback:
+            if not (hasattr(factory_component, '_outgoing_action_callback_for_created') and \
+                    factory_component._outgoing_action_callback_for_created == self.response_callback):
+                if hasattr(factory_component, 'set_outgoing_action_callback') and callable(getattr(factory_component, 'set_outgoing_action_callback')):
+                    factory_component.set_outgoing_action_callback(self.response_callback)
+                    logger.info(f"Ensured/Set SpaceRegistry.response_callback on ElementFactoryComponent for SharedSpace '{shared_space.id}'.")
+                else:
+                    logger.warning(f"ElementFactoryComponent on SharedSpace '{shared_space.id}' does not have set_outgoing_action_callback. Cannot ensure it has registry's callback.")
+        else:
+            logger.warning(f"SpaceRegistry does not have response_callback. Chat interface in SharedSpace '{shared_space.id}' may not send messages.")
+
+        # 2. Use the factory to create the chat interface from prefab
+        element_config_for_chat_interface = {
+            "name": f"Chat Interface for {shared_space.name}",
+            "description": f"Handles messages and interactions for shared space {shared_space.name}",
+            "adapter_id": shared_space.adapter_id, 
+            "external_conversation_id": shared_space.external_conversation_id
+        }
+
+        creation_result = factory_component.handle_create_element_from_prefab(
+            prefab_name="standard_chat_interface",
+            element_id=chat_interface_id,
+            element_config=element_config_for_chat_interface,
+            mount_id_override=chat_interface_id
+        )
+
+        if creation_result and creation_result.get("success"):
+            new_chat_element = creation_result.get("element")
+            if new_chat_element:
+                logger.info(f"Successfully created and mounted chat interface '{new_chat_element.id}' in SharedSpace '{shared_space.id}' using factory.")
+                # The ElementFactoryComponent should have injected the outgoing_action_callback
+                # into the MessageActionHandler of the new_chat_element if the prefab specifies it
+                # and the factory has the callback stored. No need for manual injection here anymore.
+            else:
+                logger.error(f"Chat interface creation reported success but no element returned for SharedSpace '{shared_space.id}'. Result: {creation_result}")
+        else:
+            error_msg = creation_result.get("error", "Unknown error from ElementFactoryComponent") if creation_result else "No result from ElementFactoryComponent"
+            logger.error(f"Failed to create chat interface in SharedSpace '{shared_space.id}' using factory: {error_msg}")

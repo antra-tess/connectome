@@ -7,6 +7,7 @@ The AgentLoopComponent (or similar) uses this component to discover and execute 
 import logging
 from typing import Dict, Any, Callable, List, Optional, Tuple, TypedDict
 import asyncio
+import inspect
 
 from ..base import Component, BaseElement
 # Import the registry decorator
@@ -203,12 +204,13 @@ class ToolProviderComponent(Component):
             ))
         return llm_tools
 
-    async def execute_tool(self, tool_name: str, **kwargs: Any) -> Dict[str, Any]:
+    async def execute_tool(self, tool_name: str, calling_context: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Dict[str, Any]:
         """
         Executes a registered tool by its name with the given keyword arguments.
 
         Args:
             tool_name: The name of the tool to execute.
+            calling_context: Optional dictionary containing context about the caller.
             **kwargs: Keyword arguments to pass to the tool's function.
 
         Returns:
@@ -222,14 +224,23 @@ class ToolProviderComponent(Component):
         tool_info = self._tools[tool_name]
         tool_func = tool_info["function"]
         
+        # Inspect the tool function's signature to see if it accepts calling_context
+        tool_func_sig = inspect.signature(tool_func)
+        params_to_pass = kwargs.copy() # Start with parameters from LLM
+
+        if 'calling_context' in tool_func_sig.parameters:
+            params_to_pass['calling_context'] = calling_context
+            logger.debug(f"Passing calling_context to tool '{tool_name}'. Context keys: {list(calling_context.keys()) if calling_context else 'None'}")
+        elif calling_context:
+            logger.debug(f"Tool '{tool_name}' does not accept calling_context, but it was provided. It will not be passed. Context keys: {list(calling_context.keys())}")
+
         try:
-            logger.info(f"Executing tool '{tool_name}' on Element {self.owner.id if self.owner else 'unknown'} with params: {kwargs}")
+            logger.info(f"Executing tool '{tool_name}' on Element {self.owner.id if self.owner else 'unknown'} with params: {kwargs}. Context provided: {bool(calling_context)}")
             
-            # MODIFIED: Await if the tool function is a coroutine
             if asyncio.iscoroutinefunction(tool_func):
-                result = await tool_func(**kwargs)
+                result = await tool_func(**params_to_pass)
             else:
-                result = tool_func(**kwargs)
+                result = tool_func(**params_to_pass)
             
             if not isinstance(result, dict):
                 logger.warning(f"Tool '{tool_name}' did not return a dictionary. Wrapping result. Original: {result}")

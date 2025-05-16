@@ -17,6 +17,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..inner_space import InnerSpace
 
+# NEW: Import SpaceRegistry directly
+from elements.space_registry import SpaceRegistry
+
 logger = logging.getLogger(__name__)
 
 @register_component
@@ -101,31 +104,15 @@ class UplinkManagerComponent(Component):
 
         # --- Get remote space info for the UplinkProxy constructor ---
         remote_space_metadata: Optional[Dict[str, Any]] = None
-        registry_to_use: Optional[SpaceRegistry] = None
-
-        if self.owner and hasattr(self.owner, 'get_registry'):
-            registry_to_use = self.owner.get_registry()
-            if registry_to_use:
-                logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Successfully retrieved SpaceRegistry via owner.get_registry().")
-            else:
-                logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] owner.get_registry() returned None. Attempting direct .space_registry attribute.")
-                if hasattr(self.owner, 'space_registry') and self.owner.space_registry:
-                    registry_to_use = self.owner.space_registry
-                    logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Successfully retrieved SpaceRegistry via owner.space_registry attribute.")
-                else:
-                    logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] SpaceRegistry also not available via direct owner.space_registry attribute.")
-        elif self.owner and hasattr(self.owner, 'space_registry') and self.owner.space_registry:
-            logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] owner.get_registry() not available, but direct .space_registry attribute found.")
-            registry_to_use = self.owner.space_registry
-        else:
-            logger.error(f"[{self.owner.id if self.owner else 'NoOwner'}/{self.COMPONENT_TYPE}] Owner is None or has no means to get SpaceRegistry.")
-
+        
+        # Get SpaceRegistry instance directly
+        registry_to_use = SpaceRegistry.get_instance()
+        
         if registry_to_use:
             remote_space_instance = registry_to_use.get_space(shared_space_id)
             if remote_space_instance and hasattr(remote_space_instance, 'get_space_metadata_for_uplink'):
                 remote_space_metadata = remote_space_instance.get_space_metadata_for_uplink()
             elif remote_space_instance:
-                # Fallback if get_space_metadata_for_uplink is not on the specific space type
                 remote_space_metadata = {
                     "space_id": remote_space_instance.id,
                     "name": remote_space_instance.name,
@@ -138,11 +125,11 @@ class UplinkManagerComponent(Component):
             else:
                 logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Could not retrieve instance of remote space {shared_space_id} from registry.")
         else:
-            logger.error(f"[{self.owner.id if self.owner else 'NoOwner'}/{self.COMPONENT_TYPE}] SpaceRegistry could not be obtained. Cannot get remote_space_info.")
+            # This case should be rare if SpaceRegistry.get_instance() is robust
+            logger.error(f"[{self.owner.id if self.owner else 'NoOwner'}/{self.COMPONENT_TYPE}] SpaceRegistry.get_instance() returned None. Cannot get remote_space_info.")
         # --- End get remote space info ---
 
         safe_remote_id_part = self._generate_safe_id_string(shared_space_id)
-        # Ensure self.owner.agent_id is available if InnerSpace is correctly set as owner
         agent_id_part = self._generate_safe_id_string(self.owner.agent_id) if hasattr(self.owner, 'agent_id') else "unknown_agent"
         new_uplink_element_id = f"uplink_{agent_id_part}_to_{safe_remote_id_part}"
 
@@ -153,7 +140,7 @@ class UplinkManagerComponent(Component):
             "remote_space_id": shared_space_id,
             "name": uplink_name,
             "description": uplink_description,
-            "remote_space_info": remote_space_metadata
+            "remote_space_info": remote_space_metadata,
         }
 
         try:

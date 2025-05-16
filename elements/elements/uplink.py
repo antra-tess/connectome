@@ -16,6 +16,7 @@ from .base import BaseElement, MountType
 from .space import Space # Inherits Space functionality (Container, Timeline)
 from .components.tool_provider import ToolProviderComponent, ToolParameter
 from .components.uplink import UplinkConnectionComponent, RemoteStateCacheComponent, UplinkVeilProducer
+from .components.uplink.remote_tool_provider import UplinkRemoteToolProviderComponent
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -65,20 +66,25 @@ class UplinkProxy(Space):
         """
         super().__init__(element_id, name, description)
         
+        # Store for RemoteStateCacheComponent and potentially others
+        self._space_registry = space_registry 
+        self.remote_space_id = remote_space_id # Made public for easier access by components
         # Initialize core components for Uplink functionality
         self._connection_component: UplinkConnectionComponent = self.add_component(UplinkConnectionComponent, remote_space_id=remote_space_id, space_registry=space_registry)
         self._cache_component: RemoteStateCacheComponent = self.add_component(RemoteStateCacheComponent) # Will sync using remote_space_id and space_registry
         self._veil_producer_component: UplinkVeilProducer = self.add_component(UplinkVeilProducer) # Produces VEIL from cached state
-        self._tool_provider_component: ToolProviderComponent = self.add_component(ToolProviderComponent) # For uplink-specific actions
         
-        # Store for RemoteStateCacheComponent and potentially others
-        self._space_registry = space_registry 
-        self.remote_space_id = remote_space_id # Made public for easier access by components
+        # Standard ToolProvider for local Uplink management tools
+        self._tool_provider_component: ToolProviderComponent = self.add_component(ToolProviderComponent) 
+        self._register_uplink_tools() # Register local tools on the standard provider
 
+        # NEW: Add RemoteToolProvider for tools from the remote space
+        self._remote_tool_provider_component: UplinkRemoteToolProviderComponent = self.add_component(UplinkRemoteToolProviderComponent)
+        
         # This will hold information about the remote space, populated by RemoteStateCacheComponent
         self.remote_space_info: Dict[str, Any] = {
-            "name": remote_space_info.get("name", remote_space_id),
-            "type": remote_space_info.get("type", "Unknown"),
+            "name": remote_space_info.get("name", remote_space_id) if remote_space_info else remote_space_id,
+            "type": remote_space_info.get("type", "Unknown") if remote_space_info else "Unknown",
             "info": remote_space_info or {}
         }
         

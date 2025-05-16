@@ -83,19 +83,6 @@ class BaseElement:
         # to the end of the subclass __init__ or the factory construction process.
         # self._validate_all_component_dependencies() # <<< Tentatively place call here, but see note.
     
-    def set_registry(self, registry) -> None:
-        """
-        Set the SpaceRegistry reference.
-        
-        This allows elements to send messages to the activity layer
-        through the SpaceRegistry.
-        
-        Args:
-            registry: SpaceRegistry instance
-        """
-        self._registry = registry
-        logger.debug(f"Set registry reference for element {self.id}")
-    
     def get_registry(self):
         """
         Get the SpaceRegistry reference.
@@ -103,7 +90,8 @@ class BaseElement:
         Returns:
             The SpaceRegistry instance if set, None otherwise
         """
-        return self._registry
+        from ..space_registry import SpaceRegistry
+        return SpaceRegistry.get_instance()
     
     def add_component(self, component_type: Type['Component'], **kwargs) -> Optional['Component']:
         """
@@ -196,14 +184,15 @@ class BaseElement:
     def get_component_by_type(self, component_type: Union[str, Type[Component]]) -> Optional[Component]:
         """Get a component by its type (class or string identifier)."""
         target_type_name = component_type if isinstance(component_type, str) else component_type.COMPONENT_TYPE
+        return_comp = None
         for comp in self._components.values():
             # Check class hierarchy for matches if component_type is a class
             if not isinstance(component_type, str) and isinstance(comp, component_type):
-                return comp
+                return_comp = comp
             # Fallback to checking COMPONENT_TYPE string
-            if hasattr(comp, 'COMPONENT_TYPE') and comp.COMPONENT_TYPE == target_type_name:
-                return comp
-        return None
+            if comp.COMPONENT_TYPE == target_type_name:
+                return_comp = comp
+        return return_comp
 
     def get_components_by_type(self, component_type: Union[str, Type[Component]]) -> List[Component]:
         """Get all components matching a given type (class or string identifier)."""

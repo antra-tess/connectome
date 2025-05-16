@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from llm.provider_interface import LLMProviderInterface
     from host.event_loop import OutgoingActionCallback
-    from elements.space_registry import SpaceRegistry
+    # from elements.space_registry import SpaceRegistry # No longer needed for type hint here
 
 # Re-define type hint for callback if not easily importable from event_loop
 MarkAgentForCycleCallable = Callable[[str, Dict[str, Any], float], None]
@@ -76,7 +76,7 @@ class InnerSpace(Space):
         agent_loop_component_type: Type[BaseAgentLoopComponent] = MultiStepToolLoopComponent,
         system_prompt_template: Optional[str] = None,
         outgoing_action_callback: Optional['OutgoingActionCallback'] = None,
-        space_registry: Optional['SpaceRegistry'] = None,
+        # space_registry: Optional['SpaceRegistry'] = None, # REMOVE PARAMETER
         mark_agent_for_cycle_callback: Optional[MarkAgentForCycleCallable] = None,
         additional_components: Optional[List[Type[Component]]] = None,
         **kwargs
@@ -93,46 +93,60 @@ class InnerSpace(Space):
             agent_loop_component_type: Type of AgentLoopComponent to use
             system_prompt_template: Optional system prompt template for the agent
             outgoing_action_callback: Callback function for sending actions to external systems
-            space_registry: Reference to the SpaceRegistry instance
+            # space_registry: Reference to the SpaceRegistry instance # REMOVE FROM DOCSTRING
             mark_agent_for_cycle_callback: Callback to HostEventLoop.mark_agent_for_cycle.
             additional_components: Optional list of additional component types to add
             **kwargs: Additional keyword arguments for Space initialization
         """
-        # Initialize the base Space (adds ContainerComponent and TimelineComponent)
-        super().__init__(element_id=element_id, name=name, description=description, **kwargs)
+        # Initialize the base Space (adds ContainerComponent, TimelineComponent, and now ElementFactoryComponent)
+        # Pass outgoing_action_callback to Space constructor so it can give it to its ElementFactoryComponent
+        super().__init__(element_id=element_id, name=name, description=description, 
+                         outgoing_action_callback=outgoing_action_callback, # PASS TO PARENT
+                         **kwargs)
         
-        # Store key dependencies
         self.agent_id = agent_id
         self.agent_name = agent_name
         self._llm_provider = llm_provider
-        self._outgoing_action_callback = outgoing_action_callback
-        self._space_registry = space_registry
+        # self._outgoing_action_callback = outgoing_action_callback # Already set by super().__init__ if Space stores it
+        # self._space_registry = space_registry # REMOVE ATTRIBUTE
         self._mark_agent_for_cycle = mark_agent_for_cycle_callback
         self._system_prompt_template = system_prompt_template
         
-        # Initialize component references (will be populated during initialization)
         self._tool_provider = None
-        self._element_factory = None
-        self._dm_manager = None # NEWLY ADDED
-        self._uplink_manager = None # NEWLY ADDED
-        # self._global_attention = None # REMOVED
+        # self._element_factory = None # ElementFactory is now added by Space superclass
+        self._dm_manager = None
+        self._uplink_manager = None
         self._hud = None
-        # self._context_manager = None # REMOVED
         self._agent_loop = None
         
-        # --- Add Core InnerSpace Components ---
         logger.info(f"Adding core components to InnerSpace: {name} ({element_id}) for agent {agent_id}")
         
-        # Add tool provider for registering and executing tools
         self._tool_provider = self.add_component(ToolProviderComponent)
         if not self._tool_provider:
             logger.error(f"Failed to add ToolProviderComponent to InnerSpace {self.id}")
             
-        # Add element factory for creating new elements
-        self._element_factory = self.add_component(ElementFactoryComponent)
+        # ElementFactoryComponent is now added by the Space superclass constructor.
+        # We need to ensure it received the correct space_registry and outgoing_action_callback.
+        # The outgoing_action_callback was passed to super().
+        # For space_registry, Space.__init__ tries to pass self._space_registry if it exists there.
+        # InnerSpace *does* have self._space_registry, so if Space.__init__ logic for factory_kwargs works,
+        # it might pick it up. However, it's safer to ensure it here if the factory needs it.
+        # Let's retrieve the factory added by super and ensure its dependencies are set.
+        self._element_factory = self.get_component_by_type(ElementFactoryComponent)
         if not self._element_factory:
-            logger.error(f"Failed to add ElementFactoryComponent to InnerSpace {self.id}")
+            logger.error(f"CRITICAL: ElementFactoryComponent was not added by Space superclass to InnerSpace {self.id}")
         else:
+            # Ensure space_registry is set on the factory if it has a setter and Space.__init__ didn't pass it
+            # This is no longer needed as ElementFactoryComponent will get SpaceRegistry.get_instance() itself.
+            # if self._space_registry and hasattr(self._element_factory, 'set_space_registry') and callable(getattr(self._element_factory, 'set_space_registry')):
+            #     # Check if it already has it (e.g. if Space init passed it via kwargs successfully)
+            #     if not (hasattr(self._element_factory, '_space_registry_for_created_elements') and getattr(self._element_factory, '_space_registry_for_created_elements')):
+            #         self._element_factory.set_space_registry(self._space_registry)
+            #         logger.info(f"Set space_registry on ElementFactoryComponent for InnerSpace {self.id}")
+            
+            # outgoing_action_callback should have been handled by Space.__init__ or its setter fallback.
+            # self._propagate_callback_to_component(ElementFactoryComponent, self._outgoing_action_callback) # Already done by Space or via __init__
+
             # --- Automatically create a default scratchpad for the agent ---
             scratchpad_id = f"scratchpad_{self.agent_id}"
             logger.info(f"[{self.id}] Attempting to create default scratchpad element '{scratchpad_id}'.")
@@ -150,7 +164,6 @@ class InnerSpace(Space):
             else:
                 error_msg = creation_result.get("error", "Unknown error") if creation_result else "Factory returned None"
                 logger.error(f"[{self.id}] Failed to create default scratchpad for agent {self.agent_id}: {error_msg}")
-            # ------------------------------------------------------------------
             
         # Add DirectMessageManagerComponent NEWLY ADDED
         self._dm_manager = self.add_component(DirectMessageManagerComponent)
@@ -205,9 +218,6 @@ class InnerSpace(Space):
         # Propagate the outgoing action callback if provided
         if outgoing_action_callback:
             self.set_outgoing_action_callback(outgoing_action_callback)
-            
-        if not self._space_registry:
-            logger.warning(f"InnerSpace {self.id} initialized without SpaceRegistry. Cross-space actions will not be possible.")
             
         # Check if mark_agent_for_cycle callback was provided
         if not self._mark_agent_for_cycle:
@@ -352,13 +362,23 @@ class InnerSpace(Space):
         target_space = None
         target_element = None
         tool_provider = None
+        space_registry_instance = None # For clarity
 
         try:
+            # 0. Get SpaceRegistry instance
+            from elements.space_registry import SpaceRegistry # Local import for usage
+            space_registry_instance = SpaceRegistry.get_instance()
+            if not space_registry_instance:
+                # This should ideally not happen if get_instance() works correctly
+                raise RuntimeError("Failed to get SpaceRegistry instance.")
+
             # 1. Find Target Space
             if space_id == self.id:
                 target_space = self
-            elif self._space_registry:
-                target_space = self._space_registry.get_space(space_id)
+            # elif self._space_registry: # Change to use space_registry_instance
+            #     target_space = self._space_registry.get_space(space_id)
+            else:
+                target_space = space_registry_instance.get_space(space_id)
             
             if not target_space:
                 raise ValueError(f"Target space '{space_id}' not found.")

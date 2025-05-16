@@ -261,8 +261,7 @@ class HUDComponent(Component):
         render_style = options.get("render_style", "verbose_tags") # Default to clean
         use_verbose_tags = (render_style == "verbose_tags")
 
-        # Basic info string for logging/default rendering
-        logger.critical(f"external_id: {external_id}")
+
         node_info = f"Type='{node_type}', Role='{structural_role}', Nature='{content_nature}', ID='{node_id}'"
         if external_id:
             node_info += f", ExternalID='{external_id}'"
