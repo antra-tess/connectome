@@ -18,7 +18,6 @@ from .components.tool_provider import ToolProviderComponent
 from .components.factory_component import ElementFactoryComponent
 from .components.base_component import VeilProducer, Component
 from .components.hud.hud_component import HUDComponent # Explicitly import if kept
-from .components.dm_manager_component import DirectMessageManagerComponent # NEWLY ADDED
 from .components.uplink_manager_component import UplinkManagerComponent # NEWLY ADDED
 
 # Import the specific Space Veil Producer
@@ -113,25 +112,13 @@ class InnerSpace(Space):
         self._system_prompt_template = system_prompt_template
         
         self._tool_provider = None
-        # self._element_factory = None # ElementFactory is now added by Space superclass
-        self._dm_manager = None
         self._uplink_manager = None
         self._hud = None
         self._agent_loop = None
         
         logger.info(f"Adding core components to InnerSpace: {name} ({element_id}) for agent {agent_id}")
-        
-        self._tool_provider = self.add_component(ToolProviderComponent)
-        if not self._tool_provider:
-            logger.error(f"Failed to add ToolProviderComponent to InnerSpace {self.id}")
-            
-        # ElementFactoryComponent is now added by the Space superclass constructor.
-        # We need to ensure it received the correct space_registry and outgoing_action_callback.
-        # The outgoing_action_callback was passed to super().
-        # For space_registry, Space.__init__ tries to pass self._space_registry if it exists there.
-        # InnerSpace *does* have self._space_registry, so if Space.__init__ logic for factory_kwargs works,
-        # it might pick it up. However, it's safer to ensure it here if the factory needs it.
-        # Let's retrieve the factory added by super and ensure its dependencies are set.
+                    
+        self._tool_provider = self.get_component_by_type(ToolProviderComponent)
         self._element_factory = self.get_component_by_type(ElementFactoryComponent)
         if not self._element_factory:
             logger.error(f"CRITICAL: ElementFactoryComponent was not added by Space superclass to InnerSpace {self.id}")
@@ -165,12 +152,7 @@ class InnerSpace(Space):
                 error_msg = creation_result.get("error", "Unknown error") if creation_result else "Factory returned None"
                 logger.error(f"[{self.id}] Failed to create default scratchpad for agent {self.agent_id}: {error_msg}")
             
-        # Add DirectMessageManagerComponent NEWLY ADDED
-        self._dm_manager = self.add_component(DirectMessageManagerComponent)
-        if not self._dm_manager:
-            logger.error(f"Failed to add DirectMessageManagerComponent to InnerSpace {self.id}")
-
-        # NEW: Add UplinkManagerComponent
+        # Add UplinkManagerComponent
         self._uplink_manager = self.add_component(UplinkManagerComponent)
         if not self._uplink_manager:
             logger.error(f"Failed to add UplinkManagerComponent to InnerSpace {self.id}")
@@ -188,7 +170,6 @@ class InnerSpace(Space):
         if additional_components:
             for component_type in additional_components:
                 if component_type in [ToolProviderComponent, ElementFactoryComponent, 
-                                     DirectMessageManagerComponent, # NEWLY ADDED
                                      UplinkManagerComponent, # NEWLY ADDED
                                      # GlobalAttentionComponent, # REMOVED
                                      HUDComponent 
@@ -242,7 +223,6 @@ class InnerSpace(Space):
         # Propagate to components that might need it
         self._propagate_callback_to_component(ToolProviderComponent, callback)
         self._propagate_callback_to_component(ElementFactoryComponent, callback)
-        self._propagate_callback_to_component(DirectMessageManagerComponent, callback) # NEWLY ADDED
         self._propagate_callback_to_component(UplinkManagerComponent, callback) # NEWLY ADDED
         self._propagate_callback_to_component(BaseAgentLoopComponent, callback)
         # Add other components as needed
@@ -327,7 +307,7 @@ class InnerSpace(Space):
         logger.info(f"[{self.id}] Component tool registration complete. Registered: {registered_count}, Skipped (already exist): {skipped_count}.")
 
     # --- Action Execution --- 
-    def execute_element_action(
+    async def execute_element_action(
         self,
         space_id: str,
                                element_id: str, 
@@ -407,8 +387,8 @@ class InnerSpace(Space):
                  
             # 4. Execute Tool
             logger.info(f"Executing action '{action_name}' on element '{element_id}' in space '{space_id}'.")
-            # ToolProviderComponent.execute_tool is assumed to return a dict like action_result
-            action_result = tool_provider.execute_tool(action_name, parameters)
+            # AWAIT THE ASYNC CALL to tool_provider.execute_tool
+            action_result = await tool_provider.execute_tool(tool_name=action_name, calling_context=calling_context, **parameters)
             logger.info(f"Action '{action_name}' executed. Success: {action_result.get('success')}")
 
         except Exception as e:
@@ -537,22 +517,10 @@ class InnerSpace(Space):
              self._agent_loop = self.get_component_by_type(BaseAgentLoopComponent)
         return self._agent_loop
         
-    def get_tool_provider(self) -> Optional[ToolProviderComponent]:
-        """Get the tool provider component."""
-        return self._tool_provider
-        
-    def get_element_factory(self) -> Optional[ElementFactoryComponent]:
-        """Get the element factory component."""
-        return self._element_factory
-        
-    def get_dm_manager(self) -> Optional[DirectMessageManagerComponent]: # NEWLY ADDED
-        """Get the DirectMessageManager component.""" # NEWLY ADDED
-        return self._dm_manager # NEWLY ADDED
-        
-    def get_uplink_manager(self) -> Optional[UplinkManagerComponent]: # NEWLY ADDED
-        """Get the UplinkManagerComponent.""" # NEWLY ADDED
-        return self._uplink_manager # NEWLY ADDED
-        
+    def get_uplink_manager(self) -> Optional[UplinkManagerComponent]:
+        """Get the UplinkManagerComponent."""
+        return self._uplink_manager
+    
     def get_hud(self) -> Optional[HUDComponent]:
         """Get the HUD component."""
         return self._hud

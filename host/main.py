@@ -121,6 +121,7 @@ async def amain():
         # 7. Inject correct HostEventLoop instance into ActivityClient
         if not activity_client: raise RuntimeError("Activity client failed initialization") # Should not happen
         activity_client._host_event_loop = event_loop 
+        space_registry.response_callback = event_loop.get_outgoing_action_callback()
         logger.info("HostEventLoop reference injected into ActivityClient.")
         
     except Exception as e:

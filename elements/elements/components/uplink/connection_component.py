@@ -32,8 +32,7 @@ class UplinkConnectionComponent(Component):
     """
     Manages the connection lifecycle, state, and spans for an Uplink element.
     """
-    
-    COMPONENT_TYPE: str = "uplink_connection"
+    COMPONENT_TYPE = "UplinkConnectionComponent"
     DEPENDENCIES: List[str] = ["timeline"] # Needs timeline to record its own events
     
     # Events this component handles internally or listens for
@@ -87,6 +86,11 @@ class UplinkConnectionComponent(Component):
             return None
         return self.owner.get_component_by_type("timeline") # Changed from self.element
 
+    @property
+    def is_connected(self) -> bool:
+        """Returns True if the connection is established."""
+        return self._state["connected"]
+
     def connect(self) -> bool:
         """
         Attempts to establish a connection to the remote space.
@@ -99,7 +103,7 @@ class UplinkConnectionComponent(Component):
              logger.warning(f"{self.COMPONENT_TYPE}: Cannot connect, component not ready.")
              return False
              
-        if self._state["connected"]:
+        if self.is_connected:
             logger.debug(f"Already connected to {self.remote_space_id}")
             return True
 

@@ -642,8 +642,9 @@ class SpaceRegistry:
                 element_id=identifier, 
                 name=space_name, 
                 description=description,
-                adapter_id=parsed_adapter_id,                 # PASS PARSED/PROVIDED
-                external_conversation_id=parsed_external_conv_id # PASS PARSED/PROVIDED
+                adapter_id=parsed_adapter_id,                 
+                external_conversation_id=parsed_external_conv_id,
+                outgoing_action_callback=self.response_callback
             )
 
             # metadata handling could be added here if Space constructor or a setter uses it
@@ -653,8 +654,8 @@ class SpaceRegistry:
 
             if self.register_space(new_shared_space):
                 logger.info(f"Successfully created and registered SharedSpace: {space_name} ({identifier})")
-                # NEW: Create and mount the chat interface element using ElementFactoryComponent
-                self._create_chat_interface_in_shared_space_with_factory(new_shared_space)
+                # REMOVE THE CALL TO _create_chat_interface_in_shared_space_with_factory
+                # The ChatManagerComponent on the SharedSpace will handle this.
                 return new_shared_space
             else:
                 # register_space should log its own errors
@@ -663,70 +664,3 @@ class SpaceRegistry:
         except Exception as e:
             logger.error(f"Exception during SharedSpace creation for identifier '{identifier}': {e}", exc_info=True)
             return None
-
-    def _create_chat_interface_in_shared_space_with_factory(self, shared_space: "Space") -> None:
-        """
-        Uses an ElementFactoryComponent on the SharedSpace to create and mount a chat interface.
-        Assumes SharedSpace now has ElementFactoryComponent by default and it's configured
-        with the necessary outgoing_action_callback (which should be self.response_callback).
-        """
-        from .elements.components.factory_component import ElementFactoryComponent
-        if not shared_space or not shared_space.id or not shared_space.adapter_id or not shared_space.external_conversation_id:
-            logger.error(f"Cannot create chat interface: SharedSpace is None or missing critical attributes (id, adapter_id, external_conversation_id). Space: {shared_space}")
-            return
-
-        chat_interface_id = f"{shared_space.id}_chat_interface"
-        if shared_space.get_mounted_element(chat_interface_id):
-            logger.debug(f"Chat interface '{chat_interface_id}' already exists in {shared_space.id}. Skipping creation.")
-            return
-
-        logger.info(f"Creating chat interface for SharedSpace '{shared_space.id}' using its ElementFactoryComponent.")
-
-        # 1. Get the ElementFactoryComponent (should exist by default on SharedSpace now)
-        factory_component = shared_space.get_component_by_type(ElementFactoryComponent)
-        if not factory_component:
-            # This is now unexpected if Space.__init__ guarantees it.
-            logger.error(f"CRITICAL: ElementFactoryComponent not found on SharedSpace '{shared_space.id}'. Cannot create chat interface.")
-            return
-        
-        # Ensure the factory has the correct outgoing_action_callback (SpaceRegistry's response_callback)
-        # Space.__init__ should have passed it if provided at SharedSpace creation. 
-        # If not, or if we need to be certain for SharedSpaces created by SpaceRegistry itself:
-        if hasattr(self, 'response_callback') and self.response_callback:
-            if not (hasattr(factory_component, '_outgoing_action_callback_for_created') and \
-                    factory_component._outgoing_action_callback_for_created == self.response_callback):
-                if hasattr(factory_component, 'set_outgoing_action_callback') and callable(getattr(factory_component, 'set_outgoing_action_callback')):
-                    factory_component.set_outgoing_action_callback(self.response_callback)
-                    logger.info(f"Ensured/Set SpaceRegistry.response_callback on ElementFactoryComponent for SharedSpace '{shared_space.id}'.")
-                else:
-                    logger.warning(f"ElementFactoryComponent on SharedSpace '{shared_space.id}' does not have set_outgoing_action_callback. Cannot ensure it has registry's callback.")
-        else:
-            logger.warning(f"SpaceRegistry does not have response_callback. Chat interface in SharedSpace '{shared_space.id}' may not send messages.")
-
-        # 2. Use the factory to create the chat interface from prefab
-        element_config_for_chat_interface = {
-            "name": f"Chat Interface for {shared_space.name}",
-            "description": f"Handles messages and interactions for shared space {shared_space.name}",
-            "adapter_id": shared_space.adapter_id, 
-            "external_conversation_id": shared_space.external_conversation_id
-        }
-
-        creation_result = factory_component.handle_create_element_from_prefab(
-            prefab_name="standard_chat_interface",
-            element_id=chat_interface_id,
-            element_config=element_config_for_chat_interface,
-            mount_id_override=chat_interface_id
-        )
-
-        if creation_result and creation_result.get("success"):
-            new_chat_element = creation_result.get("element")
-            if new_chat_element:
-                logger.info(f"Successfully created and mounted chat interface '{new_chat_element.id}' in SharedSpace '{shared_space.id}' using factory.")
-                # The ElementFactoryComponent should have injected the outgoing_action_callback
-                # into the MessageActionHandler of the new_chat_element if the prefab specifies it
-                # and the factory has the callback stored. No need for manual injection here anymore.
-            else:
-                logger.error(f"Chat interface creation reported success but no element returned for SharedSpace '{shared_space.id}'. Result: {creation_result}")
-        else:
-            error_msg = creation_result.get("error", "Unknown error from ElementFactoryComponent") if creation_result else "No result from ElementFactoryComponent"
-            logger.error(f"Failed to create chat interface in SharedSpace '{shared_space.id}' using factory: {error_msg}")

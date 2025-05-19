@@ -1,14 +1,17 @@
 import logging
 from typing import Dict, Any, Optional, List, TYPE_CHECKING
+import asyncio
+import time # For cache timestamp
 
 from elements.elements.components.base_component import Component
-from elements.elements.components.tool_provider import LLMToolDefinition # For type hinting
+from elements.elements.components.tool_provider import LLMToolDefinition, ToolProviderComponent
 from elements.component_registry import register_component
 
 if TYPE_CHECKING:
     from elements.elements.uplink import UplinkProxy
     from elements.elements.components.uplink.connection_component import UplinkConnectionComponent
     from elements.elements.inner_space import InnerSpace # For type hinting agent_id source
+    from elements.elements.components.tool_provider import ToolProviderComponent
 
 logger = logging.getLogger(__name__)
 
@@ -23,169 +26,223 @@ class UplinkRemoteToolProviderComponent(Component):
 
     def __init__(self, element: Optional['UplinkProxy'] = None, **kwargs):
         super().__init__(element, **kwargs)
-        self._cached_remote_tools: Optional[List[Dict[str, Any]]] = None
+        self._raw_remote_tool_definitions: List[Dict[str, Any]] = []
         self._cache_timestamp: Optional[float] = None
-        # TODO: Add cache TTL configuration
+        self._sync_in_progress = False
+        # TODO: Consider making cache_duration configurable
+        self._cache_duration_seconds = 300 # Cache tools for 5 minutes
+        self._local_tool_provider_on_owner: Optional[ToolProviderComponent] = None
+        self._default_remote_chat_tool_name: Optional[str] = None
+        self._tools_registered_with_local_provider = False
 
-    async def _fetch_remote_tool_definitions_from_connection(self) -> List[Dict[str, Any]]:
-        """
-        Fetches the raw tool definitions from the remote space via the UplinkConnectionComponent.
-        This method will be responsible for caching later.
-        """
+    def initialize(self, **kwargs):
+        # Synchronous part of initialization
+        if self.owner and hasattr(self.owner, 'get_component_by_type'):
+            self._local_tool_provider_on_owner = self.owner.get_component_by_type(ToolProviderComponent)
+            if not self._local_tool_provider_on_owner:
+                logger.warning(f"[{self.owner.id if self.owner else 'UnknownOwner'}-{self.id}] Could not find ToolProviderComponent on owner. Cannot register remote tools.")
+        else:
+            logger.warning(f"[{self.id}] Has no owner or owner lacks get_component_by_type. Cannot get local tool provider.")
+        
+        # Call super().initialize() if it might be async or does important things
+        # If Component.initialize is not async, this await is not strictly needed for super, but harmless.
+        super().initialize(**kwargs)
+        logger.debug(f"[{self.owner.id if self.owner else 'UnknownOwner'}-{self.id}] UplinkRemoteToolProviderComponent initialized.")
+        # Do not fetch tools here; will be fetched on demand by get_llm_tool_definitions
+
+    async def _ensure_tools_fetched_and_registered(self, force_refresh: bool = False) -> None:
+        """Ensures tools are fetched from remote and registered with the local provider."""
+        now = time.monotonic()
+        cache_expired = self._cache_timestamp is None or (now - self._cache_timestamp > self._cache_duration_seconds)
+
+        if not self._raw_remote_tool_definitions or force_refresh or cache_expired:
+            if self._sync_in_progress:
+                logger.info(f"[{self.owner.id}-{self.id}] Sync already in progress. Waiting for it to complete before re-fetching.")
+                # Basic re-entrancy guard; could use a Lock for more robust async protection
+                while self._sync_in_progress:
+                    await asyncio.sleep(0.1)
+                # After sync completes, re-check cache status as it might have been updated
+                now = time.monotonic()
+                cache_expired = self._cache_timestamp is None or (now - self._cache_timestamp > self._cache_duration_seconds)
+                if not force_refresh and not cache_expired and self._raw_remote_tool_definitions:
+                    logger.info(f"[{self.owner.id}-{self.id}] Tools were fetched by another task. Using fresh cache.")
+                    if not self._tools_registered_with_local_provider:
+                        self._register_tools_with_local_provider()
+                    return
+            
+            self._sync_in_progress = True
+            try:
+                logger.info(f"[{self.owner.id}-{self.id}] Fetching/refreshing remote tool definitions. Force: {force_refresh}, Cache Expired: {cache_expired}")
+                remote_tools = await self._fetch_remote_tool_definitions_from_connection()
+                if remote_tools is not None: # Explicit check for None, as empty list is valid
+                    self._raw_remote_tool_definitions = remote_tools
+                    self._cache_timestamp = now
+                    self._tools_registered_with_local_provider = False # Mark for re-registration
+                    logger.info(f"[{self.owner.id}-{self.id}] Remote tool definitions updated. Found {len(self._raw_remote_tool_definitions)} tools.")
+                else:
+                    logger.warning(f"[{self.owner.id}-{self.id}] Fetching remote tools returned None. Retaining potentially stale cache.")
+            except Exception as e:
+                logger.error(f"[{self.owner.id}-{self.id}] Error during tool definition fetch: {e}", exc_info=True)
+            finally:
+                self._sync_in_progress = False
+        
+        if self._raw_remote_tool_definitions and not self._tools_registered_with_local_provider:
+            self._register_tools_with_local_provider()
+
+    async def _fetch_remote_tool_definitions_from_connection(self) -> Optional[List[Dict[str, Any]]]:
         if not self.owner:
-            logger.error(f"[{self.id}] Cannot fetch remote tools: No owner (UplinkProxy).")
-            return []
-
-        connection_comp: Optional['UplinkConnectionComponent'] = self.owner.get_component_by_type("UplinkConnectionComponent")
+            logger.error(f"[{self.id}] Cannot fetch: No owner.")
+            return None
+        connection_comp: Optional['UplinkConnectionComponent'] = self.get_sibling_component("UplinkConnectionComponent")
         if not connection_comp:
-            logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] UplinkConnectionComponent not found on owner. Cannot fetch remote tools.")
-            return []
-
-        if not connection_comp.is_connected():
-            logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Not connected to remote space {self.owner.remote_space_id}. Cannot fetch tools.")
-            return []
-
+            logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] ConnectionComponent not found.")
+            return None
+        if not connection_comp.is_connected:
+            logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Not connected to {self.owner.remote_space_id}. Cannot fetch tools.")
+            return None # Return None to indicate fetch was attempted but failed due to no connection
         try:
-            # This method needs to be added to UplinkConnectionComponent
             remote_tools = await connection_comp.fetch_remote_public_tool_definitions()
-            if remote_tools is None: # Explicit None check if fetch can fail that way
-                 logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Fetch remote public tool definitions returned None.")
-                 return []
-            logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Fetched {len(remote_tools)} tool definitions from remote space {self.owner.remote_space_id}.")
+            if remote_tools is None:
+                 logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Fetch returned None.")
+                 return None
+            logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Fetched {len(remote_tools)} tools from {self.owner.remote_space_id}.")
             return remote_tools
         except Exception as e:
-            logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Error fetching remote tool definitions: {e}", exc_info=True)
+            logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Error fetching: {e}", exc_info=True)
+            return None # Indicate error
+
+    def _register_tools_with_local_provider(self):
+        if not self._local_tool_provider_on_owner or not self.owner:
+            logger.warning(f"[{self.owner.id if self.owner else 'NoOwner'}-{self.id}] Local tool provider or owner missing. Skipping registration.")
+            return
+        if not self._raw_remote_tool_definitions:
+            logger.info(f"[{self.owner.id}-{self.id}] No raw remote tool definitions to register.")
+            return
+
+        logger.debug(f"[{self.owner.id}-{self.id}] Registering {len(self._raw_remote_tool_definitions)} remote tools with local provider.")
+        self._default_remote_chat_tool_name = None
+        registered_count = 0
+        for tool_def in self._raw_remote_tool_definitions:
+            provider_element_id = tool_def.get("provider_element_id")
+            tool_name_on_remote = tool_def.get("tool_name")
+            description = tool_def.get("description")
+            parameters_schema = tool_def.get("parameters_schema")
+            if not (provider_element_id and tool_name_on_remote and description is not None and parameters_schema is not None):
+                logger.warning(f"Skipping malformed tool_def: {tool_def}")
+                continue
+            prefixed_tool_name = f"{self.owner.id}::{provider_element_id}::{tool_name_on_remote}"
+            async def tool_executor(calling_context: Optional[Dict[str, Any]] = None, **kwargs):
+                return await self.execute_tool(prefixed_tool_name=prefixed_tool_name, calling_context=calling_context, **kwargs)
+            self._local_tool_provider_on_owner.register_tool_function(
+                name=prefixed_tool_name, description=description,
+                parameters_schema=parameters_schema, tool_func=tool_executor,
+                # is_async=True
+            )
+            registered_count += 1
+            if tool_name_on_remote == "send_message" and "chat" in provider_element_id.lower() and not self._default_remote_chat_tool_name:
+                self._default_remote_chat_tool_name = prefixed_tool_name
+                logger.info(f"Default remote chat tool: '{prefixed_tool_name}'.")
+        
+        if registered_count > 0:
+            self._tools_registered_with_local_provider = True
+            logger.info(f"[{self.owner.id}-{self.id}] Successfully registered {registered_count} remote tools locally.")
+        elif self._raw_remote_tool_definitions: # Had definitions but none were valid for registration
+            self._tools_registered_with_local_provider = False # Explicitly false
+            logger.warning(f"[{self.owner.id}-{self.id}] Had raw tool definitions but none were registered.")
+        else: # No raw definitions to begin with
+            self._tools_registered_with_local_provider = False
+
+    async def get_llm_tool_definitions(self) -> List[Dict[str, Any]]:
+        await self._ensure_tools_fetched_and_registered()
+        llm_tools: List[Dict[str, Any]] = []
+        if not self._raw_remote_tool_definitions:
+            logger.warning(f"[{self.owner.id if self.owner else 'NoOwner'}/{self.COMPONENT_TYPE}] No raw remote tools to convert to LLM definitions.")
             return []
 
-    async def get_tools_for_llm(self) -> List[LLMToolDefinition]:
-        """
-        Gets tool definitions from the remote space, prefixes their names,
-        and formats them for the LLM.
-        """
-        # TODO: Implement caching for remote_raw_tools
-        remote_raw_tools = await self._fetch_remote_tool_definitions_from_connection()
-        if not remote_raw_tools:
-            return []
-
-        llm_tools: List[LLMToolDefinition] = []
-        for tool_info in remote_raw_tools:
+        for tool_info in self._raw_remote_tool_definitions:
             provider_element_id = tool_info.get("provider_element_id")
             tool_name = tool_info.get("tool_name")
             description = tool_info.get("description")
             parameters_schema = tool_info.get("parameters_schema")
-
             if not (provider_element_id and tool_name and description is not None and parameters_schema is not None):
-                logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Skipping malformed remote tool definition: {tool_info}")
+                logger.warning(f"Skipping malformed tool_info for LLM: {tool_info}")
                 continue
-
             prefixed_name = f"{self.owner.id}::{provider_element_id}::{tool_name}"
-            
-            llm_tools.append(LLMToolDefinition(
-                name=prefixed_name,
-                description=description,
-                parameters_schema=parameters_schema
-            ))
-        logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Providing {len(llm_tools)} prefixed remote tools to LLM.")
+            llm_tools.append({
+                "name": prefixed_name, "description": description,
+                "parameters_schema": parameters_schema
+            })
+        logger.debug(f"[{self.owner.id if self.owner else 'NoOwner'}/{self.COMPONENT_TYPE}] Providing {len(llm_tools)} prefixed remote tools to LLM.")
         return llm_tools
 
-    async def execute_tool(self, prefixed_tool_name: str, calling_context: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Dict[str, Any]:
-        """
-        Executes a tool request by dispatching it to the remote space.
-        The `prefixed_tool_name` is expected to be in the format:
-        'uplink_proxy_id::remote_provider_element_id::actual_tool_name'
-        
-        `calling_context` is expected to contain 'agent_id' if available.
-        """
-        calling_context = calling_context or {}
-        agent_id = calling_context.get("agent_id", "unknown_agent_via_uplink") # Get agent_id from context
-        agent_name = calling_context.get("agent_name", "Unknown Agent via Uplink") # NEW: Get agent_name
-
-        logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Attempting to execute remote tool: {prefixed_tool_name} with args {kwargs} for agent {agent_id} ({agent_name})")
-
-        try:
-            parts = prefixed_tool_name.split('::', 2)
-            if len(parts) != 3:
-                raise ValueError("Prefixed tool name is not in the expected format 'uplink_id::remote_element_id::tool_name'")
-            
-            uplink_id_from_name, remote_target_element_id, actual_tool_name = parts
-
-            if uplink_id_from_name != self.owner.id:
-                # This should ideally not happen if routing by InnerSpace is correct
-                logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Mismatched uplink ID in tool name! Expected '{self.owner.id}', got '{uplink_id_from_name}'. Aborting.")
-                return {"success": False, "error": "Mismatched uplink ID in tool name."}
-
-        except ValueError as e:
-            logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Error parsing prefixed tool name '{prefixed_tool_name}': {e}")
-            return {"success": False, "error": f"Invalid prefixed tool name format: {e}"}
-
-        connection_comp: Optional['UplinkConnectionComponent'] = self.owner.get_component_by_type("UplinkConnectionComponent")
-        if not connection_comp:
-            logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] UplinkConnectionComponent not found. Cannot dispatch remote tool execution.")
+    async def execute_tool(self, prefixed_tool_name: str, calling_context: Optional[Dict[str, Any]] = None, **kwargs) -> Dict[str, Any]:
+        if not self.owner or not hasattr(self.owner, 'get_connection_component') or not hasattr(self.owner, 'remote_space_id') or not hasattr(self.owner, 'id'):
+            return {"success": False, "error": "Owner or connection missing attributes."}
+        logger.info(f"[{self.owner.id}-{self.id}] Executing tool: '{prefixed_tool_name}', params: {kwargs}")
+        parsed_remote_target_element_id, parsed_action_name_on_remote = None, None
+        if "::" in prefixed_tool_name:
+            parts = prefixed_tool_name.split("::")
+            if len(parts) == 3:
+                owner_uplink_id, remote_target_element_id, action_name_on_remote = parts
+                if owner_uplink_id != self.owner.id:
+                    return {"success": False, "error": f"Mismatched uplink ID: expected {self.owner.id}, got {owner_uplink_id}"}
+                parsed_remote_target_element_id = remote_target_element_id
+                parsed_action_name_on_remote = action_name_on_remote
+            else:
+                return {"success": False, "error": f"Invalid prefixed tool name format: {prefixed_tool_name}"}
+        else:
+            return {"success": False, "error": f"Tool name '{prefixed_tool_name}' not remote format."}
+        if not parsed_remote_target_element_id or not parsed_action_name_on_remote:
+            return {"success": False, "error": "Failed to parse remote target/action from tool name."}
+        connection_component = self.owner.get_connection_component()
+        if not connection_component:
             return {"success": False, "error": "UplinkConnectionComponent not found."}
-
-        if not connection_comp.is_connected():
-            logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Not connected to remote space {self.owner.remote_space_id}. Cannot execute remote tool.")
+        if not connection_component.is_connected:
             return {"success": False, "error": "Not connected to remote space."}
+        
+        # Extract source_agent_id and source_agent_name from calling_context if available
+        source_agent_id_from_context = None
+        source_agent_name_from_context = None
+        if calling_context:
+            source_agent_id_from_context = calling_context.get('source_agent_id') # Check InnerSpace.execute_element_action
+            source_agent_name_from_context = calling_context.get('source_agent_name')
+        
+        # Fallback to owner InnerSpace's agent_id if not in context (though it should be for agent actions)
+        if not source_agent_id_from_context and isinstance(self.owner, TYPE_CHECKING.InnerSpace):
+             source_agent_id_from_context = self.owner.agent_id
+        if not source_agent_name_from_context and isinstance(self.owner, TYPE_CHECKING.InnerSpace):
+             source_agent_name_from_context = self.owner.agent_name
 
         action_payload_for_remote = {
             "event_type": "action_request_for_remote",
             "source_uplink_id": self.owner.id,
-            "source_agent_id": agent_id, 
-            "source_agent_name": agent_name, # NEW: Add agent_name
-            "remote_target_element_id": remote_target_element_id,
-            "action_name": actual_tool_name,
+            "source_agent_id": source_agent_id_from_context, 
+            "source_agent_name": source_agent_name_from_context,
+            "remote_target_element_id": parsed_remote_target_element_id,
+            "action_name": parsed_action_name_on_remote,
             "action_parameters": kwargs 
         }
-
-        logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Dispatching remote action: {action_payload_for_remote}")
-        
+        logger.debug(f"Dispatching remote action: {action_payload_for_remote}")
         try:
-            dispatch_success = await connection_comp.send_event_to_remote_space(action_payload_for_remote)
+            dispatch_success = await connection_component.send_event_to_remote_space(action_payload_for_remote)
             if dispatch_success:
-                logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Remote action '{actual_tool_name}' successfully dispatched to element '{remote_target_element_id}'.")
-                return {"success": True, "status": "pending_remote_execution", "detail": "Action dispatched to remote space."}
+                logger.info(f"Remote action '{parsed_action_name_on_remote}' dispatched to '{parsed_remote_target_element_id}'.")
+                return {"success": True, "status": "pending_remote_execution"}
             else:
-                logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Failed to dispatch remote action '{actual_tool_name}' via UplinkConnectionComponent.")
-                return {"success": False, "error": "Failed to dispatch action to remote space."}
+                return {"success": False, "error": "Failed to dispatch action to remote."}
         except Exception as e:
-            logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Exception during remote action dispatch: {e}", exc_info=True)
-            return {"success": False, "error": f"Exception during remote action dispatch: {e}"}
+            logger.error(f"Exception during dispatch: {e}", exc_info=True)
+            return {"success": False, "error": f"Exception during dispatch: {e}"}
 
     def list_tools(self) -> List[str]:
-        """
-        Returns a list of names of the tools this provider offers.
-        This is for compatibility if something iterates tool providers and calls list_tools.
-        The actual tool definitions for LLM are via get_tools_for_llm.
-        """
-        # This might need to be async if it has to fetch.
-        # For now, assume it can use cached or previously fetched names.
-        # This is a simplified version. A robust one would call/await get_tools_for_llm
-        # and extract names, but that might be too heavy for a simple list_tools.
-        if self._cached_remote_tools: # Assuming _cached_remote_tools stores the LLMToolDefinition like structures
-            # Ensure _cached_remote_tools actually contains dicts with 'name' key from LLMToolDefinition
-            # or adapt if it stores the raw dicts from _fetch_remote_tool_definitions_from_connection
-            return [tool_def.get('name') for tool_def in self._cached_remote_tools if isinstance(tool_def, dict) and 'name' in tool_def]
-        
-        logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] list_tools called, but remote tools are not cached. May return empty or outdated list.")
+        if self._raw_remote_tool_definitions:
+            return [f"{self.owner.id}::{td.get('provider_element_id')}::{td.get('tool_name')}" for td in self._raw_remote_tool_definitions if td.get('provider_element_id') and td.get('tool_name')]
         return []
 
-    # TODO: Add methods for refreshing the cache (_cached_remote_tools)
-    # async def refresh_remote_tools_cache(self):
-    #     # Fetch raw definitions
-    #     raw_tools = await self._fetch_remote_tool_definitions_from_connection()
-    #     # Convert to LLMToolDefinition format for consistency if _cached_remote_tools stores that
-    #     processed_tools_for_cache = []
-    #     for tool_info in raw_tools:
-    #         provider_element_id = tool_info.get("provider_element_id")
-    #         tool_name = tool_info.get("tool_name")
-    #         # ... (rest of the parsing from get_tools_for_llm)
-    #         prefixed_name = f"{self.owner.id}::{provider_element_id}::{tool_name}"
-    #         processed_tools_for_cache.append(LLMToolDefinition(
-    #             name=prefixed_name,
-    #             description=tool_info.get("description"),
-    #             parameters_schema=tool_info.get("parameters_schema")
-    #         ))
-    #     self._cached_remote_tools = processed_tools_for_cache
-    #     self._cache_timestamp = time.monotonic()
+    async def force_refresh_tools(self) -> bool:
+        """Public method to explicitly refresh the tool cache and re-register."""
+        logger.info(f"[{self.owner.id}-{self.id}] Force refreshing remote tools.")
+        await self._ensure_tools_fetched_and_registered(force_refresh=True)
+        return True # Indicate completion of attempt
 
 

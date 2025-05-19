@@ -59,12 +59,6 @@ class MessageListComponent(Component):
         """
         event_payload = event_node.get('payload', {}) # This is the inner payload
         event_type = event_payload.get('event_type')
-        target_element = event_payload.get('target_element_id')
-
-        # Ensure the event is targeted at the element this component is attached to
-        if target_element != self.owner.id:
-            logger.error(f"[{self.owner.id}] MessageListComponent ignoring event targeted at {target_element}")
-            return False # Not for us
 
         if event_type in self.HANDLED_EVENT_TYPES:
             logger.debug(f"[{self.owner.id}] MessageListComponent handling event: {event_type}")

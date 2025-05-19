@@ -61,6 +61,30 @@ class ExternalEventRouter:
         self.agent_configs = agent_configs # <<< NEW: Store agent configs
         logger.info(f"ExternalEventRouter initialized with {len(agent_configs)} agent configs.")
 
+    async def _create_chat_message_details_payload(self, source_adapter_id: str, adapter_data: Dict[str, Any], is_dm: bool) -> Dict[str, Any]:
+        """
+        Creates a standardized dictionary containing the core details of a message,
+        intended to be the 'payload' part of the event that ChatManagerComponent processes.
+        """
+        sender_info = adapter_data.get('sender', {})
+        # The conversation_id from adapter_data is the key for external_conversation_id
+        external_conv_id = adapter_data.get("conversation_id")
+
+        details_payload = {
+            "source_adapter_id": source_adapter_id,
+            "external_conversation_id": external_conv_id,
+            "is_dm": is_dm,
+            "text": adapter_data.get("text", ""), # Standardized to text_content
+            "sender_external_id": sender_info.get("user_id"),     # Standardized to sender_id
+            "sender_display_name": sender_info.get("display_name"), # Standardized to sender_name
+            "timestamp": adapter_data.get("timestamp", time.time()),
+            "original_message_id_external": adapter_data.get("message_id"),
+            "mentions": adapter_data.get("mentions", []),
+            "attachments": adapter_data.get("attachments", []),
+            "original_adapter_data": adapter_data # Keep the raw adapter data
+        }
+        return details_payload
+
     async def route_external_event(self, event_data_from_activity_client: Dict[str, Any], original_timeline_context: Dict[str, Any]):
         """
         Main entry point for processing an event received from the HostEventLoop,
@@ -279,51 +303,40 @@ class ExternalEventRouter:
             logger.error(f"Could not route DM: InnerSpace for agent_id '{recipient_agent_id}' not found.")
             return
 
-        # Construct the internal event payload using fields from adapter_data
-        try:
-            sender_info = adapter_data.get('sender', {})
-            connectome_dm_event_payload = {
-                "source_adapter_id": source_adapter_id,
-                "timestamp": adapter_data.get("timestamp", time.time()), # Use adapter time if available
-                "sender_external_id": sender_info.get("user_id"),
-                "sender_display_name": sender_info.get("display_name"),
-                "text": adapter_data.get("text"),
-                "is_dm": True,
-                # Pass mentions if provided (though less common in DMs)
-                "mentions": adapter_data.get("mentions", []), 
-                "original_message_id_external": adapter_data.get("message_id"),
-                "external_channel_id": adapter_data.get("conversation_id"), # Store conversation ID
-                "original_adapter_data": adapter_data, # Keep original for full context if needed later
-                "attachments": adapter_data.get("attachments", []) 
-            }
-        except Exception as e:
-             logger.error(f"Error constructing DM event payload from adapter_data: {e}. Data: {adapter_data}", exc_info=True)
-             return
-             
-        connectome_dm_event = {
+        # Construct the standardized inner payload for ChatManagerComponent
+        is_dm_flag = True # Confirmed by _is_direct_message or implied by this handler
+        chat_message_details = await self._create_chat_message_details_payload(source_adapter_id, adapter_data, is_dm=is_dm_flag)
+        
+        # Construct the event to be recorded on the InnerSpace's timeline
+        # The 'payload' of this event will be what ChatManagerComponent processes.
+        dm_event_for_timeline = {
             "event_type": "message_received", # Connectome internal type
-            "target_element_id": f"dms_{source_adapter_id}", # Target element convention
-            "payload": connectome_dm_event_payload
+            "event_id": adapter_data.get("message_id", f"dm_msg_{uuid.uuid4()}"), # Unique ID for the timeline event
+            "source_adapter_id": source_adapter_id, # Context for InnerSpace
+            # Use the conversation_id from adapter_data, which is the DM's conversation ID
+            "external_conversation_id": adapter_data.get("conversation_id"), 
+            "payload": chat_message_details # Standardized inner payload
         }
         
         timeline_context = await self._construct_timeline_context_for_space(target_inner_space)
 
         try:
-            target_inner_space.receive_event(connectome_dm_event, timeline_context)
-            logger.info(f"DM from '{source_adapter_id}' for agent '{recipient_agent_id}' routed to InnerSpace.")
+            target_inner_space.receive_event(dm_event_for_timeline, timeline_context)
+            logger.info(f"DM from '{source_adapter_id}' for agent '{recipient_agent_id}' routed to InnerSpace with standardized payload.")
             
             # --- Notify HostEventLoop ---
             current_time = time.monotonic()
-            # Construct payload for mark_agent_for_cycle with expected fields
-            mark_payload = {
-                 "event_type": "message_received", # Pass the type mark_agent expects
+            # The mark_payload for HostEventLoop.mark_agent_for_cycle still needs its specific structure.
+            # It primarily uses the 'payload' key to access original adapter_data fields.
+            mark_payload_for_hel = {
+                 "event_type": "message_received", 
                  "source_adapter_id": source_adapter_id,
-                 "is_dm": True,
-                 "text_content": adapter_data.get("text", ""),
-                 "mentions": adapter_data.get("mentions", []),
-                 "payload": adapter_data # Also pass the original adapter data if needed elsewhere
+                 "payload": adapter_data # HostEventLoop expects to find is_dm, text_content, mentions in here
             }
-            self.mark_agent_for_cycle(recipient_agent_id, mark_payload, current_time) 
+            # Ensure adapter_data itself has what HostEventLoop's mark_agent_for_cycle expects for DMs.
+            # For DMs, mark_agent_for_cycle directly checks adapter_data['is_dm'] via its 'payload' arg.
+            # We set this in _is_direct_message, so adapter_data should be fine.
+            self.mark_agent_for_cycle(recipient_agent_id, mark_payload_for_hel, current_time) 
             logger.debug(f"Called mark_agent_for_cycle for agent {recipient_agent_id} due to DM.")
             
         except Exception as e:
@@ -356,39 +369,25 @@ class ExternalEventRouter:
             logger.error(f"Failed to get or create SharedSpace '{shared_space_identifier}'. Message cannot be routed.")
             return
         
-        # Construct internal event payload FOR STANDARDIZED PROCESSING by Space/MessageList etc.
-        # This is the structure that receive_event on Space and then MessageListComponent expect.
-        try:
-            sender_info = adapter_data.get('sender', {})
-            # This 'processed_event_data_for_shared_space' is what should be sent to the SharedSpace's receive_event
-            processed_event_data_for_shared_space = {
-                "event_type": "message_received", # Connectome internal type for messages
-                "event_id": adapter_data.get("message_id", f"ext_msg_{uuid.uuid4()}"), # Use adapter's msg_id or generate unique
-                "source_adapter_id": source_adapter_id,
-                "conversation_id": external_channel_id, # For context within the SharedSpace/ChatElement
-                "payload": { # Consistent payload structure
-                    "is_dm": False,
-                    "text_content": adapter_data.get("text", ""),
-                    "mentions": adapter_data.get("mentions", []),
-                    "sender_id": sender_info.get("user_id"),
-                    "sender_name": sender_info.get("display_name"),
-                    "timestamp": adapter_data.get("timestamp", time.time()),
-                    "original_message_id_external": adapter_data.get("message_id"), # Keep original ID
-                    "external_channel_id": external_channel_id, # Redundant here, but good for payload consistency
-                    "attachments": adapter_data.get("attachments", []),
-                    "adapter_data": adapter_data # Keep original adapter data nested
-                }
-            }
-        except Exception as e:
-            logger.error(f"Error constructing processed event payload for shared channel message: {e}. Adapter Data: {adapter_data}", exc_info=True)
-            return
+        # Construct the standardized inner payload for ChatManagerComponent
+        is_dm_flag = False # This is a channel message
+        chat_message_details = await self._create_chat_message_details_payload(source_adapter_id, adapter_data, is_dm=is_dm_flag)
+
+        # Construct the event to be recorded on the SharedSpace's timeline
+        channel_event_for_timeline = {
+            "event_type": "message_received", # Connectome internal type
+            "event_id": adapter_data.get("message_id", f"ch_msg_{uuid.uuid4()}"), # Unique ID for the timeline event
+            "source_adapter_id": source_adapter_id, # Context for SharedSpace
+            "external_conversation_id": external_channel_id, # Context for SharedSpace (same as in chat_message_details)
+            "payload": chat_message_details # Standardized inner payload
+        }
         
         timeline_context = await self._construct_timeline_context_for_space(target_shared_space)
 
         try:
             # Pass the STANDARDIZED event data to the SharedSpace
-            target_shared_space.receive_event(processed_event_data_for_shared_space, timeline_context)
-            logger.info(f"Channel message from '{source_adapter_id}' channel '{external_channel_id}' routed to SharedSpace '{shared_space_identifier}' with processed event structure.")
+            target_shared_space.receive_event(channel_event_for_timeline, timeline_context)
+            logger.info(f"Channel message from '{source_adapter_id}' channel '{external_channel_id}' routed to SharedSpace '{shared_space_identifier}' with standardized payload structure.")
             
             # --- Refined Uplink and Cycling Logic ---
             # 1. Ensure uplinks for all agents configured for this adapter (for passive awareness)
@@ -425,13 +424,11 @@ class ExternalEventRouter:
 
             if mentioned_agent_ids:
                 logger.info(f"Channel message mentioned agents: {mentioned_agent_ids}. These will be marked for cycle.")
-                mark_payload = {
+                # The mark_payload for HostEventLoop.mark_agent_for_cycle still needs its specific structure.
+                mark_payload_for_hel = {
                     "event_type": "message_received", # HostEventLoop expects this key
                     "source_adapter_id": source_adapter_id,
-                    "is_dm": False,
-                    "text_content": adapter_data.get("text", ""),
-                    "mentions": adapter_data.get("mentions", []), # Pass full mention objects
-                    "payload": adapter_data # Original adapter data
+                    "payload": adapter_data # HostEventLoop expects to find is_dm, text_content, mentions in here
                 }
                 current_time = time.monotonic()
                 for agent_id_to_cycle in mentioned_agent_ids:
@@ -439,7 +436,7 @@ class ExternalEventRouter:
                     is_configured_agent = any(cfg.agent_id == agent_id_to_cycle for cfg in self.agent_configs)
                     if is_configured_agent:
                         try:
-                            self.mark_agent_for_cycle(agent_id_to_cycle, mark_payload, current_time)
+                            self.mark_agent_for_cycle(agent_id_to_cycle, mark_payload_for_hel, current_time)
                             logger.debug(f"Marked agent '{agent_id_to_cycle}' for cycle due to mention.")
                         except Exception as mark_err:
                             logger.error(f"Error calling mark_agent_for_cycle for mentioned agent {agent_id_to_cycle}: {mark_err}", exc_info=True)

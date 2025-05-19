@@ -13,6 +13,8 @@ from .base import BaseElement, MountType
 from .components.space import ContainerComponent, TimelineComponent
 from .components.tool_provider import ToolProviderComponent
 from .components.factory_component import ElementFactoryComponent
+from .components.chat_manager_component import ChatManagerComponent
+from .components.tool_provider import ToolProviderComponent 
 
 # Type checking imports
 from typing import TYPE_CHECKING
@@ -35,6 +37,7 @@ class Space(BaseElement):
     
     # Space is a container for other elements
     IS_SPACE = True
+    IS_UPLINK_SPACE = False
     
     EVENT_TYPES = []
     
@@ -67,27 +70,38 @@ class Space(BaseElement):
         self._container: Optional[ContainerComponent] = self.add_component(ContainerComponent)
         self._timeline: Optional[TimelineComponent] = self.add_component(TimelineComponent)
         
+        
         # NEW: Add ElementFactoryComponent by default
         factory_kwargs = {}
         if self._outgoing_action_callback:
             # If ElementFactoryComponent is updated to take this in __init__
             factory_kwargs['outgoing_action_callback'] = self._outgoing_action_callback
+        self._tool_provider = self.add_component(ToolProviderComponent)
         
-        self._element_factory: Optional[ElementFactoryComponent] = self.add_component(ElementFactoryComponent, **factory_kwargs)
+        if not self.IS_UPLINK_SPACE:    
+            self._element_factory: Optional[ElementFactoryComponent] = self.add_component(ElementFactoryComponent, **factory_kwargs)
+            self.add_component(ChatManagerComponent)
         # assert  False, self._element_factory
         # NEW: Initialize uplink listeners set and delta cache
         self._uplink_listeners: Set[Callable[[List[Dict[str, Any]]], None]] = set()
         self._cached_deltas: List[Dict[str, Any]] = []
         
-        if not self._container or not self._timeline or not self._element_factory:
-            # BaseElement.add_component logs errors, but we might want to raise here
-            logger.critical(f"CRITICAL: Failed to initialize required components (Container/Timeline/Factory) for space {self.id}. Space may be unstable.")
-            # raise RuntimeError(f"Failed to initialize required components for space {self.id}")
+        # NEW: Add ChatManagerComponent by default to all Spaces
         
-        # If ElementFactoryComponent uses a setter instead of __init__ for callback:
-        if self._element_factory and self._outgoing_action_callback and not factory_kwargs.get('outgoing_action_callback'):
-            if hasattr(self._element_factory, 'set_outgoing_action_callback') and callable(getattr(self._element_factory, 'set_outgoing_action_callback')):
-                self._element_factory.set_outgoing_action_callback(self._outgoing_action_callback)
+        
+        if not self._container or not self._timeline:
+            # BaseElement.add_component logs errors, but we might want to raise here
+            logger.critical(f"CRITICAL: Failed to initialize required components (Container/Timeline) for space {self.id}. Space may be unstable.")
+            # raise RuntimeError(f"Failed to initialize required components for space {self.id}")
+        if not self.IS_UPLINK_SPACE and not self._element_factory:
+            logger.critical(f"CRITICAL: Failed to initialize ElementFactoryComponent for space {self.id}. Space may be unstable.")
+            # raise RuntimeError(f"Failed to initialize ElementFactoryComponent for space {self.id}")
+        
+        if not self.IS_UPLINK_SPACE:
+            # If ElementFactoryComponent uses a setter instead of __init__ for callback:
+            if self._element_factory and self._outgoing_action_callback and not factory_kwargs.get('outgoing_action_callback'):
+                if hasattr(self._element_factory, 'set_outgoing_action_callback') and callable(getattr(self._element_factory, 'set_outgoing_action_callback')):
+                    self._element_factory.set_outgoing_action_callback(self._outgoing_action_callback)
 
         logger.info(f"Created space: {name} ({self.id})")
     
@@ -167,6 +181,15 @@ class Space(BaseElement):
             return []
         return self._timeline.get_timeline_events(timeline_id, start_event_id, limit)
         
+
+    def get_tool_provider(self) -> Optional[ToolProviderComponent]:
+        """Get the tool provider component."""
+        return self._tool_provider
+        
+    def get_element_factory(self) -> Optional[ElementFactoryComponent]:
+        """Get the element factory component."""
+        return self._element_factory
+
     # --- NEW: Method to find an element by ID ---
     def get_element_by_id(self, element_id: str) -> Optional[BaseElement]:
         """
@@ -525,13 +548,13 @@ class Space(BaseElement):
         # 1. Get tools from this Space itself
         space_tool_provider = self.get_component_by_type(ToolProviderComponent)
         if space_tool_provider:
-            raw_tools = space_tool_provider.get_tools_for_llm() # Returns List[LLMToolDefinition]
+            raw_tools = space_tool_provider.get_llm_tool_definitions() # Returns List[LLMToolDefinition]
             for tool_def in raw_tools:
                 all_tool_definitions.append({
                     "provider_element_id": self.id,
-                    "tool_name": tool_def["name"],
-                    "description": tool_def["description"],
-                    "parameters_schema": tool_def["parameters_schema"]
+                    "tool_name": tool_def.name,
+                    "description": tool_def.description,
+                    "parameters_schema": tool_def.parameters
                 })
             logger.debug(f"[{self.id}] Found {len(raw_tools)} tools on Space itself.")
 
@@ -540,13 +563,13 @@ class Space(BaseElement):
             for child_element in self._container.get_mounted_elements().values():
                 child_tool_provider = child_element.get_component_by_type(ToolProviderComponent)
                 if child_tool_provider:
-                    child_raw_tools = child_tool_provider.get_tools_for_llm()
+                    child_raw_tools = child_tool_provider.get_llm_tool_definitions()
                     for tool_def in child_raw_tools:
                         all_tool_definitions.append({
                             "provider_element_id": child_element.id,
-                            "tool_name": tool_def["name"],
-                            "description": tool_def["description"],
-                            "parameters_schema": tool_def["parameters_schema"]
+                            "tool_name": tool_def.name,
+                            "description": tool_def.description,
+                            "parameters_schema": tool_def.parameters
                         })
                     logger.debug(f"[{self.id}] Found {len(child_raw_tools)} tools on child element '{child_element.id}'.")
         

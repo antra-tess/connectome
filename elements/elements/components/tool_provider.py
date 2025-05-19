@@ -117,6 +117,7 @@ class ToolProviderComponent(Component):
         # Validate parameters_schema (could reuse validation from decorator or add more here)
         for param in parameters_schema:
              if not isinstance(param, dict) or not all(k in param for k in ['name', 'type', 'description', 'required']):
+                 logger.error(f"Parameters schema: {parameters_schema}")
                  logger.error(f"Invalid parameter definition during register_tool_function for tool '{name}': {param}")
                  # Potentially raise an error or skip registration
                  return 
@@ -219,6 +220,7 @@ class ToolProviderComponent(Component):
         """
         if tool_name not in self._tools:
             logger.error(f"Tool '{tool_name}' not found on Element {self.owner.id if self.owner else 'unknown'}.")
+            logger.error(f"Available tools: {self.list_tools()}")
             return {"success": False, "error": f"Tool '{tool_name}' not found."}
 
         tool_info = self._tools[tool_name]

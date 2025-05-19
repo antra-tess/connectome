@@ -41,20 +41,8 @@ class ScratchpadVeilProducer(VeilProducer):
         """Helper to retrieve notes from the owning ScratchpadElement."""
         if not self.owner:
             return ([], True)
-        # Option 1: Assume a get_notes() method exists
-        if hasattr(self.owner, 'get_notes') and callable(self.owner.get_notes):
-            try:
-                return (self.owner.get_notes(), False) # Expected: List[str] or List[Dict]
-            except Exception as e:
-                logger.error(f"[{self.owner.id}] Error calling get_notes() on owner: {e}")
-                return ([], True)
-        # Option 2: Fallback to accessing a protected attribute (less ideal)
-        elif hasattr(self.owner, '_notes'):
-            notes = getattr(self.owner, '_notes')
-            return (notes, False) if isinstance(notes, list) else ([], True)
-        else:
-            logger.warning(f"[{self.owner.id}] ScratchpadVeilProducer cannot find notes on owner. Owner type: {type(self.owner)}")
-            return ([], False)
+        note_storage = self.get_sibling_component("NoteStorageComponent")
+        return (note_storage.get_notes_from_state(), False)
 
     def get_full_veil(self) -> Optional[Dict[str, Any]]:
         """

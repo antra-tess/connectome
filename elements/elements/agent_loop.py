@@ -4,7 +4,7 @@ Defines the base class and simple implementations for agent cognitive cycles.
 """
 import logging
 import asyncio
-from typing import Dict, Any, Optional, TYPE_CHECKING, List, Set
+from typing import Dict, Any, Optional, TYPE_CHECKING, List, Set, Type
 
 from .base import Component
 from elements.component_registry import register_component
@@ -12,8 +12,9 @@ from elements.component_registry import register_component
 # NEW: Import LLMMessage for correct provider interaction
 from llm.provider_interface import LLMMessage
 # NEW: Import LLMToolDefinition for passing tools
-from llm.provider_interface import LLMToolDefinition, LLMToolCall
+from llm.provider_interface import LLMToolDefinition, LLMToolCall, LLMResponse
 from .components.tool_provider import ToolProviderComponent
+from elements.elements.components.uplink.remote_tool_provider import UplinkRemoteToolProviderComponent
 
 if TYPE_CHECKING:
     from .inner_space import InnerSpace
@@ -89,51 +90,78 @@ class BaseAgentLoopComponent(Component):
             self._outgoing_action_callback = self.parent_inner_space._outgoing_action_callback
         return self._outgoing_action_callback
 
-    def aggregate_tools(self) -> List[LLMToolDefinition]:
+    async def aggregate_tools(self) -> List[LLMToolDefinition]:
         """
-        Aggregate tools from InnerSpace and its children.
+        Aggregates tools from:
+        1. The InnerSpace itself (via its ToolProviderComponent).
+        2. Mounted elements within the InnerSpace that have a ToolProviderComponent 
+           (e.g., DMManagerComponent providing DM tools, UplinkProxies providing remote tools).
         """
-        aggregated_tools: List[LLMToolDefinition] = []
-        processed_tool_names: Set[str] = set() # Track names to avoid duplicates
-        tool_provider = self._get_tool_provider()
-        if tool_provider:
-            try:
-                inner_space_tools = tool_provider.get_llm_tool_definitions()
-                for tool_def in inner_space_tools:
-                    if tool_def.name not in processed_tool_names:
-                            aggregated_tools.append(tool_def)
-                            processed_tool_names.add(tool_def.name)
-            except Exception as tool_err:
-                logger.critical(f"Error getting InnerSpace tool definitions: {tool_err}", exc_info=True)
+        aggregated_tools_list: List[LLMToolDefinition] = []
+        # Use a set to keep track of tool names to avoid duplicates if components offer same named tools
+        # Note: This only de-duplicates if the LLMToolDefinition is hashable and considered equal
+        # For now, we rely on unique naming or prefixes to differentiate.
+        # A more robust de-duplication might be needed if tools from different sources have identical names/schemas.
+        # For this iteration, we assume that if a tool name is the same, it's the same tool, or one overrides the other.
+        # More sophisticated handling might be needed (e.g. prefixing tools from mounted elements)
         
-        # Get tools from mounted children
+        # 1. Tools from InnerSpace itself (e.g., tools for managing the agent, core tools)
+        inner_space_tool_provider = self.parent_inner_space.get_tool_provider()
+        if inner_space_tool_provider:
+            for tool_def in inner_space_tool_provider.get_llm_tool_definitions():
+                # Ensure it's LLMToolDefinition instance if not already
+                if isinstance(tool_def, dict):
+                    tool_def_obj = LLMToolDefinition(**tool_def)
+                else:
+                    tool_def_obj = tool_def # Assume it is already LLMToolDefinition
+                aggregated_tools_list.append(tool_def_obj)
+        
+        # 2. Tools from mounted elements (including UplinkProxies, DM Dession elements, etc.)
+        # This requires InnerSpace to have a way to get its mounted elements.
+        # Assuming self.parent_inner_space.get_mounted_elements() exists.
         mounted_elements = self.parent_inner_space.get_mounted_elements()
-        for child_id, child_element in mounted_elements.items():
-            try:
-                child_tool_provider = child_element.get_component_by_type(ToolProviderComponent)
-                assert child_tool_provider is not None, f"Child element {child_id} has no ToolProviderComponent."
-                if child_tool_provider:
-                    child_tools = child_tool_provider.get_llm_tool_definitions()
-                    for tool_def in child_tools:
-                        # Prefix child tool name with element ID
-                        prefixed_name = f"{child_element.id}::{tool_def.name}"
-                        if prefixed_name not in processed_tool_names:
-                            # Create a new LLMToolDefinition with the prefixed name
-                            prefixed_tool_def = LLMToolDefinition(
-                                name=prefixed_name,
-                                description=tool_def.description,
-                                parameters=tool_def.parameters
-                            )
-                            aggregated_tools.append(prefixed_tool_def)
-                            processed_tool_names.add(prefixed_name)
-            except Exception as child_tool_err:
-                logger.error(f"Error getting tools from child element {child_id}: {child_tool_err}", exc_info=True)
+        for mount_id, element in mounted_elements.items():
+            # Check if the element has a standard ToolProviderComponent
+            element_tool_provider = element.get_component_by_type(ToolProviderComponent)
+            if element_tool_provider:
+                for tool_def in element_tool_provider.get_llm_tool_definitions():
+                    if isinstance(tool_def, dict):
+                        tool_def_obj = LLMToolDefinition(**tool_def)
+                    else:
+                        tool_def_obj = tool_def
+                    # Optional: Prefix tools from mounted elements if ambiguity is a concern
+                    # tool_def_obj.name = f"{mount_id}::{tool_def_obj.name}"
+                    aggregated_tools_list.append(tool_def_obj)
+            
+            # NEW: Check for UplinkRemoteToolProviderComponent specifically
+            urtp_component = element.get_component_by_type(UplinkRemoteToolProviderComponent)
+            if urtp_component:
+                # This method is now async, so we await it
+                remote_tool_dicts = await urtp_component.get_llm_tool_definitions()
+                for tool_dict in remote_tool_dicts:
+                    # urtp_component.get_tools_for_llm() returns List[Dict], convert to LLMToolDefinition
+                    aggregated_tools_list.append(LLMToolDefinition(**tool_dict))
 
-        if aggregated_tools:
-            logger.debug(f"Aggregated {len(aggregated_tools)} tool definitions to pass to LLM.")
-        else:
-            logger.debug("No tools found on InnerSpace or children.")
-        return aggregated_tools
+        # De-duplicate based on tool name (last one wins if names clash, consider warning)
+        final_tools_dict: Dict[str, LLMToolDefinition] = {}
+        for tool in aggregated_tools_list:
+            if tool.name in final_tools_dict:
+                logger.warning(f"Duplicate tool name '{tool.name}' found during aggregation. Overwriting.")
+            final_tools_dict[tool.name] = tool
+        
+        final_tools_list = list(final_tools_dict.values())
+        logger.info(f"[{self.agent_loop_name}] Aggregated {len(final_tools_list)} unique tools for LLM.")
+        return final_tools_list
+
+    async def _get_llm_response(self, current_context_messages: List[LLMMessage]) -> LLMResponse:
+        """Gets response from LLM, including tool aggregation."""
+        if not self._llm_provider:
+            logger.error(f"[{self.agent_loop_name}] LLM provider not available.")
+            return LLMResponse(content="Error: LLM provider not available.", finish_reason="error")
+
+        # Aggregate tools asynchronously
+        available_tools = await self.aggregate_tools()
+        # ... rest of the method remains the same ...
 
 @register_component
 class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
@@ -189,7 +217,7 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                 logger.error(f"Error recording agent context to timeline: {tl_err}", exc_info=True)
 
             # 2. Aggregate Tools from InnerSpace and its Children
-            aggregated_tools = self.aggregate_tools()
+            aggregated_tools = await self.aggregate_tools()
 
             # 3. Send context and aggregated tools to LLM
             logger.debug(f"{self.agent_loop_name} ({self.id}): Sending context and tools to LLM...")
@@ -246,7 +274,8 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                     logger.debug(f"Dispatching structured tool call: Space='{target_space_id}', Element='{target_element_id}', Action='{actual_tool_name}', Params='{parameters}'")
                     try:
                         calling_context = { "loop_component_id": self.id } 
-                        action_result = self.parent_inner_space.execute_element_action(
+                        # AWAIT the call to execute_element_action
+                        action_result = await self.parent_inner_space.execute_element_action(
                             space_id=target_space_id,
                             element_id=target_element_id, # Use parsed target_element_id
                             action_name=actual_tool_name,  # Use parsed actual_tool_name
@@ -290,7 +319,8 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                             logger.debug(f"Dispatching internal action from text: Space='{target_space_id}', Element='{target_element_id}', Action='{action_name}', Params='{parameters}'")
                             try:
                                 calling_context = { "loop_component_id": self.id }
-                                action_result = self.parent_inner_space.execute_element_action(
+                                # AWAIT the call to execute_element_action
+                                action_result = await self.parent_inner_space.execute_element_action(
                                     space_id=target_space_id, element_id=target_element_id,
                                     action_name=action_name, parameters=parameters,
                                     calling_context=calling_context
@@ -424,7 +454,7 @@ class MultiStepToolLoopComponent(BaseAgentLoopComponent):
                 except Exception as e: logger.error(f"Error recording context event: {e}")
 
                 # --- Aggregate Tools (InnerSpace + Children) --- 
-                aggregated_tools = self.aggregate_tools()
+                aggregated_tools = await self.aggregate_tools()
 
                 # Call LLM with aggregated tools
                 logger.debug(f"Calling LLM for stage '{current_stage}'...")
@@ -470,7 +500,8 @@ class MultiStepToolLoopComponent(BaseAgentLoopComponent):
                         logger.debug(f"Dispatching structured tool call: Element='{target_element_id}', Action='{actual_tool_name}'...")
                         try:
                             calling_context = { "loop_component_id": self.id } 
-                            action_result = self.parent_inner_space.execute_element_action(
+                            # AWAIT the call to execute_element_action
+                            action_result = await self.parent_inner_space.execute_element_action(
                                 space_id=target_space_id, 
                                 element_id=target_element_id,
                                 action_name=actual_tool_name, 

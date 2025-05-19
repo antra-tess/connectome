@@ -37,6 +37,7 @@ class UplinkProxy(Space):
     
     # Uplink has an exterior representation (this might be inferred from VeilProducer later)
     HAS_EXTERIOR = True
+    IS_UPLINK_SPACE = True
     
     # Events specific to Uplink lifecycle are handled by components, 
     # but the element might observe them.
@@ -69,14 +70,24 @@ class UplinkProxy(Space):
         # Store for RemoteStateCacheComponent and potentially others
         self._space_registry = space_registry 
         self.remote_space_id = remote_space_id # Made public for easier access by components
+        
+        # Get the ToolProviderComponent added by the parent Space class
+        self._local_tool_provider: Optional[ToolProviderComponent] = self.get_component_by_type(ToolProviderComponent)
+        if not self._local_tool_provider:
+            # This should ideally not happen if Space.__init__ guarantees it.
+            # If it can happen, we might need to add it here, but that contradicts Space's role.
+            # For now, assume Space adds it and log an error if not found.
+            logger.error(f"CRITICAL: ToolProviderComponent not found on UplinkProxy {self.id} after Space initialization. Local tools cannot be registered.")
+            # As a fallback, try adding it, though this might indicate a deeper issue.
+            # self._local_tool_provider = self.add_component(ToolProviderComponent) # Avoid this if possible
+
         # Initialize core components for Uplink functionality
         self._connection_component: UplinkConnectionComponent = self.add_component(UplinkConnectionComponent, remote_space_id=remote_space_id, space_registry=space_registry)
         self._cache_component: RemoteStateCacheComponent = self.add_component(RemoteStateCacheComponent) # Will sync using remote_space_id and space_registry
         self._veil_producer_component: UplinkVeilProducer = self.add_component(UplinkVeilProducer) # Produces VEIL from cached state
         
-        # Standard ToolProvider for local Uplink management tools
-        self._tool_provider_component: ToolProviderComponent = self.add_component(ToolProviderComponent) 
-        self._register_uplink_tools() # Register local tools on the standard provider
+        # self._tool_provider_component: ToolProviderComponent = self.add_component(ToolProviderComponent) # REMOVE THIS LINE - it's a duplicate attempt
+        self._register_uplink_tools() # Register local tools on the self._local_tool_provider
 
         # NEW: Add RemoteToolProvider for tools from the remote space
         self._remote_tool_provider_component: UplinkRemoteToolProviderComponent = self.add_component(UplinkRemoteToolProviderComponent)
@@ -93,8 +104,8 @@ class UplinkProxy(Space):
     # --- Tool Registration --- 
     def _register_uplink_tools(self) -> None:
         """Register tools specific to uplink proxies using ToolProviderComponent."""
-        if not self._tool_provider_component:
-             logger.warning(f"Cannot register uplink tools for {self.id}, ToolProviderComponent missing.")
+        if not self._local_tool_provider: # CHANGED: Use _local_tool_provider
+             logger.warning(f"Cannot register uplink tools for {self.id}, local ToolProviderComponent missing.")
              return
         
         # Define parameter schemas
@@ -111,7 +122,7 @@ class UplinkProxy(Space):
             {"name": "span_ids", "type": "array", "description": "List of span IDs to retrieve. Gets all cached if omitted.", "required": False, "items": {"type": "string"}}
         ]
 
-        @self._tool_provider_component.register_tool(
+        @self._local_tool_provider.register_tool( # CHANGED: Use _local_tool_provider
             name="connect_to_remote",
             description="Connect to the remote space associated with this uplink.",
             parameters_schema=[] # No parameters
@@ -128,7 +139,7 @@ class UplinkProxy(Space):
                 "connection_state": self._connection_component.get_connection_state()
             }
         
-        @self._tool_provider_component.register_tool(
+        @self._local_tool_provider.register_tool( # CHANGED: Use _local_tool_provider
             name="disconnect_from_remote",
             description="Disconnect from the remote space.",
             parameters_schema=[] # No parameters
@@ -144,7 +155,7 @@ class UplinkProxy(Space):
                 "connection_state": self._connection_component.get_connection_state() # State after disconnect
             }
         
-        @self._tool_provider_component.register_tool(
+        @self._local_tool_provider.register_tool( # CHANGED: Use _local_tool_provider
             name="sync_remote_state",
             description="Manually trigger synchronization with the remote space.",
             parameters_schema=sync_remote_state_params
@@ -163,7 +174,7 @@ class UplinkProxy(Space):
                 "last_successful_sync": self._cache_component._state.get("last_successful_sync")
             }
         
-        @self._tool_provider_component.register_tool(
+        @self._local_tool_provider.register_tool( # CHANGED: Use _local_tool_provider
             name="get_connection_state",
             description="Get the current connection status of the uplink.",
             parameters_schema=[] # No parameters
@@ -177,7 +188,7 @@ class UplinkProxy(Space):
                 "connection_state": self._connection_component.get_connection_state()
             }
             
-        @self._tool_provider_component.register_tool(
+        @self._local_tool_provider.register_tool( # CHANGED: Use _local_tool_provider
             name="get_connection_spans",
             description="Get recent periods when the agent was connected via this uplink.",
             parameters_schema=get_connection_spans_params
@@ -189,7 +200,7 @@ class UplinkProxy(Space):
             spans = self._connection_component.get_connection_spans(limit=limit)
             return {"success": True, "connection_spans": spans}
         
-        @self._tool_provider_component.register_tool(
+        @self._local_tool_provider.register_tool( # CHANGED: Use _local_tool_provider
             name="enable_auto_sync",
             description="Enable automatic background synchronization of remote state.",
             parameters_schema=enable_auto_sync_params
@@ -206,7 +217,7 @@ class UplinkProxy(Space):
                 "check_interval_approx_seconds": self._cache_component._state.get("cache_ttl")
             }
         
-        @self._tool_provider_component.register_tool(
+        @self._local_tool_provider.register_tool( # CHANGED: Use _local_tool_provider
             name="disable_auto_sync",
             description="Disable automatic background synchronization.",
             parameters_schema=[] # No parameters
@@ -219,7 +230,7 @@ class UplinkProxy(Space):
             return {"success": True, "status": "Auto-sync disabled.", "auto_sync_is_active": self._cache_component._auto_sync_enabled}
             
         # Tool to get cached history bundles (useful for rendering/VEIL)
-        @self._tool_provider_component.register_tool(
+        @self._local_tool_provider.register_tool( # CHANGED: Use _local_tool_provider
             name="get_history_bundles",
             description="Get cached history bundles from the remote space.",
             parameters_schema=get_history_bundles_params

@@ -153,6 +153,7 @@ class UplinkManagerComponent(Component):
             if creation_result and creation_result.get("success"):
                 created_uplink_id = creation_result.get("element_id", new_uplink_element_id)
                 new_uplink_element = self.owner.get_mounted_element(created_uplink_id)
+                new_uplink_element._connection_component.connect()
                 if new_uplink_element:
                     self._active_uplinks[shared_space_id] = created_uplink_id # Cache by mount_id
                     logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Successfully created UplinkProxy '{new_uplink_element.name}' ({created_uplink_id}) to {shared_space_id}.")

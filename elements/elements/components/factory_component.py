@@ -22,6 +22,7 @@ ELEMENT_CLASS_LOOKUP: Dict[str, Type[BaseElement]] = {
 
 _ELEMENT_CLASSES_POPULATED = False
 
+
 def _populate_element_class_lookup():
     """
     Dynamically imports and adds element classes to ELEMENT_CLASS_LOOKUP
@@ -31,29 +32,11 @@ def _populate_element_class_lookup():
     if _ELEMENT_CLASSES_POPULATED:
         return
 
-    try:
-        from ..space import Space # Dynamically import Space
-        ELEMENT_CLASS_LOOKUP["Space"] = Space
-    except ImportError:
-        logger.error("Failed to import Space for ElementFactoryComponent's lookup.")
-
-    try:
-        from ..uplink import UplinkProxy # Dynamically import UplinkProxy
-        ELEMENT_CLASS_LOOKUP["UplinkProxy"] = UplinkProxy
-    except ImportError:
-        logger.error("Failed to import UplinkProxy for ElementFactoryComponent's lookup.")
-    
-    # Add InnerSpace if it's intended to be creatable by this factory
-    # try:
-    #     from ..inner_space import InnerSpace
-    #     ELEMENT_CLASS_LOOKUP["InnerSpace"] = InnerSpace
-    # except ImportError:
-    #     logger.warning("InnerSpace not available for ElementFactoryComponent's lookup.")
-
+    from ..space import Space # Dynamically import Space
+    from ..uplink import UplinkProxy # Dynamically import UplinkProxy
+    ELEMENT_CLASS_LOOKUP["Space"] = Space
+    ELEMENT_CLASS_LOOKUP["UplinkProxy"] = UplinkProxy
     _ELEMENT_CLASSES_POPULATED = True
-
-_populate_element_class_lookup()
-
 
 @register_component
 class ElementFactoryComponent(Component):

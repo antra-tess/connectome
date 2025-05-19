@@ -6,6 +6,7 @@ import asyncio
 import time
 from typing import Dict, Any, List, Callable, Optional
 import logging # Added for logger in fixture
+import inspect
 
 # Assuming your project structure allows these imports
 # You might need to adjust paths based on how pytest discovers your modules
@@ -18,8 +19,9 @@ from elements.elements.space import Space # For SharedSpace
 from elements.elements.uplink import UplinkProxy # For verifying uplink creation
 from elements.elements.agent_loop import BaseAgentLoopComponent # For checking its presence
 from elements.elements.components.hud.hud_component import HUDComponent
-from elements.elements.components.dm_manager_component import DirectMessageManagerComponent
+from elements.elements.components.chat_manager_component import ChatManagerComponent
 from elements.elements.components.uplink_manager_component import UplinkManagerComponent # For uplink test
+from elements.elements.components.uplink.remote_tool_provider import UplinkRemoteToolProviderComponent
 from elements.elements.components.messaging.message_action_handler import MessageActionHandler
 from elements.elements.components.messaging.message_list import MessageListComponent
 from elements.elements.components.messaging.message_list_veil_producer import MessageListVeilProducer
@@ -267,7 +269,8 @@ def setup_test_environment():
         mark_agent_for_cycle_callback=event_loop.mark_agent_for_cycle
     )
     space_registry.register_inner_space(agent_inner_space, TEST_AGENT_ID)
-    assert agent_inner_space.get_dm_manager() is not None
+    space_registry.response_callback = event_loop.get_outgoing_action_callback()
+    assert agent_inner_space.get_component_by_type(ChatManagerComponent) is not None
     assert agent_inner_space.get_uplink_manager() is not None
     assert agent_inner_space.agent_id is not None
 
@@ -302,10 +305,10 @@ async def test_dm_ping_pong(setup_test_environment):
     await event_loop._process_incoming_event_queue()
     await asyncio.sleep(0.01) 
 
-    dm_manager = agent_inner_space.get_dm_manager()
-    assert dm_manager is not None
-    dm_element = dm_manager.get_dm_element_for_user(TEST_ADAPTER_ID, dm_sender_external_id)
-    assert dm_element is not None, f"DM Element for user {dm_sender_external_id} (adapter {TEST_ADAPTER_ID}) not found via DMManager."
+    chat_manager = agent_inner_space.get_component_by_type(ChatManagerComponent)
+    assert chat_manager is not None
+    dm_element = chat_manager.get_dm_element_for_user(TEST_ADAPTER_ID, dm_sender_external_id)
+    assert dm_element is not None, f"DM Element for user {dm_sender_external_id} (adapter {TEST_ADAPTER_ID}) not found via ChatManager."
     assert agent_inner_space.get_mounted_element(dm_element.mount_id) is dm_element
 
     msg_list_comp = dm_element.get_component_by_type(MessageListComponent)
@@ -394,8 +397,8 @@ async def test_dm_ping_pong(setup_test_environment):
     await asyncio.sleep(0.01)
 
     # Assert that the same DMElement is used and the new message is added
-    dm_element_after_second_msg = dm_manager.get_dm_element_for_user(TEST_ADAPTER_ID, dm_sender_external_id)
-    assert dm_element_after_second_msg is dm_element, "DMManager created a new DMElement for a subsequent message instead of reusing."
+    dm_element_after_second_msg = chat_manager.get_dm_element_for_user(TEST_ADAPTER_ID, dm_sender_external_id)
+    assert dm_element_after_second_msg is dm_element, "ChatManager created a new DMElement for a subsequent message instead of reusing."
     
     messages_after_second_incoming = msg_list_comp.get_messages()
     assert len(messages_after_second_incoming) == 3, f"Expected 3 messages after second incoming DM, got {len(messages_after_second_incoming)}"
@@ -438,12 +441,12 @@ async def test_dm_ping_pong(setup_test_environment):
     assert agent_context is not None, "Agent context not found on InnerSpace."
     agent_loop = agent_inner_space.get_component_by_type("MultiStepToolLoopComponent")
     assert agent_loop is not None, "AgentLoop not found on InnerSpace."
-    tools = agent_loop.aggregate_tools()
+    tools = await agent_loop.aggregate_tools()
     assert len(tools) > 0, "No tools found on InnerSpace."
 
     print(f"test_dm_ping_pong ({TEST_AGENT_ID}) PASSED!")
 
-# --- Test Function (Scenario 2) ---
+#--- Test Function (Scenario 2) ---
 @pytest.mark.asyncio
 async def test_shared_space_mention_reply(setup_test_environment):
     event_loop, mock_activity_client, space_registry, agent_inner_space = setup_test_environment
@@ -511,9 +514,45 @@ async def test_shared_space_mention_reply(setup_test_environment):
     # --- Phase 2: Agent replies to the shared channel via Uplink ---
     reply_text_to_channel = f"Hello @{message_sender_display_name}! Yes, I can help with the shared channel."
 
+    # Get the UplinkRemoteToolProviderComponent from the uplink_element
+    urtp_component = uplink_element.get_component_by_type(UplinkRemoteToolProviderComponent)
+    assert urtp_component is not None, "UplinkRemoteToolProviderComponent not found on uplink element."
+
+    # Fetch the tools as the LLM would see them (these are prefixed)
+    # Note: aggregate_tools in AgentLoopComponent also converts these to LLMToolDefinition objects.
+    # Here, we get them raw from URTP to find the correct name.
+    # Ensure URTP component is initialized if it fetches tools on init
+    if hasattr(urtp_component, 'initialize_component') and inspect.iscoroutinefunction(urtp_component.initialize_component):
+        await urtp_component.initialize_component()
+    elif hasattr(urtp_component, 'initialize_component'):
+        urtp_component.initialize_component()
+        
+    available_remote_tools_dicts = await urtp_component.get_llm_tool_definitions() # This returns List[Dict]
+    
+    # Find the prefixed name for send_message targeting the chat_element_in_shared_space
+    # The provider_element_id in the tool definition from URTP is the ID of the element *in the SharedSpace*.
+    # The chat_element_in_shared_space.id is this ID.
+    prefixed_send_message_tool_name = None
+    for tool_dict in available_remote_tools_dicts:
+        # Expected name format: f"{uplink_element.id}::{chat_element_in_shared_space.id}::send_message"
+        # Check if the tool_dict corresponds to the send_message tool from the chat_element_in_shared_space
+        # The tool_dict['name'] will already be prefixed by URTPC's get_tools_for_llm
+        # The structure of the prefixed name is owner_uplink_id::remote_provider_element_id::actual_tool_name
+        name_parts = tool_dict['name'].split('::')
+        if len(name_parts) == 3:
+            owner_uplink_id, remote_provider_el_id, actual_tool_name = name_parts
+            if owner_uplink_id == uplink_element.id and \
+               remote_provider_el_id == chat_element_in_shared_space.id and \
+               actual_tool_name == "send_message":
+                prefixed_send_message_tool_name = tool_dict['name']
+                break
+    
+    assert prefixed_send_message_tool_name is not None, \
+        f"Could not find prefixed send_message tool for {chat_element_in_shared_space.id} via uplink {uplink_element.id}. Tools found: {[t['name'] for t in available_remote_tools_dicts]}"
+
     action_result = await agent_inner_space.execute_action_on_element(
-        element_id=uplink_element.id,
-        action_name="send_message",
+        element_id=uplink_element.id, # Target is the UplinkProxy
+        action_name=prefixed_send_message_tool_name, # Use the dynamically found prefixed name
         parameters={"text": reply_text_to_channel}
     )
     assert action_result['success'] is True, f"send_message via UplinkProxy failed: {action_result.get('error')}"
