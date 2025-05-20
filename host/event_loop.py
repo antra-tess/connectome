@@ -73,16 +73,19 @@ class HostEventLoop:
     def get_outgoing_action_callback(self) -> OutgoingActionCallback:
          return self.enqueue_outgoing_action
 
-    def enqueue_outgoing_action(self, action_request: Dict[str, Any]):
+    async def enqueue_outgoing_action(self, action_request: Dict[str, Any]) -> Dict[str, Any]:
         """Adds an outgoing action request from an InnerSpace component to the queue."""
         # TODO: Add validation for action_request format?
         try:
             self._outgoing_action_queue.put_nowait(action_request)
             logger.debug(f"Outgoing action enqueued: {action_request.get('action_type')}")
+            return {"success": True, "status": "Action enqueued successfully."}
         except asyncio.QueueFull:
              logger.error("HostEventLoop outgoing queue is full! Action dropped.")
+             return {"success": False, "error": "Outgoing queue full."}
         except Exception as e:
              logger.error(f"Error enqueuing outgoing action: {e}", exc_info=True)
+             return {"success": False, "error": f"Error enqueuing action: {e}"}
              
     # --- NEW: Method for conditional agent cycle marking --- 
     def mark_agent_for_cycle(self, agent_id: str, event_payload: Dict[str, Any], current_time: float):

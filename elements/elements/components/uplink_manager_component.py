@@ -141,6 +141,7 @@ class UplinkManagerComponent(Component):
             "name": uplink_name,
             "description": uplink_description,
             "remote_space_info": remote_space_metadata,
+            "notify_owner_of_new_deltas_callback": self.owner.handle_deltas_from_uplink
         }
 
         try:

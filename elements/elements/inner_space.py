@@ -512,108 +512,119 @@ class InnerSpace(Space):
     # --- Convenience Getters ---
     def get_agent_loop_component(self) -> Optional[BaseAgentLoopComponent]:
         """Get the agent loop component."""
-        # Attempt to retrieve if not already set (might have been added later)
-        if not self._agent_loop:
-             self._agent_loop = self.get_component_by_type(BaseAgentLoopComponent)
         return self._agent_loop
-        
+
     def get_uplink_manager(self) -> Optional[UplinkManagerComponent]:
-        """Get the UplinkManagerComponent."""
         return self._uplink_manager
-    
+
     def get_hud(self) -> Optional[HUDComponent]:
-        """Get the HUD component."""
         return self._hud
-    
+
+    def handle_deltas_from_uplink(self, uplink_id: str, deltas: List[Dict[str, Any]]):
+        """
+        Receives VEIL deltas from a specific UplinkProxy that has new data from its remote space.
+        This can be used to trigger HUD updates or other reactive logic within the InnerSpace.
+        Args:
+            uplink_id: The ID of the UplinkProxy element that sourced these deltas.
+            deltas: A list of VEIL delta dictionaries.
+        """
+        logger.info(f"[{self.id}] Received {len(deltas)} deltas from Uplink '{uplink_id}'.")
+        
+        # Example: Notify HUDComponent or AgentLoopComponent
+        hud_comp = self.get_hud()
+        if hud_comp:
+            logger.debug(f"[{self.id}] Informing HUD component about new deltas from {uplink_id}. (Placeholder)")
+
+        if self._mark_agent_for_cycle and deltas: 
+            event_payload_for_cycle = {
+                "trigger_type": "uplink_delta_received",
+                "source_uplink_id": uplink_id,
+                "delta_count": len(deltas)
+            }
+            current_time = time.time()
+            logger.info(f"[{self.id}] Marking agent '{self.agent_id}' for cycle due to deltas from uplink '{uplink_id}'.")
+            self._mark_agent_for_cycle(self.agent_id, event_payload_for_cycle, current_time)
+
+    # --- VEIL Rendering & Context Generation (Delegated to HUDComponent) ---
+    def get_rendered_veil(self, for_round_id: Optional[str] = None) -> Optional[str]:
+        if self._hud:
+            return self._hud.get_rendered_veil(for_round_id)
+        logger.warning(f"[{self.id}] HUDComponent not available, cannot render VEIL for InnerSpace {self.id}")
+        return None
+
     # --- Event Handling ---
     def handle_event(self, event: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
         """
-        Handle InnerSpace-specific events, including triggering agent cycles on tool results
-        via the HostEventLoop.
-        
-        Args:
-            event: The event to handle (expected structure: {"event_id": ..., "timestamp": ..., "payload": {...}})
-            timeline_context: Context information about the timeline
-            
-        Returns:
-            True if the event was handled, False otherwise
+        Handle events specific to InnerSpace or delegate to Space.
+        This method now also includes logic to mark the agent for a cycle
+        when a 'tool_result_received' event specific to this InnerSpace occurs.
         """
-        # Let Space handle the event first (records to timeline, updates components, etc.)
-        handled = super().handle_event(event, timeline_context)
-        
-        # Extract event payload robustly (this is the inner payload, e.g., what was passed to add_event_...)
-        event_payload = event.get('payload', {})
-        event_type = event_payload.get("event_type")
-        event_data = event_payload.get("data", {})
+        event_type = event.get("event_type")
+        event_payload = event.get("payload", {})
+        handled_by_self = False
 
-        # --- Trigger Agent Cycle via HostEventLoop on Tool Result ---
+        # Specific InnerSpace event handling
         if event_type == "tool_result_received":
-            # The loop_component_id is still useful for logging/debugging
-            loop_component_id = event_data.get("loop_component_id")
-            logger.debug(f"[{self.id}] Detected tool result event. Attempting to mark agent {self.agent_id} for cycle via callback.")
+            # Check if this result is for an action initiated by *this* InnerSpace's agent
+            # The calling_context in the tool_result_received event should have loop_component_id
+            # which belongs to this InnerSpace's agent loop.
+            # For now, we assume any tool_result_received on the InnerSpace's timeline might be relevant.
+            # A more precise check could be added if loop_component_id is available in event_payload.
             
-            if callable(self._mark_agent_for_cycle):
-                try:
-                    current_time = time.monotonic()
-                    # Pass the *entire event payload* (which contains event_type: "tool_result_received")
-                    # and the agent_id to the callback.
-                    self._mark_agent_for_cycle(self.agent_id, event_payload, current_time)
-                    logger.info(f"[{self.id}] Called mark_agent_for_cycle for agent {self.agent_id} due to tool result (loop: {loop_component_id}).")
-                    # Mark handled because we successfully delegated the trigger action
-                    handled = True 
-                except Exception as e:
-                    logger.error(f"Error calling mark_agent_for_cycle callback for agent {self.agent_id}: {e}", exc_info=True)
+            logger.info(f"[{self.id}] InnerSpace received 'tool_result_received'. Payload: {event_payload}")
+            if self._mark_agent_for_cycle:
+                current_time = time.time()
+                # Pass the original tool_result_received payload as context for the cycle
+                logger.info(f"[{self.id}] Marking agent '{self.agent_id}' for cycle due to tool_result_received.")
+                self._mark_agent_for_cycle(self.agent_id, event_payload, current_time) 
+                handled_by_self = True # Considers this aspect handled
             else:
-                logger.warning(f"[{self.id}] Tool result received, but mark_agent_for_cycle callback is not available or not callable. Cannot trigger agent cycle.")
-        # --- End Trigger Agent Loop Logic ---
+                logger.warning(f"[{self.id}] Received tool_result_received but _mark_agent_for_cycle is not set.")
 
-        # Direct attention events to the global attention component if not already handled
-        elif event_type in ["attention_requested", "attention_cleared"]: # MODIFIED condition
-            if not handled:
-                logger.warning(f"InnerSpace received attention event '{event_type}' but GlobalAttentionComponent is not available.")
-                # Event is not "handled" by a specific component here, but we acknowledge it.
-                # Set handled to True if we consider logging it as handling.
-                # For now, let it fall through, HostEventLoop might still see it if it bubbles up.
-                pass # Or handled = True if logging is enough.
-                
-        # Add any other InnerSpace-specific event handling here
-                
-        return handled
+        # Delegate to Space's general event handling (records to timeline, dispatches to components/children)
+        # super().receive_event(event, timeline_context) # CAUTION: event is the full node, not just payload
+        # The 'event' passed to InnerSpace.handle_event is the *full event node* from the timeline
+        # Space.receive_event expects the *raw event payload* as its first argument.
+        # So, we need to pass event['payload'] to super().receive_event if we call it.
+        # However, the timeline recording and component dispatch should already be happening
+        # by the time InnerSpace.handle_event is called (if it's called as a component handler).
+        # If InnerSpace.handle_event is called directly by ExternalEventRouter for DMs,
+        # then it's responsible for the full processing.
+        
+        # For now, let's assume this handle_event is an *additional* handler called by Space.receive_event
+        # and its main job is the InnerSpace-specific logic above.
+        # If it were meant to *replace* Space.receive_event, it would need to replicate
+        # timeline recording and dispatch to all other components and children.
+        
+        # Based on current structure, Space.receive_event adds to timeline, then calls handle_event on components.
+        # So, we don't call super().receive_event() here to avoid double processing.
 
-    # --- Uplink Management ---
+        return handled_by_self # Indicates if InnerSpace-specific logic handled it.
+
+    # --- Connection and Uplink Management ---
     def get_connected_spaces(self) -> List[str]:
         """
-        Get IDs of all spaces this InnerSpace is connected to via UplinkProxy elements.
-        Delegates to UplinkManagerComponent if available.
+        Retrieves a list of remote space IDs this InnerSpace is connected to via Uplinks.
+        Delegates to UplinkManagerComponent.
         """
         if self._uplink_manager:
-            # Assuming UplinkManagerComponent's list_active_uplinks_tool returns a dict
-            # with an 'active_uplinks' list of dicts, each having 'remote_space_id'
-            tool_result = self._uplink_manager.list_active_uplinks_tool()
-            if tool_result.get("success"):
-                return [uplink.get("remote_space_id") for uplink in tool_result.get("active_uplinks", []) if uplink.get("remote_space_id")]
+            # Assuming UplinkManagerComponent.list_active_uplinks_tool() returns a dict
+            # with an "active_uplinks" key, which is a list of dicts.
+            uplinks_result = self._uplink_manager.list_active_uplinks_tool()
+            if uplinks_result.get("success"):
+                return [uplink_info.get("remote_space_id") for uplink_info in uplinks_result.get("active_uplinks", []) if uplink_info.get("remote_space_id")]
             else:
-                logger.error(f"[{self.id}] get_connected_spaces: Error from UplinkManager: {tool_result.get('error')}")
-                return [] # Return empty on error to avoid downstream issues
-        
-        # Fallback (original logic, less efficient if UplinkManager is present but fails to provide)
-        logger.warning(f"[{self.id}] get_connected_spaces: UplinkManagerComponent not available or failed. Using fallback scan.")
-        connected_spaces = []
-        for element in self.get_mounted_elements().values():
-            # Check if this is an UplinkProxy (through duck typing to avoid import cycles)
-            if hasattr(element, 'remote_space_id') and callable(getattr(element, 'get_connection_component', None)):
-                connected_spaces.append(element.remote_space_id)
-        return connected_spaces
-    
+                logger.error(f"[{self.id}] Failed to list active uplinks from UplinkManager: {uplinks_result.get('error')}")
+        return []
+
     def get_uplink_for_space(self, remote_space_id: str) -> Optional[BaseElement]:
         """
-        Get the UplinkProxy element for a specific remote space.
+        Gets the UplinkProxy element for a given remote_space_id.
         Delegates to UplinkManagerComponent.
         """
         if self._uplink_manager:
             return self._uplink_manager.get_uplink_for_space(remote_space_id)
-        
-        logger.warning(f"[{self.id}] get_uplink_for_space: UplinkManagerComponent not available. Cannot get uplink for {remote_space_id}.")
+        logger.error(f"[{self.id}] get_uplink_for_space: UplinkManagerComponent not available.")
         return None
 
     def ensure_uplink_to_shared_space(
@@ -627,11 +638,25 @@ class InnerSpace(Space):
         Delegates to UplinkManagerComponent.
         """
         if self._uplink_manager:
-            return self._uplink_manager.ensure_uplink_to_shared_space(
-                shared_space_id=shared_space_id,
-                shared_space_name=shared_space_name,
-                shared_space_description=shared_space_description
-            )
-        
+            return self._uplink_manager.ensure_uplink_to_shared_space(shared_space_id, shared_space_name, shared_space_description)
         logger.error(f"[{self.id}] ensure_uplink_to_shared_space: UplinkManagerComponent not available. Cannot ensure uplink to {shared_space_id}.")
         return None
+
+    async def execute_action_on_element(self, element_id: str, action_name: str, parameters: Dict[str, Any], calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Executes an action on an element, ensuring agent's identity is in the calling_context.
+        """
+        # Prepare the calling_context for actions initiated by this InnerSpace
+        final_calling_context = calling_context.copy() if calling_context else {}
+        
+        # Ensure the agent's own identity is part of the context it sends out
+        if 'source_agent_id' not in final_calling_context and hasattr(self, 'agent_id'):
+            final_calling_context['source_agent_id'] = self.agent_id
+        if 'source_agent_name' not in final_calling_context and hasattr(self, 'agent_name'):
+            final_calling_context['source_agent_name'] = self.agent_name
+        
+        # Add any other context this InnerSpace wants to provide by default
+        final_calling_context.setdefault('initiator_space_id', self.id)
+
+        # Call the super method with the augmented context
+        return await super().execute_action_on_element(element_id, action_name, parameters, calling_context=final_calling_context)

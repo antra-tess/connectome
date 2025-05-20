@@ -45,14 +45,15 @@ class UplinkConnectionComponent(Component):
         # "disconnect_request"
     ]
     
+    owner: Optional['UplinkProxy'] # Type hint owner
+
     def __init__(self, remote_space_id: Optional[str] = None,
                  sync_interval: int = 60,
                  space_registry: Optional['SpaceRegistry'] = None,
-                 delta_callback: Optional[Callable[[List[Dict[str, Any]]], None]] = None, **kwargs):
+                 **kwargs):
         super().__init__(**kwargs)
         self.remote_space_id = remote_space_id or "unknown_remote"
         self._space_registry = space_registry
-        self._delta_callback = delta_callback
         self._remote_space_ref: Optional['Space'] = None
         
         # State stores connection details and history
@@ -84,7 +85,7 @@ class UplinkConnectionComponent(Component):
         """Helper to get the associated TimelineComponent."""
         if not self.owner: # Changed from self.element
             return None
-        return self.owner.get_component_by_type("timeline") # Changed from self.element
+        return self.owner.get_component_by_type("TimelineComponent") # Changed from self.element
 
     @property
     def is_connected(self) -> bool:
@@ -135,21 +136,21 @@ class UplinkConnectionComponent(Component):
             self._record_timeline_event("uplink_connected", {"remote_space_id": self.remote_space_id})
 
             # --- NEW: Register listener with remote space --- 
-            if self._space_registry and self._delta_callback:
+            if self._space_registry and self.owner and hasattr(self.owner, 'process_incoming_deltas_from_remote_space'):
                 try:
                      self._remote_space_ref = self._space_registry.get_space(self.remote_space_id)
                      if self._remote_space_ref:
-                         logger.info(f"Registering delta listener with remote space {self.remote_space_id}")
-                         self._remote_space_ref.register_uplink_listener(self._delta_callback)
+                         logger.info(f"Registering self.owner.process_incoming_deltas_from_remote_space with remote space {self.remote_space_id}")
+                         # Pass the method from the UplinkProxy owner
+                         self._remote_space_ref.register_uplink_listener(self.owner.process_incoming_deltas_from_remote_space)
                      else:
                           logger.error(f"Could not register listener: Remote space {self.remote_space_id} not found in registry.")
-                          # TODO: Should connection fail if remote space cannot be found?
                 except Exception as e:
                      logger.error(f"Error registering uplink listener with remote space {self.remote_space_id}: {e}", exc_info=True)
             elif not self._space_registry:
                  logger.warning("Cannot register uplink listener: SpaceRegistry not provided.")
-            elif not self._delta_callback:
-                 logger.warning("Cannot register uplink listener: Delta callback not provided.")
+            elif not self.owner or not hasattr(self.owner, 'process_incoming_deltas_from_remote_space'):
+                 logger.warning(f"Cannot register uplink listener: Owner '{self.owner.id if self.owner else 'None'}' is missing 'process_incoming_deltas_from_remote_space' method.")
             # --- END NEW --- 
 
             return True
@@ -175,14 +176,18 @@ class UplinkConnectionComponent(Component):
         Returns:
             True if disconnected successfully (or already disconnected).
         """
+        if not self._is_initialized or not self._is_enabled: # Added readiness check
+            logger.warning(f"{self.COMPONENT_TYPE}: Cannot disconnect, component not ready.")
+            return False
+
         # --- NEW: Unregister listener --- 
-        if self._remote_space_ref and self._delta_callback:
+        if self._remote_space_ref and self.owner and hasattr(self.owner, 'process_incoming_deltas_from_remote_space'):
              try:
-                  logger.info(f"Unregistering delta listener from remote space {self.remote_space_id}")
-                  self._remote_space_ref.unregister_uplink_listener(self._delta_callback)
+                  logger.info(f"Unregistering self.owner.process_incoming_deltas_from_remote_space from remote space {self.remote_space_id}")
+                  self._remote_space_ref.unregister_uplink_listener(self.owner.process_incoming_deltas_from_remote_space)
              except Exception as e:
                   logger.error(f"Error unregistering uplink listener from {self.remote_space_id}: {e}", exc_info=True)
-        self._remote_space_ref = None # Clear reference regardless
+        self._remote_space_ref = None
         # --- END NEW --- 
 
         if not self._state["connected"]:

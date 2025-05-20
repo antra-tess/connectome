@@ -17,6 +17,9 @@ from .space import Space # Inherits Space functionality (Container, Timeline)
 from .components.tool_provider import ToolProviderComponent, ToolParameter
 from .components.uplink import UplinkConnectionComponent, RemoteStateCacheComponent, UplinkVeilProducer
 from .components.uplink.remote_tool_provider import UplinkRemoteToolProviderComponent
+from elements.elements.components.uplink.connection_component import UplinkConnectionComponent
+from elements.elements.components.uplink.remote_tool_provider import UplinkRemoteToolProviderComponent
+from elements.elements.components.uplink.cache_component import RemoteStateCacheComponent
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -51,7 +54,9 @@ class UplinkProxy(Space):
     def __init__(self, element_id: str, name: str, description: str, 
                  remote_space_id: str, remote_space_info: Optional[Dict[str, Any]] = None,
                  sync_interval: int = 60, cache_ttl: int = 300,
-                 space_registry: Optional['SpaceRegistry'] = None):
+                 space_registry: Optional['SpaceRegistry'] = None,
+                 outgoing_action_callback: Optional['OutgoingActionCallback'] = None,
+                 notify_owner_of_new_deltas_callback: Optional[Callable[[str, List[Dict[str, Any]]], None]] = None):
         """
         Initialize the uplink proxy.
         
@@ -64,13 +69,17 @@ class UplinkProxy(Space):
             sync_interval: Default interval for connection component (may be obsolete)
             cache_ttl: Default TTL for the remote state cache component
             space_registry: Reference to the SpaceRegistry for finding remote space
+            outgoing_action_callback: Callback for local management tools if any
+            notify_owner_of_new_deltas_callback: Callback for this UplinkProxy to notify its owner (InnerSpace) of new deltas, passing self.id and deltas.
         """
         super().__init__(element_id, name, description)
         
-        # Store for RemoteStateCacheComponent and potentially others
         self._space_registry = space_registry 
         self.remote_space_id = remote_space_id # Made public for easier access by components
         
+        # This callback is for THIS UplinkProxy to notify ITS owner (InnerSpace)
+        self._notify_owner_of_new_deltas_callback = notify_owner_of_new_deltas_callback
+
         # Get the ToolProviderComponent added by the parent Space class
         self._local_tool_provider: Optional[ToolProviderComponent] = self.get_component_by_type(ToolProviderComponent)
         if not self._local_tool_provider:
@@ -79,14 +88,13 @@ class UplinkProxy(Space):
             # For now, assume Space adds it and log an error if not found.
             logger.error(f"CRITICAL: ToolProviderComponent not found on UplinkProxy {self.id} after Space initialization. Local tools cannot be registered.")
             # As a fallback, try adding it, though this might indicate a deeper issue.
-            # self._local_tool_provider = self.add_component(ToolProviderComponent) # Avoid this if possible
+            self._local_tool_provider = self.add_component(ToolProviderComponent, component_id=f"{self.id}_local_tool_provider")
 
         # Initialize core components for Uplink functionality
         self._connection_component: UplinkConnectionComponent = self.add_component(UplinkConnectionComponent, remote_space_id=remote_space_id, space_registry=space_registry)
         self._cache_component: RemoteStateCacheComponent = self.add_component(RemoteStateCacheComponent) # Will sync using remote_space_id and space_registry
         self._veil_producer_component: UplinkVeilProducer = self.add_component(UplinkVeilProducer) # Produces VEIL from cached state
         
-        # self._tool_provider_component: ToolProviderComponent = self.add_component(ToolProviderComponent) # REMOVE THIS LINE - it's a duplicate attempt
         self._register_uplink_tools() # Register local tools on the self._local_tool_provider
 
         # NEW: Add RemoteToolProvider for tools from the remote space
@@ -101,6 +109,15 @@ class UplinkProxy(Space):
         
         logger.info(f"Created uplink proxy: {name} ({element_id}) -> {remote_space_id}")
     
+    def initialize(self, **kwargs):
+        super().initialize(**kwargs)
+        # The UplinkConnectionComponent is added during __init__ or by prefab.
+        # We no longer need to set its _delta_callback here as it will directly call
+        # self.process_incoming_deltas_from_remote_space which is on this UplinkProxy instance.
+        conn_comp = self.get_connection_component()
+        if not conn_comp:
+            logger.error(f"[{self.id}] UplinkConnectionComponent not found during UplinkProxy initialize. Critical for remote delta listening.")
+
     # --- Tool Registration --- 
     def _register_uplink_tools(self) -> None:
         """Register tools specific to uplink proxies using ToolProviderComponent."""
@@ -308,20 +325,32 @@ class UplinkProxy(Space):
     def get_cache_component(self) -> Optional[RemoteStateCacheComponent]:
         return self._cache_component
 
-    # --- NEW: Delta Handler ---
-    def handle_remote_deltas(self, deltas: List[Dict[str, Any]]):
+    def process_incoming_deltas_from_remote_space(self, deltas: List[Dict[str, Any]]):
         """
-        Callback method invoked by the remote Space when new VEIL deltas are generated.
-        Delegates delta application to the cache component.
+        Called by the remote SharedSpace (via UplinkConnectionComponent's registration)
+        when new VEIL deltas are available from the remote space.
         """
-        logger.info(f"[{self.id}] Received {len(deltas)} VEIL delta(s) from remote space {self.remote_space_id}.")
+        logger.info(f"[{self.id}] UplinkProxy processing {len(deltas)} incoming deltas from remote space '{self.remote_space_id}'.")
+        
+        # 1. Apply deltas to local cache
         if self._cache_component:
             try:
                 self._cache_component.apply_deltas(deltas)
+                logger.debug(f"[{self.id}] Applied deltas to RemoteStateCacheComponent.")
             except Exception as e:
-                logger.error(f"[{self.id}] Error applying remote deltas in cache component: {e}", exc_info=True)
+                logger.error(f"[{self.id}] Error applying deltas in cache component: {e}", exc_info=True)
         else:
             logger.warning(f"[{self.id}] Cannot apply remote deltas: RemoteStateCacheComponent not found.")
+
+        # 2. Notify the owner of this UplinkProxy (the InnerSpace) about these deltas
+        if self._notify_owner_of_new_deltas_callback:
+            try:
+                logger.debug(f"[{self.id}] Notifying owner (InnerSpace) of new deltas from remote space '{self.remote_space_id}'.")
+                self._notify_owner_of_new_deltas_callback(self.id, deltas) # Pass uplink_id and deltas
+            except Exception as e:
+                logger.error(f"[{self.id}] Error calling _notify_owner_of_new_deltas_callback: {e}", exc_info=True)
+        else:
+            logger.warning(f"[{self.id}] No owner notification callback configured (_notify_owner_of_new_deltas_callback is None). InnerSpace will not be directly informed of these deltas.")
 
     # --- Event Handling --- 
     # Default delegation via super().handle_event is likely sufficient unless 

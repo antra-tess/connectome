@@ -225,7 +225,6 @@ class ToolProviderComponent(Component):
 
         tool_info = self._tools[tool_name]
         tool_func = tool_info["function"]
-        
         # Inspect the tool function's signature to see if it accepts calling_context
         tool_func_sig = inspect.signature(tool_func)
         params_to_pass = kwargs.copy() # Start with parameters from LLM

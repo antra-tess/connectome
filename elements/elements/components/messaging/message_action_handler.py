@@ -42,12 +42,19 @@ class MessageActionHandler(Component):
     def __init__(self, element: Optional[Any] = None, outgoing_action_callback: Optional['OutgoingActionCallback'] = None, **kwargs): # Added element, updated kwargs
         super().__init__(element, **kwargs) # Pass element and kwargs
         self._outgoing_action_callback = outgoing_action_callback
-        if not self._outgoing_action_callback:
-             logger.warning(f"MessageActionHandler {self.id if self.id else 'UNKNOWN_ID'} initialized without an outgoing_action_callback. Cannot send external messages.")
-
+            
+        
     def initialize(self, **kwargs) -> None:
         """Registers tools after initialization."""
         super().initialize(**kwargs)
+        
+        owner_id_for_log = "UnknownOwner"
+        if self.owner and hasattr(self.owner, 'id'):
+            owner_id_for_log = self.owner.id
+        if not self._outgoing_action_callback or self._outgoing_action_callback is None:
+             logger.warning(f"MessageActionHandler {self.id if self.id else 'UNKNOWN_ID'} on Element '{owner_id_for_log}' initialized without an outgoing_action_callback. Cannot send external messages.")
+        logger.critical(f"MAH Init [{owner_id_for_log} / CompID: {self.id if self.id else 'NoCompIDYet'}] initialized. outgoing_action_callback is {'SET' if self._outgoing_action_callback else 'NOT SET'}.")
+
         self._register_messaging_tools()
         logger.debug(f"MessageActionHandler initialized and tools registered for Element {self.owner.id if self.owner else 'Unknown'}")
 
@@ -191,6 +198,7 @@ class MessageActionHandler(Component):
             logger.debug(f"[{self.owner.id}] Dispatching direct send_message action request: {action_request}")
             
             try:
+                assert self._outgoing_action_callback is not None
                 dispatch_result = await self._outgoing_action_callback(action_request)
                 if dispatch_result and dispatch_result.get("success"):
                     logger.info(f"[{self.owner.id}] Direct send_message action successfully dispatched to ActivityClient for req_id: {internal_request_id}.")
@@ -202,6 +210,7 @@ class MessageActionHandler(Component):
             except Exception as e:
                 error_msg = f"Exception during direct send_message dispatch: {e}"
                 logger.exception(f"[{self.owner.id}] {error_msg} for req_id: {internal_request_id}")
+                logger.critical(f"FAILED TO DISPATCH DIRECT SEND_MESSAGE ACTION REQUEST: [{self.owner.id}] Dispatching direct send_message action request: {action_request}, outgoing_action_callback: {self._outgoing_action_callback}")
                 return {"success": False, "error": error_msg, "message_id": None}
 
         # --- Register delete_message Tool --- 
@@ -210,7 +219,7 @@ class MessageActionHandler(Component):
             description="Deletes a message specified by its external ID from the conversation this element represents.",
             parameters_schema=delete_message_params
         )
-        def delete_message_tool(message_external_id: str, calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        async def delete_message_tool(message_external_id: str, calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             """Handles deleting a message using its external ID."""
             if not self._outgoing_action_callback:
                 return {"success": False, "error": "Outgoing action callback is not configured."}
@@ -235,7 +244,7 @@ class MessageActionHandler(Component):
             }
             
             try:
-                self._outgoing_action_callback(action_request)
+                await self._outgoing_action_callback(action_request)
                 logger.info(f"[{self.owner.id}] Dispatched 'delete_message' action for ID '{message_external_id}' to adapter '{adapter_id}'.")
                 return {"success": True, "status": "Delete request sent to outgoing queue."} 
             except Exception as e:
@@ -248,7 +257,7 @@ class MessageActionHandler(Component):
             description="Edits an existing message specified by its external ID.",
             parameters_schema=edit_message_params
         )
-        def edit_message_tool(message_external_id: str, new_text: str, calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        async def edit_message_tool(message_external_id: str, new_text: str, calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             """Handles editing a message using its external ID."""
             if not self._outgoing_action_callback:
                 return {"success": False, "error": "Outgoing action callback is not configured."}
@@ -274,7 +283,7 @@ class MessageActionHandler(Component):
             }
             
             try:
-                self._outgoing_action_callback(action_request)
+                await self._outgoing_action_callback(action_request)
                 logger.info(f"[{self.owner.id}] Dispatched 'edit_message' action for ID '{message_external_id}' to adapter '{adapter_id}'.")
                 return {"success": True, "status": "Edit request sent to outgoing queue."} 
             except Exception as e:
@@ -287,7 +296,7 @@ class MessageActionHandler(Component):
             description="Adds an emoji reaction to a message specified by its external ID.",
             parameters_schema=add_reaction_params
         )
-        def add_reaction_tool(message_external_id: str, emoji: str, calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        async def add_reaction_tool(message_external_id: str, emoji: str, calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             """Handles adding a reaction to a message using its external ID."""
             if not self._outgoing_action_callback:
                 return {"success": False, "error": "Outgoing action callback is not configured."}
@@ -313,7 +322,7 @@ class MessageActionHandler(Component):
             }
             
             try:
-                self._outgoing_action_callback(action_request)
+                await self._outgoing_action_callback(action_request)
                 logger.info(f"[{self.owner.id}] Dispatched 'add_reaction' ({emoji}) action for ID '{message_external_id}' to adapter '{adapter_id}'.")
                 return {"success": True, "status": "Add reaction request sent to outgoing queue."} 
             except Exception as e:
@@ -326,7 +335,7 @@ class MessageActionHandler(Component):
             description="Removes an emoji reaction (previously added by this agent/bot) from a message specified by its external ID.",
             parameters_schema=remove_reaction_params
         )
-        def remove_reaction_tool(message_external_id: str, emoji: str, calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        async def remove_reaction_tool(message_external_id: str, emoji: str, calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             """Handles removing a reaction from a message using its external ID."""
             if not self._outgoing_action_callback:
                 return {"success": False, "error": "Outgoing action callback is not configured."}
@@ -352,7 +361,7 @@ class MessageActionHandler(Component):
             }
             
             try:
-                self._outgoing_action_callback(action_request)
+                await self._outgoing_action_callback(action_request)
                 logger.info(f"[{self.owner.id}] Dispatched 'remove_reaction' ({emoji}) action for ID '{message_external_id}' to adapter '{adapter_id}'.")
                 return {"success": True, "status": "Remove reaction request sent to outgoing queue."} 
             except Exception as e:
@@ -365,7 +374,7 @@ class MessageActionHandler(Component):
             description="Fetches historical messages for a specific conversation from the adapter.",
             parameters_schema=fetch_history_params
         )
-        def fetch_history_tool(conversation_id: str, # Explicitly required by tool
+        async def fetch_history_tool(conversation_id: str, # Explicitly required by tool
                                  before_ms: Optional[int] = None,
                                  after_ms: Optional[int] = None,
                                  limit: Optional[int] = 100,
@@ -373,7 +382,7 @@ class MessageActionHandler(Component):
             # This tool might be called by an agent loop that doesn't have a `calling_context`
             # in the same way a direct user tool might.
             # The agent loop should ideally provide its own ID.
-            return self.handle_fetch_history(
+            return await self.handle_fetch_history(
                 conversation_id=conversation_id,
                 before_ms=before_ms,
                 after_ms=after_ms,
@@ -387,7 +396,7 @@ class MessageActionHandler(Component):
             description="Retrieves the content of a specific attachment. If not locally cached, initiates a fetch from the adapter.",
             parameters_schema=get_message_attachment_content_params # Use updated params
         )
-        def get_message_attachment_content_tool(message_external_id: str, attachment_id: str, calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        async def get_message_attachment_content_tool(message_external_id: str, attachment_id: str, calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             if not self._outgoing_action_callback: # _dispatch_action checks this, but good for early exit
                 return {"success": False, "error": "Outgoing action callback is not configured."}
 
@@ -455,7 +464,7 @@ class MessageActionHandler(Component):
             }
 
             # Use _dispatch_action to send to ActivityClient
-            dispatch_result = self._dispatch_action(
+            dispatch_result = await self._dispatch_action(
                 action_type="fetch_attachment_content", # New action type for ActivityClient to handle
                 payload=action_payload
             )
@@ -571,6 +580,7 @@ class MessageActionHandler(Component):
             return self.owner.agent_id
             
         logger.warning(f"[{self.owner.id if self.owner else 'Unknown'}] Could not determine requesting_agent_id through calling_context or InnerSpace hierarchy.")
+        logger.critical(f"{calling_context}")
         return None
     
     def _get_requesting_agent_name(self, calling_context: Optional[Dict[str, Any]] = None) -> Optional[str]:
@@ -603,7 +613,7 @@ class MessageActionHandler(Component):
         return None
 
 
-    def handle_fetch_history(self, 
+    async def handle_fetch_history(self, 
                              conversation_id: str,
                              before_ms: Optional[int] = None,
                              after_ms: Optional[int] = None,
@@ -643,9 +653,9 @@ class MessageActionHandler(Component):
             "calling_loop_id": calling_context.get('loop_component_id') # From AgentLoop
         }
         
-        return self._dispatch_action("fetch_message_history", payload) # "fetch_message_history" is the ActivityClient action
+        return await self._dispatch_action("fetch_message_history", payload) # "fetch_message_history" is the ActivityClient action
 
-    def handle_get_attachment(self, 
+    async def handle_get_attachment(self, 
                               attachment_id: str,
                               conversation_id: Optional[str] = None, 
                               message_external_id: Optional[str] = None, 
@@ -689,9 +699,9 @@ class MessageActionHandler(Component):
             "calling_loop_id": calling_context.get('loop_component_id') # From AgentLoop
         }
         
-        return self._dispatch_action("get_attachment_content", payload) # "get_attachment_content" is ActivityClient action
+        return await self._dispatch_action("get_attachment_content", payload) # "get_attachment_content" is ActivityClient action
 
-    def _dispatch_action(self, action_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _dispatch_action(self, action_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Helper to dispatch an action via the outgoing_action_callback."""
         if not self._outgoing_action_callback:
             logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] Cannot dispatch '{action_type}': Outgoing action callback not configured.")
@@ -703,7 +713,7 @@ class MessageActionHandler(Component):
             "payload": payload
         }
         try:
-            self._outgoing_action_callback(action_request)
+            await self._outgoing_action_callback(action_request)
             logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] Dispatched '{action_type}' to ActivityClient with payload: {payload}")
             return {"success": True, "status": f"'{action_type}' request sent to outgoing queue."}
         except Exception as e:
