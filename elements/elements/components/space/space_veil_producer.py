@@ -1,208 +1,217 @@
 import logging
-from typing import Dict, Any, Optional, List, Set, Type
+from typing import Dict, Any, Optional, List, Set
+import copy
 
-# Need Component base class and potentially Space/BaseElement for type hints/checks
-from ..base_component import Component, VeilProducer
-from ...base import BaseElement # For checking children
-# Import the registry decorator
+from ..base_component import VeilProducer
 from elements.component_registry import register_component
-
-# Need to know the base VeilProducer type to find on children
-# Assuming a base or common ancestor for VEIL producers exists or we use duck typing
-# If not, we might need to import specific producers like UplinkVeilProducer etc.
-# Let's assume a generic way to find them for now.
-# Option 1: Assume a base VeilProducer class exists somewhere (e.g., in veil directory)
-# from ..veil.veil_producer import VeilProducer # Ideal if base class exists
-# Option 2: Duck typing (check for get_full_veil/calculate_delta methods) - Safer if no base class
-# Option 3: If we only expect specific producers, import them.
-
-# Let's use Option 2 (Duck Typing) for now to avoid assuming a base class structure
+# Assuming your Space class is in elements.elements.space
+# Adjust the import if your Space class is located elsewhere.
+# from ...space import Space # This was in the prior context, might need adjustment
 
 logger = logging.getLogger(__name__)
 
-# VEIL Node Structure Constants (Example)
-VEIL_SPACE_ROOT_TYPE = "space_root" # Generic type for space VEIL root
+VEIL_SPACE_ROOT_TYPE = "space_root"
 
 @register_component
 class SpaceVeilProducer(VeilProducer):
     """
-    Generates VEIL representation for a Space element, aggregating VEIL
-    from its mounted child elements that also have VeilProducers.
+    Generates VEIL deltas ONLY for the Space element's own root node.
+    It can also construct a full hierarchical VEIL from a flat cache if requested
+    (e.g., by its owner Space calling its get_full_veil method).
+    The Space element itself manages the canonical flat cache.
     """
     COMPONENT_TYPE = "SpaceVeilProducer"
 
-    # No specific sibling dependencies, relies on owner being a Space
-    # and children potentially having VeilProducers.
-
     def initialize(self, **kwargs) -> None:
-        """Initializes the component state for delta tracking."""
+        """Initializes the component state for delta tracking for the Space's root node."""
         super().initialize(**kwargs)
-        # Track the veil_ids/structure of child VEIL roots from the last generation
-        self._state.setdefault('_last_child_veil_roots', {}) # { child_element_id: child_root_veil_node }
-        # Track properties of the space itself last time
-        self._state.setdefault('_last_space_properties', self._get_current_space_properties())
-        logger.debug(f"SpaceVeilProducer initialized for Element {self.owner.id}")
-        return True
+        self._state.setdefault('_last_space_properties', {})
+        self._state.setdefault('_has_produced_root_add_before', False)
+        logger.debug(f"SpaceVeilProducer initialized for Element {self.owner.id if self.owner else 'Unknown'}")
 
     def _get_current_space_properties(self) -> Dict[str, Any]:
-        """Extracts properties of the Space element itself for VEIL."""
-        # Basic properties - can be expanded
+        """Extracts properties of the Space element itself for its VEIL root node."""
+        if not self.owner:
+            logger.error(f"[{self.COMPONENT_TYPE}] Owner not set, cannot get space properties.")
+            return {}
         props = {
             "structural_role": "root",
             "content_nature": "space_summary",
             "element_id": self.owner.id,
             "element_name": self.owner.name,
             "element_type": self.owner.__class__.__name__,
-            # Add any other relevant Space-level properties from owner state/metadata
             "is_inner_space": getattr(self.owner, 'IS_INNER_SPACE', False)
         }
         return props
 
-    def _find_child_veil_producers(self, child_element: BaseElement) -> List[Any]:
-        """Finds components on a child element that look like VeilProducers (duck typing)."""
-        producers = []
-        for comp in child_element.get_components().values():
-            # Duck typing: Check for required methods
-            if hasattr(comp, 'get_full_veil') and callable(comp.get_full_veil) and \
-               hasattr(comp, 'calculate_delta') and callable(comp.calculate_delta):
-                 producers.append(comp)
-        return producers
+    def build_hierarchical_veil_from_flat_cache(self,
+                                             flat_cache: Dict[str, Any],
+                                             root_node_id: str,
+                                             owner_id_for_logging: str,
+                                             processed_nodes_this_call: Set[str]) -> Optional[Dict[str, Any]]:
+        """
+        Recursively builds a hierarchical VEIL node structure from a flat cache.
+        It discovers children by looking for nodes in the flat_cache whose 'parent_id'
+        (in properties or directly) matches the current root_node_id.
+        'processed_nodes_this_call' is a set passed by the caller to detect cycles during this specific build.
+        """
+        if root_node_id in processed_nodes_this_call:
+            logger.warning(f"[{owner_id_for_logging}/{self.COMPONENT_TYPE}] Cycle detected for node_id {root_node_id} during VEIL reconstruction.")
+            return None
 
+        original_node_data = flat_cache.get(root_node_id)
+        if not original_node_data:
+            logger.warning(f"[{owner_id_for_logging}/{self.COMPONENT_TYPE}] Node {root_node_id} referenced but not found in flat_cache for reconstruction.")
+            return None
+
+        processed_nodes_this_call.add(root_node_id)
+        
+        reconstructed_node = copy.deepcopy(original_node_data)
+        
+        # Initialize children list for the reconstructed node.
+        # This list will be populated by discovering children from the flat_cache.
+        current_node_built_children = []
+
+        # Iterate through the entire flat_cache to find nodes that are children of root_node_id
+        for potential_child_veil_id, potential_child_node_data_from_cache in flat_cache.items():
+            if potential_child_veil_id == root_node_id: # A node cannot be its own child
+                continue
+
+            parent_id_of_potential_child = None
+            if isinstance(potential_child_node_data_from_cache, dict):
+                # Prioritize parent_id from properties
+                parent_id_in_props = potential_child_node_data_from_cache.get("properties", {}).get("parent_id")
+                # Fallback to parent_id as a direct key in the node data
+                parent_id_direct = potential_child_node_data_from_cache.get("parent_id")
+                
+                if parent_id_in_props:
+                    parent_id_of_potential_child = parent_id_in_props
+                elif parent_id_direct:
+                    parent_id_of_potential_child = parent_id_direct
+            
+            if parent_id_of_potential_child == root_node_id:
+                # This potential_child_veil_id is a child of the current root_node_id.
+                # Recursively build this child.
+                # Pass the same 'processed_nodes_this_call' set for cycle detection within this build operation.
+                fully_built_child_node = self.build_hierarchical_veil_from_flat_cache(
+                    flat_cache=flat_cache,
+                    root_node_id=potential_child_veil_id, # Use the child's veil_id as the new root for recursion
+                    owner_id_for_logging=owner_id_for_logging,
+                    processed_nodes_this_call=processed_nodes_this_call
+                )
+                
+                if fully_built_child_node:
+                    current_node_built_children.append(fully_built_child_node)
+        
+        # Assign the discovered and built children to the reconstructed node.
+        # Ensure 'children' is always a list, even if empty.
+        reconstructed_node["children"] = current_node_built_children
+        
+        processed_nodes_this_call.remove(root_node_id) # Backtrack for multiple branches from the same parent
+        return reconstructed_node
 
     def get_full_veil(self) -> Optional[Dict[str, Any]]:
         """
-        Generates the complete VEIL structure for the Space, including children.
+        Constructs and returns a full hierarchical VEIL representation of its owner Space,
+        by using the Space's internal flat cache (`_flat_veil_cache`).
+
+        This method is primarily intended to be called BY THE OWNING SPACE ITSELF
+        (e.g., from Space.get_full_veil_snapshot()) to encapsulate the building logic.
+        External consumers should typically call Space.get_full_veil_snapshot().
         """
-        from ...space import Space # For checking owner type
-        if not isinstance(self.owner, Space):
-            logger.error(f"[{self.owner.id}] SpaceVeilProducer attached to non-Space element: {type(self.owner)}. Cannot generate VEIL.")
+        if not self.owner:
+            logger.error(f"[{self.COMPONENT_TYPE}] Owner (Space) not set, cannot generate its full VEIL.")
+            return None
+        
+        owner_id = self.owner.id
+        # Ensure owner has the _flat_veil_cache attribute
+        if not hasattr(self.owner, '_flat_veil_cache'): # Corrected attribute name check
+            logger.error(f"[{owner_id}/{self.COMPONENT_TYPE}] Owner Space is missing '_flat_veil_cache'. Cannot build VEIL.")
             return None
 
-        owner_id = self.owner.id
-        current_space_props = self._get_current_space_properties()
+        space_flat_cache = self.owner._flat_veil_cache # Corrected attribute name usage
+        space_root_veil_id = f"{owner_id}_space_root"
 
-        # Aggregate VEIL from children
-        aggregated_children_veils = []
-        current_child_veil_roots = {} # Store for delta tracking { child_element_id: child_root_veil }
-        processed_child_elements = set()
+        if not space_flat_cache or space_root_veil_id not in space_flat_cache:
+            logger.warning(f"[{owner_id}/{self.COMPONENT_TYPE}] Space's flat cache is empty or root node '{space_root_veil_id}' missing. Cannot build full VEIL via get_full_veil.")
+            # Return a minimal representation of the root if it's missing, or an error structure
+            return {
+                "veil_id": space_root_veil_id,
+                "node_type": VEIL_SPACE_ROOT_TYPE,
+                "properties": self._get_current_space_properties(), # Provide basic props even on error
+                "children": [],
+                "status": "Error: Cache unavailable or root missing for producer's get_full_veil."
+            }
 
-        mounted_elements = self.owner.get_mounted_elements()
-
-        for mount_id, child_element in mounted_elements.items():
-            if child_element.id in processed_child_elements:
-                continue
-            processed_child_elements.add(child_element.id)
-
-            child_producers = self._find_child_veil_producers(child_element)
-
-            for child_producer in child_producers:
-                 try:
-                     child_veil = child_producer.get_full_veil()
-                     if child_veil:
-                         aggregated_children_veils.append(child_veil)
-                         current_child_veil_roots[child_element.id] = child_veil # Store the root node
-                 except Exception as e:
-                     logger.error(f"[{owner_id}] Error getting full VEIL from child producer {child_producer.__class__.__name__} on {child_element.id}: {e}", exc_info=True)
-
-        # Create the root node for the Space
-        root_veil_node = {
-            "veil_id": f"{owner_id}_space_root",
-            "node_type": VEIL_SPACE_ROOT_TYPE,
-            "properties": {**current_space_props, "veil_child_count": len(aggregated_children_veils)},
-            "children": aggregated_children_veils
-        }
-
-        # Update state for delta calculation
-        self._state['_last_child_veil_roots'] = current_child_veil_roots
-        self._state['_last_space_properties'] = current_space_props
-
-        return root_veil_node
-
+        logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] get_full_veil: Building hierarchical VEIL from owner's flat cache (root: '{space_root_veil_id}').")
+        full_veil = self.build_hierarchical_veil_from_flat_cache(
+            flat_cache=space_flat_cache,
+            root_node_id=space_root_veil_id,
+            owner_id_for_logging=owner_id,
+            processed_nodes_this_call=set() # Important: fresh set for each top-level call
+        )
+        return full_veil    
 
     def calculate_delta(self) -> Optional[List[Dict[str, Any]]]:
         """
-        Calculates the changes (delta) for the Space, aggregating child deltas.
+        Calculates deltas ONLY for the Space element's own root node.
+        It no longer aggregates deltas from children; Space.on_frame_end handles that.
+        State updates for this producer's baseline are handled within this method.
         """
-        from ...space import Space # For checking owner type
-        if not isinstance(self.owner, Space):
-            logger.error(f"[{self.owner.id}] SpaceVeilProducer attached to non-Space element: {type(self.owner)}. Cannot calculate delta.")
+        if not self.owner:
+            logger.error(f"[{self.COMPONENT_TYPE}] Owner not set, cannot calculate delta.")
             return None
+
+        # Optional: Check if owner is of type Space, if Space class is available for import
+        # from ...space import Space # Adjust import as needed
+        # if not isinstance(self.owner, Space):
+        #     logger.error(f"[{self.owner.id if self.owner else 'UnknownOwner'}/{self.COMPONENT_TYPE}] SpaceVeilProducer attached to non-Space element: {type(self.owner)}. Cannot calculate delta.")
+        #     return None
 
         owner_id = self.owner.id
         delta_operations = []
         space_root_veil_id = f"{owner_id}_space_root"
-
-        # 1. Calculate delta for Space properties
-        last_space_props = self._state.get('_last_space_properties', {})
         current_space_props = self._get_current_space_properties()
-        if current_space_props != last_space_props:
-             logger.debug(f"[{owner_id}] Detected property change for Space root.")
-             delta_operations.append({
-                 "op": "update_node",
-                 "veil_id": space_root_veil_id,
-                 "properties": current_space_props # Send all current properties including annotations
-             })
 
-        # 2. Calculate and aggregate deltas from children
-        last_child_roots = self._state.get('_last_child_veil_roots', {}) # { child_element_id: child_root_veil_node }
-        current_child_roots = {} # { child_element_id: child_root_veil_node }
-        processed_child_elements = set()
-        mounted_elements = self.owner.get_mounted_elements()
-
-        for mount_id, child_element in mounted_elements.items():
-            if child_element.id in processed_child_elements:
-                continue
-            processed_child_elements.add(child_element.id)
-
-            child_producers = self._find_child_veil_producers(child_element)
-            child_element_produced_veil = False
-
-            for child_producer in child_producers:
-                 try:
-                     # Get child deltas
-                     child_deltas = child_producer.calculate_delta()
-                     if child_deltas and isinstance(child_deltas, list):
-                         # TODO: Adjust parent_id if needed? Assume child deltas are self-contained for now.
-                         delta_operations.extend(child_deltas)
-
-                     # Get child's current root VEIL for add/remove detection
-                     # Avoid calling get_full_veil again if possible; delta calculation
-                     # should ideally be sufficient. We need the child's root veil_id.
-                     # This implies child producers should consistently return deltas
-                     # relative to their own structure/root.
-                     # We mainly need to know if a child VEIL *exists* now vs last time.
-                     # Let's try getting the *current* full VEIL to check for existence/root node.
-                     # This isn't ideal performance-wise if get_full_veil is expensive.
-                     current_child_veil = child_producer.get_full_veil()
-                     if current_child_veil:
-                         current_child_roots[child_element.id] = current_child_veil
-                         child_element_produced_veil = True
-
-                 except Exception as e:
-                     logger.error(f"[{owner_id}] Error calculating delta/getting VEIL from child producer {child_producer.__class__.__name__} on {child_element.id}: {e}", exc_info=True)
-
-            # If this child existed last time but doesn't produce VEIL now (or producer removed)
-            if child_element.id in last_child_roots and not child_element_produced_veil:
-                 removed_node_id = last_child_roots[child_element.id].get("veil_id")
-                 if removed_node_id:
-                     logger.debug(f"[{owner_id}] Child element {child_element.id} VEIL root {removed_node_id} removed.")
-                     delta_operations.append({"op": "remove_node", "veil_id": removed_node_id})
-
-        # 3. Detect newly added child VEIL roots
-        added_child_element_ids = set(current_child_roots.keys()) - set(last_child_roots.keys())
-        for added_id in added_child_element_ids:
-             added_node = current_child_roots[added_id]
-             logger.debug(f"[{owner_id}] Child element {added_id} VEIL root {added_node.get('veil_id')} added.")
-             delta_operations.append({
-                 "op": "add_node",
-                 "parent_id": space_root_veil_id, # Add it to the space's root
-                 "node": added_node
-             })
-
-        # Update state for next delta calculation
-        self._state['_last_child_veil_roots'] = current_child_roots
-        self._state['_last_space_properties'] = current_space_props
-
+        if not self._state.get('_has_produced_root_add_before', False):
+            logger.info(f"[{owner_id}/{self.COMPONENT_TYPE}] Generating 'add_node' for Space root '{space_root_veil_id}'.")
+            delta_operations.append({
+                "op": "add_node",
+                "node": {
+                    "veil_id": space_root_veil_id,
+                    "node_type": VEIL_SPACE_ROOT_TYPE,
+                    "properties": current_space_props,
+                    "children": [] # Root node initially has no children declared by this delta
+                }
+            })
+        else:
+            last_space_props = self._state.get('_last_space_properties', {})
+            if current_space_props != last_space_props:
+                logger.info(f"[{owner_id}/{self.COMPONENT_TYPE}] Generating 'update_node' for Space root properties on '{space_root_veil_id}'.")
+                delta_operations.append({
+                    "op": "update_node",
+                    "veil_id": space_root_veil_id,
+                    "properties": current_space_props
+                })
+        
         if delta_operations:
-            logger.info(f"[{owner_id}] SpaceVeilProducer calculated delta with {len(delta_operations)} operations.")
-        return delta_operations
+            logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] Calculated delta for Space root: {delta_operations}")
+        else:
+            logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] No delta operations for Space root this frame.")
+
+        self._state['_last_space_properties'] = copy.deepcopy(current_space_props)
+        if not self._state.get('_has_produced_root_add_before', False):
+            # Check if an add_node op for the root was actually generated
+            for delta_op in delta_operations:
+                if delta_op.get("op") == "add_node" and \
+                   isinstance(delta_op.get("node"), dict) and \
+                   delta_op["node"].get("veil_id") == space_root_veil_id:
+                    self._state['_has_produced_root_add_before'] = True
+                    logger.info(f"[{owner_id}/{self.COMPONENT_TYPE}] Confirmed 'add_node' for Space root '{space_root_veil_id}' produced. Flag set.")
+                    break
+        
+        logger.debug(
+            f"[{owner_id}/{self.COMPONENT_TYPE}] calculate_delta completed. "
+            f"Root add produced flag: {self._state.get('_has_produced_root_add_before', False)}. "
+        )
+        return delta_operations if delta_operations else None

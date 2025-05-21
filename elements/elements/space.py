@@ -8,13 +8,15 @@ from typing import Dict, Any, Optional, List, Callable, Type, Set
 import uuid
 import time
 import asyncio
+import copy
 
 from .base import BaseElement, MountType
-from .components.space import ContainerComponent, TimelineComponent
+from .components.space import ContainerComponent, TimelineComponent, SpaceVeilProducer
 from .components.tool_provider import ToolProviderComponent
 from .components.factory_component import ElementFactoryComponent
 from .components.chat_manager_component import ChatManagerComponent
 from .components.tool_provider import ToolProviderComponent 
+from .components.base_component import VeilProducer
 
 # Type checking imports
 from typing import TYPE_CHECKING
@@ -69,8 +71,6 @@ class Space(BaseElement):
         # Store references for easier delegation, though get_component could also be used.
         self._container: Optional[ContainerComponent] = self.add_component(ContainerComponent)
         self._timeline: Optional[TimelineComponent] = self.add_component(TimelineComponent)
-        
-        
         # NEW: Add ElementFactoryComponent by default
         factory_kwargs = {}
         if self._outgoing_action_callback:
@@ -81,10 +81,44 @@ class Space(BaseElement):
         if not self.IS_UPLINK_SPACE:    
             self._element_factory: Optional[ElementFactoryComponent] = self.add_component(ElementFactoryComponent, **factory_kwargs)
             self.add_component(ChatManagerComponent)
+            self._veil_producer: Optional[SpaceVeilProducer] = self.add_component(SpaceVeilProducer)
         # assert  False, self._element_factory
         # NEW: Initialize uplink listeners set and delta cache
         self._uplink_listeners: Set[Callable[[List[Dict[str, Any]]], None]] = set()
         self._cached_deltas: List[Dict[str, Any]] = []
+        
+        # NEW: Initialize internal hierarchical VEIL cache (Phase 1, Step 1.1)
+        self._flat_veil_cache: Dict[str, Any] = {}
+        if not self.IS_UPLINK_SPACE and self._veil_producer and hasattr(self._veil_producer, '_get_current_space_properties'):
+            # Initialize with the Space's own root node
+            space_root_id = f"{self.id}_space_root"
+            initial_props = self._veil_producer._get_current_space_properties()
+            self._flat_veil_cache = {
+                space_root_id: {
+                    "veil_id": space_root_id,
+                    "node_type": self._veil_producer.VEIL_SPACE_ROOT_TYPE if hasattr(self._veil_producer, 'VEIL_SPACE_ROOT_TYPE') else "space_root",
+                    "properties": initial_props,
+                    "children": [] # Producer will reconstruct this based on parent_id
+                }
+            }
+            logger.debug(f"[{self.id}] Initialized _flat_veil_cache with root node: {space_root_id}")
+        elif not self.IS_UPLINK_SPACE:
+            # Fallback if _veil_producer or its method is not available at this stage
+            # This might happen if component initialization order changes or if it's an UplinkSpace
+            space_root_id = f"{self.id}_space_root"
+            self._flat_veil_cache = {
+                 space_root_id: {
+                    "veil_id": space_root_id,
+                    "node_type": "space_root", # Generic fallback
+                    "properties": {
+                        "element_id": self.id,
+                        "element_name": self.name,
+                        "element_type": self.__class__.__name__
+                    },
+                    "children": [] # Producer will reconstruct this
+                }
+            }
+            logger.warning(f"[{self.id}] Initialized _flat_veil_cache with basic root node due to missing SpaceVeilProducer or properties method at init.")
         
         # NEW: Add ChatManagerComponent by default to all Spaces
         
@@ -103,15 +137,112 @@ class Space(BaseElement):
                 if hasattr(self._element_factory, 'set_outgoing_action_callback') and callable(getattr(self._element_factory, 'set_outgoing_action_callback')):
                     self._element_factory.set_outgoing_action_callback(self._outgoing_action_callback)
 
+        # NEW: For accumulating deltas from children in the "emit on change" model
+        self._deltas_accumulated_this_frame: List[Dict[str, Any]] = []
+
         logger.info(f"Created space: {name} ({self.id})")
     
+    # --- NEW: Internal VEIL Cache Management (Phase 1, Step 1.2) ---
+    def _apply_deltas_to_internal_cache(self, deltas: List[Dict[str, Any]]) -> None:
+        """
+        Applies a list of VEIL delta operations to the internal flat VEIL cache.
+        Modifies self._flat_veil_cache in place.
+        It checks for a top-level 'parent_id' in 'add_node' and 'update_node' operations
+        and ensures this 'parent_id' is stored within the node's 'properties'.
+        """
+        if not isinstance(deltas, list):
+            logger.warning(f"[{self.id}] Invalid deltas format received by _apply_deltas_to_internal_cache: not a list.")
+            return
+
+        logger.debug(f"[{self.id}] Applying {len(deltas)} deltas to internal flat cache.")
+
+        for operation in deltas:
+            op_type = operation.get("op")
+            node_id_from_op = operation.get("veil_id") # Used by update_node, remove_node
+            node_data_from_op = operation.get("node")   # Used by add_node
+            top_level_parent_id = operation.get("parent_id") # Check for parent_id at the operation level
+
+            if op_type == "add_node":
+                if not node_data_from_op or not isinstance(node_data_from_op, dict) or "veil_id" not in node_data_from_op:
+                    logger.warning(f"[{self.id}] Invalid 'add_node' operation (missing node, node not dict, or missing veil_id): {operation}")
+                    continue
+                
+                new_node_id = node_data_from_op["veil_id"]
+                
+                # Ensure 'properties' dictionary exists in the node data
+                if "properties" not in node_data_from_op or not isinstance(node_data_from_op.get("properties"), dict):
+                    node_data_from_op["properties"] = {}
+                
+                # If parent_id is provided at the top level of the delta op, inject it into node's properties
+                if top_level_parent_id:
+                    node_data_from_op["properties"]["parent_id"] = top_level_parent_id
+                    logger.debug(f"[{self.id}] Cache: Injecting parent_id '{top_level_parent_id}' into properties of node '{new_node_id}' during add_node.")
+
+                if new_node_id in self._flat_veil_cache:
+                    logger.debug(f"[{self.id}] Cache: Updating existing node {new_node_id} via add_node delta in _flat_veil_cache.")
+                else:
+                    logger.debug(f"[{self.id}] Cache: Adding new node {new_node_id} via add_node delta to _flat_veil_cache.")
+                
+                if "children" not in node_data_from_op or not isinstance(node_data_from_op.get("children"), list):
+                    node_data_from_op["children"] = [] 
+                
+                self._flat_veil_cache[new_node_id] = node_data_from_op
+
+            elif op_type == "update_node":
+                if not node_id_from_op:
+                    logger.warning(f"[{self.id}] Invalid 'update_node' operation (missing veil_id): {operation}")
+                    continue
+                
+                if node_id_from_op in self._flat_veil_cache:
+                    logger.debug(f"[{self.id}] Cache: Updating properties for node {node_id_from_op} in _flat_veil_cache.")
+                    
+                    # Ensure 'properties' dictionary exists in the cached node data
+                    if "properties" not in self._flat_veil_cache[node_id_from_op] or \
+                       not isinstance(self._flat_veil_cache[node_id_from_op].get("properties"), dict):
+                         self._flat_veil_cache[node_id_from_op]["properties"] = {}
+
+                    # Apply property updates from the delta
+                    properties_to_update = operation.get("properties")
+                    if properties_to_update is not None: # Can be an empty dict to clear properties
+                        self._flat_veil_cache[node_id_from_op]["properties"].update(properties_to_update)
+                    else:
+                        # If "properties" is not in the delta, it's not an error, just means no property changes.
+                        # However, if "properties" is explicitly null, it could mean clear all, but our current
+                        # model uses an empty dict for that if updating. Let's log if it's missing but was expected.
+                        # For now, if properties_to_update is None, we only care about potential parent_id change.
+                        pass 
+
+                    # If parent_id is provided at the top level of the update_node op, update it in node's properties
+                    if top_level_parent_id:
+                        self._flat_veil_cache[node_id_from_op]["properties"]["parent_id"] = top_level_parent_id
+                        logger.debug(f"[{self.id}] Cache: Injecting/updating parent_id '{top_level_parent_id}' into properties of node '{node_id_from_op}' during update_node.")
+                else:
+                    logger.warning(f"[{self.id}] Cache: 'update_node' for {node_id_from_op} but node not found in _flat_veil_cache.")
+            
+            elif op_type == "remove_node":
+                if not node_id_from_op:
+                    logger.warning(f"[{self.id}] Invalid 'remove_node' operation (missing veil_id): {operation}")
+                    continue
+
+                if node_id_from_op in self._flat_veil_cache:
+                    logger.debug(f"[{self.id}] Cache: Removing node {node_id_from_op} from _flat_veil_cache.")
+                    del self._flat_veil_cache[node_id_from_op]
+                    # No need to remove from parent's children list here;
+                    # SpaceVeilProducer will handle this during reconstruction.
+                else:
+                    logger.warning(f"[{self.id}] Cache: 'remove_node' for {node_id_from_op} but node not found in _flat_veil_cache.")
+            else:
+                logger.warning(f"[{self.id}] Cache: Unsupported delta operation '{op_type}' received. Skipping.")
+
     # --- Container Methods (Delegated) ---
     def mount_element(self, element: BaseElement, mount_id: Optional[str] = None, mount_type: MountType = MountType.INCLUSION) -> bool:
         """Mount an element in this space (delegates to ContainerComponent)."""
         if not self._container:
             logger.error(f"[{self.id}] Cannot mount element: ContainerComponent unavailable.")
             return False
-        return self._container.mount_element(element, mount_id, mount_type)
+        # Pass self.id as parent_space_id to the element being mounted
+        mount_successful = self._container.mount_element(element, mount_id, mount_type)
+        return mount_successful
     
     def unmount_element(self, mount_id: str) -> bool:
         """Unmount an element (delegates to ContainerComponent)."""
@@ -373,7 +504,7 @@ class Space(BaseElement):
                  logger.debug(f"[{self.id}] Event '{new_event_id}' ({event_type}) handled by Space component(s); no specific child target.")
 
         # NEW methods for listener registration
-        self.register_uplink_listener(lambda deltas: self.receive_delta(deltas))
+        # self.register_uplink_listener(lambda deltas: self.receive_delta(deltas)) # Removed: A Space shouldn't self-listen to its own produced deltas this way.
 
     # NEW methods for listener registration
     def register_uplink_listener(self, callback: Callable[[List[Dict[str, Any]]], None]):
@@ -393,18 +524,40 @@ class Space(BaseElement):
     def on_frame_end(self) -> None:
         """
         Called by the HostEventLoop (or owning Space) after its processing frame.
-        Sends cached VEIL deltas to all registered uplink listeners.
+        In the new "emit on change" model:
+        1. Triggers its own SpaceVeilProducer to emit deltas (which will be cached via receive_delta).
+        2. Sends all deltas accumulated in _deltas_accumulated_this_frame to uplink listeners.
         """
-        if self._cached_deltas:
-            logger.debug(f"[{self.id}] on_frame_end: Sending {len(self._cached_deltas)} cached deltas to {len(self._uplink_listeners)} listeners.")
+        # 1. Trigger this Space's own VeilProducer to emit its delta
+        # This ensures the Space's own root node state is up-to-date in the cache and accumulated deltas.
+        if not self.IS_UPLINK_SPACE and self._veil_producer and hasattr(self._veil_producer, 'emit_delta'):
+            try:
+                logger.debug(f"[{self.id}] on_frame_end: Triggering emit_delta for own SpaceVeilProducer.")
+                self._veil_producer.emit_delta() # This will call calculate_delta and then self.receive_delta
+            except Exception as e:
+                logger.error(f"[{self.id}] on_frame_end: Error triggering emit_delta for SpaceVeilProducer: {e}", exc_info=True)
+
+        # 2. Send accumulated deltas to listeners
+        if self._deltas_accumulated_this_frame:
+            logger.debug(f"[{self.id}] on_frame_end: Sending {len(self._deltas_accumulated_this_frame)} accumulated deltas to {len(self._uplink_listeners)} listeners.")
+            # logger.critical(f"DEBUG [{self.id}] Sending deltas to listeners: {self._deltas_accumulated_this_frame}") # Too verbose for normal running
+            
+            # Create a copy for sending, as listeners might modify it or processing might take time.
+            deltas_to_send = list(self._deltas_accumulated_this_frame) 
+            
+            all_listeners_notified_successfully = True
             for listener_callback in self._uplink_listeners:
                 try:
-                    listener_callback(self._cached_deltas)
+                    listener_callback(deltas_to_send)
                 except Exception as e:
-                    logger.error(f"[{self.id}] Error calling uplink listener: {e}", exc_info=True)
-            self._cached_deltas.clear()
+                    all_listeners_notified_successfully = False
+                    logger.error(f"[{self.id}] Error calling uplink listener {listener_callback}: {e}", exc_info=True)
+            
+            # Clear the accumulated deltas for the next frame, regardless of listener success for now.
+            # If listener success is critical for not clearing, that logic would be more complex (e.g., retry, dead-letter queue for deltas).
+            self._deltas_accumulated_this_frame.clear()
         else:
-            logger.debug(f"[{self.id}] on_frame_end: No deltas to send.")
+            logger.debug(f"[{self.id}] on_frame_end: No accumulated deltas to send.")
             
     # --- Uplink Support Methods ---
     def get_space_metadata_for_uplink(self) -> Dict[str, Any]:
@@ -437,36 +590,76 @@ class Space(BaseElement):
     def get_full_veil_snapshot(self) -> Optional[Dict[str, Any]]:
         """
         Generates and returns a full VEIL snapshot of this space and its contents.
-        Delegates to the SpaceVeilProducerComponent if present.
-            
-        Returns:
-            A dictionary representing the full VEIL state, or None if generation fails.
+        Delegates the construction of the hierarchy to its SpaceVeilProducer,
+        providing it with the Space's internal flat cache.
         """
-        veil_producer = self.get_component_by_type("SpaceVeilProducerComponent")
-        if veil_producer and hasattr(veil_producer, 'produce_veil'):
-            logger.debug(f"[{self.id}] Generating full VEIL snapshot via SpaceVeilProducerComponent.")
-            try:
-                # Assuming produce_veil() with no arguments means full snapshot
-                # and it needs the current element_states which it can get from self.element
-                # or the producer is already observing the space.
-                # The VeilProducer's produce_veil usually takes element_states.
-                # For a SpaceVeilProducer, it might need to gather states from mounted elements.
-                # Let's assume its produce_veil can operate on its owner (the Space) directly.
-                return veil_producer.produce_veil() 
-            except Exception as e:
-                logger.error(f"[{self.id}] Error generating VEIL snapshot from SpaceVeilProducerComponent: {e}", exc_info=True)
-                return None
-        else:
-            logger.warning(f"[{self.id}] SpaceVeilProducerComponent not found or 'produce_veil' method missing. Cannot generate full VEIL snapshot.")
-            # Fallback: return basic space info if no producer
+        if self.IS_UPLINK_SPACE: # UplinkSpaces might not have a standard _veil_producer
+            logger.warning(f"[{self.id}] get_full_veil_snapshot() called on an UplinkSpace. UplinkSpaces typically do not produce their own VEIL in this manner.")
+            # Or, they might have a different producer type. For now, return None or basic info.
+            # Consider what an UplinkSpace should return here.
+            # For now, let's provide its own root if the cache has it.
+            space_root_id = f"{self.id}_space_root"
+            if self._flat_veil_cache and space_root_id in self._flat_veil_cache:
+                 return copy.deepcopy(self._flat_veil_cache[space_root_id]) # Just its own node
+            return {"veil_id": space_root_id, "properties": {"name": self.name, "status": "UplinkSpace - snapshot not applicable"}, "children": []}
+
+
+        if not self._veil_producer:
+            logger.error(f"[{self.id}] Cannot generate full VEIL snapshot: _veil_producer (SpaceVeilProducer) not found.")
+            # Fallback: return basic space info if producer is missing
+            space_root_id = f"{self.id}_space_root"
             return {
-                "element_id": self.id,
-                "name": self.name,
-                "description": self.description,
-                "element_type": self.__class__.__name__,
-                "mounted_elements": {mount_id: elem.name for mount_id, elem in self.get_mounted_elements().items()},
-                "components": [comp.COMPONENT_TYPE for comp in self.get_components().values()],
-                "veil_status": "producer_missing"
+                "veil_id": space_root_id,
+                "node_type": "space_root", # VEIL_SPACE_ROOT_TYPE, # - might not be defined here
+                "properties": {
+                    "element_id": self.id,
+                    "element_name": self.name,
+                    "description": self.description,
+                    "element_type": self.__class__.__name__,
+                    "veil_status": "veil_producer_missing_on_space"
+                },
+                "children": []
+            }
+
+        # The SpaceVeilProducer's get_full_veil method now handles building from this Space's cache.
+        logger.debug(f"[{self.id}] get_full_veil_snapshot: Delegating to SpaceVeilProducer to build VEIL from internal cache.")
+        try:
+            # SpaceVeilProducer.get_full_veil() will use self.owner._flat_veil_cache
+            # and self.owner.id (which are this Space's attributes)
+            full_reconstructed_veil = self._veil_producer.get_full_veil() 
+            
+            if full_reconstructed_veil:
+                return full_reconstructed_veil # Already a deepcopy from the producer's builder
+            else:
+                # This case implies an issue within the producer's get_full_veil or its builder
+                logger.error(f"[{self.id}] SpaceVeilProducer.get_full_veil() returned None or empty. Snapshot generation failed.")
+                space_root_id = f"{self.id}_space_root"
+                return {
+                    "veil_id": space_root_id,
+                    "node_type": "space_root",
+                    "properties": {
+                        "element_id": self.id,
+                        "element_name": self.name,
+                        "description": self.description,
+                        "element_type": self.__class__.__name__,
+                        "veil_status": "veil_producer_failed_to_build_hierarchy"
+                     },
+                    "children": list(self._flat_veil_cache.values()) if self._flat_veil_cache else [] 
+                }
+        except Exception as e:
+            logger.error(f"[{self.id}] Error calling SpaceVeilProducer.get_full_veil() for snapshot: {e}", exc_info=True)
+            space_root_id = f"{self.id}_space_root"
+            return {
+                "veil_id": space_root_id,
+                "node_type": "space_root",
+                "properties": {
+                    "element_id": self.id,
+                    "element_name": self.name,
+                    "description": self.description,
+                    "element_type": self.__class__.__name__,
+                    "veil_status": f"error_delegating_to_veil_producer: {e}"
+                },
+                "children": []
             }
 
     # --- Lifecycle & Debug --- 
@@ -479,16 +672,56 @@ class Space(BaseElement):
         # Consider clearing cache after retrieval? Or timestamping?
         return list(self._cached_deltas) # Return a copy
 
-    def receive_delta(self, delta: List[Dict[str, Any]]) -> None:
+    def receive_delta(self, delta_operations: List[Dict[str, Any]]) -> None:
         """
-        Receives a VEIL delta from an UplinkProxy and adds it to the Space's timeline.
+        Receives VEIL delta operations, typically from a child element's VeilProducer
+        (via its emit_delta -> owner.receive_delta -> this_method chain).
+        Applies these deltas to the Space's internal flat VEIL cache and
+        accumulates them for dispatch by on_frame_end.
         """
+        if not isinstance(delta_operations, list) or not delta_operations:
+            logger.debug(f"[{self.id}] Space.receive_delta called with no valid delta operations. Skipping.")
+            return
+
+        logger.debug(f"[{self.id}] Space.receive_delta: Processing {len(delta_operations)} delta operations.")
+
+        # 1. Apply to internal flat VEIL cache
+        try:
+            self._apply_deltas_to_internal_cache(delta_operations)
+            logger.debug(f"[{self.id}] Space.receive_delta: Applied {len(delta_operations)} operations to _flat_veil_cache.")
+        except Exception as e:
+            logger.error(f"[{self.id}] Space.receive_delta: Error applying deltas to internal cache: {e}", exc_info=True)
+            # Decide if we should still accumulate if caching fails. For now, let's still accumulate.
+
+        # 2. Accumulate for on_frame_end dispatch
+        self._deltas_accumulated_this_frame.extend(delta_operations)
+        logger.debug(f"[{self.id}] Space.receive_delta: Added {len(delta_operations)} operations to _deltas_accumulated_this_frame. Total accumulated: {len(self._deltas_accumulated_this_frame)}")
+
+        # Optional: Record an event to the timeline (as before, but maybe less critical now that cache is updated)
+        # This might be too noisy if every producer emitting causes an event here.
+        # Consider if this specific event is still needed or if the cache changes are sufficient.
+        # For now, let's keep it to see its utility.
         event_payload = {
-            "event_type": "Veil Delta Calculated",
-            "delta": delta
+            "event_type": "veil_delta_operations_received_by_space", 
+            "payload": { 
+                "source": "child_producer_emission", # Indicates source
+                "delta_operation_count": len(delta_operations)
+            }
         }
-        self.add_event_to_timeline(event_payload, {"timeline_id": self.get_primary_timeline()})
-        self._cached_deltas.extend(delta)
+        timeline_context = {} # TODO: ensure this gets proper context from caller if needed
+        primary_timeline = self.get_primary_timeline()
+        if primary_timeline:
+            timeline_context['timeline_id'] = primary_timeline
+        # self.add_event_to_timeline(event_payload, timeline_context) # Commented out to reduce noise, can be re-enabled if useful for debugging.
+
+    def get_flat_veil_snapshot(self) -> Dict[str, Any]:
+        """
+        Returns a deep copy of the Space's internal flat VEIL node cache.
+        The cache is a dictionary where keys are veil_ids and values are node data.
+        Hierarchy is not explicitly stored here; it's reconstructed by producers.
+        """
+        logger.debug(f"[{self.id}] Providing flat VEIL cache snapshot. Size: {len(self._flat_veil_cache)}")
+        return copy.deepcopy(self._flat_veil_cache)
 
     # --- Action Execution --- 
     async def execute_action_on_element(self, element_id: str, action_name: str, parameters: Dict[str, Any], calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

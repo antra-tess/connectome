@@ -8,6 +8,7 @@ from typing import Dict, Any, Optional, List, Set, Callable, TYPE_CHECKING
 import uuid
 import time
 from datetime import datetime, timedelta
+import copy
 
 from ..base_component import Component
 from .connection_component import UplinkConnectionComponent # Needed to check connection status
@@ -50,7 +51,8 @@ class RemoteStateCacheComponent(Component):
             "last_successful_sync": None,
             "last_sync_attempt": None,
             "cache_expiry": {}, # e.g., { cache_key: expiry_timestamp }
-            "cache_ttl": cache_ttl # Default time-to-live in seconds
+            "cache_ttl": cache_ttl, # Default time-to-live in seconds
+            "pending_remote_deltas": [] # NEW: For storing raw deltas from remote
         }
         # Timer for auto-sync (implementation detail)
         self._auto_sync_enabled = False
@@ -83,9 +85,10 @@ class RemoteStateCacheComponent(Component):
         return self.owner.get_component_by_type("uplink_connection")
 
     def sync_remote_state(self, force: bool = False) -> bool:
+        from ...uplink import UplinkProxy
         """
         Synchronizes the cache with the remote space's current state.
-        Fetches metadata and a full VEIL snapshot.
+        Fetches metadata and a flat VEIL cache snapshot.
 
         Args:
             force: If True, forces a sync even if one was recently done.
@@ -138,25 +141,32 @@ class RemoteStateCacheComponent(Component):
             uplink_proxy_element.remote_space_info["status"] = "metadata_fetch_error"
             # Do not necessarily return False here, could still attempt VEIL sync if desired
 
-        # 2. Fetch full VEIL snapshot from the remote space
+        # 2. Fetch flat VEIL cache snapshot from the remote space
         try:
-            logger.debug(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Fetching full VEIL snapshot from remote space '{remote_space_id}'.")
-            full_veil_snapshot = remote_space.get_full_veil_snapshot()
-            if full_veil_snapshot:
-                self._cached_state = full_veil_snapshot # Replace current cache with the full snapshot
-                self._state["last_successful_sync"] = time.time()
-                self._state["last_data_hash"] = hash(str(full_veil_snapshot)) # Basic change detection
-                logger.info(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Successfully synced full VEIL snapshot. New hash: {self._state['last_data_hash']}")
+            logger.debug(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Fetching flat VEIL cache snapshot from remote space '{remote_space_id}'.")
+            flat_veil_cache_snapshot = remote_space.get_flat_veil_snapshot() 
+            
+            if flat_veil_cache_snapshot is not None: 
+                self._state["remote_state_cache"].clear()
+                self._state["remote_state_cache"] = flat_veil_cache_snapshot # It's already a deepcopy
                 
-                # Notify the UplinkVeilProducer that the cache has been updated
-                uplink_veil_producer = self.owner.get_component_by_type("UplinkVeilProducerComponent")
-                if uplink_veil_producer and hasattr(uplink_veil_producer, 'on_cache_updated'):
-                    uplink_veil_producer.on_cache_updated(self._cached_state)
+                logger.info(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Successfully stored flat VEIL cache snapshot. Cache size: {len(self._state['remote_state_cache'])}")
+
+                self._state["last_successful_sync"] = time.time()
+                self._state["last_data_hash"] = hash(str(self._state["remote_state_cache"])) 
+                logger.info(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Successfully synced flat VEIL snapshot. New flat cache hash: {self._state['last_data_hash']}")
+                
+                self._state["pending_remote_deltas"].clear()
+
+                uplink_veil_producer = self.owner.get_component_by_type("UplinkVeilProducer")
+                if uplink_veil_producer:
+                    logger.debug(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Triggering emit_delta on UplinkVeilProducer after full sync.")
+                    uplink_veil_producer.emit_delta()
                 return True
             else:
-                logger.warning(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Remote space '{remote_space_id}' returned no VEIL snapshot.")
+                logger.warning(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Remote space '{remote_space_id}' returned None or empty flat VEIL snapshot.")
                 # Don't clear existing cache if snapshot fetch fails, keep potentially stale data.
-                return False # Indicate sync was not fully successful
+                return False
 
         except Exception as e:
             logger.error(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Error fetching VEIL snapshot from '{remote_space_id}': {e}", exc_info=True)
@@ -168,158 +178,223 @@ class RemoteStateCacheComponent(Component):
              logger.debug(f"Cache stale or sync forced for {self.remote_space_id}, attempting sync.")
              self.sync_remote_state() # Attempt sync, ignore result for getter
              
-        return self._state["remote_state_cache"].copy()
+        # The remote_state_cache now directly holds the deepcopy from get_flat_veil_snapshot.
+        # Returning another deepcopy ensures consumers can't modify this component's internal state.
+        return copy.deepcopy(self._state.get("remote_state_cache", {}))
 
     def get_history_bundles(self, span_ids: Optional[List[str]] = None) -> Dict[str, Any]:
-         """
-         Retrieves cached history bundles, potentially fetching missing ones.
-         (Fetching logic TBD - would likely happen during sync_remote_state)
-         """
-         if span_ids:
-              return {sid: self._state["history_bundles"].get(sid) for sid in span_ids if sid in self._state["history_bundles"]}
-         return self._state["history_bundles"].copy()
+        """
+        Retrieves cached history bundles, potentially fetching missing ones.
+        (Fetching logic TBD - would likely happen during sync_remote_state)
+        """
+        if span_ids:
+            return {sid: self._state["history_bundles"].get(sid) for sid in span_ids if sid in self._state["history_bundles"]}
+        return copy.deepcopy(self._state.get("history_bundles", {})) # Return copy
 
     def _is_cache_stale(self) -> bool:
-         """Checks if the main cache is considered stale based on TTL."""
-         expiry = self._state["cache_expiry"].get("full_state")
-         if not expiry: # No expiry set, assume stale
-              return True
-         return int(time.time() * 1000) > expiry
+        """Checks if the main cache is considered stale based on TTL."""
+        last_sync = self._state.get("last_successful_sync")
+        if not last_sync: # No successful sync yet, assume stale
+            return True
+        
+        ttl = self._state.get("cache_ttl", 300) # Default to 300 seconds if not set
+        if time.time() > last_sync + ttl:
+            return True
+        return False
          
     def enable_auto_sync(self, interval: Optional[int] = None) -> None:
-         """
-         Enables automatic background synchronization.
-         (Note: Requires an async event loop or threading setup in the host)
-         """
-         if interval is not None:
-              self._state["cache_ttl"] = interval # Assuming sync interval relates to TTL
-              # Update sync_interval in connection component? Or keep separate? Let's keep separate for now.
-              
-         sync_interval_seconds = self._state["cache_ttl"] 
-         if not self._auto_sync_enabled:
-              self._auto_sync_enabled = True
-              logger.info(f"Enabling auto-sync for {self.remote_space_id} every {sync_interval_seconds} seconds.")
-              # --- Timer Implementation Placeholder --- 
-              # This needs integration with the main application loop (e.g., asyncio.create_task)
-              # async def _sync_loop():
-              #      while self._auto_sync_enabled:
-              #           await asyncio.sleep(sync_interval_seconds)
-              #           if self._auto_sync_enabled: # Check again in case disabled during sleep
-              #                self.sync_remote_state()
-              # self._auto_sync_timer = asyncio.create_task(_sync_loop())
-              logger.warning("Auto-sync timer implementation required (e.g., asyncio).")
-              # -------------------------------------
+        """
+        Enables automatic background synchronization.
+        (Note: Requires an async event loop or threading setup in the host)
+        """
+        if interval is not None:
+            # Use the provided interval for this session's auto-sync logic
+            # It could also update self._state["cache_ttl"] if they are meant to be linked
+            sync_interval_seconds = interval
+            self._state["cache_ttl"] = interval # Link them if auto-sync interval should also be the TTL
+        else:
+            sync_interval_seconds = self._state.get("cache_ttl", 300)
+
+        if not self._auto_sync_enabled:
+            self._auto_sync_enabled = True
+            logger.info(f"Enabling auto-sync for {self.remote_space_id} every {sync_interval_seconds} seconds.")
+            # Placeholder: Actual timer/task scheduling would integrate with host's event loop
+            logger.warning("Auto-sync timer implementation required (e.g., asyncio).")
               
     def disable_auto_sync(self) -> None:
-         """Disables automatic background synchronization."""
-         if self._auto_sync_enabled:
-              self._auto_sync_enabled = False
-              # --- Cancel Timer Placeholder --- 
-              # if self._auto_sync_timer:
-              #      self._auto_sync_timer.cancel()
-              #      self._auto_sync_timer = None
-              logger.warning("Auto-sync timer cancellation required.")
-              # ------------------------------
-              logger.info(f"Disabled auto-sync for {self.remote_space_id}.")
+        """Disables automatic background synchronization."""
+        if self._auto_sync_enabled:
+            self._auto_sync_enabled = False
+            logger.warning("Auto-sync timer cancellation required.")
+            logger.info(f"Disabled auto-sync for {self.remote_space_id}.")
 
-    # --- NEW: Apply Deltas --- 
     def apply_deltas(self, deltas: List[Dict[str, Any]]) -> None:
         """
         Applies a list of VEIL delta operations to the cached state.
-        Currently handles 'add_node' and 'remove_node'.
-        Structure of cache assumed to be { veil_id: node_data }
+        Also queues these deltas to be passed on by the UplinkVeilProducer.
         """
         if not isinstance(deltas, list):
             logger.warning(f"[{self.owner.id if self.owner else 'cache'}] Invalid delta format received: not a list.")
             return
 
-        logger.debug(f"[{self.owner.id if self.owner else 'cache'}] Applying {len(deltas)} deltas to cache for {self.remote_space_id}.")
-        cache_modified = False
-        # Ensure cache exists
+        logger.debug(f"[{self.owner.id if self.owner else 'cache'}] Applying {len(deltas)} deltas to remote_state_cache for {self.remote_space_id}.")
+        cache_modified_by_these_deltas = False
+        
         if "remote_state_cache" not in self._state:
              self._state["remote_state_cache"] = {}
 
+        nodes_referenced_in_this_batch = set()
+
         for delta_op in deltas:
-            op = delta_op.get("op")
-            veil_id = delta_op.get("veil_id")
+            # _process_delta_operation modifies self._state["remote_state_cache"] in place.
+            # We will assume if _process_delta_operation is called, a modification might have occurred.
+            # A more precise check would involve comparing cache state or having _process_delta_operation return a status.
+            self._process_delta_operation(delta_op, self._state["remote_state_cache"], nodes_referenced_in_this_batch)
+            cache_modified_by_these_deltas = True 
 
-            if op == "add_node":
-                node_data = delta_op.get("node")
-                parent_id = delta_op.get("parent_id") # Optional: used if cache is hierarchical
-                if node_data and "veil_id" in node_data:
-                    # Simple flat cache implementation: veil_id -> node_data
-                    node_veil_id = node_data["veil_id"]
-                    if node_veil_id in self._state["remote_state_cache"]:
-                         logger.debug(f"Updating existing node {node_veil_id} in cache via add_node delta.")
-                    else:
-                         logger.debug(f"Adding new node {node_veil_id} to cache via add_node delta.")
-                    self._state["remote_state_cache"][node_veil_id] = node_data
-                    cache_modified = True
-                    # TODO: Handle hierarchical cache using parent_id if needed
-                else:
-                     logger.warning(f"Skipping add_node delta: missing node data or veil_id. Op: {delta_op}")
+        if cache_modified_by_these_deltas: 
+             # Add a deepcopy of original deltas, as _process_delta_operation might have modified them if they were complex objects.
+             # For standard VEIL deltas (dicts of primitives), this is less of a concern, but good practice.
+             self._state["pending_remote_deltas"].extend(copy.deepcopy(deltas))
+             logger.debug(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Added {len(deltas)} to pending_remote_deltas. Total pending: {len(self._state['pending_remote_deltas'])}")
 
-            elif op == "remove_node":
-                if veil_id:
-                    if veil_id in self._state["remote_state_cache"]:
-                        logger.debug(f"Removing node {veil_id} from cache via remove_node delta.")
-                        del self._state["remote_state_cache"][veil_id]
-                        cache_modified = True
-                    else:
-                        logger.debug(f"Skipping remove_node delta: veil_id {veil_id} not found in cache.")
-                    # TODO: Handle removal in hierarchical cache (remove children?)
-                else:
-                    logger.warning(f"Skipping remove_node delta: missing veil_id. Op: {delta_op}")
-                    
-            elif op == "update_node":
-                # Placeholder for future implementation
-                properties = delta_op.get("properties")
-                if veil_id and properties:
-                     if veil_id in self._state["remote_state_cache"]:
-                          logger.debug(f"Updating properties for node {veil_id} in cache via update_node delta.")
-                          # Naive update: merge properties dictionary
-                          # A more robust implementation might handle specific property changes
-                          self._state["remote_state_cache"][veil_id]["properties"].update(properties)
-                          cache_modified = True
-                     else:
-                          logger.debug(f"Skipping update_node delta: veil_id {veil_id} not found in cache.")
-                else:
-                     logger.warning(f"Skipping update_node delta: missing veil_id or properties. Op: {delta_op}")
+             self._state["last_successful_sync"] = time.time() # Treat delta application as a content update
+             # Optionally update a separate "last_delta_update_time" if needed
+             logger.info(f"Cache for {self.remote_space_id} updated via {len(deltas)} deltas.")
 
-            else:
-                logger.warning(f"Unsupported delta operation received: '{op}'. Skipping.")
-                
-        if cache_modified:
-             # Update timestamp to reflect cache freshness from deltas
-             self._state["last_successful_sync"] = int(time.time() * 1000) # Treat delta application as a successful sync
-             self._state["cache_expiry"]["full_state"] = self._state["last_successful_sync"] + (self._state["cache_ttl"] * 1000)
-             logger.info(f"Cache for {self.remote_space_id} updated via deltas.")
-             # Optionally trigger element event? uplink_state_synced might be too coarse.
-             # Maybe a more specific event like "uplink_cache_updated_via_delta"?
+             uplink_veil_producer = self.owner.get_component_by_type("UplinkVeilProducer")
+             if uplink_veil_producer:
+                 logger.debug(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Triggering emit_delta on UplinkVeilProducer after applying deltas. Cache size: {len(self._state.get('remote_state_cache', {}))}")
+                 uplink_veil_producer.emit_delta()
 
-             # --- Notify the UplinkVeilProducer --- 
-             uplink_veil_producer = self.owner.get_component_by_type("UplinkVeilProducerComponent")
-             if uplink_veil_producer and hasattr(uplink_veil_producer, 'on_cache_updated'):
-                 # Pass the current full state of the cache after deltas applied
-                 # The on_cache_updated method in UplinkVeilProducer expects the full snapshot data
-                 # which in this case is self._state["remote_state_cache"]
-                 logger.debug(f"Notifying UplinkVeilProducer after applying deltas. Cache size: {len(self._state.get('remote_state_cache', {}))}")
-                 uplink_veil_producer.on_cache_updated(self._state.get("remote_state_cache", {}))
-             # -------------------------------------
+    def get_pending_remote_deltas_and_clear(self) -> List[Dict[str, Any]]:
+        """
+        Returns the list of remote deltas accumulated since the last call
+        and clears the internal list. Returns a deepcopy.
+        """
+        # Return a deepcopy to prevent external modification of queued deltas if they are complex
+        pending_deltas = copy.deepcopy(self._state.get("pending_remote_deltas", [])) 
+        if pending_deltas: 
+            self._state["pending_remote_deltas"] = [] 
+            logger.debug(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Returning and clearing {len(pending_deltas)} pending remote deltas.")
+        return pending_deltas
 
     def _on_event(self, event: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
-        """
-        Handle events related to synchronization.
-        """
+        """Handle events related to synchronization."""
         event_type = event.get("event_type")
         if event_type == "sync_request":
              force = event.get("data", {}).get("force", False)
              logger.info(f"Received sync request for {self.remote_space_id}, force={force}")
-             return self.sync_remote_state()
-        # uplink_state_synced is handled internally by sync_remote_state
+             return self.sync_remote_state(force=force) # Pass force along
         return False
 
     def _on_cleanup(self) -> bool:
          """Disables auto-sync on cleanup."""
          self.disable_auto_sync()
          return True 
+
+    def _process_delta_operation(self, operation: Dict[str, Any],
+                                 target_cache: Dict[str, Any], 
+                                 nodes_referenced_this_op_batch: Set[str]):
+        """
+        Helper to process a single delta operation against the target_cache.
+        target_cache is modified in place.
+        nodes_referenced_this_op_batch is used to track nodes processed within a single call to apply_deltas,
+        primarily for _add_or_update_node_recursive if it were still used for complex hierarchical adds.
+        With flat deltas, its role is diminished but kept for structure.
+        """
+        op_type = operation.get("op")
+        
+        # Make a copy of the operation node data if it's 'add_node' or 'update_node'
+        # to ensure the cache stores its own version, not a reference to the input delta's node.
+        # This is crucial if the input delta might be reused or if its node part is complex.
+        # For update_node, properties are copied. For add_node, the whole node is copied.
+
+        if op_type == "add_node":
+            node_to_add_original = operation.get("node")
+            parent_id = operation.get("parent_id")
+
+            if node_to_add_original and isinstance(node_to_add_original, dict) and "veil_id" in node_to_add_original:
+                node_id = node_to_add_original["veil_id"]
+                
+                # Store a deepcopy of the node data in the cache
+                node_copy_for_cache = copy.deepcopy(node_to_add_original)
+                
+                # Ensure children list is present and is a list of stubs if children were provided
+                if "children" in node_copy_for_cache:
+                    if not isinstance(node_copy_for_cache["children"], list):
+                        logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Node {node_id} in add_node delta had non-list children. Replacing with empty list for cache.")
+                        node_copy_for_cache["children"] = []
+                    else:
+                        # Convert full children to stubs if they aren't already
+                        stub_children = []
+                        for child in node_copy_for_cache["children"]:
+                            if isinstance(child, dict) and "veil_id" in child:
+                                stub_children.append({"veil_id": child["veil_id"]})
+                            # else: (log warning or ignore malformed child stub)
+                        node_copy_for_cache["children"] = stub_children
+                else: # If no children field, ensure one exists (empty list) for consistency
+                    node_copy_for_cache["children"] = []
+
+                target_cache[node_id] = node_copy_for_cache
+                
+                if parent_id:
+                    if parent_id in target_cache:
+                        parent_node_in_cache = target_cache[parent_id]
+                        if "children" not in parent_node_in_cache or not isinstance(parent_node_in_cache.get("children"), list):
+                            parent_node_in_cache["children"] = []
+                        
+                        child_stub = {"veil_id": node_id} 
+                        if not any(c.get("veil_id") == node_id for c in parent_node_in_cache["children"]):
+                            parent_node_in_cache["children"].append(child_stub)
+                    else:
+                        logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] 'add_node' for {node_id} specified parent_id {parent_id}, but parent not in cache. Node added as potential orphan.")
+                
+                logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Applied 'add_node' for {node_id}. Parent hint: {parent_id}")
+                nodes_referenced_this_op_batch.add(node_id)
+            else:
+                logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Invalid 'add_node' operation: {operation}")
+
+        elif op_type == "update_node":
+            node_id_to_update = operation.get("veil_id")
+            properties_to_update = operation.get("properties")
+            if node_id_to_update and properties_to_update is not None: # Allow empty properties dict
+                if node_id_to_update in target_cache:
+                    cached_node_data = target_cache[node_id_to_update]
+                    if "properties" not in cached_node_data or not isinstance(cached_node_data.get("properties"), dict):
+                         cached_node_data["properties"] = {} # Ensure properties dict exists
+                    
+                    # Update with a copy of the new properties
+                    cached_node_data["properties"].update(copy.deepcopy(properties_to_update))
+                    logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Updated properties for node {node_id_to_update} in cache.")
+                    nodes_referenced_this_op_batch.add(node_id_to_update)
+                else:
+                    logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] 'update_node' for {node_id_to_update} but node not found in cache.")
+            else:
+                logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Invalid 'update_node' (missing veil_id or properties): {operation}")
+
+        elif op_type == "remove_node":
+            node_id_to_remove = operation.get("veil_id")
+            if node_id_to_remove:
+                if node_id_to_remove in target_cache:
+                    del target_cache[node_id_to_remove]
+                    nodes_referenced_this_op_batch.add(node_id_to_remove)
+                    logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Removed {node_id_to_remove} from cache.")
+
+                    for existing_node_id, existing_node_data in target_cache.items():
+                        if isinstance(existing_node_data, dict):
+                            children_list = existing_node_data.get("children")
+                            if isinstance(children_list, list):
+                                original_len = len(children_list)
+                                new_children_list = [
+                                    child_stub for child_stub in children_list 
+                                    if not (isinstance(child_stub, dict) and child_stub.get("veil_id") == node_id_to_remove)
+                                ]
+                                if len(new_children_list) < original_len:
+                                    existing_node_data["children"] = new_children_list
+                else:
+                    logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] 'remove_node' for {node_id_to_remove} but node not found in cache.")
+            else:
+                logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Invalid 'remove_node' (missing veil_id): {operation}")
+        else:
+            logger.warning(f"Unsupported delta operation received by _process_delta_operation: '{op_type}'. Skipping.") 

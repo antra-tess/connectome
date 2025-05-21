@@ -41,7 +41,7 @@ PREFABS = {
     "standard_uplink_proxy": {
         "description": "Creates an UplinkProxy to connect to a remote Space. Requires 'remote_space_id' in element_config.",
         "element_class_name": "UplinkProxy", # Specifies the class to instantiate
-        "element_constructor_arg_keys": ["remote_space_id", "name", "description", "remote_space_info", "space_registry"], # Added "remote_space_info"
+        "element_constructor_arg_keys": ["remote_space_id", "name", "description", "remote_space_info", "space_registry",],
         "components": [
             # UplinkProxy's __init__ adds its own core components:
             # UplinkConnectionComponent, RemoteStateCacheComponent, UplinkVeilProducer,

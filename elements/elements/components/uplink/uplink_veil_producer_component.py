@@ -1,5 +1,6 @@
 import logging
 from typing import Dict, Any, Optional, List, Set
+import copy # Added for deepcopy
 
 from ..base_component import VeilProducer
 from .cache_component import RemoteStateCacheComponent # Sibling component
@@ -9,17 +10,17 @@ from elements.component_registry import register_component
 logger = logging.getLogger(__name__)
 
 # VEIL Node Structure Constants (Example)
-VEIL_UPLINK_ROOT_TYPE = "uplink_proxy_root"
+VEIL_UPLINK_ROOT_TYPE = "uplinked_content_container"
 VEIL_REMOTE_SPACE_ID_PROP = "remote_space_id"
 VEIL_REMOTE_SPACE_NAME_PROP = "remote_space_name"
 VEIL_LAST_SYNC_PROP = "last_sync_timestamp"
-VEIL_CACHED_NODES_CONTAINER_TYPE = "cached_remote_nodes" # Optional intermediate node
+# VEIL_CACHED_NODES_CONTAINER_TYPE = "cached_remote_nodes" # Optional intermediate node, removed for now to simplify. Children of remote root go directly under uplink root.
 
 @register_component
 class UplinkVeilProducer(VeilProducer):
     """
-    Generates VEIL representation based on the cached state of a remote space
-    managed by a sibling RemoteStateCacheComponent.
+    Generates VEIL representation. For its own root node, it calculates deltas.
+    For remote content, it processes and re-parents deltas from RemoteStateCacheComponent.
     """
     COMPONENT_TYPE = "UplinkVeilProducer"
 
@@ -29,147 +30,233 @@ class UplinkVeilProducer(VeilProducer):
     def initialize(self, **kwargs) -> None:
         """Initializes the component state for delta tracking."""
         super().initialize(**kwargs)
-        # Track the veil_ids of the nodes present in the last generated VEIL
-        self._state.setdefault('_last_generated_cache_veil_ids', set())
-        # Optional: Store a shallow copy of last node properties for update detection
-        self._state.setdefault('_last_node_properties', {})
-        # Store the latest full snapshot received, if needed for direct access
-        self._state.setdefault('_current_full_snapshot', None)
-        logger.debug(f"UplinkVeilProducer initialized for Element {self.owner.id}")
+        self._state.setdefault('_has_produced_uplink_root_add_before', False)
+        self._state.setdefault('_last_uplink_root_properties', {})
+        # _last_presented_remote_structure and _last_identified_remote_root_id removed
+        logger.debug(f"UplinkVeilProducer initialized for Element {self.owner.id if self.owner else 'Unknown'}")
 
     def _get_cache_component(self) -> Optional[RemoteStateCacheComponent]:
         """Helper to get the sibling cache component."""
-        return self.get_sibling_component(RemoteStateCacheComponent)
+        cache_comp = self.get_sibling_component(RemoteStateCacheComponent)
+        if not cache_comp:
+            logger.error(f"[{self.owner.id if self.owner else 'Unknown'}/{self.COMPONENT_TYPE}] Critical: RemoteStateCacheComponent not found.")
+        return cache_comp
+    
+    def _get_current_uplink_root_properties(self) -> Dict[str, Any]:
+        """Helper to get the current properties for this producer's root node."""
+        cache_comp = self._get_cache_component()
+        # Get count from the main remote_state_cache, not pending_remote_deltas
+        cached_nodes_count = len(cache_comp._state.get("remote_state_cache", {})) if cache_comp else 0
+        
+        return {
+            "structural_role": "container",
+            "content_nature": "uplink_summary",
+            "element_id": self.owner.id,
+            "element_name": self.owner.name,
+            VEIL_REMOTE_SPACE_ID_PROP: getattr(self.owner, 'remote_space_id', 'unknown'),
+            VEIL_REMOTE_SPACE_NAME_PROP: getattr(self.owner, 'remote_space_info', {}).get('name', 'unknown'),
+            VEIL_LAST_SYNC_PROP: cache_comp._state.get("last_successful_sync") if cache_comp else None,
+            "cached_node_count": cached_nodes_count
+        }
+
+    def _recursively_build_hierarchy(self, node_id_to_build: str,
+                                     all_nodes_map: Dict[str, Dict[str, Any]],
+                                     processed_during_this_build: Set[str]) -> Optional[Dict[str, Any]]:
+        """
+        Helper to recursively build a full hierarchical node structure from a flat map
+        of cached nodes. Used by get_full_veil.
+        """
+        if node_id_to_build in processed_during_this_build:
+            logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Cycle detected for node_id {node_id_to_build} during VEIL reconstruction.")
+            return None 
+
+        original_node_data = all_nodes_map.get(node_id_to_build)
+        if not original_node_data:
+            logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Node {node_id_to_build} referenced but not found in cache for VEIL reconstruction.")
+            return None
+
+        processed_during_this_build.add(node_id_to_build)
+        
+        reconstructed_node = copy.deepcopy(original_node_data)
+        
+        reconstructed_children_list = []
+        if 'children' in reconstructed_node and isinstance(reconstructed_node['children'], list):
+            original_child_node_stubs_in_parent = reconstructed_node['children']
+            reconstructed_node['children'] = [] # Start fresh
+
+            for child_node_stub in original_child_node_stubs_in_parent:
+                if not isinstance(child_node_stub, dict) or 'veil_id' not in child_node_stub:
+                    logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Child item in node {node_id_to_build} is not a valid node stub: {child_node_stub}")
+                    continue
+                
+                child_veil_id = child_node_stub['veil_id']
+                fully_built_child = self._recursively_build_hierarchy(child_veil_id, all_nodes_map, processed_during_this_build)
+                
+                if fully_built_child:
+                    reconstructed_children_list.append(fully_built_child)
+            
+            reconstructed_node['children'] = reconstructed_children_list
+        
+        processed_during_this_build.remove(node_id_to_build)
+        return reconstructed_node
+        
+    def _identify_remote_root_in_cache_for_full_veil(self, cached_nodes_dict: Dict[str, Any]) -> Optional[str]:
+        """Identifies the VEIL ID of the remote space's root node within the cache."""
+        remote_space_id_attr = getattr(self.owner, 'remote_space_id', None)
+        if not remote_space_id_attr:
+            logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] UplinkProxy owner does not have remote_space_id. Cannot determine remote root for full VEIL.")
+            return None
+
+        potential_root_id_by_convention = f"{remote_space_id_attr}_space_root"
+        if potential_root_id_by_convention in cached_nodes_dict:
+            return potential_root_id_by_convention
+        
+        for node_id, node_data in cached_nodes_dict.items():
+            props = node_data.get("properties", {})
+            # Check common properties that might indicate a space's root node
+            if props.get("element_id") == remote_space_id_attr and \
+               node_data.get("node_type") == "space_root" and \
+               props.get("structural_role") == "root" and \
+               props.get("content_nature") == "space_summary":
+                return node_id
+        
+        logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Could not identify a clear remote root for full VEIL for remote_space_id '{remote_space_id_attr}'.")
+        return None
 
     def get_full_veil(self) -> Optional[Dict[str, Any]]:
         """
-        Generates the complete VEIL structure for the cached remote space state.
+        Generates the complete VEIL structure for the cached remote space state,
+        reconstructing the hierarchy.
         """
         cache_comp = self._get_cache_component()
-        if not cache_comp:
-            logger.error(f"[{self.owner.id}] Cannot generate VEIL: RemoteStateCacheComponent not found.")
-            return None
+        if not cache_comp: return None
 
-        # Get the current cached state (don't force sync here, VEIL reflects cache)
-        # The cache format is assumed to be { veil_id: node_data }
         cached_nodes_dict = cache_comp.get_synced_remote_state(force_sync=False)
-        current_cache_veil_ids = set(cached_nodes_dict.keys())
+        uplink_root_properties = self._get_current_uplink_root_properties()
+        
+        hierarchical_children_of_uplink_root = []
+        identified_remote_root_id = self._identify_remote_root_in_cache_for_full_veil(cached_nodes_dict)
 
-        # Extract nodes directly from the cache dictionary values
-        child_veil_nodes = list(cached_nodes_dict.values())
-
-        # Create the root container node for the uplink representation
+        if identified_remote_root_id:
+            logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] get_full_veil: Identified remote root node: {identified_remote_root_id}. Reconstructing hierarchy.")
+            reconstructed_remote_root_tree = self._recursively_build_hierarchy(identified_remote_root_id, cached_nodes_dict, set())
+            if reconstructed_remote_root_tree:
+                hierarchical_children_of_uplink_root.append(reconstructed_remote_root_tree)
+            else:
+                logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] get_full_veil: Failed to reconstruct hierarchy from remote root {identified_remote_root_id}. Uplink VEIL will not show remote content tree.")
+        elif cached_nodes_dict: # If no clear root but cache has content, log it.
+             logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] get_full_veil: Remote state cache has {len(cached_nodes_dict)} items but no clear remote root identified. Uplink VEIL will not show remote content tree.")
+        
         root_veil_node = {
-            "veil_id": f"{self.owner.id}_uplink_root", # Unique ID for this uplink's VEIL root
+            "veil_id": f"{self.owner.id}_uplink_root",
             "node_type": VEIL_UPLINK_ROOT_TYPE,
-            "properties": {
-                "structural_role": "container",
-                "content_nature": "uplink_summary",
-                "element_id": self.owner.id,
-                "element_name": self.owner.name,
-                VEIL_REMOTE_SPACE_ID_PROP: getattr(self.owner, 'remote_space_id', 'unknown'),
-                VEIL_REMOTE_SPACE_NAME_PROP: getattr(self.owner, 'remote_space_info', {}).get('name', 'unknown'),
-                VEIL_LAST_SYNC_PROP: cache_comp._state.get("last_successful_sync"),
-                "cached_node_count": len(child_veil_nodes)
-                # Add other relevant uplink properties (e.g., connection status?)
-            },
-            "children": child_veil_nodes # Embed the cached nodes directly
+            "properties": uplink_root_properties,
+            "children": hierarchical_children_of_uplink_root
         }
-
-        # Update state for delta calculation
-        self._state['_last_generated_cache_veil_ids'] = current_cache_veil_ids
-        # Store properties for detailed delta checks later
-        self._state['_last_node_properties'] = {
-            nid: node.get("properties", {}) for nid, node in cached_nodes_dict.items()
-        }
-        self._state['_current_full_snapshot'] = root_veil_node # Cache the generated full VEIL
-
         return root_veil_node
 
     def calculate_delta(self) -> Optional[List[Dict[str, Any]]]:
-        """
-        Calculates the changes (delta) in the cached state since the last VEIL generation.
-        Detects added, removed, and potentially updated nodes.
-        """
+        uplink_root_deltas = []
+        uplink_root_veil_id = f"{self.owner.id}_uplink_root"
+        
+        parent_space_id = getattr(self.owner, 'parent_space_id', None)
+        parent_space_root_veil_id = f"{parent_space_id}_space_root" if parent_space_id else None
+
+        if not parent_space_root_veil_id:
+            logger.warning(f"[{self.owner.id if self.owner else 'Unknown'}/{self.COMPONENT_TYPE}] Cannot determine parent_space_root_veil_id. Uplink root delta will not be parented.")
+
+        current_uplink_root_props = self._get_current_uplink_root_properties()
+        if not self._state.get('_has_produced_uplink_root_add_before', False):
+            uplink_root_deltas.append({
+                "op": "add_node",
+                "parent_id": parent_space_root_veil_id,
+                "node": {
+                    "veil_id": uplink_root_veil_id,
+                    "node_type": VEIL_UPLINK_ROOT_TYPE,
+                    "properties": current_uplink_root_props,
+                    "children": [] 
+                }
+            })
+        else:
+            last_props = self._state.get('_last_uplink_root_properties', {})
+            if last_props != current_uplink_root_props:
+                uplink_root_deltas.append({
+                    "op": "update_node",
+                    "veil_id": uplink_root_veil_id,
+                    "properties": current_uplink_root_props
+                })
+
+        # Process pending remote deltas
+        processed_remote_deltas = []
         cache_comp = self._get_cache_component()
         if not cache_comp:
-            logger.error(f"[{self.owner.id}] Cannot calculate VEIL delta: RemoteStateCacheComponent not found.")
-            return None
+            logger.error(f"[{self.owner.id if self.owner else 'Unknown'}/{self.COMPONENT_TYPE}] RemoteStateCacheComponent not found. Cannot process remote deltas.")
+        else:
+            pending_deltas_from_cache = cache_comp.get_pending_remote_deltas_and_clear()
+            if pending_deltas_from_cache:
+                logger.info(f"[{self.owner.id if self.owner else 'Unknown'}/{self.COMPONENT_TYPE}] Processing {len(pending_deltas_from_cache)} pending remote deltas.")
+                remote_space_actual_id = getattr(self.owner, 'remote_space_id', None)
+                expected_remote_space_root_veil_id = f"{remote_space_actual_id}_space_root" if remote_space_actual_id else None
 
-        current_cache_dict = cache_comp.get_synced_remote_state(force_sync=False)
-        current_ids = set(current_cache_dict.keys())
-        last_ids = self._state.get('_last_generated_cache_veil_ids', set())
-        last_props = self._state.get('_last_node_properties', {})
-
-        delta_operations = []
-        parent_veil_id = f"{self.owner.id}_uplink_root" # ID of the container node
-
-        # 1. Detect removed nodes
-        removed_ids = last_ids - current_ids
-        for removed_id in removed_ids:
-            delta_operations.append({
-                "op": "remove_node",
-                "veil_id": removed_id
-            })
-
-        # 2. Detect added and potentially modified nodes
-        current_node_properties = {}
-        for node_id, current_node_data in current_cache_dict.items():
-            current_props = current_node_data.get("properties", {})
-            current_node_properties[node_id] = current_props # Store for next delta
-
-            if node_id not in last_ids:
-                # Added node
-                delta_operations.append({
-                    "op": "add_node",
-                    "parent_id": parent_veil_id,
-                    "node": current_node_data,
-                    # "position": ? # Position might be irrelevant if children are unordered dict
-                })
+                for remote_op in pending_deltas_from_cache:
+                    op_to_emit = copy.deepcopy(remote_op) # Process a copy
+                    
+                    # Re-parent the remote space's root node if it's being added
+                    if expected_remote_space_root_veil_id and \
+                       op_to_emit.get("op") == "add_node" and \
+                       isinstance(op_to_emit.get("node"), dict) and \
+                       op_to_emit["node"].get("veil_id") == expected_remote_space_root_veil_id:
+                        
+                        logger.debug(f"[{self.owner.id if self.owner else 'Unknown'}/{self.COMPONENT_TYPE}] Re-parenting remote space root delta '{expected_remote_space_root_veil_id}' to '{uplink_root_veil_id}'.")
+                        op_to_emit["parent_id"] = uplink_root_veil_id
+                    
+                    processed_remote_deltas.append(op_to_emit)
             else:
-                # Existing node: Check for modifications
-                last_node_props = last_props.get(node_id)
-                if last_node_props != current_props: # Simple dict comparison
-                    logger.debug(f"[{self.owner.id}] Detected property change for cached node {node_id}")
-                    # Send an update operation with only the changed properties?
-                    # Or send the full node update? Let's send updated properties for now.
-                    # More sophisticated diffing could be done here.
-                    delta_operations.append({
-                        "op": "update_node",
-                        "veil_id": node_id,
-                        "properties": current_props # Send all current properties
-                    })
+                logger.debug(f"[{self.owner.id if self.owner else 'Unknown'}/{self.COMPONENT_TYPE}] No pending remote deltas to process.")
 
-        # Update state for next delta calculation
-        self._state['_last_generated_cache_veil_ids'] = current_ids
-        self._state['_last_node_properties'] = current_node_properties
-        # After calculating delta, the full snapshot is implicitly based on these current_ids/props
-        # No need to update _current_full_snapshot here as it reflects the last get_full_veil() call
+        final_deltas = uplink_root_deltas + processed_remote_deltas
 
-        if delta_operations:
-            logger.info(f"[{self.owner.id}] Calculated Uplink VEIL delta with {len(delta_operations)} operations.")
-        return delta_operations
+        if final_deltas:
+            logger.info(f"[{self.owner.id if self.owner else 'Unknown'}/{self.COMPONENT_TYPE}] Calculated {len(final_deltas)} total delta operations ({len(uplink_root_deltas)} for uplink root, {len(processed_remote_deltas)} for remote content).")
+        
+        # Update state for THIS producer's root node only
+        self.signal_delta_produced_this_frame(uplink_root_deltas) 
+        
+        return final_deltas if final_deltas else None
+
+    def signal_delta_produced_this_frame(self, produced_uplink_root_deltas: List[Dict[str, Any]]):
+        """
+        Updates baseline state for THIS UplinkVeilProducer's OWN root node,
+        based on the deltas *it* generated for that root node.
+        """
+        current_uplink_root_props = self._get_current_uplink_root_properties()
+        self._state['_last_uplink_root_properties'] = current_uplink_root_props
+        
+        uplink_root_veil_id = f"{self.owner.id}_uplink_root"
+        if not self._state.get('_has_produced_uplink_root_add_before', False):
+            for delta_op in produced_uplink_root_deltas: 
+                if delta_op.get("op") == "add_node" and \
+                   isinstance(delta_op.get("node"), dict) and \
+                   delta_op["node"].get("veil_id") == uplink_root_veil_id:
+                    self._state['_has_produced_uplink_root_add_before'] = True
+                    logger.info(f"[{self.owner.id if self.owner else 'Unknown'}/{self.COMPONENT_TYPE}] Confirmed uplink root '{uplink_root_veil_id}' add_node produced.")
+                    break
+        
+        # No longer updates _last_presented_remote_structure or _last_identified_remote_root_id here
+        logger.debug(
+            f"[{self.owner.id if self.owner else 'Unknown'}/{self.COMPONENT_TYPE}] Baseline updated for UplinkVeilProducer's own root node. "
+            f"Uplink root added flag: {self._state.get('_has_produced_uplink_root_add_before', False)}."
+        )
 
     def on_cache_updated(self, new_full_snapshot_data: Dict[str, Any]) -> None:
         """
-        Called by RemoteStateCacheComponent when its cache has been fully updated 
-        (e.g., after a successful sync_remote_state).
+        DEPRECATED in favor of emit_delta flow.
+        Called by RemoteStateCacheComponent when its cache has been fully updated.
         This signals that the producer should reset its delta tracking baseline.
-
-        Args:
-            new_full_snapshot_data: The complete new state from the remote cache.
-                                   While passed, this producer typically re-fetches from
-                                   the cache component directly when needed.
         """
-        logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Cache updated notification received. Resetting delta baseline.")
-        # Reset the baseline for delta calculation.
-        # The next call to calculate_delta will treat everything in the updated 
-        # RemoteStateCacheComponent as new.
-        self._state['_last_generated_cache_veil_ids'] = set()
-        self._state['_last_node_properties'] = {}
-        # Optionally, we could store the new_full_snapshot_data here if we wanted to avoid
-        # an immediate re-fetch in get_full_veil, but current design re-fetches.
-        self._state['_current_full_snapshot'] = None # Invalidate any previously stored full snapshot
-        
-        # Important: After this, the next on_frame_end will cause calculate_delta
-        # to generate a potentially large delta representing the full new state.
+        logger.info(f"[{self.owner.id if self.owner else 'Unknown'}/{self.COMPONENT_TYPE}] on_cache_updated (DEPRECATED) called. emit_delta flow is used.")
+        # The new flow is that RemoteStateCacheComponent calls emit_delta(),
+        # which calls calculate_delta(), which calls signal_delta_produced_this_frame() to update state.
+        # So, this explicit reset might lead to double "new" deltas if not careful.
+        # For now, let's make it a no-op or just log.
+        pass

@@ -300,3 +300,13 @@ class VeilProducer(Component):
         delta_operations = self.calculate_delta()
         if delta_operations:
             self.owner.receive_delta(delta_operations)
+
+    def calculate_delta(self) -> Optional[List[Dict[str, Any]]]:
+        """
+        Base implementation for calculate_delta.
+        Subclasses should override this to provide specific delta calculation logic.
+        This method should also be responsible for updating the producer's internal state 
+        (e.g., _last_ids, _has_produced_root_add_before) after determining the deltas.
+        """
+        logger.warning(f"[{self.owner.id if self.owner else 'Unknown'}/{self.COMPONENT_TYPE}] calculate_delta() not implemented.")
+        return None

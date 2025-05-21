@@ -55,8 +55,7 @@ class UplinkProxy(Space):
                  remote_space_id: str, remote_space_info: Optional[Dict[str, Any]] = None,
                  sync_interval: int = 60, cache_ttl: int = 300,
                  space_registry: Optional['SpaceRegistry'] = None,
-                 outgoing_action_callback: Optional['OutgoingActionCallback'] = None,
-                 notify_owner_of_new_deltas_callback: Optional[Callable[[str, List[Dict[str, Any]]], None]] = None):
+                 outgoing_action_callback: Optional['OutgoingActionCallback'] = None):
         """
         Initialize the uplink proxy.
         
@@ -70,16 +69,12 @@ class UplinkProxy(Space):
             cache_ttl: Default TTL for the remote state cache component
             space_registry: Reference to the SpaceRegistry for finding remote space
             outgoing_action_callback: Callback for local management tools if any
-            notify_owner_of_new_deltas_callback: Callback for this UplinkProxy to notify its owner (InnerSpace) of new deltas, passing self.id and deltas.
         """
         super().__init__(element_id, name, description)
         
         self._space_registry = space_registry 
         self.remote_space_id = remote_space_id # Made public for easier access by components
         
-        # This callback is for THIS UplinkProxy to notify ITS owner (InnerSpace)
-        self._notify_owner_of_new_deltas_callback = notify_owner_of_new_deltas_callback
-
         # Get the ToolProviderComponent added by the parent Space class
         self._local_tool_provider: Optional[ToolProviderComponent] = self.get_component_by_type(ToolProviderComponent)
         if not self._local_tool_provider:
@@ -331,7 +326,6 @@ class UplinkProxy(Space):
         when new VEIL deltas are available from the remote space.
         """
         logger.info(f"[{self.id}] UplinkProxy processing {len(deltas)} incoming deltas from remote space '{self.remote_space_id}'.")
-        
         # 1. Apply deltas to local cache
         if self._cache_component:
             try:
@@ -342,15 +336,7 @@ class UplinkProxy(Space):
         else:
             logger.warning(f"[{self.id}] Cannot apply remote deltas: RemoteStateCacheComponent not found.")
 
-        # 2. Notify the owner of this UplinkProxy (the InnerSpace) about these deltas
-        if self._notify_owner_of_new_deltas_callback:
-            try:
-                logger.debug(f"[{self.id}] Notifying owner (InnerSpace) of new deltas from remote space '{self.remote_space_id}'.")
-                self._notify_owner_of_new_deltas_callback(self.id, deltas) # Pass uplink_id and deltas
-            except Exception as e:
-                logger.error(f"[{self.id}] Error calling _notify_owner_of_new_deltas_callback: {e}", exc_info=True)
-        else:
-            logger.warning(f"[{self.id}] No owner notification callback configured (_notify_owner_of_new_deltas_callback is None). InnerSpace will not be directly informed of these deltas.")
+        logger.debug(f"[{self.id}] End of process_incoming_deltas_from_remote_space. {len(deltas)} deltas processed by cache and veil producer.")
 
     # --- Event Handling --- 
     # Default delegation via super().handle_event is likely sufficient unless 

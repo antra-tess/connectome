@@ -162,9 +162,6 @@ class InnerSpace(Space):
         self._hud = self.add_component(HUDComponent, **hud_kwargs)
         if not self._hud:
             logger.error(f"Failed to add HUDComponent to InnerSpace {self.id}")
-            
-        # Add VEIL producer for representing InnerSpace - Use SpaceVeilProducer
-        self.add_component(SpaceVeilProducer)
         
         # Add any additional requested components
         if additional_components:

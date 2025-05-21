@@ -53,8 +53,6 @@ class MessageActionHandler(Component):
             owner_id_for_log = self.owner.id
         if not self._outgoing_action_callback or self._outgoing_action_callback is None:
              logger.warning(f"MessageActionHandler {self.id if self.id else 'UNKNOWN_ID'} on Element '{owner_id_for_log}' initialized without an outgoing_action_callback. Cannot send external messages.")
-        logger.critical(f"MAH Init [{owner_id_for_log} / CompID: {self.id if self.id else 'NoCompIDYet'}] initialized. outgoing_action_callback is {'SET' if self._outgoing_action_callback else 'NOT SET'}.")
-
         self._register_messaging_tools()
         logger.debug(f"MessageActionHandler initialized and tools registered for Element {self.owner.id if self.owner else 'Unknown'}")
 
@@ -210,7 +208,6 @@ class MessageActionHandler(Component):
             except Exception as e:
                 error_msg = f"Exception during direct send_message dispatch: {e}"
                 logger.exception(f"[{self.owner.id}] {error_msg} for req_id: {internal_request_id}")
-                logger.critical(f"FAILED TO DISPATCH DIRECT SEND_MESSAGE ACTION REQUEST: [{self.owner.id}] Dispatching direct send_message action request: {action_request}, outgoing_action_callback: {self._outgoing_action_callback}")
                 return {"success": False, "error": error_msg, "message_id": None}
 
         # --- Register delete_message Tool --- 
@@ -580,7 +577,6 @@ class MessageActionHandler(Component):
             return self.owner.agent_id
             
         logger.warning(f"[{self.owner.id if self.owner else 'Unknown'}] Could not determine requesting_agent_id through calling_context or InnerSpace hierarchy.")
-        logger.critical(f"{calling_context}")
         return None
     
     def _get_requesting_agent_name(self, calling_context: Optional[Dict[str, Any]] = None) -> Optional[str]:
