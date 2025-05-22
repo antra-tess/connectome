@@ -158,7 +158,7 @@ class RemoteStateCacheComponent(Component):
                 
                 self._state["pending_remote_deltas"].clear()
 
-                uplink_veil_producer = self.owner.get_component_by_type("UplinkVeilProducer")
+                uplink_veil_producer = self.get_sibling_component("UplinkVeilProducer")
                 if uplink_veil_producer:
                     logger.debug(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Triggering emit_delta on UplinkVeilProducer after full sync.")
                     uplink_veil_producer.emit_delta()
@@ -262,7 +262,7 @@ class RemoteStateCacheComponent(Component):
              # Optionally update a separate "last_delta_update_time" if needed
              logger.info(f"Cache for {self.remote_space_id} updated via {len(deltas)} deltas.")
 
-             uplink_veil_producer = self.owner.get_component_by_type("UplinkVeilProducer")
+             uplink_veil_producer = self.get_sibling_component("UplinkVeilProducer")
              if uplink_veil_producer:
                  logger.debug(f"[{self.owner.id if self.owner else 'cache'}/{self.COMPONENT_TYPE}] Triggering emit_delta on UplinkVeilProducer after applying deltas. Cache size: {len(self._state.get('remote_state_cache', {}))}")
                  uplink_veil_producer.emit_delta()

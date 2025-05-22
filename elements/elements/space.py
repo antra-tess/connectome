@@ -40,7 +40,8 @@ class Space(BaseElement):
     # Space is a container for other elements
     IS_SPACE = True
     IS_UPLINK_SPACE = False
-    
+    IS_INNER_SPACE = False
+
     EVENT_TYPES = []
     
     def __init__(self, element_id: str, name: str, description: str, 
@@ -89,39 +90,9 @@ class Space(BaseElement):
         
         # NEW: Initialize internal hierarchical VEIL cache (Phase 1, Step 1.1)
         self._flat_veil_cache: Dict[str, Any] = {}
-        if not self.IS_UPLINK_SPACE and self._veil_producer and hasattr(self._veil_producer, '_get_current_space_properties'):
-            # Initialize with the Space's own root node
-            space_root_id = f"{self.id}_space_root"
-            initial_props = self._veil_producer._get_current_space_properties()
-            self._flat_veil_cache = {
-                space_root_id: {
-                    "veil_id": space_root_id,
-                    "node_type": self._veil_producer.VEIL_SPACE_ROOT_TYPE if hasattr(self._veil_producer, 'VEIL_SPACE_ROOT_TYPE') else "space_root",
-                    "properties": initial_props,
-                    "children": [] # Producer will reconstruct this based on parent_id
-                }
-            }
-            logger.debug(f"[{self.id}] Initialized _flat_veil_cache with root node: {space_root_id}")
-        elif not self.IS_UPLINK_SPACE:
-            # Fallback if _veil_producer or its method is not available at this stage
-            # This might happen if component initialization order changes or if it's an UplinkSpace
-            space_root_id = f"{self.id}_space_root"
-            self._flat_veil_cache = {
-                 space_root_id: {
-                    "veil_id": space_root_id,
-                    "node_type": "space_root", # Generic fallback
-                    "properties": {
-                        "element_id": self.id,
-                        "element_name": self.name,
-                        "element_type": self.__class__.__name__
-                    },
-                    "children": [] # Producer will reconstruct this
-                }
-            }
-            logger.warning(f"[{self.id}] Initialized _flat_veil_cache with basic root node due to missing SpaceVeilProducer or properties method at init.")
-        
-        # NEW: Add ChatManagerComponent by default to all Spaces
-        
+        # NEW: For accumulating deltas from children in the "emit on change" model
+        self._deltas_accumulated_this_frame: List[Dict[str, Any]] = []
+        self._ensure_own_veil_presence_initialized()
         
         if not self._container or not self._timeline:
             # BaseElement.add_component logs errors, but we might want to raise here
@@ -137,12 +108,31 @@ class Space(BaseElement):
                 if hasattr(self._element_factory, 'set_outgoing_action_callback') and callable(getattr(self._element_factory, 'set_outgoing_action_callback')):
                     self._element_factory.set_outgoing_action_callback(self._outgoing_action_callback)
 
-        # NEW: For accumulating deltas from children in the "emit on change" model
-        self._deltas_accumulated_this_frame: List[Dict[str, Any]] = []
 
         logger.info(f"Created space: {name} ({self.id})")
-    
-    # --- NEW: Internal VEIL Cache Management (Phase 1, Step 1.2) ---
+
+    def _ensure_own_veil_presence_initialized(self) -> None:
+        """
+        Ensures that the Space's own root VEIL node is present in self._flat_veil_cache.
+        This is crucial to call before processing any deltas that might reference it as a parent,
+        and also ensures it's there if on_frame_end triggers its own producer.
+        """
+        # Ensure _flat_veil_cache itself is initialized (should be by __init__)
+        if not hasattr(self, '_flat_veil_cache'):
+            logger.error(f"[{self.id}] Critical: _flat_veil_cache attribute not found during _ensure_own_veil_presence_initialized. Initializing to empty dict.")
+            self._flat_veil_cache = {}
+
+        space_root_id = f"{self.id}_space_root"
+
+        if space_root_id not in self._flat_veil_cache:
+            logger.info(f"[{self.id}] Root VEIL node '{space_root_id}' not found in cache. Initializing in _ensure_own_veil_presence_initialized.")
+            if not self.IS_UPLINK_SPACE:
+                self._veil_producer.emit_delta()
+            logger.info(f"[{self.id}] Initialized own root VEIL node '{space_root_id}' in _flat_veil_cache via _ensure_own_veil_presence_initialized.")
+        else:
+            logger.debug(f"[{self.id}] Own root VEIL node '{space_root_id}' already present in _flat_veil_cache.")
+
+
     def _apply_deltas_to_internal_cache(self, deltas: List[Dict[str, Any]]) -> None:
         """
         Applies a list of VEIL delta operations to the internal flat VEIL cache.
@@ -153,7 +143,6 @@ class Space(BaseElement):
         if not isinstance(deltas, list):
             logger.warning(f"[{self.id}] Invalid deltas format received by _apply_deltas_to_internal_cache: not a list.")
             return
-
         logger.debug(f"[{self.id}] Applying {len(deltas)} deltas to internal flat cache.")
 
         for operation in deltas:
@@ -540,7 +529,6 @@ class Space(BaseElement):
         # 2. Send accumulated deltas to listeners
         if self._deltas_accumulated_this_frame:
             logger.debug(f"[{self.id}] on_frame_end: Sending {len(self._deltas_accumulated_this_frame)} accumulated deltas to {len(self._uplink_listeners)} listeners.")
-            # logger.critical(f"DEBUG [{self.id}] Sending deltas to listeners: {self._deltas_accumulated_this_frame}") # Too verbose for normal running
             
             # Create a copy for sending, as listeners might modify it or processing might take time.
             deltas_to_send = list(self._deltas_accumulated_this_frame) 
@@ -712,7 +700,7 @@ class Space(BaseElement):
         primary_timeline = self.get_primary_timeline()
         if primary_timeline:
             timeline_context['timeline_id'] = primary_timeline
-        # self.add_event_to_timeline(event_payload, timeline_context) # Commented out to reduce noise, can be re-enabled if useful for debugging.
+        self.add_event_to_timeline(event_payload, timeline_context) # Commented out to reduce noise, can be re-enabled if useful for debugging.
 
     def get_flat_veil_snapshot(self) -> Dict[str, Any]:
         """

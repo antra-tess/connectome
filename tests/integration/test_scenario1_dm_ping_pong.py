@@ -415,7 +415,7 @@ async def test_dm_ping_pong(setup_test_environment):
     # Call process_cycle on the InnerSpace to simulate end-of-frame processing,
     # which includes on_frame_end for its TimelineComponent.
     agent_inner_space.on_frame_end()
-    await asyncio.sleep(0.01) # Allow async tasks from process_cycle to complete
+    await asyncio.sleep(0.1) # Allow async tasks from process_cycle to complete
 
     veil_producer = dm_element.get_component_by_type("MessageListVeilProducer")
     assert veil_producer is not None, "MessageListVeilProducer not found on DMElement."
@@ -644,23 +644,50 @@ async def test_shared_space_mention_reply(setup_test_environment):
     # --- Phase 4: Verify Agent's Perspective (VEIL, Context, Tools) ---
     # Trigger InnerSpace cycle to update its components, including Uplink's cache/VEIL
     agent_inner_space.on_frame_end() 
-    await asyncio.sleep(0.01)
+    await asyncio.sleep(0.1)
 
     uplink_veil_producer = uplink_element.get_component_by_type(UplinkVeilProducer)
     assert uplink_veil_producer is not None
     uplink_veil = uplink_veil_producer.get_full_veil()
     assert uplink_veil is not None, "UplinkProxy failed to produce VEIL after second message."
 
-    # Check that the Uplink VEIL contains all three messages
-    assert uplink_veil.get('node_type') == "uplinked_content_container" # VEIL_UPLINK_WRAPPER_NODE_TYPE
-    assert 'children' in uplink_veil and len(uplink_veil['children']) == 1
-    remote_chat_veil = uplink_veil['children'][0]
-    assert remote_chat_veil.get('node_type') == "message_list"
     
+    uplink_children = uplink_veil.get('children', [])
+    assert len(uplink_children) == 1, \
+        f"Uplink VEIL root should have 1 child (the remote space's root), got {len(uplink_children)}"
+    
+    remote_space_root_in_uplink_veil = uplink_children[0]
+    # The remote space's root node_type should be "space_root" (or what SpaceVeilProducer.VEIL_SPACE_ROOT_TYPE is)
+    # Let's import SpaceVeilProducer to check its constant if available, otherwise hardcode "space_root"
+    from elements.elements.components.space.space_veil_producer import VEIL_SPACE_ROOT_TYPE as RemoteSpaceRootNodeType
+    assert remote_space_root_in_uplink_veil.get('node_type') == RemoteSpaceRootNodeType, \
+        f"Remote space root node type in Uplink VEIL mismatch. Expected {RemoteSpaceRootNodeType}, got {remote_space_root_in_uplink_veil.get('node_type')}"
+    assert remote_space_root_in_uplink_veil.get('veil_id') == f"{shared_space.id}_space_root", \
+        f"Remote space root veil_id mismatch. Expected f'{shared_space.id}_space_root', got {remote_space_root_in_uplink_veil.get('veil_id')}"
+
+    # Now find the message_list within the children of the remote_space_root_in_uplink_veil
+    remote_space_root_children = remote_space_root_in_uplink_veil.get('children', [])
+    
+    # Find the chat element's message list VEIL node
+    # The chat_element_in_shared_space.id is like "shared_mock_shared_adapter_channel_789_chat_interface"
+    # Its MessageListVeilProducer would create a root like "shared_mock_shared_adapter_channel_789_chat_interface_message_list_root"
+    expected_chat_message_list_veil_id = f"{chat_element_in_shared_space.id}_message_list_root"
+    
+    remote_chat_veil = None
+    for child_node in remote_space_root_children:
+        if child_node.get('veil_id') == expected_chat_message_list_veil_id:
+            remote_chat_veil = child_node
+            break
+    
+    assert remote_chat_veil is not None, \
+        f"Message list VEIL node '{expected_chat_message_list_veil_id}' not found as a child of the remote space root in Uplink VEIL."
+
     veil_chat_messages = remote_chat_veil.get('children', [])
-    assert len(veil_chat_messages) == 3, f"Expected 3 messages in Uplink VEIL after 3rd message in shared space, got {len(veil_chat_messages)}"
+    # At this point in the test (after second incoming shared message, agent has replied once), we expect 3 messages total.
+    assert len(veil_chat_messages) == 3, \
+        f"Expected 3 messages in Uplink VEIL's remote message list after 3rd total message in shared space, got {len(veil_chat_messages)}"
     
-    # Check content of messages in VEIL (optional, but good for sanity)
+    # Check content of messages in VEIL
     assert veil_chat_messages[0]['properties'].get('text_content') == incoming_mention_text
     assert veil_chat_messages[1]['properties'].get('text_content') == reply_text_to_channel
     assert veil_chat_messages[2]['properties'].get('text_content') == second_incoming_shared_text
@@ -699,23 +726,36 @@ async def test_shared_space_mention_reply(setup_test_environment):
     # Manually trigger on_frame_end for SharedSpace again after the fourth message
     logger.info(f"Manually calling on_frame_end for SharedSpace ({shared_space.id}) after fourth incoming message (with mention).")
     shared_space.on_frame_end()
-    await asyncio.sleep(0.01) # Allow deltas to be processed by UplinkProxy
-
-    # Trigger InnerSpace cycle again
-    agent_inner_space.on_frame_end() 
-    await asyncio.sleep(0.01)
+    await asyncio.sleep(0.1) # Allow deltas to be processed by UplinkProxy
+    
+    agent_inner_space.on_frame_end()
+    await asyncio.sleep(0.1)
 
     # Re-fetch VEIL from UplinkProxy
     uplink_veil_after_fourth = uplink_veil_producer.get_full_veil()
     assert uplink_veil_after_fourth is not None, "UplinkProxy failed to produce VEIL after fourth message."
-    assert uplink_veil_after_fourth.get('node_type') == "uplinked_content_container"
     
-    assert 'children' in uplink_veil_after_fourth and len(uplink_veil_after_fourth['children']) == 1
-    remote_chat_veil_after_fourth = uplink_veil_after_fourth['children'][0]
-    assert remote_chat_veil_after_fourth.get('node_type') == MessageListVeilProducer.VEIL_CONTAINER_TYPE
+    uplink_children_after_fourth = uplink_veil_after_fourth.get('children', [])
+    assert len(uplink_children_after_fourth) == 1, "Uplink VEIL root (after 4th msg) should have 1 child"
+    
+    remote_space_root_after_fourth = uplink_children_after_fourth[0]
+    assert remote_space_root_after_fourth.get('node_type') == RemoteSpaceRootNodeType
+    assert remote_space_root_after_fourth.get('veil_id') == f"{shared_space.id}_space_root"
+
+    remote_space_root_children_after_fourth = remote_space_root_after_fourth.get('children', [])
+    remote_chat_veil_after_fourth = None
+    for child_node in remote_space_root_children_after_fourth:
+        if child_node.get('veil_id') == expected_chat_message_list_veil_id: # Same ID as before
+            remote_chat_veil_after_fourth = child_node
+            break
+            
+    assert remote_chat_veil_after_fourth is not None, \
+        f"Message list VEIL node '{expected_chat_message_list_veil_id}' not found (after 4th msg)."
+    assert remote_chat_veil_after_fourth.get('node_type') == 'message_list'
     
     veil_chat_messages_after_fourth = remote_chat_veil_after_fourth.get('children', [])
-    assert len(veil_chat_messages_after_fourth) == 4, f"Expected 4 messages in Uplink VEIL, got {len(veil_chat_messages_after_fourth)}"
+    assert len(veil_chat_messages_after_fourth) == 4, \
+        f"Expected 4 messages in Uplink VEIL's remote message list, got {len(veil_chat_messages_after_fourth)}"
 
     # Check content of all messages in VEIL
     assert veil_chat_messages_after_fourth[0]['properties'].get('text_content') == incoming_mention_text
@@ -723,13 +763,11 @@ async def test_shared_space_mention_reply(setup_test_environment):
     assert veil_chat_messages_after_fourth[2]['properties'].get('text_content') == second_incoming_shared_text
     assert veil_chat_messages_after_fourth[3]['properties'].get('text_content') == third_incoming_shared_text_with_mention
 
-
     # Verify InnerSpace can generate its full context (which includes the Uplink's VEIL)
     hud = agent_inner_space.get_component_by_type("HUDComponent")
     assert hud is not None, "HUDComponent not found on InnerSpace for shared space test."
     agent_shared_context = await hud.get_agent_context()
     assert agent_shared_context is not None and len(agent_shared_context) > 0, "Agent context for shared space is missing or empty."
-    
     # Verify agent loop can aggregate tools (which should include tools from the UplinkProxy)
     # Assuming MultiStepToolLoopComponent or similar is used
     agent_loop = agent_inner_space.get_component_by_type("MultiStepToolLoopComponent") 

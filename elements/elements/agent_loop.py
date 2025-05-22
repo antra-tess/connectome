@@ -121,7 +121,16 @@ class BaseAgentLoopComponent(Component):
         # Assuming self.parent_inner_space.get_mounted_elements() exists.
         mounted_elements = self.parent_inner_space.get_mounted_elements()
         for mount_id, element in mounted_elements.items():
-            # Check if the element has a standard ToolProviderComponent
+            # NEW: Check for UplinkRemoteToolProviderComponent specifically
+            urtp_component = element.get_component_by_type(UplinkRemoteToolProviderComponent)
+            if urtp_component:
+                # This method is now async, so we await it
+                remote_tool_dicts = await urtp_component.get_llm_tool_definitions()
+                for tool_dict in remote_tool_dicts:
+                    # urtp_component.get_tools_for_llm() returns List[Dict], convert to LLMToolDefinition
+                    aggregated_tools_list.append(LLMToolDefinition(**tool_dict))
+                    continue
+
             element_tool_provider = element.get_component_by_type(ToolProviderComponent)
             if element_tool_provider:
                 for tool_def in element_tool_provider.get_llm_tool_definitions():
@@ -132,15 +141,6 @@ class BaseAgentLoopComponent(Component):
                     # Optional: Prefix tools from mounted elements if ambiguity is a concern
                     # tool_def_obj.name = f"{mount_id}::{tool_def_obj.name}"
                     aggregated_tools_list.append(tool_def_obj)
-            
-            # NEW: Check for UplinkRemoteToolProviderComponent specifically
-            urtp_component = element.get_component_by_type(UplinkRemoteToolProviderComponent)
-            if urtp_component:
-                # This method is now async, so we await it
-                remote_tool_dicts = await urtp_component.get_llm_tool_definitions()
-                for tool_dict in remote_tool_dicts:
-                    # urtp_component.get_tools_for_llm() returns List[Dict], convert to LLMToolDefinition
-                    aggregated_tools_list.append(LLMToolDefinition(**tool_dict))
 
         # De-duplicate based on tool name (last one wins if names clash, consider warning)
         final_tools_dict: Dict[str, LLMToolDefinition] = {}
@@ -153,15 +153,6 @@ class BaseAgentLoopComponent(Component):
         logger.info(f"[{self.agent_loop_name}] Aggregated {len(final_tools_list)} unique tools for LLM.")
         return final_tools_list
 
-    async def _get_llm_response(self, current_context_messages: List[LLMMessage]) -> LLMResponse:
-        """Gets response from LLM, including tool aggregation."""
-        if not self._llm_provider:
-            logger.error(f"[{self.agent_loop_name}] LLM provider not available.")
-            return LLMResponse(content="Error: LLM provider not available.", finish_reason="error")
-
-        # Aggregate tools asynchronously
-        available_tools = await self.aggregate_tools()
-        # ... rest of the method remains the same ...
 
 @register_component
 class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):

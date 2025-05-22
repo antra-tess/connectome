@@ -413,3 +413,8 @@ class UplinkProxy(Space):
             spans = spans[:limit]
             
         return spans 
+    
+    def receive_delta(self, delta_operations: List[Dict[str, Any]]) -> None:
+        super().receive_delta(delta_operations) # Building own Space cache
+        self.get_parent_object().receive_delta(delta_operations) # Notify the owner (InnerSpace) of the deltas
+    

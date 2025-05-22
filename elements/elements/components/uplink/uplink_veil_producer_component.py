@@ -159,7 +159,8 @@ class UplinkVeilProducer(VeilProducer):
         uplink_root_deltas = []
         uplink_root_veil_id = f"{self.owner.id}_uplink_root"
         
-        parent_space_id = getattr(self.owner, 'parent_space_id', None)
+        parent_info = self.owner.get_parent_info()
+        parent_space_id = parent_info.get("parent_id") if parent_info else None
         parent_space_root_veil_id = f"{parent_space_id}_space_root" if parent_space_id else None
 
         if not parent_space_root_veil_id:
@@ -220,8 +221,7 @@ class UplinkVeilProducer(VeilProducer):
             logger.info(f"[{self.owner.id if self.owner else 'Unknown'}/{self.COMPONENT_TYPE}] Calculated {len(final_deltas)} total delta operations ({len(uplink_root_deltas)} for uplink root, {len(processed_remote_deltas)} for remote content).")
         
         # Update state for THIS producer's root node only
-        self.signal_delta_produced_this_frame(uplink_root_deltas) 
-        
+        self.signal_delta_produced_this_frame(uplink_root_deltas)
         return final_deltas if final_deltas else None
 
     def signal_delta_produced_this_frame(self, produced_uplink_root_deltas: List[Dict[str, Any]]):
@@ -247,16 +247,3 @@ class UplinkVeilProducer(VeilProducer):
             f"[{self.owner.id if self.owner else 'Unknown'}/{self.COMPONENT_TYPE}] Baseline updated for UplinkVeilProducer's own root node. "
             f"Uplink root added flag: {self._state.get('_has_produced_uplink_root_add_before', False)}."
         )
-
-    def on_cache_updated(self, new_full_snapshot_data: Dict[str, Any]) -> None:
-        """
-        DEPRECATED in favor of emit_delta flow.
-        Called by RemoteStateCacheComponent when its cache has been fully updated.
-        This signals that the producer should reset its delta tracking baseline.
-        """
-        logger.info(f"[{self.owner.id if self.owner else 'Unknown'}/{self.COMPONENT_TYPE}] on_cache_updated (DEPRECATED) called. emit_delta flow is used.")
-        # The new flow is that RemoteStateCacheComponent calls emit_delta(),
-        # which calls calculate_delta(), which calls signal_delta_produced_this_frame() to update state.
-        # So, this explicit reset might lead to double "new" deltas if not careful.
-        # For now, let's make it a no-op or just log.
-        pass
