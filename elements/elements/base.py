@@ -119,11 +119,6 @@ class BaseElement:
              logger.warning(f"Element {self.id} already has a component of type {component.COMPONENT_TYPE}. Cannot add duplicate.")
              return None
         
-        # REMOVED: Dependency validation during single component addition
-        # if not component.validate_dependencies(self._components): 
-        #     logger.error(f"Component {component.COMPONENT_TYPE} has unsatisfied dependencies")
-        #     return None
-        
         # Initialize the component
         try:
             component.initialize()

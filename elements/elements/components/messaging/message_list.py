@@ -408,7 +408,6 @@ class MessageListComponent(Component):
             'internal_request_id': internal_request_id, # For matching confirmation
             'error_details': None
         }
-
         self._state['_messages'].append(new_message)
         self._state['_message_map'][internal_message_id] = len(self._state['_messages']) - 1
         
@@ -448,7 +447,8 @@ class MessageListComponent(Component):
                 message_to_update = msg
                 idx_to_update = idx
                 break
-        
+            elif msg.get('internal_request_id') == internal_req_id and msg.get('status') != "pending_send":
+                logger.warning(f"[{self.owner.id}] Found message with internal_request_id '{internal_req_id}' but it's not in 'pending_send' status. Current status: {msg.get('status')}")
         if message_to_update:
             message_to_update['status'] = "sent"
             # Assuming the first ID is the primary one for now
@@ -475,7 +475,7 @@ class MessageListComponent(Component):
         """
         internal_req_id = failure_content.get('internal_request_id')
         error_msg = failure_content.get('error_message')
-
+        
         if not internal_req_id:
             logger.warning(f"[{self.owner.id}] Message send failure event missing 'internal_request_id'. Payload: {failure_content}")
             return False

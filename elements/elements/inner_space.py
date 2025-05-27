@@ -578,24 +578,6 @@ class InnerSpace(Space):
             else:
                 logger.warning(f"[{self.id}] Received tool_result_received but _mark_agent_for_cycle is not set.")
 
-        # Delegate to Space's general event handling (records to timeline, dispatches to components/children)
-        # super().receive_event(event, timeline_context) # CAUTION: event is the full node, not just payload
-        # The 'event' passed to InnerSpace.handle_event is the *full event node* from the timeline
-        # Space.receive_event expects the *raw event payload* as its first argument.
-        # So, we need to pass event['payload'] to super().receive_event if we call it.
-        # However, the timeline recording and component dispatch should already be happening
-        # by the time InnerSpace.handle_event is called (if it's called as a component handler).
-        # If InnerSpace.handle_event is called directly by ExternalEventRouter for DMs,
-        # then it's responsible for the full processing.
-        
-        # For now, let's assume this handle_event is an *additional* handler called by Space.receive_event
-        # and its main job is the InnerSpace-specific logic above.
-        # If it were meant to *replace* Space.receive_event, it would need to replicate
-        # timeline recording and dispatch to all other components and children.
-        
-        # Based on current structure, Space.receive_event adds to timeline, then calls handle_event on components.
-        # So, we don't call super().receive_event() here to avoid double processing.
-
         return handled_by_self # Indicates if InnerSpace-specific logic handled it.
 
     # --- Connection and Uplink Management ---

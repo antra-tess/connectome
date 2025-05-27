@@ -465,7 +465,7 @@ class ExternalEventRouter:
         """
         target_element_id = adapter_data.get("target_element_id_for_confirmation")
         internal_request_id = adapter_data.get("internal_request_id")
-
+        
         if not target_element_id or not internal_request_id:
             logger.error(f"[_handle_message_send_success_ack] Missing 'target_element_id_for_confirmation' or 'internal_request_id' in adapter_data: {adapter_data}")
             return
@@ -503,7 +503,6 @@ class ExternalEventRouter:
             "target_element_id": target_element_id, # MessageListComponent is on this element
             "payload": confirmation_payload_for_mlc # This is what MessageListComponent handler expects
         }
-
         # The timeline_context is for the parent_space_of_target_element
         timeline_context = await self._construct_timeline_context_for_space(parent_space_of_target_element) 
 

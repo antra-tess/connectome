@@ -341,7 +341,6 @@ class Space(BaseElement):
         event_type = event_payload.get("event_type")
         target_element_id = event_payload.get("target_element_id")
         logger.debug(f"[{self.id}] Receiving event: Type='{event_type}', Target='{target_element_id}', Timeline='{timeline_context.get('timeline_id')}'")
-
         # 1. Add event to the timeline via TimelineComponent
         new_event_id = self.add_event_to_timeline(event_payload, timeline_context)
         if not new_event_id:
@@ -366,9 +365,9 @@ class Space(BaseElement):
                     # Pass the full event node as recorded (or just payload if preferred)
                     # Passing full_event_node gives components access to event ID etc.
                     if component.handle_event(full_event_node, timeline_context):
-                         logger.debug(f"[{self.id}] Event '{new_event_id}' ({event_type}) handled by component: {comp_name}")
-                         handled_by_component = True
-                         # Allow multiple components to handle the same event
+                        logger.debug(f"[{self.id}] Event '{new_event_id}' ({event_type}) handled by component: {comp_name}")
+                        handled_by_component = True
+                        # Allow multiple components to handle the same event
                 except Exception as comp_err:
                      logger.error(f"[{self.id}] Error in component '{comp_name}' handling event '{new_event_id}': {comp_err}", exc_info=True)
         
@@ -450,50 +449,6 @@ class Space(BaseElement):
                 logger.error(f"[{self.id}] 'action_request_for_remote' event (ID: {new_event_id}) missing remote_target_element_id or action_name. Payload: {event_payload}")
             return # Event processed by this specific handler
         # --- End handle action_request_for_remote ---
-
-        # 3. If target_element_id is specified in the event_payload, route to that element
-        if original_target_element_id:
-            # Ensure lookup is by actual element ID if mounted_elements keys are mount_ids that might differ
-            # For now, assuming get_mounted_element can handle element_id or mount_id.
-            # Or, iterate values:
-            mounted_element = None
-            if self._container: # Check if ContainerComponent exists
-                direct_child = self._container.get_mounted_element(original_target_element_id)
-                if direct_child and direct_child.id == original_target_element_id:
-                    mounted_element = direct_child
-                else: # Fallback: iterate if mount_id != element_id
-                    for elem in self._container.get_mounted_elements().values():
-                        if elem.id == original_target_element_id:
-                            mounted_element = elem
-                            break
-            
-            if mounted_element:
-                if hasattr(mounted_element, 'receive_event') and callable(mounted_element.receive_event):
-                    logger.debug(f"[{self.id}] Routing event (ID: '{new_event_id}', Type: '{event_payload.get('event_type')}') to mounted element: {mounted_element.id}")
-                    try:
-                        # Child element receives the original event_payload and timeline context
-                        mounted_element.receive_event(event_payload, timeline_context)
-                    except Exception as mounted_err:
-                        logger.error(f"[{self.id}] Error in mounted element '{mounted_element.id}' receiving event '{new_event_id}': {mounted_err}", exc_info=True)
-                else:
-                    logger.warning(f"[{self.id}] Mounted element '{original_target_element_id}' found but has no receive_event method.")
-                    raise ValueError(f"Mounted element '{original_target_element_id}' has no receive_event method.")
-            else:
-                 # This could happen if the event targets an element nested deeper
-                 # We rely on parent elements routing downwards. If it wasn't found here,
-                 # it means the target wasn't a direct child.
-                 logger.debug(f"[{self.id}] Event '{new_event_id}' targets element '{original_target_element_id}', which is not directly mounted here.")
-        else:
-             # Event was not targeted at a specific child element
-             # Ensure this logging happens only if no specific child target AND not handled by own components in a way that stops propagation.
-             # For now, this is fine as a general log if no specific target_element_id was in the original event_payload.
-             if not original_target_element_id and not handled_by_component:
-                 logger.debug(f"[{self.id}] Event '{new_event_id}' ({event_type}) processed by Space components (or no specific child target and no component handled it).")
-             elif not original_target_element_id and handled_by_component:
-                 logger.debug(f"[{self.id}] Event '{new_event_id}' ({event_type}) handled by Space component(s); no specific child target.")
-
-        # NEW methods for listener registration
-        # self.register_uplink_listener(lambda deltas: self.receive_delta(deltas)) # Removed: A Space shouldn't self-listen to its own produced deltas this way.
 
     # NEW methods for listener registration
     def register_uplink_listener(self, callback: Callable[[List[Dict[str, Any]]], None]):
