@@ -84,6 +84,15 @@ class ExternalEventRouter:
             "original_adapter_data": adapter_data # Keep the raw adapter data
         }
         return details_payload
+    
+    def _get_agent_id_by_alias(self, adapter_name: str) -> Optional[str]:
+        """
+        Retrieves the agent_id associated with a given adapter_name.
+        """
+        for agent_config in self.agent_configs:
+            if adapter_name in agent_config.platform_aliases.values():
+                return agent_config.agent_id
+        return None
 
     async def route_external_event(self, event_data_from_activity_client: Dict[str, Any], original_timeline_context: Dict[str, Any]):
         """
@@ -118,6 +127,10 @@ class ExternalEventRouter:
         # Extract the raw event type and data from the nested payload
         event_type_from_adapter = payload.get("event_type_from_adapter")
         adapter_data = payload.get("adapter_data")
+
+        adapter_name = adapter_data.get("adapter_name")
+        agent_id = self._get_agent_id_by_alias(adapter_name)
+        adapter_data["recipient_connectome_agent_id"] = agent_id
 
         if not event_type_from_adapter or not isinstance(adapter_data, dict):
             logger.error(f"Event payload missing 'event_type_from_adapter' or valid 'adapter_data' dict: {payload}")
@@ -783,7 +796,7 @@ class ExternalEventRouter:
                     "sender_external_id": sender_info.get("user_id"),
                     "sender_display_name": sender_info.get("display_name", "Unknown Sender"),
                     "text": message_dict.get("text"),
-                    "is_dm": False, # Assume history is from shared context
+                    "is_dm": message_dict.get("is_direct_message", False), # Assume history is from shared context
                     "mentions": message_dict.get("mentions", []), 
                     "original_message_id_external": message_dict.get("message_id"),
                     "external_channel_id": conversation_id, # Use the main conversation ID

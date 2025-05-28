@@ -9,6 +9,7 @@ from typing import Dict, Any, Optional, List, Type, Callable
 import inspect
 import time
 import re # For _generate_safe_id_string
+import asyncio
 
 from .space import Space  # Inherit from Space to get Container and Timeline functionality
 from .base import BaseElement, MountType
@@ -19,12 +20,14 @@ from .components.factory_component import ElementFactoryComponent
 from .components.base_component import VeilProducer, Component
 from .components.hud.hud_component import HUDComponent # Explicitly import if kept
 from .components.uplink_manager_component import UplinkManagerComponent # NEWLY ADDED
+from .components.compression_engine_component import CompressionEngineComponent # NEW: Import CompressionEngine
 
 # Import the specific Space Veil Producer
 from .components.space.space_veil_producer import SpaceVeilProducer
 
 # Import agent loop components
 from .agent_loop import BaseAgentLoopComponent, MultiStepToolLoopComponent, SimpleRequestResponseLoopComponent
+from .agent_loop import create_default_orientation_conversation, create_specialized_orientation_conversation
 
 # Type checking imports
 from typing import TYPE_CHECKING
@@ -73,7 +76,8 @@ class InnerSpace(Space):
         agent_id: str,
         llm_provider: 'LLMProviderInterface',
         agent_loop_component_type: Type[BaseAgentLoopComponent] = MultiStepToolLoopComponent,
-        system_prompt_template: Optional[str] = None,
+        orientation_conversation: Optional[List['LLMMessage']] = None,
+        agent_purpose: Optional[str] = None,
         outgoing_action_callback: Optional['OutgoingActionCallback'] = None,
         # space_registry: Optional['SpaceRegistry'] = None, # REMOVE PARAMETER
         mark_agent_for_cycle_callback: Optional[MarkAgentForCycleCallable] = None,
@@ -90,7 +94,8 @@ class InnerSpace(Space):
             agent_id: The unique ID of the agent this InnerSpace belongs to.
             llm_provider: Interface to the LLM powering the agent
             agent_loop_component_type: Type of AgentLoopComponent to use
-            system_prompt_template: Optional system prompt template for the agent
+            orientation_conversation: Optional list of LLMMessage objects for the agent's orientation conversation
+            agent_purpose: Optional description of the agent's purpose
             outgoing_action_callback: Callback function for sending actions to external systems
             # space_registry: Reference to the SpaceRegistry instance # REMOVE FROM DOCSTRING
             mark_agent_for_cycle_callback: Callback to HostEventLoop.mark_agent_for_cycle.
@@ -109,10 +114,28 @@ class InnerSpace(Space):
         # self._outgoing_action_callback = outgoing_action_callback # Already set by super().__init__ if Space stores it
         # self._space_registry = space_registry # REMOVE ATTRIBUTE
         self._mark_agent_for_cycle = mark_agent_for_cycle_callback
-        self._system_prompt_template = system_prompt_template
+        
+        # Determine orientation conversation to use
+        if orientation_conversation:
+            self._orientation_conversation = orientation_conversation
+        elif agent_purpose:
+            self._orientation_conversation = create_specialized_orientation_conversation(
+                agent_name=agent_name, 
+                agent_role=agent_purpose,
+                example_capabilities=["problem-solving", "research", "communication", "tool usage"]
+            )
+        else:
+            # Create default orientation conversation
+            self._orientation_conversation = create_default_orientation_conversation(
+                agent_name=agent_name,
+                agent_purpose=agent_purpose
+            )
+        
+        logger.info(f"Created orientation conversation with {len(self._orientation_conversation)} messages for agent {agent_name}")
         
         self._tool_provider = None
         self._uplink_manager = None
+        self._compression_engine = None  # NEW: Add CompressionEngine reference
         self._hud = None
         self._agent_loop = None
         
@@ -157,6 +180,43 @@ class InnerSpace(Space):
         if not self._uplink_manager:
             logger.error(f"Failed to add UplinkManagerComponent to InnerSpace {self.id}")
 
+        # NEW: Add CompressionEngineComponent - Required for agent memory and context management
+        self._compression_engine = self.add_component(CompressionEngineComponent)
+        if not self._compression_engine:
+            logger.error(f"Failed to add CompressionEngineComponent to InnerSpace {self.id}")
+        else:
+            logger.info(f"CompressionEngineComponent successfully added to InnerSpace {self.id}")
+            
+            # Set orientation conversation in CompressionEngine
+            if self._orientation_conversation:
+                # Create a simple async wrapper to set orientation
+                async def set_orientation():
+                    success = await self._compression_engine.set_orientation_conversation(self._orientation_conversation)
+                    if success:
+                        logger.info(f"Orientation conversation set successfully in CompressionEngine for agent {agent_name}")
+                    else:
+                        logger.error(f"Failed to set orientation conversation in CompressionEngine for agent {agent_name}")
+                
+                # Run the async function - note this is during init so should be safe
+                try:
+                    # If we're already in an async context, we can't use asyncio.run()
+                    # Instead, create a task or use create_task if event loop is running
+                    loop = None
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        pass
+                    
+                    if loop and loop.is_running():
+                        # We're in an async context, schedule the task
+                        loop.create_task(set_orientation())
+                    else:
+                        # We're not in an async context, safe to use asyncio.run()
+                        asyncio.run(set_orientation())
+                        
+                except Exception as e:
+                    logger.error(f"Error setting orientation conversation: {e}", exc_info=True)
+
         # Add HUD component for rendering agent context
         hud_kwargs = {'llm_provider': llm_provider} if llm_provider else {}
         self._hud = self.add_component(HUDComponent, **hud_kwargs)
@@ -168,6 +228,7 @@ class InnerSpace(Space):
             for component_type in additional_components:
                 if component_type in [ToolProviderComponent, ElementFactoryComponent, 
                                      UplinkManagerComponent, # NEWLY ADDED
+                                     CompressionEngineComponent, # NEW: Add to skip list
                                      # GlobalAttentionComponent, # REMOVED
                                      HUDComponent 
                                      # ContextManagerComponent # REMOVED
@@ -182,7 +243,6 @@ class InnerSpace(Space):
         # Prepare kwargs for the agent loop component
         agent_loop_kwargs = {
             "parent_inner_space": self, # Directly pass self as parent_inner_space
-            "system_prompt_template": self._system_prompt_template,
             "agent_loop_name": f"{self.name}_AgentLoop" # Provide a name for the loop
         }
         # The llm_provider and outgoing_action_callback are accessed by the loop *through* parent_inner_space.
@@ -516,6 +576,10 @@ class InnerSpace(Space):
 
     def get_hud(self) -> Optional[HUDComponent]:
         return self._hud
+
+    def get_compression_engine(self) -> Optional[CompressionEngineComponent]:
+        """Get the compression engine component."""
+        return self._compression_engine
 
     def handle_deltas_from_uplink(self, uplink_id: str, deltas: List[Dict[str, Any]]):
         """

@@ -365,7 +365,7 @@ class Space(BaseElement):
                     # Pass the full event node as recorded (or just payload if preferred)
                     # Passing full_event_node gives components access to event ID etc.
                     if component.handle_event(full_event_node, timeline_context):
-                        logger.debug(f"[{self.id}] Event '{new_event_id}' ({event_type}) handled by component: {comp_name}")
+                        logger.warning(f"[{self.id}] Event '{new_event_id}' ({event_type}) handled by component: {comp_name}")
                         handled_by_component = True
                         # Allow multiple components to handle the same event
                 except Exception as comp_err:

@@ -106,3 +106,188 @@ Contributions to both the architecture and implementation are welcome. Please re
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Configuration
+
+### Logging Configuration
+
+Connectome supports configurable logging levels and formats through environment variables:
+
+#### Environment Variables
+
+- `CONNECTOME_LOG_LEVEL`: Set the logging level (default: `INFO`)
+  - Valid values: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`
+- `CONNECTOME_LOG_FORMAT`: Set the logging format (default: `%(asctime)s - %(name)s - %(levelname)s - %(message)s`)
+
+#### Examples
+
+**Set DEBUG level for detailed output:**
+```bash
+export CONNECTOME_LOG_LEVEL=DEBUG
+python -m host.main
+```
+
+**Set WARNING level for minimal output:**
+```bash
+export CONNECTOME_LOG_LEVEL=WARNING
+python -m host.main
+```
+
+**Custom log format:**
+```bash
+export CONNECTOME_LOG_LEVEL=DEBUG
+export CONNECTOME_LOG_FORMAT="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+python -m host.main
+```
+
+**In .env file:**
+```env
+CONNECTOME_LOG_LEVEL=DEBUG
+CONNECTOME_LOG_FORMAT=%(asctime)s [%(levelname)s] %(name)s: %(message)s
+```
+
+#### Quick Commands
+
+```bash
+# Debug level - most verbose
+CONNECTOME_LOG_LEVEL=DEBUG python -m host.main
+
+# Info level - default
+CONNECTOME_LOG_LEVEL=INFO python -m host.main
+
+# Warning level - minimal output
+CONNECTOME_LOG_LEVEL=WARNING python -m host.main
+
+# Error level - only errors
+CONNECTOME_LOG_LEVEL=ERROR python -m host.main
+```
+
+### Component-Specific Logging
+
+Individual components and modules also respect the global logging configuration. For even more granular control, you can set logging levels for specific Python loggers:
+
+```python
+import logging
+logging.getLogger('elements.elements.agent_loop').setLevel(logging.DEBUG)
+logging.getLogger('host.event_loop').setLevel(logging.WARNING)
+```
+
+### Troubleshooting Tool Validation
+
+If you're experiencing issues with LLM tool calls, enable DEBUG logging to see detailed tool validation:
+
+```bash
+# Enable debug logging to see tool validation details
+CONNECTOME_LOG_LEVEL=DEBUG python -m host.main
+```
+
+**Common tool validation issues:**
+- **Missing JSON schema structure**: Tools must have `"type": "object"` and `"properties": {}` in parameters
+- **Invalid required parameters**: Parameters listed in `"required"` must exist in `"properties"`
+- **Non-JSON serializable data**: All tool parameters must be JSON serializable
+
+**Test tool validation:**
+```bash
+# Run the tool validation test
+python test_tool_validation.py
+```
+
+**Check which elements are providing tools:**
+```bash
+# Run with DEBUG to see tool aggregation details
+CONNECTOME_LOG_LEVEL=DEBUG python -m host.main 2>&1 | grep "tool"
+```
+
+### DM Element Tool Routing
+
+When multiple DM Elements are mounted (different conversations), each provides the same tool names (e.g., `send_message`). Connectome automatically resolves conflicts using **lightweight tool prefixing** that fits within LLM provider character limits:
+
+**Problem: Anthropic's 64-Character Limit**
+```
+❌ dm_elem_discord_adapter_1_alice_smith_a1b2c3d4__send_message (60+ chars)
+```
+
+**Solution: Smart Prefix Extraction**
+```
+✅ smith_a1b2__send_message (24 chars)
+✅ jones_x9y8__send_message (24 chars)  
+✅ brown_f5e4__send_message (24 chars)
+```
+
+**How It Works:**
+- **DM Elements**: Extracts username + short UUID (`alice_smith_a1b2c3d4` → `smith_a1b2`)
+- **Other Elements**: Uses meaningful prefix + hash (`uplink_proxy_abc123` → `uplink_2db3`)
+- **Character Sanitization**: Removes invalid chars like `/`, `@`, spaces, etc. (`1148/channel events` → `1148_c_e964`)
+- **Automatic Truncation**: Ensures tools never exceed 64-character limit
+- **Collision Resistant**: UUID parts prevent conflicts
+- **Regex Compliant**: Uses `__` separator to comply with Anthropic's `^[a-zA-Z0-9_-]{1,64}$` constraint
+- **Prefix Registry**: Internal mapping resolves shortened prefixes back to full element IDs during execution
+
+**Sanitization Examples:**
+```
+Original Element ID                     → Sanitized Prefix    → Tool Name
+dm_elem_discord_adapter_1_alice@email   → alice_em_a1b2      → alice_em_a1b2__send_message
+1148/channel events                     → 1148_c_e964        → 1148_c_e964__send_message  
+uplink/shared/channel                   → uplink_2f36        → uplink_2f36__send_message
+element:with:colons                     → elemen_38cd        → elemen_38cd__send_message
+```
+
+**Agent Context Example:**
+```
+Alice DM: [Tools: smith_a1b2__send_message, smith_a1b2__edit_message]
+Bob DM: [Tools: jones_x9y8__send_message, jones_x9y8__edit_message]  
+Channel Uplink: [Tools: uplink_2db3__send_message]
+```
+
+The agent clearly sees which conversation each tool targets while staying within all LLM provider limits.
+
+**Key Technical Details**:
+- **Anthropic Constraint**: Tool names must match regex `^[a-zA-Z0-9_-]{1,64}$`
+- **DM Element ID Structure**: `dm_elem_{adapter_id}_{safe_user_id_part}_{short_uuid}`
+- **Prefix Algorithm**: Username (≤8 chars) + `_` + UUID (4 chars) = `smith_a1b2`
+- **Character Sanitization**: Invalid chars (/, @, spaces, etc.) replaced with underscores
+- **Prefix Registry**: Maps shortened prefixes back to full element IDs during tool execution
+- **Tool Parsing**: `smith_a1b2__send_message` → resolve `smith_a1b2` → `dm_elem_discord_adapter_1_alice_smith_a1b2c3d4`
+- **Agent Context**: Shows `Alice DM: [Tools: smith_a1b2__send_message, smith_a1b2__edit_message]`
+
+**Prefix Registry Architecture**:
+```python
+# Registry populated during tool aggregation
+_prefix_to_element_id_registry = {
+    "smith_a1b2": "dm_elem_discord_adapter_1_alice_smith_a1b2c3d4",
+    "jones_x9y8": "dm_elem_discord_adapter_1_bob_jones_x9y8z7w6",
+    "uplink_2db3": "uplink_proxy_abc123def456"
+}
+
+# Tool execution resolves prefix to full element ID
+prefix = "smith_a1b2"  # From "smith_a1b2__send_message"
+target_element_id = registry[prefix]  # Returns full element ID
+execute_element_action(element_id=target_element_id, action_name="send_message")
+```
+
+## Setup and Running
+
+### Quick Start
+
+1. Create your `.env` file with required configuration
+2. Set desired logging level: `export CONNECTOME_LOG_LEVEL=DEBUG`
+3. Run: `python -m host.main`
+
+### Full Configuration Example
+
+```env
+# Logging
+CONNECTOME_LOG_LEVEL=DEBUG
+CONNECTOME_LOG_FORMAT=%(asctime)s [%(levelname)s] %(name)s: %(message)s
+
+# LLM Configuration
+CONNECTOME_LLM_TYPE=litellm
+CONNECTOME_LLM_DEFAULT_MODEL=gpt-4o-mini
+CONNECTOME_LLM_API_KEY=your_openai_key_here
+
+# Activity Adapters
+CONNECTOME_ACTIVITY_ADAPTERS_JSON=[{"id": "discord_adapter_1", "url": "http://localhost:5001", "auth_token": null}]
+
+# Agents
+CONNECTOME_AGENTS_JSON=[{"agent_id": "demo_agent", "name": "Demo Agent", "description": "A demonstration agent", "agent_loop_component_type_name": "SimpleRequestResponseLoopComponent", "platform_aliases": {"discord_adapter_1": "DemoBot"}, "handles_direct_messages_from_adapter_ids": ["discord_adapter_1"]}]
+```

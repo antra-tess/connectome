@@ -155,7 +155,7 @@ class UplinkRemoteToolProviderComponent(Component):
             list_tool_parameters = self._convert_json_schema_to_tool_parameters(json_parameters_schema)
 
             # Use a distinct variable name for the current iteration's prefixed tool name
-            current_tool_prefixed_name = f"{self.owner.id}::{provider_element_id}::{tool_name_on_remote}"
+            current_tool_prefixed_name = f"{self.owner.id}__{provider_element_id}__{tool_name_on_remote}"
             
             # Define the executor, capturing current_tool_prefixed_name
             async def tool_executor(calling_context: Optional[Dict[str, Any]] = None, 
@@ -205,7 +205,7 @@ class UplinkRemoteToolProviderComponent(Component):
             if not (provider_element_id and tool_name and description is not None and json_parameters_schema is not None):
                 logger.warning(f"Skipping malformed tool_info for LLM: {tool_info}")
                 continue
-            prefixed_name = f"{self.owner.id}::{provider_element_id}::{tool_name}"
+            prefixed_name = f"{self.owner.id}__{provider_element_id}__{tool_name}"
             llm_tools.append({
                 "name": prefixed_name, "description": description,
                 "parameters": json_parameters_schema
@@ -219,8 +219,8 @@ class UplinkRemoteToolProviderComponent(Component):
             return {"success": False, "error": "Owner or connection missing attributes."}
         logger.info(f"[{self.owner.id}-{self.id}] Executing tool: '{prefixed_tool_name}', params: {kwargs}")
         parsed_remote_target_element_id, parsed_action_name_on_remote = None, None
-        if "::" in prefixed_tool_name:
-            parts = prefixed_tool_name.split("::")
+        if "__" in prefixed_tool_name:
+            parts = prefixed_tool_name.split("__")
             if len(parts) == 3:
                 owner_uplink_id, remote_target_element_id, action_name_on_remote = parts
                 if owner_uplink_id != self.owner.id:
@@ -276,7 +276,7 @@ class UplinkRemoteToolProviderComponent(Component):
 
     def list_tools(self) -> List[str]:
         if self._raw_remote_tool_definitions:
-            return [f"{self.owner.id}::{td.get('provider_element_id')}::{td.get('tool_name')}" for td in self._raw_remote_tool_definitions if td.get('provider_element_id') and td.get('tool_name')]
+            return [f"{self.owner.id}__{td.get('provider_element_id')}__{td.get('tool_name')}" for td in self._raw_remote_tool_definitions if td.get('provider_element_id') and td.get('tool_name')]
         return []
 
     async def force_refresh_tools(self) -> bool:

@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "connectome"
+version = "0.1.0"
+description = "A digital mind framework for persistent AI agents"
+authors = [
+    {name = "Connectome Team"}
+]
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+dependencies = [
+    "pydantic",
+    "pydantic-settings",
+    "aiohttp",
+    "asyncio-mqtt",
+    "litellm",
+    "anthropic",
+    "openai",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.setuptools.packages.find]
+include = ["elements*", "host*", "llm*"]
+
+[project.scripts]
+connectome = "host.main:main" 

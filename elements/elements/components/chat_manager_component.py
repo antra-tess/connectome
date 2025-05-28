@@ -106,7 +106,7 @@ class ChatManagerComponent(Component):
         if not element_factory:
             return None, None # Error logged by _get_element_factory
 
-        element_name = f"DM with {user_display_name_for_naming or user_ext_id_for_naming} ({adapter_id})"
+        element_name = f"DM session ID {user_display_name_for_naming or user_ext_id_for_naming} ({adapter_id})"
         element_description = f"DM session with {user_display_name_for_naming or user_ext_id_for_naming} on {adapter_id} (channel: {conv_id})"
         
         # Sanitize user_ext_id_for_naming for mount_id and element_id parts
@@ -137,7 +137,7 @@ class ChatManagerComponent(Component):
             new_dm_element = creation_result['element']
             actual_mount_id = creation_result.get('mount_id', mount_id)
             self._state["dm_sessions_map"][session_key] = {"element_id": new_dm_element.id, "mount_id": actual_mount_id}
-            logger.info(f"Successfully created and mounted DM chat element '{new_dm_element.id}' (mounted as '{actual_mount_id}') for {session_key}.")
+            logger.debug(f"Successfully created and mounted DM chat element '{new_dm_element.id}' (mounted as '{actual_mount_id}') for {session_key}.")
             return new_dm_element, actual_mount_id
         else:
             error_msg = creation_result.get('error', "Failed to create DM element.") if creation_result else "Factory error."
@@ -195,7 +195,7 @@ class ChatManagerComponent(Component):
         """
         from ..inner_space import InnerSpace # For type checking owner
         from ..space import Space # For type checking owner
-
+        
         event_payload_from_space = event_node.get('payload', {})
         connectome_event_type = event_payload_from_space.get("event_type")
 

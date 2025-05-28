@@ -49,6 +49,15 @@ class MessageListVeilProducer(VeilProducer):
         """Helper to get the sibling message list component."""
         return self.get_sibling_component(MessageListComponent)
 
+    def _get_available_tools_for_element(self) -> List[str]:
+        """Get list of available tool names for this element."""
+        from ..tool_provider import ToolProviderComponent
+        
+        tool_provider = self.get_sibling_component(ToolProviderComponent)
+        if tool_provider:
+            return tool_provider.list_tools()
+        return []
+
     def get_full_veil(self) -> Optional[Dict[str, Any]]:
         """
         Generates the complete VEIL structure for the current message list.
@@ -134,7 +143,10 @@ class MessageListVeilProducer(VeilProducer):
                 "content_nature": "message_list",
                 "element_id": self.owner.id,
                 "element_name": self.owner.name,
-                "message_count": len(message_nodes)
+                "message_count": len(message_nodes),
+                # NEW: Include tool information for agent targeting
+                "available_tools": self._get_available_tools_for_element(),
+                "tool_target_element_id": self.owner.id  # Explicit target for tools
                 # Add other container properties/annotations if needed
             },
             "children": message_nodes
@@ -169,7 +181,10 @@ class MessageListVeilProducer(VeilProducer):
             "content_nature": "message_list",
             "element_id": self.owner.id,
             "element_name": self.owner.name,
-            "message_count": len(current_message_ids) # Use count of valid messages
+            "message_count": len(current_message_ids), # Use count of valid messages
+            # NEW: Include tool information for agent targeting
+            "available_tools": self._get_available_tools_for_element(),
+            "tool_target_element_id": self.owner.id  # Explicit target for tools
         }
 
         # 1. Handle the list root node (add or update)

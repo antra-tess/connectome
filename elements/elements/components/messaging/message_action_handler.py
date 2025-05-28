@@ -72,6 +72,7 @@ class MessageActionHandler(Component):
         send_message_params: List[ToolParameter] = [
             {"name": "text", "type": "string", "description": "The content of the message to send.", "required": True},
             {"name": "reply_to_external_id", "type": "string", "description": "Optional external ID of the message being replied to.", "required": False},
+            {"name": "target_element_id", "type": "string", "description": "Optional specific element ID to target for sending. If not provided, will use the element this tool is attached to.", "required": False},
             {
                 "name": "attachments", "type": "array", "description": "Optional list of attachment objects to send.", "required": False,
                 "items": {
@@ -126,12 +127,24 @@ class MessageActionHandler(Component):
         async def send_message_tool(text: str,
                                     attachments: Optional[List[Dict[str, Any]]] = None,
                                     reply_to_external_id: Optional[str] = None,
+                                    target_element_id: Optional[str] = None,
                                     calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             """
             Tool function to send a message.
             Uses local outgoing_action_callback.
+            
+            Args:
+                text: Message content to send
+                attachments: Optional list of attachment objects
+                reply_to_external_id: Optional ID of message being replied to
+                target_element_id: Optional specific element ID to target. Usually not needed
+                                  as the agent loop will automatically route to the correct element.
+                calling_context: Context from the calling component
             """
-            logger.info(f"[{self.owner.id}] MessageActionHandler.send_message_tool called. Text: '{text[:50]}...', Context: {calling_context is not None}")
+            logger.info(f"[{self.owner.id}] MessageActionHandler.send_message_tool called. Text: '{text[:50]}...', Target: {target_element_id or 'auto'}")
+
+            # Note: target_element_id parameter is included for completeness but typically
+            # the agent loop handles routing automatically based on tool aggregation
 
             retrieved_adapter_id, retrieved_conversation_id = self._get_message_context()
             requesting_agent_id = self._get_requesting_agent_id(calling_context) # Pass context
@@ -190,7 +203,8 @@ class MessageActionHandler(Component):
                     "reply_to_external_id": reply_to_external_id,
                     "attachments": attachments or [],
                     "requesting_element_id": self.owner.id,
-                    "requesting_agent_id": requesting_agent_id
+                    "requesting_agent_id": requesting_agent_id,
+                    "target_element_id": target_element_id
                 }
             }
             logger.debug(f"[{self.owner.id}] Dispatching direct send_message action request: {action_request}")

@@ -106,7 +106,7 @@ class HostEventLoop:
 
         event_type = event_payload.get("event_type")
         payload_data = event_payload.get("payload", {}) # The actual content from the adapter
-        is_dm = payload_data.get("is_dm", False)
+        is_dm = payload_data.get("is_direct_message", False)
         text_content = payload_data.get("text_content", "").lower() # Ensure text_content is string
         # Mentions should be a list of IDs/names from the adapter
         mentions = payload_data.get("mentions", []) 
@@ -270,22 +270,15 @@ class HostEventLoop:
                      if self._should_agent_run_cycle(agent_id, now):
                           agents_to_run_now.add(agent_id)
                           self._pending_agent_cycles.remove(agent_id)
-                          
+                
                 for agent_id in agents_to_run_now:
-                    # target_shell = self.shell_modules.get(agent_id) # Removed
                     target_inner_space = self.space_registry.get_inner_space_for_agent(agent_id)
                     if target_inner_space:
                         agent_loop_component = target_inner_space.get_agent_loop_component()
                         if agent_loop_component:
                             logger.info(f"Agent cycle triggered for {agent_id} via InnerSpace's AgentLoopComponent.")
                         self._last_agent_cycle_time[agent_id] = now
-                        try:
-                                # Assuming AgentLoopComponent has a method like trigger_cycle or run_cognitive_cycle
-                                await agent_loop_component.trigger_cycle() 
-                        except Exception as cycle_error:
-                                logger.error(f"Error during agent cycle trigger for {agent_id} via AgentLoopComponent: {cycle_error}", exc_info=True)
-                        else:
-                            logger.error(f"Could not trigger agent cycle: AgentLoopComponent not found in InnerSpace for {agent_id}.")
+                        await agent_loop_component.trigger_cycle() 
                     else:
                         logger.error(f"Could not trigger agent cycle: InnerSpace for {agent_id} not found in SpaceRegistry.")
 

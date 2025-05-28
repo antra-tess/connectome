@@ -23,6 +23,8 @@ from llm.provider_interface import (
     LLMResponse
 )
 
+logger = logging.getLogger(__name__)
+
 
 class LiteLLMProvider(LLMProvider):
     """LiteLLM implementation of LLMProvider."""
@@ -80,7 +82,27 @@ class LiteLLMProvider(LLMProvider):
         # Format tools if provided
         litellm_functions = None
         if tools:
-            litellm_functions = [self.format_tool_for_provider(tool) for tool in tools]
+            self.logger.debug(f"Formatting {len(tools)} tools for LiteLLM")
+            litellm_functions = []
+            for tool in tools:
+                try:
+                    # Validate tool first
+                    validation_issues = validate_llm_tool_definition(tool)
+                    if validation_issues:
+                        self.logger.error(f"Tool '{getattr(tool, 'name', 'UNKNOWN')}' validation failed: {'; '.join(validation_issues)}")
+                        continue
+                    
+                    formatted_tool = self.format_tool_for_provider(tool)
+                    litellm_functions.append(formatted_tool)
+                    self.logger.debug(f"Successfully formatted tool: {tool.name}")
+                except Exception as e:
+                    self.logger.error(f"Error formatting tool '{getattr(tool, 'name', 'UNKNOWN')}': {e}")
+                    continue
+            
+            self.logger.debug(f"Formatted {len(litellm_functions)} tools successfully")
+            if self.logger.isEnabledFor(logging.DEBUG):
+                # Only stringify tools for debug if debug logging is enabled
+                self.logger.debug(f"LiteLLM tool definitions: {json.dumps(litellm_functions, indent=2)}")
         
         # Prepare parameters
         params = {
@@ -94,7 +116,7 @@ class LiteLLMProvider(LLMProvider):
         if max_tokens is not None:
             params["max_tokens"] = max_tokens
         if litellm_functions:
-            params["functions"] = litellm_functions
+            params["tools"] = litellm_functions
         
         # Add any additional kwargs
         params.update(kwargs)
@@ -115,39 +137,61 @@ class LiteLLMProvider(LLMProvider):
         Format a tool definition for LiteLLM.
         
         Args:
-            tool: Tool definition
+            tool: Tool definition with JSON schema parameters
             
         Returns:
             LiteLLM-compatible function definition
         """
-        # Convert our tool format to LiteLLM function format
+        # Validate tool input
+        if not isinstance(tool, LLMToolDefinition):
+            raise TypeError(f"Expected LLMToolDefinition, got {type(tool)}")
+        
+        if not tool.name or not isinstance(tool.name, str):
+            raise ValueError(f"Tool name must be a non-empty string, got: {tool.name}")
+        
+        if not isinstance(tool.parameters, dict):
+            raise ValueError(f"Tool parameters must be a dict (JSON schema), got {type(tool.parameters)}: {tool.parameters}")
+        
+        # tool.parameters should be a JSON schema like:
+        # {
+        #   "type": "object",
+        #   "properties": {
+        #     "param_name": {"type": "string", "description": "..."},
+        #     ...
+        #   },
+        #   "required": ["param1", "param2"]
+        # }
+        
+        # Build LiteLLM function definition
         function_def = {
-            "name": tool.name,
-            "description": tool.description,
-            "parameters": {
-                "type": "object",
-                "properties": {}
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description or "",
+                "parameters": tool.parameters.copy()  # Use the JSON schema directly
             }
         }
         
-        # Add parameters
-        required_params = []
-        for param_name, param_info in tool.parameters.items():
-            if isinstance(param_info, dict):
-                function_def["parameters"]["properties"][param_name] = param_info
-                if param_info.get("required", False):
-                    required_params.append(param_name)
-            else:
-                # Simple string description
-                function_def["parameters"]["properties"][param_name] = {
-                    "type": "string",
-                    "description": param_info
-                }
+        # Validate the JSON schema structure
+        if "type" not in tool.parameters:
+            self.logger.warning(f"Tool '{tool.name}' parameters missing 'type' field, adding 'object'")
+            function_def["function"]["parameters"]["type"] = "object"
         
-        # Add required parameters list if any were found
-        if required_params:
-            function_def["parameters"]["required"] = required_params
-            
+        if "properties" not in tool.parameters:
+            self.logger.warning(f"Tool '{tool.name}' parameters missing 'properties' field, adding empty object")
+            function_def["function"]["parameters"]["properties"] = {}
+        
+        # Ensure required is a list if present
+        if "required" in tool.parameters and not isinstance(tool.parameters["required"], list):
+            self.logger.warning(f"Tool '{tool.name}' has non-list 'required' field: {tool.parameters['required']}")
+            function_def["function"]["parameters"]["required"] = []
+        
+        # Validate the function definition is JSON serializable
+        try:
+            json.dumps(function_def)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"Tool '{tool.name}' produced non-JSON-serializable definition: {e}")
+        
         return function_def
     
     def parse_response(self, raw_response: Any) -> LLMResponse:
@@ -160,60 +204,125 @@ class LiteLLMProvider(LLMProvider):
         Returns:
             Standardized LLMResponse
         """
-        # Extract the response message
-        response_message = raw_response.choices[0].message
-        
-        # Extract content
-        content = response_message.get("content")
-        
-        # Extract tool calls if present
-        tool_calls = []
-        if "function_call" in response_message:
-            # Single function call format
-            function_call = response_message["function_call"]
-            tool_name = function_call["name"]
+        try:
+            # Validate response structure
+            if not hasattr(raw_response, 'choices') or not raw_response.choices:
+                self.logger.error(f"Invalid response structure: missing or empty choices")
+                return LLMResponse(
+                    content="Error: Invalid response structure from LLM",
+                    finish_reason="error"
+                )
             
-            # Parse arguments (handle potential JSON parsing errors)
-            try:
-                parameters = json.loads(function_call["arguments"])
-            except json.JSONDecodeError:
-                parameters = {"raw_arguments": function_call["arguments"]}
+            # Extract the response message
+            response_message = raw_response.choices[0].message
+            
+            # Extract content - handle both dict and object formats
+            if hasattr(response_message, 'content'):
+                content = response_message.content
+            elif isinstance(response_message, dict):
+                content = response_message.get("content")
+            else:
+                content = str(response_message) if response_message else None
+            
+            # Extract tool calls if present
+            tool_calls = []
+            
+            # Handle single function call format (older OpenAI format)
+            function_call = None
+            if hasattr(response_message, 'function_call'):
+                function_call = response_message.function_call
+            elif isinstance(response_message, dict) and "function_call" in response_message:
+                function_call = response_message["function_call"]
                 
-            tool_calls.append(LLMToolCall(tool_name=tool_name, parameters=parameters))
-        
-        # Handle newer format with multiple tool calls
-        elif "tool_calls" in response_message:
-            for tool_call in response_message["tool_calls"]:
-                if tool_call["type"] == "function":
-                    function_call = tool_call["function"]
-                    tool_name = function_call["name"]
-                    
-                    # Parse arguments
+            if function_call:
+                tool_name = function_call.get("name") if isinstance(function_call, dict) else getattr(function_call, "name", None)
+                arguments = function_call.get("arguments") if isinstance(function_call, dict) else getattr(function_call, "arguments", None)
+                
+                if tool_name and arguments:
+                    # Parse arguments (handle potential JSON parsing errors)
                     try:
-                        parameters = json.loads(function_call["arguments"])
-                    except json.JSONDecodeError:
-                        parameters = {"raw_arguments": function_call["arguments"]}
+                        if isinstance(arguments, str):
+                            parameters = json.loads(arguments)
+                        elif isinstance(arguments, dict):
+                            parameters = arguments
+                        else:
+                            parameters = {"raw_arguments": str(arguments)}
+                    except json.JSONDecodeError as e:
+                        self.logger.warning(f"Failed to parse function call arguments as JSON: {e}")
+                        parameters = {"raw_arguments": str(arguments)}
                         
                     tool_calls.append(LLMToolCall(tool_name=tool_name, parameters=parameters))
-        
-        # Extract finish reason
-        finish_reason = raw_response.choices[0].finish_reason
-        
-        # Extract usage info if available
-        usage = None
-        if hasattr(raw_response, "usage"):
-            usage = {
-                "prompt_tokens": raw_response.usage.prompt_tokens,
-                "completion_tokens": raw_response.usage.completion_tokens,
-                "total_tokens": raw_response.usage.total_tokens
-            }
-        
-        return LLMResponse(
-            content=content,
-            tool_calls=tool_calls,
-            finish_reason=finish_reason,
-            usage=usage
-        )
+            
+            # Handle newer format with multiple tool calls
+            tool_calls_list = None
+            if hasattr(response_message, 'tool_calls'):
+                tool_calls_list = response_message.tool_calls
+            elif isinstance(response_message, dict) and "tool_calls" in response_message:
+                tool_calls_list = response_message["tool_calls"]
+                
+            if tool_calls_list:
+                for tool_call in tool_calls_list:
+                    if isinstance(tool_call, dict):
+                        tool_type = tool_call.get("type")
+                        if tool_type == "function" and "function" in tool_call:
+                            function_call = tool_call["function"]
+                            tool_name = function_call.get("name")
+                            arguments = function_call.get("arguments")
+                    else:
+                        # Handle object format
+                        tool_type = getattr(tool_call, "type", None)
+                        if tool_type == "function" and hasattr(tool_call, "function"):
+                            function_call = tool_call.function
+                            tool_name = getattr(function_call, "name", None)
+                            arguments = getattr(function_call, "arguments", None)
+                        else:
+                            continue
+                    
+                    if tool_name and arguments is not None:
+                        # Parse arguments
+                        try:
+                            if isinstance(arguments, str):
+                                parameters = json.loads(arguments)
+                            elif isinstance(arguments, dict):
+                                parameters = arguments
+                            else:
+                                parameters = {"raw_arguments": str(arguments)}
+                        except json.JSONDecodeError as e:
+                            self.logger.warning(f"Failed to parse tool call arguments as JSON: {e}")
+                            parameters = {"raw_arguments": str(arguments)}
+                            
+                        tool_calls.append(LLMToolCall(tool_name=tool_name, parameters=parameters))
+            
+            # Extract finish reason
+            finish_reason = None
+            if hasattr(raw_response.choices[0], 'finish_reason'):
+                finish_reason = raw_response.choices[0].finish_reason
+            elif isinstance(raw_response.choices[0], dict):
+                finish_reason = raw_response.choices[0].get('finish_reason')
+            
+            # Extract usage info if available
+            usage = None
+            if hasattr(raw_response, "usage") and raw_response.usage:
+                usage_obj = raw_response.usage
+                usage = {
+                    "prompt_tokens": getattr(usage_obj, "prompt_tokens", 0),
+                    "completion_tokens": getattr(usage_obj, "completion_tokens", 0),
+                    "total_tokens": getattr(usage_obj, "total_tokens", 0)
+                }
+            
+            return LLMResponse(
+                content=content,
+                tool_calls=tool_calls,
+                finish_reason=finish_reason,
+                usage=usage or {}
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Error parsing LLM response: {e}", exc_info=True)
+            return LLMResponse(
+                content=f"Error parsing response: {str(e)}",
+                finish_reason="error"
+            )
     
     def _format_messages(self, messages: List[LLMMessage]) -> List[Dict[str, Any]]:
         """
@@ -240,3 +349,61 @@ class LiteLLMProvider(LLMProvider):
             litellm_messages.append(msg_dict)
             
         return litellm_messages 
+
+def validate_llm_tool_definition(tool: LLMToolDefinition) -> List[str]:
+    """
+    Validate an LLMToolDefinition and return a list of issues found.
+    
+    Args:
+        tool: The tool definition to validate
+        
+    Returns:
+        List of validation error messages (empty if valid)
+    """
+    issues = []
+    
+    if not isinstance(tool, LLMToolDefinition):
+        issues.append(f"Expected LLMToolDefinition, got {type(tool)}")
+        return issues
+    
+    # Check name
+    if not tool.name or not isinstance(tool.name, str):
+        issues.append(f"Tool name must be a non-empty string, got: {repr(tool.name)}")
+    
+    # Check description
+    if tool.description is not None and not isinstance(tool.description, str):
+        issues.append(f"Tool description must be a string or None, got: {type(tool.description)}")
+    
+    # Check parameters
+    if not isinstance(tool.parameters, dict):
+        issues.append(f"Tool parameters must be a dict (JSON schema), got {type(tool.parameters)}")
+        return issues
+    
+    # Check JSON schema structure
+    if "type" not in tool.parameters:
+        issues.append("Parameters schema missing 'type' field")
+    elif tool.parameters["type"] != "object":
+        issues.append(f"Parameters schema 'type' should be 'object', got: {tool.parameters['type']}")
+    
+    if "properties" not in tool.parameters:
+        issues.append("Parameters schema missing 'properties' field")
+    elif not isinstance(tool.parameters["properties"], dict):
+        issues.append(f"Parameters 'properties' must be a dict, got {type(tool.parameters['properties'])}")
+    
+    if "required" in tool.parameters:
+        if not isinstance(tool.parameters["required"], list):
+            issues.append(f"Parameters 'required' must be a list, got {type(tool.parameters['required'])}")
+        elif tool.parameters["properties"]:
+            # Check that required params exist in properties
+            properties = tool.parameters["properties"]
+            for req_param in tool.parameters["required"]:
+                if req_param not in properties:
+                    issues.append(f"Required parameter '{req_param}' not found in properties")
+    
+    # Test JSON serialization
+    try:
+        json.dumps(tool.parameters)
+    except (TypeError, ValueError) as e:
+        issues.append(f"Parameters not JSON serializable: {e}")
+    
+    return issues 

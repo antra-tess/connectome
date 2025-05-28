@@ -37,10 +37,6 @@ class AgentConfig(BaseSettings):
     name: str = Field(description="Human-readable name for the agent")
     description: str = Field(default="An agent instance.", description="Description of the agent\'s purpose")
     agent_loop_component_type_name: str = Field(default="SimpleRequestResponseLoopComponent", description="Component type name for the agent\'s loop")
-    system_prompt_template: str = Field(
-        default="You are an AI assistant named '{agent_name}' operating within the Connectome V3 framework.\nYou will be given a context representing your current environment, including recent messages and available data sources.\nYou also have a set of tools you can use to interact with this environment or request more information.\nYour goal is to understand the context, use tools if necessary, and respond appropriately or achieve given objectives.\nWhen using tools, strictly adhere to their specified JSON schema for arguments.",
-        description="Template for the system prompt sent to the LLM. Use '{agent_name}' as a placeholder."
-    )
     platform_aliases: Dict[str, str] = Field(default_factory=dict, 
                                             description="Platform-specific user-facing aliases for the agent, "
                                                         "e.g., {\'discord_adapter_1\': \'MyBotName\'} for mention detection.")
@@ -56,6 +52,10 @@ class AgentConfig(BaseSettings):
 
 class HostSettings(BaseSettings):
     """Main configuration settings loaded from environment variables."""
+    
+    # Logging Settings
+    log_level: str = Field(default="INFO", description="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)")
+    log_format: str = Field(default='%(asctime)s - %(name)s - %(levelname)s - %(message)s', description="Logging format string")
     
     # LLM Settings (will load from CONNECTOME_LLM_TYPE, CONNECTOME_LLM_DEFAULT_MODEL etc.)
     llm_provider: LLMConfig = Field(default_factory=LLMConfig)

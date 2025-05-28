@@ -7,9 +7,9 @@ import logging
 import asyncio
 import sys
 from typing import Dict, Any, Optional # Added Optional
+import os
 
-# Configure logging
-# Consider moving to a dedicated config file/setup function
+# Basic logging until we load configuration
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -35,11 +35,45 @@ from elements.component_registry import scan_and_load_components
 # Configuration Loading
 from host.config import load_settings, HostSettings
 
-# --------------- 
+# ---------------
+
+def configure_logging(log_level: str = "INFO", log_format: str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'):
+    """Configure logging with the specified level and format."""
+    try:
+        # Get numeric log level from string
+        numeric_level = getattr(logging, log_level.upper())
+        
+        # Clear existing handlers and reconfigure
+        root_logger = logging.getLogger()
+        for handler in root_logger.handlers[:]:
+            root_logger.removeHandler(handler)
+            
+        logging.basicConfig(level=numeric_level, format=log_format, force=True)
+        
+        # Update our logger reference
+        global logger
+        logger = logging.getLogger(__name__)
+        logger.info(f"Logging configured: level={log_level.upper()}, format='{log_format[:50]}...'")
+        
+    except AttributeError:
+        logger.error(f"Invalid log level: {log_level}. Using INFO instead.")
+        logging.basicConfig(level=logging.INFO, format=log_format, force=True)
 
 async def amain():
     """Asynchronous main entry point."""
     logger.info("Starting Host Process (Async - Refactored)..." + "\n" + "-"*20)
+
+    # --- Configuration ---
+    try:
+        settings: HostSettings = load_settings()
+    except ValueError as e: # If load_settings re-raises
+        logger.critical(f"Halting due to configuration loading error: {e}")
+        return
+    
+    # --- Configure Logging from Settings ---
+    configure_logging(settings.log_level, settings.log_format)
+    logger.info("Configuration loaded and logging configured.")
+    # -------------------------------------
 
     # --- Scan and load components early ---
     logger.info("Scanning for registered components...")
@@ -50,14 +84,6 @@ async def amain():
         logger.critical(f"Failed to scan and load components: {e}", exc_info=True)
         return # Cannot proceed without components
     # --------------------------------------
-
-    # --- Configuration ---
-    try:
-        settings: HostSettings = load_settings()
-    except ValueError as e: # If load_settings re-raises
-        logger.critical(f"Halting due to configuration loading error: {e}")
-        return
-    # -------------------------------------
 
     # --- Initialize Core Infrastructure ---
     llm_provider = None
@@ -168,9 +194,7 @@ async def amain():
                        llm_provider=agent_llm_provider,
                        agent_loop_component_type=agent_loop_type,
                        outgoing_action_callback=outgoing_callback,
-                       space_registry=space_registry,
                        mark_agent_for_cycle_callback=mark_agent_callback, # <<< Pass callback
-                       system_prompt_template=agent_config.system_prompt_template # <<< Pass template
                        # components_to_add=agent_config.inner_space_extra_components # If using this config
                    )
                    

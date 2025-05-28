@@ -157,13 +157,87 @@ class HUDComponent(Component):
         return output
 
     def _render_container(self, node: Dict[str, Any], attention: Dict[str, Any], options: Dict[str, Any], indent_str: str, node_info: str) -> str:
-        """Renders a container node - often just acts as a header for children."""
+        """Renders a container node with element information and tool availability."""
         props = node.get("properties", {})
-        # Display name if available, otherwise use type
-        name = props.get('element_name', node.get('node_type'))
-        output = f"{indent_str}{name}:\n" # Simple header
-        # Children are handled by the main loop
+        element_name = props.get("element_name", "Unknown Element")
+        element_id = props.get("element_id", "unknown_id")
+        content_nature = props.get("content_nature", "container")
+        
+        # NEW: Include tool targeting information
+        available_tools = props.get("available_tools", [])
+        tool_target_element_id = props.get("tool_target_element_id")
+        
+        # Build header with element information
+        header = f"{indent_str}{element_name}:"
+        
+        # Add tool information if available
+        if available_tools:
+            # Create short prefix for display (same logic as agent loop)
+            short_prefix = self._create_short_element_prefix(element_id)
+            prefixed_tools = [f"{short_prefix}__{tool}" for tool in available_tools]
+            
+            if tool_target_element_id and tool_target_element_id != element_id:
+                header += f" [Tools: {', '.join(prefixed_tools)} → {tool_target_element_id}]"
+            else:
+                header += f" [Tools: {', '.join(prefixed_tools)}]"
+        
+        output = f"{header}\n"
+        
+        # Add element ID for verbose mode
+        use_verbose_tags = options.get("render_style") == "verbose_tags"
+        if use_verbose_tags and element_id:
+            output += f"{indent_str}  (Element ID: {element_id})\n"
+        
         return output
+
+    def _create_short_element_prefix(self, element_id: str) -> str:
+        """
+        Create a short prefix for tool names (same logic as AgentLoop).
+        
+        Args:
+            element_id: Full element ID
+            
+        Returns:
+            Short prefix for display consistency that matches ^[a-zA-Z0-9_-]+$
+        """
+        def sanitize_for_anthropic(text: str) -> str:
+            """Remove or replace characters not allowed by Anthropic's regex ^[a-zA-Z0-9_-]+$"""
+            import re
+            # Replace invalid characters with underscores, then remove duplicate underscores
+            sanitized = re.sub(r'[^a-zA-Z0-9_-]', '_', text)
+            # Remove duplicate underscores
+            sanitized = re.sub(r'_+', '_', sanitized)
+            # Remove leading/trailing underscores
+            sanitized = sanitized.strip('_')
+            return sanitized
+        
+        # For DM elements, try to extract user and UUID parts
+        if element_id.startswith('dm_elem_'):
+            parts = element_id.split('_')
+            if len(parts) >= 4:
+                user_part = parts[-2] if len(parts) > 3 else 'dm'
+                uuid_part = parts[-1] if len(parts) > 3 else parts[-1]
+                
+                # Sanitize both parts
+                user_short = sanitize_for_anthropic(user_part)[:8] if user_part else 'dm'
+                uuid_short = sanitize_for_anthropic(uuid_part)[:4] if uuid_part else ''
+                
+                result = f"{user_short}_{uuid_short}" if uuid_short else user_short
+                return sanitize_for_anthropic(result)
+        
+        # For other elements, use a hash-based approach
+        import hashlib
+        hash_obj = hashlib.md5(element_id.encode())
+        short_hash = hash_obj.hexdigest()[:8]
+        
+        if '_' in element_id:
+            meaningful_part = element_id.split('_')[0][:6]
+            meaningful_part = sanitize_for_anthropic(meaningful_part)
+            return f"{meaningful_part}_{short_hash[:4]}"
+        else:
+            # Sanitize the entire element_id and use with hash
+            sanitized_id = sanitize_for_anthropic(element_id)[:6]
+            return f"{sanitized_id}_{short_hash[:4]}" if sanitized_id else f"el_{short_hash[:6]}"
 
     def _render_chat_message(self, node: Dict[str, Any], attention: Dict[str, Any], options: Dict[str, Any], indent_str: str, node_info: str) -> str:
         """Renders a chat message node cleanly."""
@@ -303,11 +377,12 @@ class HUDComponent(Component):
         try:
              node_content_str = render_func(node, attention, options, content_indent_str, node_info)
              # Prepend the content string to the main output
-             output += node_content_str 
+             output += node_content_str
         except Exception as render_err:
              logger.error(f"Error calling renderer {render_func.__name__} for node {node_id}: {render_err}", exc_info=True)
              # Add error message, respecting indent
              output += f"{content_indent_str}>> Error rendering content for {node_info}: {render_err}\n"
+        logger.critical(f"Output: {output}; verbose: {use_verbose_tags}")
 
         # Check attention (append after content for clarity)
         if node_id in attention:

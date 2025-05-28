@@ -214,7 +214,6 @@ test_agent_config = AgentConfig(
     agent_id=TEST_AGENT_ID,
     name="Test DM Agent",
     description="Agent for testing DM and SharedSpace ping-pong.",
-    system_prompt_template="You are a test agent. Please reply with 'Pong'.", # Make prompt specific for test
     handles_direct_messages_from_adapter_ids=[TEST_ADAPTER_ID, TEST_SHARED_ADAPTER_ID]
 )
 
@@ -264,7 +263,6 @@ def setup_test_environment():
         description="Test InnerSpace",
         agent_id=TEST_AGENT_ID,
         llm_provider=llm_provider,
-        system_prompt_template=test_agent_config.system_prompt_template,
         outgoing_action_callback=event_loop.get_outgoing_action_callback(),
         mark_agent_for_cycle_callback=event_loop.mark_agent_for_cycle
     )
@@ -538,11 +536,11 @@ async def test_shared_space_mention_reply(setup_test_environment):
     # The chat_element_in_shared_space.id is this ID.
     prefixed_send_message_tool_name = None
     for tool_dict in available_remote_tools_dicts:
-        # Expected name format: f"{uplink_element.id}::{chat_element_in_shared_space.id}::send_message"
+        # Expected name format: f"{uplink_element.id}__{chat_element_in_shared_space.id}__send_message"
         # Check if the tool_dict corresponds to the send_message tool from the chat_element_in_shared_space
         # The tool_dict['name'] will already be prefixed by URTPC's get_tools_for_llm
-        # The structure of the prefixed name is owner_uplink_id::remote_provider_element_id::actual_tool_name
-        name_parts = tool_dict['name'].split('::')
+        # The structure of the prefixed name is owner_uplink_id__remote_provider_element_id__actual_tool_name
+        name_parts = tool_dict['name'].split('__')
         if len(name_parts) == 3:
             owner_uplink_id, remote_provider_el_id, actual_tool_name = name_parts
             if owner_uplink_id == uplink_element.id and \
@@ -787,8 +785,8 @@ async def test_shared_space_mention_reply(setup_test_environment):
     # A simpler check: ensure at least one send_message tool exists if the naming is complex.
     found_uplink_send_message = False
     for tool_def in aggregated_tools:
-        # Example check: if tool name is prefixed like "uplink_element_id::tool_name"
-        if tool_def.name.startswith(f"{uplink_element.id}::") and "send_message" in tool_def.name:
+        # Example check: if tool name is prefixed like "uplink_element_id__tool_name"
+        if tool_def.name.startswith(f"{uplink_element.id}__") and "send_message" in tool_def.name:
             found_uplink_send_message = True
             break
         # Simpler check if tools are not prefixed by default from Uplink's ToolProvider

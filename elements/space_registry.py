@@ -654,8 +654,6 @@ class SpaceRegistry:
 
             if self.register_space(new_shared_space):
                 logger.info(f"Successfully created and registered SharedSpace: {space_name} ({identifier})")
-                # REMOVE THE CALL TO _create_chat_interface_in_shared_space_with_factory
-                # The ChatManagerComponent on the SharedSpace will handle this.
                 return new_shared_space
             else:
                 # register_space should log its own errors
