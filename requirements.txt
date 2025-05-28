@@ -22,3 +22,22 @@ pytest-asyncio>=0.20.0                         # For async test support
 
 # Optional - Redis for storage (if using Redis storage backend)
 # redis>=4.5.4
+
+# Core Storage Dependencies
+aiofiles>=24.1.0
+
+# Optional Dependencies for Enhanced Storage Backends
+# Install these based on your storage backend needs:
+
+# For SQLite storage backend
+aiosqlite>=0.21.0
+
+# For future Redis storage backend (example)
+# aioredis>=2.0.0
+
+# For future PostgreSQL storage backend (example)  
+# asyncpg>=0.28.0
+# psycopg[binary]>=3.0.0
+
+# For future MongoDB storage backend (example)
+# motor>=3.0.0

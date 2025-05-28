@@ -248,7 +248,16 @@ class ElementFactoryComponent(Component):
 
             # 3. Mount the element in the owner_space
             actual_mount_id_to_use = mount_id_override if mount_id_override else new_element.id
-            mount_success, final_mount_id = owner_space.mount_element(new_element, mount_id=actual_mount_id_to_use)
+            
+            # Prepare creation data for replay
+            creation_data = {
+                'prefab_name': prefab_name,
+                'element_config': element_config,
+                'component_config_overrides': component_config_overrides,
+                'mount_id_override': mount_id_override
+            }
+            
+            mount_success, final_mount_id = owner_space.mount_element(new_element, mount_id=actual_mount_id_to_use, creation_data=creation_data)
             if not mount_success:
                  raise RuntimeError(f"Failed to mount element {element_id} (mount_id: {actual_mount_id_to_use}) into {owner_space.id}. Mount ID from call: {final_mount_id}")
 
@@ -348,7 +357,13 @@ class ElementFactoryComponent(Component):
                     raise ValueError(f"Component type '{comp_type_name}' not found.")
 
             # 3. Mount in the owner_space
-            mount_success, final_mount_id = owner_space.mount_element(new_element) # Uses element_id as mount_id by default
+            creation_data = {
+                'element_class_name': element_class_name,
+                'component_configs': component_configs,
+                'dynamic_creation': True
+            }
+            
+            mount_success, final_mount_id = owner_space.mount_element(new_element, creation_data=creation_data) # Uses element_id as mount_id by default
             if not mount_success:
                  raise RuntimeError(f"Failed to mount element {element_id} into {owner_space.id}. Mount ID: {final_mount_id}")
 

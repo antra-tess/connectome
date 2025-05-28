@@ -32,7 +32,7 @@ class ContainerComponent(BaseComponent):
         logger.debug(f"ContainerComponent initialized for Element {self.owner.id if self.owner else 'Unknown'}")
         return True
 
-    def mount_element(self, element: 'BaseElement', mount_id: Optional[str] = None, mount_type: MountType = MountType.INCLUSION,) -> Tuple[bool, Optional[str]]:
+    def mount_element(self, element: 'BaseElement', mount_id: Optional[str] = None, mount_type: MountType = MountType.INCLUSION, creation_data: Optional[Dict[str, Any]] = None) -> Tuple[bool, Optional[str]]:
         """
         Mounts a child element.
 
@@ -40,9 +40,10 @@ class ContainerComponent(BaseComponent):
             element: The BaseElement instance to mount.
             mount_id: Optional identifier for the mount point. Defaults to element.id.
             mount_type: The type of mounting (e.g., INCLUSION, UPLINK).
+            creation_data: Optional data about how the element was created (for replay).
 
         Returns:
-            True if mounting was successful, False otherwise.
+            Tuple of (success: bool, mount_id: Optional[str])
         """
         if not self.owner:
             logger.error("Cannot mount element: ContainerComponent has no owner element.")
@@ -65,17 +66,23 @@ class ContainerComponent(BaseComponent):
         }
         logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] Element '{element.name}' ({element.id}) mounted as '{actual_mount_id}' (Type: {mount_type}).")
         
-        # Record event on the Space's timeline
+        # Record event on the Space's timeline with creation data
         if self.owner and hasattr(self.owner, 'add_event_to_timeline'):
+            event_data = {
+                'mount_id': actual_mount_id,
+                'element_id': element.id,
+                'element_name': element.name,
+                'element_type': element.__class__.__name__,
+                'mount_type': mount_type.name if isinstance(mount_type, MountType) else str(mount_type)
+            }
+            
+            # Add creation data if provided (enables element recreation during replay)
+            if creation_data:
+                event_data['creation_data'] = creation_data
+                
             event_payload = {
                 'event_type': 'element_mounted',
-                'data': {
-                    'mount_id': actual_mount_id,
-                    'element_id': element.id,
-                    'element_name': element.name,
-                    'element_type': element.__class__.__name__,
-                    'mount_type': mount_type.name if isinstance(mount_type, MountType) else str(mount_type)
-                },
+                'data': event_data,
                 'context': {"component_id": self.id}
             }
             self.owner.add_event_to_timeline(event_payload, timeline_context={})

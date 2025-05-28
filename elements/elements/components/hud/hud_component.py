@@ -367,7 +367,7 @@ class HUDComponent(Component):
 
         # Optional: Add opening tag if verbose style is enabled
         if use_verbose_tags:
-             output += f"{indent_str}<{node_type} id='{node_id}'>\n"
+             output += f"{indent_str}<{node_type}'>\n"
              # Increase indent for content within tags
              content_indent_str = indent_str + "  "
         else:

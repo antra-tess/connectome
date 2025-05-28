@@ -5,11 +5,15 @@ Manages the Loom DAG (event history) for a Space.
 import logging
 import time
 import uuid
+import asyncio
 from typing import Dict, Any, Optional, List, Set
 
 from ...base import Component
 # Import the registry decorator
 from elements.component_registry import register_component
+
+# NEW: Import storage system
+from storage import create_storage_from_env, StorageInterface
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +28,18 @@ class TimelineComponent(Component):
     
     NOTE: This is a simplified implementation focusing on a single primary timeline.
           Full Loom features (forking, merging, complex DAG traversal) are not yet implemented.
+          
+    NEW: Integrates with pluggable storage system to persist timeline events and DAG structure.
     """
     COMPONENT_TYPE = "TimelineComponent"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        
+        # NEW: Storage integration
+        self._storage: Optional[StorageInterface] = None
+        self._storage_initialized = False
+        self._space_id: Optional[str] = None  # For storage key naming
 
     def initialize(self, **kwargs) -> None:
         """Initializes the component state, creating a default primary timeline."""
@@ -36,13 +50,163 @@ class TimelineComponent(Component):
         self._state.setdefault('_all_events', {})
         self._state.setdefault('_primary_timeline_id', None)
 
+        # NEW: Get Space ID for storage
+        if self.owner:
+            self._space_id = f"space_{self.owner.id}"
+
         # Create default primary timeline if none exists
         if not self._state['_timelines']:
             self._create_timeline(DEFAULT_TIMELINE_ID, is_primary=True)
             logger.info(f"TimelineComponent initialized for Element {self.owner.id}. Created default timeline '{DEFAULT_TIMELINE_ID}'.")
         else:
             logger.debug(f"TimelineComponent initialized for Element {self.owner.id}. Existing state loaded.")
+        
+        # NEW: Schedule async storage initialization
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._initialize_storage_async())
+            logger.debug(f"Scheduled async storage initialization for TimelineComponent {self.id}")
+        except RuntimeError:
+            logger.debug(f"No event loop running, will initialize storage on first use for TimelineComponent {self.id}")
+        
         return True
+
+    async def _initialize_storage_async(self) -> bool:
+        """Initialize storage backend asynchronously."""
+        try:
+            logger.debug(f"Initializing storage backend for TimelineComponent {self.id}")
+            
+            # Create storage from environment configuration
+            self._storage = create_storage_from_env()
+            
+            # Initialize the storage backend
+            success = await self._storage.initialize()
+            if not success:
+                logger.error(f"Failed to initialize storage backend for TimelineComponent")
+                return False
+            
+            self._storage_initialized = True
+            logger.info(f"Storage backend successfully initialized for TimelineComponent {self.id}")
+            
+            # Load existing timeline data from storage
+            await self._load_timeline_from_storage()
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error initializing storage backend for TimelineComponent: {e}", exc_info=True)
+            return False
+
+    async def _ensure_storage_ready(self) -> bool:
+        """Ensure storage backend is initialized before use."""
+        if self._storage_initialized:
+            return True
+        
+        if self._storage is None:
+            logger.debug(f"Storage not yet initialized for TimelineComponent {self.id}, initializing now...")
+            success = await self._initialize_storage_async()
+            return success
+        
+        return self._storage_initialized
+
+    async def _load_timeline_from_storage(self) -> bool:
+        """Load existing timeline data from storage."""
+        if not self._storage_initialized or not self._space_id:
+            return False
+        
+        try:
+            logger.debug(f"Loading timeline data for space {self._space_id}")
+            
+            # Load timeline state from system state storage
+            timeline_state = await self._storage.load_system_state(f"timeline_state_{self._space_id}")
+            if timeline_state:
+                # Restore timeline metadata, converting head_event_ids back to sets
+                timelines = timeline_state.get('_timelines', {})
+                for timeline_id, timeline_info in timelines.items():
+                    head_event_ids = timeline_info.get('head_event_ids', [])
+                    # Convert list back to set if needed
+                    if isinstance(head_event_ids, list):
+                        timeline_info['head_event_ids'] = set(head_event_ids)
+                    elif isinstance(head_event_ids, str):
+                        # Handle case where it was accidentally saved as string
+                        timeline_info['head_event_ids'] = {head_event_ids}
+                    elif not isinstance(head_event_ids, set):
+                        timeline_info['head_event_ids'] = set()
+                
+                self._state['_timelines'] = timelines
+                self._state['_primary_timeline_id'] = timeline_state.get('_primary_timeline_id')
+                logger.info(f"Loaded timeline state with {len(self._state['_timelines'])} timelines")
+            
+            # Load all timeline events from storage
+            timeline_events = await self._storage.load_system_state(f"timeline_events_{self._space_id}")
+            if timeline_events:
+                self._state['_all_events'] = timeline_events.get('_all_events', {})
+                logger.info(f"Loaded {len(self._state['_all_events'])} timeline events")
+            
+            # NEW: Trigger event replay if enabled
+            if hasattr(self.owner, 'replay_events_from_timeline') and callable(self.owner.replay_events_from_timeline):
+                logger.info(f"Triggering event replay for space {self._space_id}")
+                replay_success = await self.owner.replay_events_from_timeline()
+                if replay_success:
+                    logger.info(f"Event replay completed successfully for space {self._space_id}")
+                else:
+                    logger.warning(f"Event replay failed for space {self._space_id}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error loading timeline data from storage: {e}", exc_info=True)
+            return False
+
+    async def _persist_timeline_state(self) -> bool:
+        """Persist current timeline state to storage."""
+        if not await self._ensure_storage_ready() or not self._space_id:
+            return False
+        
+        try:
+            # Store timeline state (metadata about timelines)
+            # Convert sets to lists for JSON serialization
+            timelines_serializable = {}
+            for timeline_id, timeline_info in self._state['_timelines'].items():
+                timeline_copy = timeline_info.copy()
+                # Convert set to list for serialization
+                if isinstance(timeline_copy.get('head_event_ids'), set):
+                    timeline_copy['head_event_ids'] = list(timeline_copy['head_event_ids'])
+                timelines_serializable[timeline_id] = timeline_copy
+            
+            timeline_state = {
+                '_timelines': timelines_serializable,
+                '_primary_timeline_id': self._state['_primary_timeline_id'],
+                'last_updated': time.time()
+            }
+            await self._storage.store_system_state(f"timeline_state_{self._space_id}", timeline_state)
+            
+            # Store all events (the actual event data)
+            timeline_events = {
+                '_all_events': self._state['_all_events'],
+                'last_updated': time.time()
+            }
+            await self._storage.store_system_state(f"timeline_events_{self._space_id}", timeline_events)
+            
+            logger.debug(f"Persisted timeline state with {len(self._state['_all_events'])} events")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error persisting timeline state: {e}", exc_info=True)
+            return False
+
+    async def shutdown(self) -> bool:
+        """Gracefully shutdown the timeline component and storage."""
+        try:
+            # Persist final state before shutdown
+            if self._storage_initialized:
+                await self._persist_timeline_state()
+                logger.info(f"Shutting down storage backend for TimelineComponent {self.id}")
+                await self._storage.shutdown()
+            return True
+        except Exception as e:
+            logger.error(f"Error during TimelineComponent shutdown: {e}", exc_info=True)
+            return False
 
     def _create_timeline(self, timeline_id: str, is_primary: bool = False, fork_from: Optional[Dict[str, str]] = None):
         """Internal helper to create timeline metadata and root event."""
@@ -81,7 +245,17 @@ class TimelineComponent(Component):
         """
         Adds an event to the primary timeline.
         """
-        return self.add_event_to_timeline(event_payload, timeline_context={'timeline_id': self._state['_primary_timeline_id']})
+        event_id = self.add_event_to_timeline(event_payload, timeline_context={'timeline_id': self._state['_primary_timeline_id']})
+        
+        # NEW: Schedule async persistence (non-blocking)
+        if event_id and self._storage_initialized:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._persist_timeline_state())
+            except RuntimeError:
+                pass  # No event loop running, persistence will happen on shutdown
+        
+        return event_id
 
     def add_event_to_timeline(self, event_payload: Dict[str, Any], timeline_context: Dict[str, Any]) -> Optional[str]:
         """
@@ -141,7 +315,15 @@ class TimelineComponent(Component):
         timeline_info['head_event_ids'] = {new_event_id}
         
         logger.debug(f"[{self.owner.id}] Event '{new_event_id}' added to timeline '{target_timeline_id}' (Parents: {parent_ids}). Payload type: {event_payload.get('event_type')}")
-        # TODO: Emit event? Prune history?
+        
+        # NEW: Schedule async persistence for the new event (non-blocking)
+        if self._storage_initialized:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._persist_timeline_state())
+            except RuntimeError:
+                pass  # No event loop running, persistence will happen on shutdown
+        
         return new_event_id
 
     def get_primary_timeline(self) -> Optional[str]:

@@ -9,6 +9,8 @@ import uuid
 import time
 import asyncio
 import copy
+import os
+from enum import Enum
 
 from .base import BaseElement, MountType
 from .components.space import ContainerComponent, TimelineComponent, SpaceVeilProducer
@@ -27,6 +29,30 @@ if TYPE_CHECKING:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# NEW: Event replay configuration and modes
+class EventReplayMode(Enum):
+    DISABLED = "disabled"
+    ENABLED = "enabled" 
+    SELECTIVE = "selective"  # Future: replay only specific event types
+
+# NEW: Events that can be replayed for system state reconstruction
+REPLAYABLE_SYSTEM_EVENTS = {
+    'element_mounted',
+    'element_unmounted', 
+    'component_initialized',
+    'tool_provider_registered',
+    'element_created_from_prefab',
+    'orientation_conversation_set',
+    # Add more as needed - some events might not be safe to replay
+}
+
+# Events that should NOT be replayed (already happened, would cause conflicts)
+NON_REPLAYABLE_EVENTS = {
+    'timeline_created',  # Timeline already exists
+    'veil_delta_operations_received_by_space',  # Runtime only
+    'action_executed',  # Would re-execute actions
+    # Add more runtime-only events
+}
 
 class Space(BaseElement):
     """
@@ -68,6 +94,11 @@ class Space(BaseElement):
         self.external_conversation_id = external_conversation_id
         self._outgoing_action_callback = outgoing_action_callback
         
+        # NEW: Event replay configuration
+        self._event_replay_mode = self._determine_replay_mode()
+        self._replay_in_progress = False
+        self._replayed_event_ids = set()  # Track which events have been replayed
+        
         # Initialize space with required components
         # Store references for easier delegation, though get_component could also be used.
         self._container: Optional[ContainerComponent] = self.add_component(ContainerComponent)
@@ -108,8 +139,24 @@ class Space(BaseElement):
                 if hasattr(self._element_factory, 'set_outgoing_action_callback') and callable(getattr(self._element_factory, 'set_outgoing_action_callback')):
                     self._element_factory.set_outgoing_action_callback(self._outgoing_action_callback)
 
+        # NEW: Schedule event replay after component initialization
+        if self._event_replay_mode != EventReplayMode.DISABLED:
+            # We need to schedule replay after storage is initialized
+            # This will be triggered when TimelineComponent completes its async initialization
+            logger.info(f"[{self.id}] Event replay mode: {self._event_replay_mode.value}")
 
         logger.info(f"Created space: {name} ({self.id})")
+
+    def _determine_replay_mode(self) -> EventReplayMode:
+        """Determine event replay mode from environment variables or configuration."""
+        replay_mode = os.environ.get('CONNECTOME_EVENT_REPLAY_MODE', 'disabled').lower()
+        
+        if replay_mode == 'enabled':
+            return EventReplayMode.ENABLED
+        elif replay_mode == 'selective':
+            return EventReplayMode.SELECTIVE
+        else:
+            return EventReplayMode.DISABLED
 
     def _ensure_own_veil_presence_initialized(self) -> None:
         """
@@ -224,13 +271,13 @@ class Space(BaseElement):
                 logger.warning(f"[{self.id}] Cache: Unsupported delta operation '{op_type}' received. Skipping.")
 
     # --- Container Methods (Delegated) ---
-    def mount_element(self, element: BaseElement, mount_id: Optional[str] = None, mount_type: MountType = MountType.INCLUSION) -> bool:
+    def mount_element(self, element: BaseElement, mount_id: Optional[str] = None, mount_type: MountType = MountType.INCLUSION, creation_data: Optional[Dict[str, Any]] = None) -> bool:
         """Mount an element in this space (delegates to ContainerComponent)."""
         if not self._container:
             logger.error(f"[{self.id}] Cannot mount element: ContainerComponent unavailable.")
             return False
         # Pass self.id as parent_space_id to the element being mounted
-        mount_successful = self._container.mount_element(element, mount_id, mount_type)
+        mount_successful, _ = self._container.mount_element(element, mount_id, mount_type, creation_data)
         return mount_successful
     
     def unmount_element(self, mount_id: str) -> bool:
@@ -340,12 +387,22 @@ class Space(BaseElement):
         """
         event_type = event_payload.get("event_type")
         target_element_id = event_payload.get("target_element_id")
-        logger.debug(f"[{self.id}] Receiving event: Type='{event_type}', Target='{target_element_id}', Timeline='{timeline_context.get('timeline_id')}'")
-        # 1. Add event to the timeline via TimelineComponent
-        new_event_id = self.add_event_to_timeline(event_payload, timeline_context)
-        if not new_event_id:
-            logger.error(f"[{self.id}] Failed to add event to timeline. Aborting processing for this event.")
-            return
+        
+        # NEW: Check if this is a replay mode to prevent double-recording
+        is_replay_mode = timeline_context.get('replay_mode', False)
+        
+        logger.debug(f"[{self.id}] Receiving event: Type='{event_type}', Target='{target_element_id}', Timeline='{timeline_context.get('timeline_id')}', Replay={is_replay_mode}")
+        
+        # 1. Add event to the timeline via TimelineComponent (unless in replay mode)
+        new_event_id = None
+        if not is_replay_mode:
+            new_event_id = self.add_event_to_timeline(event_payload, timeline_context)
+            if not new_event_id:
+                logger.error(f"[{self.id}] Failed to add event to timeline. Aborting processing for this event.")
+                return
+        else:
+            # In replay mode, use a dummy event ID for processing
+            new_event_id = f"replay_{event_type}_{int(time.time() * 1000)}"
             
         # Construct the full event node as it exists in the DAG for handlers
         full_event_node = { 
@@ -769,3 +826,327 @@ class Space(BaseElement):
         
         logger.info(f"[{self.id}] Collected {len(all_tool_definitions)} public tool definitions in total.")
         return all_tool_definitions 
+
+    # --- NEW: Event Replay Methods ---
+    
+    async def replay_events_from_timeline(self) -> bool:
+        """
+        Replay timeline events to reconstruct system state.
+        Should be called after storage is initialized but before normal operation.
+        
+        Returns:
+            True if replay completed successfully, False otherwise
+        """
+        if self._event_replay_mode == EventReplayMode.DISABLED:
+            logger.debug(f"[{self.id}] Event replay disabled, skipping")
+            return True
+            
+        if self._replay_in_progress:
+            logger.warning(f"[{self.id}] Event replay already in progress, skipping")
+            return False
+            
+        if not self._timeline:
+            logger.error(f"[{self.id}] Cannot replay events: TimelineComponent not available")
+            return False
+            
+        try:
+            self._replay_in_progress = True
+            logger.info(f"[{self.id}] Starting event replay for system state reconstruction")
+            
+            # Get all events from the primary timeline in chronological order
+            primary_timeline_id = self._timeline.get_primary_timeline()
+            if not primary_timeline_id:
+                logger.info(f"[{self.id}] No primary timeline found, nothing to replay")
+                return True
+                
+            # Get events in chronological order (oldest first for replay)
+            all_events = self._timeline.get_timeline_events(primary_timeline_id, limit=0)
+            
+            # Reverse to get chronological order (oldest first)
+            chronological_events = list(reversed(all_events))
+            
+            if not chronological_events:
+                logger.info(f"[{self.id}] No events found in timeline, nothing to replay")
+                return True
+                
+            logger.info(f"[{self.id}] Found {len(chronological_events)} events to potentially replay")
+            
+            replayed_count = 0
+            skipped_count = 0
+            
+            for event_node in chronological_events:
+                event_id = event_node.get('id')
+                event_payload = event_node.get('payload', {})
+                event_type = event_payload.get('event_type')
+                
+                # Skip if already replayed (shouldn't happen, but safety check)
+                if event_id in self._replayed_event_ids:
+                    logger.debug(f"[{self.id}] Skipping already replayed event {event_id}")
+                    skipped_count += 1
+                    continue
+                    
+                # Check if this event type should be replayed
+                if not self._should_replay_event(event_type, event_payload):
+                    logger.debug(f"[{self.id}] Skipping non-replayable event {event_id} ({event_type})")
+                    skipped_count += 1
+                    continue
+                    
+                # Replay the event
+                success = await self._replay_single_event(event_node)
+                if success:
+                    self._replayed_event_ids.add(event_id)
+                    replayed_count += 1
+                    logger.debug(f"[{self.id}] Successfully replayed event {event_id} ({event_type})")
+                else:
+                    logger.warning(f"[{self.id}] Failed to replay event {event_id} ({event_type})")
+                    # Continue with other events even if one fails
+                    skipped_count += 1
+                    
+            logger.info(f"[{self.id}] Event replay completed: {replayed_count} replayed, {skipped_count} skipped")
+            
+            # NEW: Trigger VEIL state regeneration after replay
+            await self._regenerate_veil_state_after_replay()
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"[{self.id}] Error during event replay: {e}", exc_info=True)
+            return False
+        finally:
+            self._replay_in_progress = False
+
+    async def _regenerate_veil_state_after_replay(self) -> bool:
+        """
+        Regenerate VEIL state after event replay to ensure VEIL cache reflects recreated elements.
+        
+        Returns:
+            True if regeneration was successful, False otherwise
+        """
+        try:
+            logger.info(f"[{self.id}] Regenerating VEIL state after event replay")
+            
+            # Clear the existing VEIL cache to force regeneration
+            self._flat_veil_cache.clear()
+            
+            # Ensure own VEIL presence is initialized
+            self._ensure_own_veil_presence_initialized()
+            
+            # Trigger VEIL emission for all mounted elements
+            if self._container:
+                mounted_elements = self._container.get_mounted_elements()
+                logger.info(f"[{self.id}] Triggering VEIL regeneration for {len(mounted_elements)} mounted elements")
+                
+                for mount_id, element in mounted_elements.items():
+                    try:
+                        # Trigger VEIL emission for elements that have VEIL producers
+                        if hasattr(element, 'on_frame_end') and callable(element.on_frame_end):
+                            element.on_frame_end()
+                            logger.debug(f"[{self.id}] Triggered VEIL emission for element {mount_id}")
+                    except Exception as e:
+                        logger.warning(f"[{self.id}] Error triggering VEIL emission for element {mount_id}: {e}")
+            
+            # Trigger own VEIL producer to ensure space root is updated
+            if hasattr(self, 'on_frame_end') and callable(self.on_frame_end):
+                self.on_frame_end()
+                
+            logger.info(f"[{self.id}] VEIL state regeneration completed. Cache size: {len(self._flat_veil_cache)}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[{self.id}] Error during VEIL state regeneration: {e}", exc_info=True)
+            return False
+    
+    def _should_replay_event(self, event_type: str, event_payload: Dict[str, Any]) -> bool:
+        """
+        Determine if an event should be replayed based on type and content.
+        
+        Args:
+            event_type: The type of event
+            event_payload: The full event payload
+            
+        Returns:
+            True if the event should be replayed, False otherwise
+        """
+        if self._event_replay_mode == EventReplayMode.DISABLED:
+            return False
+            
+        # Never replay explicitly non-replayable events
+        if event_type in NON_REPLAYABLE_EVENTS:
+            return False
+            
+        if self._event_replay_mode == EventReplayMode.ENABLED:
+            # Replay all replayable system events
+            return event_type in REPLAYABLE_SYSTEM_EVENTS
+            
+        elif self._event_replay_mode == EventReplayMode.SELECTIVE:
+            # Future: implement selective replay logic
+            # For now, same as ENABLED
+            return event_type in REPLAYABLE_SYSTEM_EVENTS
+            
+        return False
+    
+    async def _replay_single_event(self, event_node: Dict[str, Any]) -> bool:
+        """
+        Replay a single event to reconstruct system state.
+        
+        Args:
+            event_node: The complete event node from timeline
+            
+        Returns:
+            True if replay was successful, False otherwise
+        """
+        event_payload = event_node.get('payload', {})
+        event_type = event_payload.get('event_type')
+        event_data = event_payload.get('data', {})
+        
+        try:
+            # For most events, we can use the generic receive_event mechanism with replay mode
+            # This allows components to handle replay events the same way as live events
+            timeline_context = {
+                'timeline_id': event_node.get('timeline_id'),
+                'replay_mode': True,  # Mark this as a replay to prevent double-recording
+                'original_event_id': event_node.get('id'),
+                'original_timestamp': event_node.get('timestamp')
+            }
+            
+            # Use receive_event for most replay scenarios
+            # This ensures components get the chance to handle replayed events
+            logger.debug(f"[{self.id}] Replaying event {event_type} via receive_event mechanism")
+            self.receive_event(event_payload, timeline_context)
+            
+            # For events that need special handling beyond component processing:
+            if event_type == 'element_mounted':
+                return await self._replay_element_mounted(event_data)
+                
+            elif event_type == 'element_unmounted':
+                return await self._replay_element_unmounted(event_data)
+                
+            elif event_type == 'element_created_from_prefab':
+                return await self._replay_element_created_from_prefab(event_data)
+                
+            # For events that are handled sufficiently by component processing:
+            elif event_type in ['component_initialized', 'tool_provider_registered', 'orientation_conversation_set']:
+                # These events are primarily informational or handled by component loading
+                return True
+                
+            else:
+                logger.debug(f"[{self.id}] Event type {event_type} replayed via component mechanism")
+                return True
+                
+        except Exception as e:
+            logger.error(f"[{self.id}] Error replaying {event_type} event: {e}", exc_info=True)
+            return False
+    
+    async def _replay_element_mounted(self, event_data: Dict[str, Any]) -> bool:
+        """Replay element_mounted event - recreate the mounted element if possible."""
+        mount_id = event_data.get('mount_id')
+        element_id = event_data.get('element_id')
+        element_name = event_data.get('element_name')
+        element_type = event_data.get('element_type')
+        mount_type_str = event_data.get('mount_type', 'INCLUSION')
+        
+        # NEW: Extract creation data if available
+        creation_data = event_data.get('creation_data', {})
+        prefab_name = creation_data.get('prefab_name')
+        element_config = creation_data.get('element_config', {})
+        component_config = creation_data.get('component_config_overrides', {})
+        
+        logger.info(f"[{self.id}] REPLAY: element_mounted - {element_name} ({element_id}) as {mount_id}")
+        
+        # Check if element is already mounted (avoid double-mounting)
+        if self._container and self._container.get_mounted_element(mount_id):
+            logger.debug(f"[{self.id}] Element {mount_id} already mounted, skipping replay")
+            return True
+            
+        # Try to recreate the element
+        if not self._element_factory:
+            logger.warning(f"[{self.id}] Cannot replay element mounting: No ElementFactoryComponent")
+            return False
+            
+        try:
+            # Convert mount_type string back to enum
+            from .base import MountType
+            if hasattr(MountType, mount_type_str):
+                mount_type = getattr(MountType, mount_type_str)
+            else:
+                mount_type = MountType.INCLUSION
+                
+            if prefab_name:
+                # Recreate from prefab if prefab info is available
+                logger.info(f"[{self.id}] Recreating element from prefab: {prefab_name}")
+                
+                # Use ElementFactoryComponent to recreate from prefab
+                result = self._element_factory.handle_create_element_from_prefab(
+                    prefab_name=prefab_name,
+                    element_id=element_id,
+                    element_config=element_config if element_config else None,
+                    component_config_overrides=component_config if component_config else None,
+                    mount_id_override=mount_id
+                )
+                
+                if result.get('success'):
+                    logger.info(f"[{self.id}] ✓ Successfully recreated element {element_id} from prefab {prefab_name}")
+                    return True
+                else:
+                    logger.warning(f"[{self.id}] Failed to recreate element from prefab: {result.get('error')}")
+                    return False
+                    
+            else:
+                # Try to recreate using basic element information
+                # This is more limited but handles cases where prefab info isn't available
+                logger.info(f"[{self.id}] Attempting basic element recreation for {element_type}")
+                
+                # For now, we can't fully recreate arbitrary elements without more information
+                # This would require a more sophisticated element serialization system
+                logger.warning(f"[{self.id}] Basic element recreation not fully implemented for {element_type}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"[{self.id}] Error during element recreation: {e}", exc_info=True)
+            return False
+    
+    async def _replay_element_unmounted(self, event_data: Dict[str, Any]) -> bool:
+        """Replay element_unmounted event."""
+        mount_id = event_data.get('mount_id')
+        logger.info(f"[{self.id}] REPLAY: element_unmounted - {mount_id}")
+        
+        # Check if element is still mounted and unmount it
+        if self._container and self._container.get_mounted_element(mount_id):
+            return self._container.unmount_element(mount_id)
+        else:
+            logger.debug(f"[{self.id}] Element {mount_id} not mounted, nothing to unmount")
+            return True
+    
+    async def _replay_element_created_from_prefab(self, event_data: Dict[str, Any]) -> bool:
+        """Replay element_created_from_prefab event."""
+        prefab_name = event_data.get('prefab_name')
+        element_id = event_data.get('new_element_id')
+        mount_id = event_data.get('mount_id')
+        logger.info(f"[{self.id}] REPLAY: element_created_from_prefab - {prefab_name} -> {element_id}")
+        
+        # Check if element already exists
+        if self._container and self._container.get_mounted_element(mount_id):
+            logger.debug(f"[{self.id}] Element {mount_id} already exists, skipping prefab replay")
+            return True
+            
+        # Try to recreate using factory
+        if not self._element_factory:
+            logger.warning(f"[{self.id}] Cannot replay prefab creation: No ElementFactoryComponent")
+            return False
+            
+        # Note: This would require re-calling the factory with original parameters
+        # which would need to be stored in the event data
+        logger.warning(f"[{self.id}] Prefab creation replay not fully implemented")
+        return False  # For now, return False until full implementation
+    
+    def is_replay_in_progress(self) -> bool:
+        """Check if event replay is currently in progress."""
+        return self._replay_in_progress
+    
+    def get_replay_mode(self) -> EventReplayMode:
+        """Get the current event replay mode."""
+        return self._event_replay_mode
+    
+    def get_replayed_event_count(self) -> int:
+        """Get the number of events that have been replayed."""
+        return len(self._replayed_event_ids) 

@@ -8,12 +8,16 @@ import logging
 from typing import Dict, Any, Optional, List, TYPE_CHECKING
 from datetime import datetime
 import json
+import asyncio
 
 from .base_component import Component
 from elements.component_registry import register_component
 
 # Import LLM interfaces
 from llm.provider_interface import LLMMessage
+
+# NEW: Import storage system
+from storage import create_storage_from_env, StorageInterface
 
 if TYPE_CHECKING:
     from elements.elements.inner_space import InnerSpace
@@ -28,6 +32,7 @@ class CompressionEngineComponent(Component):
     1. Storing agent's reasoning chains, responses, and tool interactions
     2. Providing memory context to AgentLoop (no compression for now - unlimited context)
     3. Future: Implementing context compression strategies
+    4. NEW: Persisting all data to pluggable storage backends (file, SQLite, etc.)
     
     This component centralizes memory management and will evolve to include
     sophisticated compression algorithms for maintaining agent continuity
@@ -40,7 +45,7 @@ class CompressionEngineComponent(Component):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         
-        # Memory storage - list of interaction records
+        # Memory storage - list of interaction records (in-memory cache)
         self._memory_interactions: List[Dict[str, Any]] = []
         
         # Orientation conversation - prerecorded messages that establish agent context
@@ -54,6 +59,13 @@ class CompressionEngineComponent(Component):
         self._max_memory_interactions = None  # Unlimited for now
         self._compression_enabled = False     # Future feature
         
+        # NEW: Pluggable storage backend
+        self._storage: Optional[StorageInterface] = None
+        self._storage_initialized = False
+        
+        # NEW: Conversation tracking for proper storage
+        self._conversation_id: Optional[str] = None
+        
         logger.info(f"CompressionEngineComponent initialized ({self.id})")
     
     def _on_initialize(self) -> bool:
@@ -62,11 +74,137 @@ class CompressionEngineComponent(Component):
             # Try to get agent name from parent InnerSpace if available
             if hasattr(self.owner, 'agent_name'):
                 self._agent_name = self.owner.agent_name
+                # Use agent name as conversation ID for now
+                self._conversation_id = f"agent_{self._agent_name}"
                 logger.info(f"CompressionEngine initialized for agent: {self._agent_name}")
+            else:
+                # Fallback to component ID
+                self._conversation_id = f"agent_{self.id}"
+            
+            # Schedule async initialization to run later
+            # We can't run async code directly in _on_initialize
+            
+            async def async_init():
+                try:
+                    # Initialize storage backend
+                    await self._initialize_storage()
+                    
+                    # Load existing data from storage
+                    await self._load_from_storage()
+                    
+                    logger.info(f"CompressionEngine async initialization complete for {self._agent_name}")
+                except Exception as e:
+                    logger.error(f"Failed during async initialization: {e}", exc_info=True)
+            
+            # Try to schedule the async initialization
+            try:
+                # Check if we're in an async context
+                loop = asyncio.get_running_loop()
+                # Schedule the task
+                loop.create_task(async_init())
+                logger.info(f"Scheduled async initialization for CompressionEngine {self.id}")
+            except RuntimeError:
+                # No event loop running, we'll initialize later when needed
+                logger.info(f"No event loop running, will initialize storage on first use for CompressionEngine {self.id}")
             
             return True
+            
         except Exception as e:
             logger.error(f"Failed to initialize CompressionEngineComponent: {e}", exc_info=True)
+            return False
+    
+    async def _ensure_storage_ready(self) -> bool:
+        """Ensure storage backend is initialized before use."""
+        if self._storage_initialized:
+            return True
+        
+        if self._storage is None:
+            logger.info(f"Storage not yet initialized for CompressionEngine {self.id}, initializing now...")
+            success = await self._initialize_storage()
+            if not success:
+                return False
+            
+            # Also load existing data
+            await self._load_from_storage()
+        
+        return self._storage_initialized
+    
+    async def _initialize_storage(self) -> bool:
+        """Initialize the pluggable storage backend."""
+        try:
+            logger.info(f"Initializing storage backend for CompressionEngine {self.id}")
+            
+            # Create storage from environment configuration
+            self._storage = create_storage_from_env()
+            
+            # Initialize the storage backend
+            success = await self._storage.initialize()
+            if not success:
+                logger.error(f"Failed to initialize storage backend")
+                return False
+            
+            self._storage_initialized = True
+            logger.info(f"Storage backend successfully initialized for CompressionEngine {self.id}")
+            
+            # Test storage health
+            health = await self._storage.health_check()
+            logger.info(f"Storage health: {health.get('status', 'unknown')}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error initializing storage backend: {e}", exc_info=True)
+            return False
+    
+    async def _load_from_storage(self) -> bool:
+        """Load existing conversation data and memories from storage."""
+        if not self._storage_initialized or not self._conversation_id:
+            return False
+        
+        try:
+            logger.info(f"Loading stored data for conversation {self._conversation_id}")
+            
+            # Load conversation data (Typingcloud format with compressed memories)
+            conversation_data = await self._storage.load_conversation(self._conversation_id)
+            if conversation_data:
+                logger.info(f"Loaded existing conversation data for {self._conversation_id}")
+                # TODO: Process conversation data if needed
+            
+            # Load raw messages (uncompressed message history)
+            raw_messages = await self._storage.load_raw_messages(self._conversation_id)
+            if raw_messages:
+                logger.info(f"Loaded {len(raw_messages)} raw messages for {self._conversation_id}")
+                # TODO: Process raw messages if needed for recompression
+            
+            # Load memories (compressed memory formation sequences)
+            memories = await self._storage.load_memories(self._conversation_id)
+            if memories:
+                logger.info(f"Loaded {len(memories)} memories for {self._conversation_id}")
+                # TODO: Process memories into context
+            
+            # Load reasoning chains (agent reasoning and tool interaction history)
+            agent_id = self._agent_name or self.id
+            reasoning_chains = await self._storage.load_reasoning_chains(agent_id)
+            if reasoning_chains:
+                # Restore in-memory interactions from stored reasoning chains
+                self._memory_interactions = reasoning_chains
+                logger.info(f"Loaded {len(reasoning_chains)} reasoning chains for agent {agent_id}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error loading data from storage: {e}", exc_info=True)
+            return False
+    
+    async def shutdown(self) -> bool:
+        """Gracefully shutdown the compression engine and storage."""
+        try:
+            if self._storage:
+                logger.info(f"Shutting down storage backend for CompressionEngine {self.id}")
+                await self._storage.shutdown()
+            return True
+        except Exception as e:
+            logger.error(f"Error during CompressionEngine shutdown: {e}", exc_info=True)
             return False
     
     async def get_memory_context(self) -> List[LLMMessage]:
@@ -130,22 +268,18 @@ class CompressionEngineComponent(Component):
         
         summary_parts = []
         
-        if tool_calls:
-            summary_parts.append(f"Called {len(tool_calls)} tool(s):")
-            for i, call in enumerate(tool_calls):
-                tool_name = call.get("tool_name", "unknown")
-                parameters = call.get("parameters", {})
-                # Truncate parameters for readability
-                params_str = str(parameters)[:100] + "..." if len(str(parameters)) > 100 else str(parameters)
-                summary_parts.append(f"  {i+1}. {tool_name}({params_str})")
+        for i, tool_call in enumerate(tool_calls):
+            tool_name = tool_call.get("tool_name", "unknown_tool")
+            summary_parts.append(f"Called {tool_name}")
+            
+            # Add result if available
+            if i < len(tool_results) and tool_results[i]:
+                result = tool_results[i]
+                if isinstance(result, dict) and "success" in result:
+                    status = "✓" if result.get("success") else "✗"
+                    summary_parts.append(f"{status} {result.get('message', 'completed')}")
         
-        if tool_results:
-            summary_parts.append(f"Results:")
-            for i, result in enumerate(tool_results):
-                result_str = str(result)[:200] + "..." if len(str(result)) > 200 else str(result)
-                summary_parts.append(f"  {i+1}. {result_str}")
-        
-        return "\n".join(summary_parts)
+        return "; ".join(summary_parts) if summary_parts else None
     
     async def store_reasoning_chain(self, chain_data: Dict[str, Any]) -> None:
         """
@@ -172,7 +306,17 @@ class CompressionEngineComponent(Component):
                 "agent_name": self._agent_name
             }
             
+            # Store in memory for immediate access
             self._memory_interactions.append(interaction_record)
+            
+            # NEW: Persist to storage backend (ensure storage is ready first)
+            if await self._ensure_storage_ready():
+                agent_id = self._agent_name or self.id
+                success = await self._storage.store_reasoning_chain(agent_id, interaction_record)
+                if not success:
+                    logger.error(f"Failed to persist reasoning chain to storage")
+            else:
+                logger.warning(f"Storage not ready, reasoning chain not persisted")
             
             # Log storage (with truncation for readability)
             response_preview = str(chain_data.get("agent_response", ""))[:100]
@@ -180,37 +324,49 @@ class CompressionEngineComponent(Component):
             
             logger.info(f"Stored reasoning chain: {response_preview}{'...' if len(response_preview) == 100 else ''} (tools: {tool_count})")
             
-            # Emit event to timeline for tracking
-            if hasattr(self.owner, 'add_event_to_primary_timeline'):
-                self.owner.add_event_to_primary_timeline({
-                    "event_type": "reasoning_chain_stored",
-                    "data": {
-                        "compression_engine_id": self.id,
-                        "interaction_count": len(self._memory_interactions),
-                        "tool_calls_count": tool_count,
-                        "timestamp": interaction_record["timestamp"].isoformat()
-                    }
-                })
-                
+            # NEW: Also store as raw messages for potential recompression
+            if await self._ensure_storage_ready() and self._conversation_id:
+                await self._store_raw_messages_for_chain(chain_data)
+            
         except Exception as e:
             logger.error(f"Error storing reasoning chain: {e}", exc_info=True)
     
-    async def get_recent_interactions(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        """
-        Get recent stored interactions for debugging or inspection.
-        
-        Args:
-            limit: Maximum number of interactions to return (None for all)
+    async def _store_raw_messages_for_chain(self, chain_data: Dict[str, Any]) -> None:
+        """Store the raw message exchange for this reasoning chain."""
+        try:
+            messages = []
             
-        Returns:
-            List of interaction records
-        """
-        interactions = self._memory_interactions
-        if limit:
-            interactions = interactions[-limit:]
-        
-        # Return copies to prevent external modification
-        return [interaction.copy() for interaction in interactions]
+            # User message (context received)
+            context_received = chain_data.get("context_received")
+            if context_received:
+                messages.append({
+                    "role": "user",
+                    "content": context_received,
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "hud_context"
+                })
+            
+            # Assistant response
+            agent_response = chain_data.get("agent_response")
+            if agent_response:
+                messages.append({
+                    "role": "assistant", 
+                    "content": agent_response,
+                    "timestamp": datetime.now().isoformat(),
+                    "tool_calls": chain_data.get("tool_calls", []),
+                    "tool_results": chain_data.get("tool_results", [])
+                })
+            
+            # Load existing raw messages and append new ones
+            existing_messages = await self._storage.load_raw_messages(self._conversation_id)
+            all_messages = existing_messages + messages
+            
+            # Store updated message list
+            await self._storage.store_raw_messages(self._conversation_id, all_messages)
+            logger.debug(f"Stored raw messages for reasoning chain (total: {len(all_messages)})")
+            
+        except Exception as e:
+            logger.error(f"Error storing raw messages: {e}", exc_info=True)
     
     async def get_memory_stats(self) -> Dict[str, Any]:
         """Get statistics about stored memory."""
@@ -220,16 +376,42 @@ class CompressionEngineComponent(Component):
         oldest_timestamp = None
         newest_timestamp = None
         if self._memory_interactions:
-            oldest_timestamp = self._memory_interactions[0]["timestamp"]
-            newest_timestamp = self._memory_interactions[-1]["timestamp"]
+            oldest_interaction = self._memory_interactions[0]
+            newest_interaction = self._memory_interactions[-1]
+            
+            # Handle both datetime objects and string timestamps
+            oldest_ts = oldest_interaction["timestamp"]
+            newest_ts = newest_interaction["timestamp"]
+            
+            if isinstance(oldest_ts, str):
+                oldest_timestamp = oldest_ts
+            else:
+                oldest_timestamp = oldest_ts.isoformat() if hasattr(oldest_ts, 'isoformat') else str(oldest_ts)
+            
+            if isinstance(newest_ts, str):
+                newest_timestamp = newest_ts
+            else:
+                newest_timestamp = newest_ts.isoformat() if hasattr(newest_ts, 'isoformat') else str(newest_ts)
+        
+        # NEW: Get storage statistics (but don't force initialization)
+        storage_stats = {}
+        if self._storage_initialized:
+            try:
+                storage_stats = await self._storage.get_statistics()
+            except Exception as e:
+                logger.warning(f"Could not get storage statistics: {e}")
         
         return {
             "total_interactions": total_interactions,
             "total_tool_calls": total_tool_calls,
+            "oldest_interaction": oldest_timestamp,
+            "newest_interaction": newest_timestamp,
             "agent_name": self._agent_name,
-            "oldest_interaction": oldest_timestamp.isoformat() if oldest_timestamp else None,
-            "newest_interaction": newest_timestamp.isoformat() if newest_timestamp else None,
-            "compression_enabled": self._compression_enabled
+            "conversation_id": self._conversation_id,
+            "orientation_initialized": self._orientation_initialized,
+            "orientation_message_count": len(self._orientation_messages),
+            "storage_initialized": self._storage_initialized,
+            "storage_stats": storage_stats
         }
     
     async def clear_memory(self) -> bool:
@@ -237,6 +419,11 @@ class CompressionEngineComponent(Component):
         try:
             interaction_count = len(self._memory_interactions)
             self._memory_interactions.clear()
+            
+            # NEW: Also clear from persistent storage
+            if await self._ensure_storage_ready() and self._conversation_id:
+                await self._storage.delete_conversation(self._conversation_id)
+                logger.info(f"Cleared persistent storage for conversation {self._conversation_id}")
             
             logger.warning(f"Cleared {interaction_count} memory interactions for agent {self._agent_name}")
             
@@ -283,6 +470,17 @@ class CompressionEngineComponent(Component):
             self._orientation_messages = orientation_messages.copy() if orientation_messages else []
             self._orientation_initialized = True
             
+            # NEW: Store orientation in persistent storage as system state
+            if await self._ensure_storage_ready():
+                orientation_data = {
+                    "messages": [{"role": msg.role, "content": msg.content} for msg in self._orientation_messages],
+                    "agent_name": self._agent_name,
+                    "set_at": datetime.now().isoformat()
+                }
+                state_key = f"orientation_{self._agent_name or self.id}"
+                await self._storage.store_system_state(state_key, orientation_data)
+                logger.info(f"Stored orientation conversation in persistent storage")
+            
             logger.info(f"Orientation conversation set with {len(self._orientation_messages)} messages")
             
             # Emit event to timeline for tracking
@@ -307,4 +505,56 @@ class CompressionEngineComponent(Component):
     
     def has_orientation(self) -> bool:
         """Check if orientation conversation has been set."""
-        return self._orientation_initialized and bool(self._orientation_messages) 
+        return self._orientation_initialized and bool(self._orientation_messages)
+    
+    # NEW: Conversation management methods
+    
+    async def store_conversation_snapshot(self, conversation_data: Dict[str, Any]) -> bool:
+        """Store a complete conversation snapshot in Typingcloud format."""
+        if not await self._ensure_storage_ready() or not self._conversation_id:
+            return False
+        
+        try:
+            success = await self._storage.store_conversation(self._conversation_id, conversation_data)
+            if success:
+                logger.info(f"Stored conversation snapshot for {self._conversation_id}")
+            return success
+        except Exception as e:
+            logger.error(f"Error storing conversation snapshot: {e}", exc_info=True)
+            return False
+    
+    async def load_conversation_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Load the stored conversation snapshot."""
+        if not await self._ensure_storage_ready() or not self._conversation_id:
+            return None
+        
+        try:
+            return await self._storage.load_conversation(self._conversation_id)
+        except Exception as e:
+            logger.error(f"Error loading conversation snapshot: {e}", exc_info=True)
+            return None
+    
+    async def store_memory_formation(self, memory_id: str, memory_data: Dict[str, Any]) -> bool:
+        """Store a compressed memory formation sequence."""
+        if not await self._ensure_storage_ready() or not self._conversation_id:
+            return False
+        
+        try:
+            success = await self._storage.store_memory(self._conversation_id, memory_id, memory_data)
+            if success:
+                logger.info(f"Stored memory formation {memory_id}")
+            return success
+        except Exception as e:
+            logger.error(f"Error storing memory formation: {e}", exc_info=True)
+            return False
+    
+    async def get_stored_memories(self) -> List[Dict[str, Any]]:
+        """Get all stored memory formations for this conversation."""
+        if not await self._ensure_storage_ready() or not self._conversation_id:
+            return []
+        
+        try:
+            return await self._storage.load_memories(self._conversation_id)
+        except Exception as e:
+            logger.error(f"Error loading memories: {e}", exc_info=True)
+            return [] 
