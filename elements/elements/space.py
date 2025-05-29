@@ -4,7 +4,7 @@ Base class for space elements that can contain other elements.
 """
 
 import logging
-from typing import Dict, Any, Optional, List, Callable, Type, Set
+from typing import Dict, Any, Optional, List, Callable, Type, Set, Tuple
 import uuid
 import time
 import asyncio
@@ -271,14 +271,14 @@ class Space(BaseElement):
                 logger.warning(f"[{self.id}] Cache: Unsupported delta operation '{op_type}' received. Skipping.")
 
     # --- Container Methods (Delegated) ---
-    def mount_element(self, element: BaseElement, mount_id: Optional[str] = None, mount_type: MountType = MountType.INCLUSION, creation_data: Optional[Dict[str, Any]] = None) -> bool:
+    def mount_element(self, element: BaseElement, mount_id: Optional[str] = None, mount_type: MountType = MountType.INCLUSION, creation_data: Optional[Dict[str, Any]] = None) -> Tuple[bool, Optional[str]]:
         """Mount an element in this space (delegates to ContainerComponent)."""
         if not self._container:
             logger.error(f"[{self.id}] Cannot mount element: ContainerComponent unavailable.")
-            return False
+            return False, None
         # Pass self.id as parent_space_id to the element being mounted
-        mount_successful, _ = self._container.mount_element(element, mount_id, mount_type, creation_data)
-        return mount_successful
+        mount_successful, final_mount_id = self._container.mount_element(element, mount_id, mount_type, creation_data)
+        return mount_successful, final_mount_id
     
     def unmount_element(self, mount_id: str) -> bool:
         """Unmount an element (delegates to ContainerComponent)."""

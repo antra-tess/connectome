@@ -9,6 +9,7 @@ from datetime import datetime
 
 from .base import Component
 from elements.component_registry import register_component
+from .utils.prefix_generator import create_short_element_prefix  # NEW: Import shared utility
 
 # NEW: Import LLMMessage for correct provider interaction
 from llm.provider_interface import LLMMessage
@@ -102,58 +103,15 @@ class BaseAgentLoopComponent(Component):
 
     def _create_short_element_prefix(self, element_id: str) -> str:
         """
-        Create a short prefix for tool names from element ID to fit Anthropic's 64-char limit.
-        
-        For DM elements like 'dm_elem_discord_adapter_1_alice_smith_a1b2c3d4',
-        extracts meaningful parts to create something like 'alice_a1b2' or 'dm_a1b2c3d4'.
+        Create a short prefix for tool names from element ID using shared utility.
         
         Args:
             element_id: Full element ID
             
         Returns:
-            Short prefix (max 16 characters to leave room for tool names) that matches ^[a-zA-Z0-9_-]+$
+            Short prefix that matches ^[a-zA-Z0-9_-]+$
         """
-        def sanitize_for_anthropic(text: str) -> str:
-            """Remove or replace characters not allowed by Anthropic's regex ^[a-zA-Z0-9_-]+$"""
-            import re
-            # Replace invalid characters with underscores, then remove duplicate underscores
-            sanitized = re.sub(r'[^a-zA-Z0-9_-]', '_', text)
-            # Remove duplicate underscores
-            sanitized = re.sub(r'_+', '_', sanitized)
-            # Remove leading/trailing underscores
-            sanitized = sanitized.strip('_')
-            return sanitized
-        
-        # For DM elements, try to extract user and UUID parts
-        if element_id.startswith('dm_elem_'):
-            parts = element_id.split('_')
-            if len(parts) >= 4:
-                # parts: ['dm', 'elem', 'adapter_id', 'user_part', 'uuid_part', ...]
-                user_part = parts[-2] if len(parts) > 3 else 'dm'  # Second to last part
-                uuid_part = parts[-1] if len(parts) > 3 else parts[-1]  # Last part (UUID)
-                
-                # Sanitize both parts
-                user_short = sanitize_for_anthropic(user_part)[:8] if user_part else 'dm'
-                uuid_short = sanitize_for_anthropic(uuid_part)[:4] if uuid_part else ''
-                
-                result = f"{user_short}_{uuid_short}" if uuid_short else user_short
-                return sanitize_for_anthropic(result)
-        
-        # For other elements, use a hash-based approach
-        import hashlib
-        # Create a short hash from the element ID
-        hash_obj = hashlib.md5(element_id.encode())
-        short_hash = hash_obj.hexdigest()[:8]
-        
-        # Try to extract a meaningful prefix from the element ID
-        if '_' in element_id:
-            meaningful_part = element_id.split('_')[0][:6]
-            meaningful_part = sanitize_for_anthropic(meaningful_part)
-            return f"{meaningful_part}_{short_hash[:4]}"
-        else:
-            # Sanitize the entire element_id and use with hash
-            sanitized_id = sanitize_for_anthropic(element_id)[:6]
-            return f"{sanitized_id}_{short_hash[:4]}" if sanitized_id else f"el_{short_hash[:6]}"
+        return create_short_element_prefix(element_id)
 
     def _find_element_with_tool(self, tool_name: str) -> Optional[str]:
         """Find the element ID that provides a specific tool."""
@@ -190,6 +148,7 @@ class BaseAgentLoopComponent(Component):
             return full_element_id
         else:
             logger.warning(f"Could not resolve prefix '{prefix}' to any element ID")
+            logger.warning(f"Prefix registry: {self._prefix_to_element_id_registry}")
             return None
 
     async def aggregate_tools(self) -> List[LLMToolDefinition]:
@@ -200,15 +159,23 @@ class BaseAgentLoopComponent(Component):
            (e.g., DMManagerComponent providing DM tools, UplinkProxies providing remote tools).
         """
         aggregated_tools_list: List[LLMToolDefinition] = []
-        # Use a set to keep track of tool names to avoid duplicates if components offer same named tools
-        # Note: This only de-duplicates if the LLMToolDefinition is hashable and considered equal
-        # For now, we rely on unique naming or prefixes to differentiate.
-        # A more robust de-duplication might be needed if tools from different sources have identical names/schemas.
-        # For this iteration, we assume that if a tool name is the same, it's the same tool, or one overrides the other.
-        # More sophisticated handling might be needed (e.g. prefixing tools from mounted elements)
+        seen_tool_names: Set[str] = set()  # Track tool names to avoid collisions
         
-        # Clear the prefix registry at the start of aggregation
-        self._prefix_to_element_id_registry.clear()
+        # DON'T clear the entire registry - preserve existing mappings
+        # Only remove mappings for elements that no longer exist
+        current_mounted_elements = self.parent_inner_space.get_mounted_elements()
+        current_element_ids = set(element.id for element in current_mounted_elements.values())  # Use element.id, not mount keys
+        current_element_ids.add(self.parent_inner_space.id)  # Include InnerSpace itself
+        
+        # Remove stale mappings (for elements that no longer exist)
+        stale_prefixes = []
+        for prefix, element_id in self._prefix_to_element_id_registry.items():
+            if element_id not in current_element_ids:
+                stale_prefixes.append(prefix)
+        
+        for stale_prefix in stale_prefixes:
+            del self._prefix_to_element_id_registry[stale_prefix]
+            logger.debug(f"Removed stale prefix mapping: '{stale_prefix}'")
         
         # 1. Tools from InnerSpace itself (e.g., tools for managing the agent, core tools)
         inner_space_tool_provider = self.parent_inner_space.get_tool_provider()
@@ -220,6 +187,7 @@ class BaseAgentLoopComponent(Component):
                 else:
                     tool_def_obj = tool_def # Assume it is already LLMToolDefinition
                 aggregated_tools_list.append(tool_def_obj)
+                seen_tool_names.add(tool_def_obj.name)
         
         # 2. Tools from mounted elements (including UplinkProxies, DM Dession elements, etc.)
         # This requires InnerSpace to have a way to get its mounted elements.
@@ -229,35 +197,47 @@ class BaseAgentLoopComponent(Component):
             # Create short prefix for this element to avoid tool name conflicts
             element_prefix = self._create_short_element_prefix(element.id)
             
-            # NEW: Register the prefix-to-element-ID mapping
-            self._prefix_to_element_id_registry[element_prefix] = element.id
-            logger.debug(f"Registered prefix '{element_prefix}' -> '{element.id}'")
+            # Register or update the prefix-to-element-ID mapping
+            # Only log if it's a new mapping or changed
+            if element_prefix not in self._prefix_to_element_id_registry:
+                self._prefix_to_element_id_registry[element_prefix] = element.id
+                logger.debug(f"Registered new prefix '{element_prefix}' -> '{element.id}'")
+            elif self._prefix_to_element_id_registry[element_prefix] != element.id:
+                logger.warning(f"Prefix collision: '{element_prefix}' was mapped to '{self._prefix_to_element_id_registry[element_prefix]}', now mapping to '{element.id}'")
+                self._prefix_to_element_id_registry[element_prefix] = element.id
             
             # NEW: Check for UplinkRemoteToolProviderComponent specifically
             urtp_component = element.get_component_by_type(UplinkRemoteToolProviderComponent)
             if urtp_component:
+                # Force refresh tools to pick up any naming changes
+                logger.debug(f"Force refreshing remote tools for uplink {element.id}")
+                await urtp_component.force_refresh_tools()
+                
                 # This method is now async, so we await it
                 remote_tool_dicts = await urtp_component.get_llm_tool_definitions()
+                logger.debug(f"UplinkRemoteToolProvider for {element.id} returned {len(remote_tool_dicts)} tools")
+                
                 for tool_dict in remote_tool_dicts:
                     # urtp_component.get_tools_for_llm() returns List[Dict], convert to LLMToolDefinition
                     tool_def_obj = LLMToolDefinition(**tool_dict)
                     # Use lightweight prefixing to avoid Anthropic's 64-char limit
                     original_name = tool_def_obj.name
-                    tool_def_obj.name = f"{element_prefix}__{original_name}"
+                    prefixed_name = f"{element_prefix}__{original_name}"
                     
-                    # Validate length for Anthropic compatibility
-                    if len(tool_def_obj.name) > 64:
-                        logger.warning(f"Tool name '{tool_def_obj.name}' exceeds 64 chars, truncating...")
-                        max_name_len = 64 - len(element_prefix) - 2  # Account for '__'
-                        truncated_name = original_name[:max_name_len]
-                        tool_def_obj.name = f"{element_prefix}__{truncated_name}"
+                    # Validate length and ensure uniqueness for Anthropic compatibility
+                    final_name = self._ensure_unique_tool_name(prefixed_name, seen_tool_names, element_prefix, original_name)
+                    tool_def_obj.name = final_name
+                    seen_tool_names.add(final_name)
                     
                     aggregated_tools_list.append(tool_def_obj)
                     continue
 
             element_tool_provider = element.get_component_by_type(ToolProviderComponent)
             if element_tool_provider:
-                for tool_def in element_tool_provider.get_llm_tool_definitions():
+                logger.debug(f"Regular ToolProviderComponent for {element.id} found {len(element_tool_provider.get_llm_tool_definitions())} tools")
+                regular_tools = element_tool_provider.get_llm_tool_definitions()
+                
+                for tool_def in regular_tools:
                     if isinstance(tool_def, dict):
                         tool_def_obj = LLMToolDefinition(**tool_def)
                     else:
@@ -265,28 +245,79 @@ class BaseAgentLoopComponent(Component):
                     
                     # Use lightweight prefixing to prevent conflicts while staying under 64 chars
                     original_name = tool_def_obj.name
-                    tool_def_obj.name = f"{element_prefix}__{original_name}"
+                    prefixed_name = f"{element_prefix}__{original_name}"
                     
-                    # Validate length for Anthropic compatibility
-                    if len(tool_def_obj.name) > 64:
-                        logger.warning(f"Tool name '{tool_def_obj.name}' exceeds 64 chars, truncating...")
-                        max_name_len = 64 - len(element_prefix) - 2  # Account for '__'
-                        truncated_name = original_name[:max_name_len]
-                        tool_def_obj.name = f"{element_prefix}__{truncated_name}"
+                    # Validate length and ensure uniqueness for Anthropic compatibility
+                    final_name = self._ensure_unique_tool_name(prefixed_name, seen_tool_names, element_prefix, original_name)
+                    tool_def_obj.name = final_name
+                    seen_tool_names.add(final_name)
                     
                     aggregated_tools_list.append(tool_def_obj)
 
-        # De-duplicate based on tool name (last one wins if names clash, consider warning)
-        final_tools_dict: Dict[str, LLMToolDefinition] = {}
-        for tool in aggregated_tools_list:
-            if tool.name in final_tools_dict:
-                logger.warning(f"Duplicate tool name '{tool.name}' found during aggregation. Overwriting.")
-            final_tools_dict[tool.name] = tool
-        
-        final_tools_list = list(final_tools_dict.values())
-        logger.info(f"[{self.agent_loop_name}] Aggregated {len(final_tools_list)} unique tools for LLM.")
+        # No need for separate deduplication since we're tracking uniqueness during aggregation
+        logger.info(f"[{self.agent_loop_name}] Aggregated {len(aggregated_tools_list)} unique tools for LLM.")
         logger.debug(f"[{self.agent_loop_name}] Prefix registry contains {len(self._prefix_to_element_id_registry)} mappings: {self._prefix_to_element_id_registry}")
-        return final_tools_list
+
+        return aggregated_tools_list
+
+    def _ensure_unique_tool_name(self, prefixed_name: str, seen_names: Set[str], element_prefix: str, original_name: str) -> str:
+        """
+        Ensure tool name is unique and under 64 characters.
+        
+        Args:
+            prefixed_name: Original prefixed name (prefix__tool_name)
+            seen_names: Set of already used tool names
+            element_prefix: The element prefix used
+            original_name: The original tool name
+            
+        Returns:
+            A unique tool name under 64 characters
+        """
+        # If name is short enough and unique, use it as-is
+        if len(prefixed_name) <= 64 and prefixed_name not in seen_names:
+            return prefixed_name
+        
+        # If too long, we need to truncate intelligently
+        max_total_length = 64
+        prefix_with_separator = f"{element_prefix}__"
+        available_for_tool_name = max_total_length - len(prefix_with_separator) - 4  # Reserve 4 chars for uniqueness suffix
+        
+        if available_for_tool_name < 8:  # If prefix is too long even for basic tool name
+            logger.warning(f"Element prefix '{element_prefix}' too long for tool names. Using hash-based approach.")
+            # Use a hash-based approach for the entire name
+            import hashlib
+            hash_obj = hashlib.md5(f"{element_prefix}__{original_name}".encode())
+            hash_suffix = hash_obj.hexdigest()[:8]
+            base_name = f"{element_prefix[:8]}_{hash_suffix}"[:60]  # Leave room for counter
+        else:
+            # Truncate tool name but preserve some meaning
+            truncated_tool_name = original_name[:available_for_tool_name]
+            base_name = f"{element_prefix}__{truncated_tool_name}"
+        
+        # Ensure uniqueness by adding a counter if needed
+        final_name = base_name
+        counter = 1
+        while final_name in seen_names and counter < 100:  # Prevent infinite loop
+            # Create counter suffix that fits in remaining space
+            counter_suffix = f"_{counter:02d}"
+            if len(base_name) + len(counter_suffix) > 64:
+                # Truncate base name to make room for counter
+                truncated_base = base_name[:64 - len(counter_suffix)]
+                final_name = f"{truncated_base}{counter_suffix}"
+            else:
+                final_name = f"{base_name}{counter_suffix}"
+            counter += 1
+        
+        if final_name in seen_names:
+            # Last resort: use hash
+            import hashlib
+            hash_obj = hashlib.md5(f"{element_prefix}__{original_name}_{counter}".encode())
+            final_name = f"{element_prefix[:8]}_{hash_obj.hexdigest()[:8]}"
+        
+        if len(prefixed_name) > 64:
+            logger.warning(f"Tool name '{prefixed_name}' ({len(prefixed_name)} chars) truncated to '{final_name}' ({len(final_name)} chars)")
+        
+        return final_name
 
 
 @register_component
@@ -332,7 +363,7 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                 logger.warning(f"{self.agent_loop_name} ({self.id}): HUD provided empty context. Aborting cycle.")
                 return
 
-            logger.critical(f"Current context: {current_context}")
+            logger.debug(f"Generated agent context: {len(current_context)} characters")
 
             # --- 2. Get Memory Context from CompressionEngine ---
             memory_messages = []
@@ -340,8 +371,6 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                 logger.debug(f"{self.agent_loop_name} ({self.id}): Retrieving memory context...")
                 memory_messages = await compression_engine.get_memory_context()
                 logger.info(f"Retrieved {len(memory_messages)} memory messages")
-
-            # logger.critical(f"Memory messages: {memory_messages}")
 
             # --- 3. Build Complete Message History ---
             # Start with memory context (includes orientation conversation + interaction history)
@@ -355,10 +384,7 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
             # --- 4. Get Available Tools ---
             aggregated_tools = await self.aggregate_tools()
 
-            # logger.critical(f"Aggregated tools: {aggregated_tools}")
-
             # --- 5. Send to LLM ---
-            # logger.critical(f"{self.agent_loop_name} ({self.id}): Sending to LLM...")
             llm_response_obj = llm_provider.complete(messages=messages, tools=aggregated_tools)
             
             if not llm_response_obj:
@@ -368,10 +394,6 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
             agent_response_text = llm_response_obj.content
             agent_tool_calls = llm_response_obj.tool_calls or []
 
-            # logger.critical(f"Agent response text: {agent_response_text}")
-            # logger.critical(f"Agent tool calls: {agent_tool_calls}")
-            # logger.critical(f"Tool call: {agent_tool_calls[0].tool_name}, {agent_tool_calls[0].parameters}")
-            
             logger.info(f"LLM response: {len(agent_response_text or '')} chars, {len(agent_tool_calls)} tool calls")
 
             # --- 6. Process Tool Calls ---
@@ -496,7 +518,6 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                         "loop_type": "simple"
                     }
                 }
-                # logger.critical(f"Reasoning chain data: {reasoning_chain_data}")
                 
                 await compression_engine.store_reasoning_chain(reasoning_chain_data)
                 logger.info(f"Stored reasoning chain with {len(tool_results)} tool results")

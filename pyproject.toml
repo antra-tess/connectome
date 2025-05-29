@@ -30,7 +30,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["elements*", "host*", "llm*"]
+include = ["elements*", "host*", "llm*", "storage*"]
 
 [project.scripts]
 connectome = "host.main:main" 

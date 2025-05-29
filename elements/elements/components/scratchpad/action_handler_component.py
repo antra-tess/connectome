@@ -50,11 +50,11 @@ class ScratchpadActionHandler(Component):
 
     def _get_parent_space_timeline(self) -> Optional[TimelineComponent]:
         """Traverse up to find the parent Space and its TimelineComponent."""
-        if not self.owner or not self.owner.parent_space:
+        if not self.owner:
             logger.warning(f"[{self.owner.id if self.owner else 'Handler'}] Cannot find parent space to record timeline event.")
             return None
         
-        parent_space = self.owner.parent_space
+        parent_space = self.owner.get_parent_object()
         # Ensure parent_space is an instance of Space before trying to get component
         # This check might be redundant if self.owner.parent_space is guaranteed to be a Space
         if isinstance(parent_space, BaseElement) and hasattr(parent_space, 'get_component_by_type'):

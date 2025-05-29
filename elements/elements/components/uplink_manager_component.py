@@ -53,7 +53,7 @@ class UplinkManagerComponent(Component):
     def _generate_safe_id_string(self, base_string: str) -> str:
         """Generates a string suitable for use as an ID component from a base string."""
         s = re.sub(r'[^a-zA-Z0-9_\\-]', '', base_string.replace(' ', '_'))
-        return s[:50] # Limit length
+        return s[:10] # Limit length
 
     def get_uplink_for_space(self, remote_space_id: str) -> Optional[BaseElement]:
         """
@@ -131,7 +131,7 @@ class UplinkManagerComponent(Component):
 
         safe_remote_id_part = self._generate_safe_id_string(shared_space_id)
         agent_id_part = self._generate_safe_id_string(self.owner.agent_id) if hasattr(self.owner, 'agent_id') else "unknown_agent"
-        new_uplink_element_id = f"uplink_{agent_id_part}_to_{safe_remote_id_part}"
+        new_uplink_element_id = f"up_{agent_id_part}_to_{safe_remote_id_part}"
 
         uplink_name = f"Uplink: {shared_space_name or shared_space_id}"
         uplink_description = f"Connects to SharedSpace: {shared_space_description or shared_space_id}"

@@ -159,8 +159,11 @@ class FileStorage(StorageInterface):
             
             async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
                 content = await f.read()
-                return json.loads(content)
-                
+                try:
+                    return json.loads(content)
+                except Exception as e:
+                    self.logger.error(f"Failed to parse JSON file {file_path}: {e}", exc_info=True)
+                    return None
         except Exception as e:
             self.logger.error(f"Failed to read JSON file {file_path}: {e}", exc_info=True)
             return None

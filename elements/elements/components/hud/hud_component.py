@@ -7,6 +7,8 @@ from ..base_component import Component
 from ..space.space_veil_producer import SpaceVeilProducer
 # Import the registry decorator
 from elements.component_registry import register_component
+# Import shared prefix generator for consistency with AgentLoop
+from ...utils.prefix_generator import create_short_element_prefix
 # May need access to GlobalAttentionComponent for filtering
 # from ..attention.global_attention_component import GlobalAttentionComponent
 
@@ -172,14 +174,33 @@ class HUDComponent(Component):
         
         # Add tool information if available
         if available_tools:
+            # NEW: Check if this is a remote element accessed via uplink proxy
+            prefix_element_id = self._determine_tool_prefix_element_id(element_id)
+            
             # Create short prefix for display (same logic as agent loop)
-            short_prefix = self._create_short_element_prefix(element_id)
+            short_prefix = self._create_short_element_prefix(prefix_element_id)
+            
+            # NEW: Get chat prefix mappings if this is an uplink proxy
+            chat_prefix_info = ""
+            if prefix_element_id != element_id:  # This is a remote element accessed via uplink
+                uplink_element = self._get_uplink_element_for_remote(element_id)
+                if uplink_element and hasattr(uplink_element, '_remote_tool_provider_component'):
+                    urtp = uplink_element._remote_tool_provider_component
+                    if urtp and hasattr(urtp, 'get_chat_prefix_mappings'):
+                        chat_mappings = urtp.get_chat_prefix_mappings()
+                        if chat_mappings:
+                            chat_prefix_info = f" (Chat prefixes: {', '.join(f'{p}={n}' for p, n in chat_mappings.items())})"
+            
             prefixed_tools = [f"{short_prefix}__{tool}" for tool in available_tools]
             
             if tool_target_element_id and tool_target_element_id != element_id:
                 header += f" [Tools: {', '.join(prefixed_tools)} → {tool_target_element_id}]"
             else:
                 header += f" [Tools: {', '.join(prefixed_tools)}]"
+                
+            # If using uplink proxy prefix, add clarification with chat prefix info
+            if prefix_element_id != element_id:
+                header += f" (via uplink{chat_prefix_info})"
         
         output = f"{header}\n"
         
@@ -190,9 +211,65 @@ class HUDComponent(Component):
         
         return output
 
+    def _get_uplink_element_for_remote(self, remote_element_id: str):
+        """Helper to find the uplink element that provides access to a remote element."""
+        if not self.owner:
+            return None
+            
+        mounted_elements = self.owner.get_mounted_elements()
+        
+        for mount_id, element in mounted_elements.items():
+            # Check if this is an uplink proxy
+            if hasattr(element, 'remote_space_id') and hasattr(element, '_remote_tool_provider_component'):
+                # Check if this uplink proxy has remote tools from the remote_element_id
+                remote_tool_provider = getattr(element, '_remote_tool_provider_component', None)
+                if remote_tool_provider and hasattr(remote_tool_provider, '_raw_remote_tool_definitions'):
+                    # Check if any remote tool definitions come from this remote_element_id
+                    for tool_def in remote_tool_provider._raw_remote_tool_definitions:
+                        if tool_def.get('provider_element_id') == remote_element_id:
+                            return element
+        return None
+
+    def _determine_tool_prefix_element_id(self, element_id: str) -> str:
+        """
+        Determine which element ID should be used for tool prefixing.
+        
+        For remote elements accessed via uplink proxies, returns the uplink proxy ID.
+        For local elements, returns the element ID itself.
+        
+        Args:
+            element_id: The element ID from the VEIL node
+            
+        Returns:
+            Element ID to use for generating tool prefixes
+        """
+        # Check if this element might be a remote element by looking for uplink proxies
+        # that could be proxying tools from this element
+        
+        if not self.owner:
+            return element_id
+            
+        # Get mounted elements from the InnerSpace
+        mounted_elements = self.owner.get_mounted_elements()
+        
+        for mount_id, element in mounted_elements.items():
+            # Check if this is an uplink proxy
+            if hasattr(element, 'remote_space_id') and hasattr(element, '_remote_tool_provider_component'):
+                # Check if this uplink proxy has remote tools from the element_id
+                remote_tool_provider = getattr(element, '_remote_tool_provider_component', None)
+                if remote_tool_provider and hasattr(remote_tool_provider, '_raw_remote_tool_definitions'):
+                    # Check if any remote tool definitions come from this element_id
+                    for tool_def in remote_tool_provider._raw_remote_tool_definitions:
+                        if tool_def.get('provider_element_id') == element_id:
+                            # This element's tools are proxied by this uplink
+                            return element.id
+        
+        # If no uplink proxy found, use the element's own ID
+        return element_id
+
     def _create_short_element_prefix(self, element_id: str) -> str:
         """
-        Create a short prefix for tool names (same logic as AgentLoop).
+        Create a short prefix for tool names using shared utility for consistency with AgentLoop.
         
         Args:
             element_id: Full element ID
@@ -200,44 +277,7 @@ class HUDComponent(Component):
         Returns:
             Short prefix for display consistency that matches ^[a-zA-Z0-9_-]+$
         """
-        def sanitize_for_anthropic(text: str) -> str:
-            """Remove or replace characters not allowed by Anthropic's regex ^[a-zA-Z0-9_-]+$"""
-            import re
-            # Replace invalid characters with underscores, then remove duplicate underscores
-            sanitized = re.sub(r'[^a-zA-Z0-9_-]', '_', text)
-            # Remove duplicate underscores
-            sanitized = re.sub(r'_+', '_', sanitized)
-            # Remove leading/trailing underscores
-            sanitized = sanitized.strip('_')
-            return sanitized
-        
-        # For DM elements, try to extract user and UUID parts
-        if element_id.startswith('dm_elem_'):
-            parts = element_id.split('_')
-            if len(parts) >= 4:
-                user_part = parts[-2] if len(parts) > 3 else 'dm'
-                uuid_part = parts[-1] if len(parts) > 3 else parts[-1]
-                
-                # Sanitize both parts
-                user_short = sanitize_for_anthropic(user_part)[:8] if user_part else 'dm'
-                uuid_short = sanitize_for_anthropic(uuid_part)[:4] if uuid_part else ''
-                
-                result = f"{user_short}_{uuid_short}" if uuid_short else user_short
-                return sanitize_for_anthropic(result)
-        
-        # For other elements, use a hash-based approach
-        import hashlib
-        hash_obj = hashlib.md5(element_id.encode())
-        short_hash = hash_obj.hexdigest()[:8]
-        
-        if '_' in element_id:
-            meaningful_part = element_id.split('_')[0][:6]
-            meaningful_part = sanitize_for_anthropic(meaningful_part)
-            return f"{meaningful_part}_{short_hash[:4]}"
-        else:
-            # Sanitize the entire element_id and use with hash
-            sanitized_id = sanitize_for_anthropic(element_id)[:6]
-            return f"{sanitized_id}_{short_hash[:4]}" if sanitized_id else f"el_{short_hash[:6]}"
+        return create_short_element_prefix(element_id)
 
     def _render_chat_message(self, node: Dict[str, Any], attention: Dict[str, Any], options: Dict[str, Any], indent_str: str, node_info: str) -> str:
         """Renders a chat message node cleanly."""
@@ -367,7 +407,7 @@ class HUDComponent(Component):
 
         # Optional: Add opening tag if verbose style is enabled
         if use_verbose_tags:
-             output += f"{indent_str}<{node_type}'>\n"
+             output += f"{indent_str}<{node_type}>\n"
              # Increase indent for content within tags
              content_indent_str = indent_str + "  "
         else:
@@ -382,7 +422,6 @@ class HUDComponent(Component):
              logger.error(f"Error calling renderer {render_func.__name__} for node {node_id}: {render_err}", exc_info=True)
              # Add error message, respecting indent
              output += f"{content_indent_str}>> Error rendering content for {node_info}: {render_err}\n"
-        logger.critical(f"Output: {output}; verbose: {use_verbose_tags}")
 
         # Check attention (append after content for clarity)
         if node_id in attention:
