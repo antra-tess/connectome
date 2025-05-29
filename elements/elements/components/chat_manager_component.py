@@ -112,8 +112,9 @@ class ChatManagerComponent(Component):
         # Sanitize user_ext_id_for_naming for mount_id and element_id parts
         safe_user_id_part = user_ext_id_for_naming.replace(':', '_').replace('@', '_').replace('.', '_') if user_ext_id_for_naming else self._generate_short_uuid()
         
-        mount_id = f"dm_{adapter_id}_{safe_user_id_part}"
+        # SIMPLIFIED: Use element_id as mount_id to avoid lookup mismatches
         new_element_id = f"dm_elem_{adapter_id}_{safe_user_id_part}_{self._generate_short_uuid()}"
+        mount_id = new_element_id  # Use same ID for both
 
         element_config = {
             "name": element_name,

@@ -438,8 +438,7 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                     # Execute tool
                     try:
                         calling_context = {"loop_component_id": self.id}
-                        tool_result = await self.parent_inner_space.execute_element_action(
-                            space_id=self.parent_inner_space.id,
+                        tool_result = await self.parent_inner_space.execute_action_on_element(
                             element_id=target_element_id,
                             action_name=actual_tool_name,
                             parameters=tool_call.parameters,
@@ -482,13 +481,13 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                             
                             # Dispatch Internal Actions
                             elif target_element_id:
-                                target_space_id = action_request.get("target_space_id", self.parent_inner_space.id)
                                 logger.debug(f"Dispatching internal action: {action_name} on {target_element_id}")
                                 try:
                                     calling_context = {"loop_component_id": self.id}
-                                    action_result = await self.parent_inner_space.execute_element_action(
-                                        space_id=target_space_id, element_id=target_element_id,
-                                        action_name=action_name, parameters=parameters,
+                                    action_result = await self.parent_inner_space.execute_action_on_element(
+                                        element_id=target_element_id,
+                                        action_name=action_name,
+                                        parameters=parameters,
                                         calling_context=calling_context
                                     )
                                     logger.debug(f"Internal action result: {action_result}")
@@ -735,8 +734,7 @@ class MultiStepToolLoopComponent(BaseAgentLoopComponent):
                         logger.debug(f"Dispatching multi-step tool: {actual_tool_name} on {target_element_id}")
                         try:
                             calling_context = {"loop_component_id": self.id} 
-                            action_result = await self.parent_inner_space.execute_element_action(
-                                space_id=self.parent_inner_space.id, 
+                            action_result = await self.parent_inner_space.execute_action_on_element(
                                 element_id=target_element_id,
                                 action_name=actual_tool_name, 
                                 parameters=tool_call.parameters,

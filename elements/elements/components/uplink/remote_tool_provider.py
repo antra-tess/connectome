@@ -179,7 +179,8 @@ class UplinkRemoteToolProviderComponent(Component):
         
         logger.debug(f"[{self.owner.id if self.owner else 'NoOwner'}/{self.COMPONENT_TYPE}] Providing {len(llm_tools)} tools with ultra-short chat prefixes.")
         if self._chat_prefix_registry:
-            logger.debug(f"Chat prefix mappings: {', '.join(f'{p}={info[\"display_name\"]}' for p, info in self._chat_prefix_registry.items())}")
+            mappings_str = ', '.join(f"{p}={info['display_name']}" for p, info in self._chat_prefix_registry.items())
+            logger.debug(f"Chat prefix mappings: {mappings_str}")
         
         return llm_tools
 
