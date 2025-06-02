@@ -540,6 +540,15 @@ class MessageActionHandler(Component):
             if parent_element_obj and not isinstance(parent_element_obj, InnerSpace):
                 logger.warning(f"[{owner.id}] DM Element's parent object (ID: {parent_element_obj.id if parent_element_obj else 'None'}) is not an InnerSpace as expected.")
 
+        # Case 2b: Owner is a chat element with generic attributes (created by updated ChatManagerComponent)
+        elif hasattr(owner, 'adapter_id') and hasattr(owner, 'external_conversation_id'):
+            adapter_id = owner.adapter_id
+            conversation_id = use_external_conversation_id if use_external_conversation_id else owner.external_conversation_id
+            logger.debug(f"[{owner.id}] Chat Element direct attributes context: adapter='{adapter_id}', conv='{conversation_id}'.")
+            # We expect parent_element_obj to be an InnerSpace here if all is correct.
+            if parent_element_obj and not isinstance(parent_element_obj, InnerSpace):
+                logger.warning(f"[{owner.id}] Chat Element's parent object (ID: {parent_element_obj.id if parent_element_obj else 'None'}) is not an InnerSpace as expected.")
+
         # Case 3: Owner is an element whose parent is a SharedSpace providing the context
         elif parent_element_obj and isinstance(parent_element_obj, Space) and not isinstance(parent_element_obj, InnerSpace):
             shared_space_parent = parent_element_obj 

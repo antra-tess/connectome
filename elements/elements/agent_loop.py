@@ -34,6 +34,12 @@ class BaseAgentLoopComponent(Component):
     Defines the interface for how the HostEventLoop triggers an agent's cognitive cycle.
     """
     COMPONENT_TYPE = "AgentLoopComponent"
+    
+    # Events this component reacts to
+    HANDLED_EVENT_TYPES = [
+        "activation_call",  # Signals that the agent should consider running a cycle
+    ]
+    
     # Define dependencies that InnerSpace should inject during instantiation.
     # Key: kwarg name for __init__; Value: attribute name on InnerSpace instance or 'self' for InnerSpace itself.
     INJECTED_DEPENDENCIES = {
@@ -64,6 +70,85 @@ class BaseAgentLoopComponent(Component):
         # ToolProvider and outgoing_action_callback might be optional for some loops.
 
         logger.info(f"{self.COMPONENT_TYPE} '{self.agent_loop_name}' ({self.id}) initialized for InnerSpace '{self.parent_inner_space.name}'.")
+
+    def handle_event(self, event_node: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
+        """
+        Handles events for the AgentLoop component.
+        Currently processes "activation_call" events to trigger agent cycles.
+        
+        Args:
+            event_node: The event node from the timeline
+            timeline_context: The timeline context for the event
+            
+        Returns:
+            True if event was handled, False otherwise
+        """
+        event_payload = event_node.get('payload', {})
+        event_type = event_payload.get('event_type')
+        
+        if event_type not in self.HANDLED_EVENT_TYPES:
+            return False
+        
+        if event_type == "activation_call":
+            activation_reason = event_payload.get('activation_reason', 'unknown')
+            source_element_id = event_payload.get('source_element_id', 'unknown')
+            
+            logger.info(f"[{self.agent_loop_name}] Received activation_call: reason='{activation_reason}', source='{source_element_id}'")
+            
+            # Check if we should actually trigger a cycle based on our own logic
+            should_activate = self._should_activate_for_reason(activation_reason, event_payload)
+            
+            if should_activate:
+                logger.info(f"[{self.agent_loop_name}] Activating agent cycle due to: {activation_reason}")
+                
+                # Run the cycle asynchronously
+                asyncio.create_task(self._run_activation_cycle(activation_reason, event_payload))
+            else:
+                logger.debug(f"[{self.agent_loop_name}] Skipping activation for reason: {activation_reason}")
+            
+            return True
+        
+        return False
+    
+    def _should_activate_for_reason(self, activation_reason: str, event_payload: Dict[str, Any]) -> bool:
+        """
+        Decides whether to activate the agent loop for a given activation reason.
+        Subclasses can override this for more sophisticated activation logic.
+        
+        Args:
+            activation_reason: The reason for activation (e.g., "direct_message_received")
+            event_payload: The full event payload
+            
+        Returns:
+            True if the agent should activate, False otherwise
+        """
+        # For now, activate for all activation calls
+        # Future enhancement: could check agent state, recent activity, specific conditions, etc.
+        return True
+    
+    async def _run_activation_cycle(self, activation_reason: str, event_payload: Dict[str, Any]) -> None:
+        """
+        Runs the agent cycle and calls on_frame_end afterwards.
+        
+        Args:
+            activation_reason: The reason for activation
+            event_payload: The full event payload
+        """
+        try:
+            logger.debug(f"[{self.agent_loop_name}] Starting activation cycle for reason: {activation_reason}")
+            
+            # Run the actual agent cycle
+            await self.trigger_cycle()
+            
+            # Call on_frame_end to complete the frame
+            if hasattr(self.parent_inner_space, 'on_frame_end') and callable(self.parent_inner_space.on_frame_end):
+                logger.debug(f"[{self.agent_loop_name}] Calling on_frame_end after cycle completion")
+                self.parent_inner_space.on_frame_end()
+            else:
+                logger.warning(f"[{self.agent_loop_name}] parent_inner_space does not have callable on_frame_end method")
+                
+        except Exception as e:
+            logger.error(f"[{self.agent_loop_name}] Error during activation cycle: {e}", exc_info=True)
 
     async def trigger_cycle(self):
         """
@@ -358,6 +443,9 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
             logger.debug(f"{self.agent_loop_name} ({self.id}): Getting current context from HUD...")
             render_options = {"render_style": "verbose_tags"}
             current_context = await hud.get_agent_context(options=render_options)
+
+            logger.critical(f"Current context: {current_context}")
+            logger.critical(f"Owner's mounted elements: {self.parent_inner_space.get_mounted_elements()}")
             
             if not current_context:
                 logger.warning(f"{self.agent_loop_name} ({self.id}): HUD provided empty context. Aborting cycle.")

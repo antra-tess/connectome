@@ -34,24 +34,27 @@ class EventReplayMode(Enum):
     DISABLED = "disabled"
     ENABLED = "enabled" 
     SELECTIVE = "selective"  # Future: replay only specific event types
+    ENABLED_WITH_VEIL_SNAPSHOT = "enabled_with_veil_snapshot"  # NEW: Structural replay + VEIL cache restoration
 
-# NEW: Events that can be replayed for system state reconstruction
-REPLAYABLE_SYSTEM_EVENTS = {
-    'element_mounted',
-    'element_unmounted', 
-    'component_initialized',
-    'tool_provider_registered',
-    'element_created_from_prefab',
-    'orientation_conversation_set',
-    # Add more as needed - some events might not be safe to replay
+# NEW: Default replayability for event types (fallback when is_replayable flag not set)
+# These are only used when events don't have explicit is_replayable flag
+DEFAULT_REPLAYABLE_EVENTS = {
+    # Structural events - generally safe to replay
+    'element_mounted', 'element_unmounted', 'component_initialized', 
+    'tool_provider_registered', 'element_created_from_prefab', 'orientation_conversation_set',
+    'component_state_updated',
+    
+    # Message events - content restoration
+    'message_received', 'historical_message_received', 'agent_message_confirmed', 'connectome_message_deleted', 'connectome_message_updated', 
+    'connectome_reaction_added', 'connectome_reaction_removed', 'attachment_content_available',
+    'connectome_message_send_confirmed', 'connectome_message_send_failed',
 }
 
-# Events that should NOT be replayed (already happened, would cause conflicts)
-NON_REPLAYABLE_EVENTS = {
-    'timeline_created',  # Timeline already exists
-    'veil_delta_operations_received_by_space',  # Runtime only
-    'action_executed',  # Would re-execute actions
-    # Add more runtime-only events
+DEFAULT_NON_REPLAYABLE_EVENTS = {
+    # Runtime-only events that shouldn't be replayed
+    'timeline_created', 'veil_delta_operations_received_by_space', 'action_executed',
+    'activation_call', 'agent_context_generated', 'tool_action_dispatched', 'tool_result_received',
+    'final_action_dispatched', 'llm_response_processed', 'structured_tool_action_dispatched',
 }
 
 class Space(BaseElement):
@@ -153,6 +156,8 @@ class Space(BaseElement):
         
         if replay_mode == 'enabled':
             return EventReplayMode.ENABLED
+        elif replay_mode == 'enabled_with_veil_snapshot':
+            return EventReplayMode.ENABLED_WITH_VEIL_SNAPSHOT
         elif replay_mode == 'selective':
             return EventReplayMode.SELECTIVE
         else:
@@ -172,7 +177,7 @@ class Space(BaseElement):
         space_root_id = f"{self.id}_space_root"
 
         if space_root_id not in self._flat_veil_cache:
-            logger.info(f"[{self.id}] Root VEIL node '{space_root_id}' not found in cache. Initializing in _ensure_own_veil_presence_initialized.")
+            logger.warning(f"[{self.id}] Root VEIL node '{space_root_id}' not found in cache. Initializing in _ensure_own_veil_presence_initialized.")
             if not self.IS_UPLINK_SPACE:
                 self._veil_producer.emit_delta()
             logger.info(f"[{self.id}] Initialized own root VEIL node '{space_root_id}' in _flat_veil_cache via _ensure_own_veil_presence_initialized.")
@@ -398,7 +403,7 @@ class Space(BaseElement):
         if not is_replay_mode:
             new_event_id = self.add_event_to_timeline(event_payload, timeline_context)
             if not new_event_id:
-                logger.error(f"[{self.id}] Failed to add event to timeline. Aborting processing for this event.")
+                logger.error(f"[{self.id}] Failed to add event to timeline. Aborting processing for this event. Event: {event_payload}")
                 return
         else:
             # In replay mode, use a dummy event ID for processing
@@ -712,7 +717,10 @@ class Space(BaseElement):
         primary_timeline = self.get_primary_timeline()
         if primary_timeline:
             timeline_context['timeline_id'] = primary_timeline
-        self.add_event_to_timeline(event_payload, timeline_context) # Commented out to reduce noise, can be re-enabled if useful for debugging.
+        try:
+            self.add_event_to_timeline(event_payload, timeline_context) # Commented out to reduce noise, can be re-enabled if useful for debugging.
+        except Exception as e:
+            logger.error(f"[{self.id}] Space.receive_delta: Error adding event to timeline: {e}", exc_info=True)
 
     def get_flat_veil_snapshot(self) -> Dict[str, Any]:
         """
@@ -891,21 +899,44 @@ class Space(BaseElement):
                     skipped_count += 1
                     continue
                     
+                # Log what we're about to replay
+                logger.info(f"[{self.id}] Replaying event {event_id}: {event_type}")
+                
                 # Replay the event
                 success = await self._replay_single_event(event_node)
                 if success:
                     self._replayed_event_ids.add(event_id)
                     replayed_count += 1
-                    logger.debug(f"[{self.id}] Successfully replayed event {event_id} ({event_type})")
+                    logger.info(f"[{self.id}] ✓ Successfully replayed event {event_id} ({event_type})")
                 else:
-                    logger.warning(f"[{self.id}] Failed to replay event {event_id} ({event_type})")
+                    logger.error(f"[{self.id}] ✗ Failed to replay event {event_id} ({event_type})")
                     # Continue with other events even if one fails
                     skipped_count += 1
                     
             logger.info(f"[{self.id}] Event replay completed: {replayed_count} replayed, {skipped_count} skipped")
             
-            # NEW: Trigger VEIL state regeneration after replay
-            await self._regenerate_veil_state_after_replay()
+            # NEW: For VEIL snapshot mode, restore VEIL cache after structural replay
+            if self._event_replay_mode == EventReplayMode.ENABLED_WITH_VEIL_SNAPSHOT:
+                logger.info(f"[{self.id}] Attempting VEIL cache restoration after structural replay")
+                veil_restoration_success = await self._restore_veil_snapshot()
+                if not veil_restoration_success:
+                    logger.warning(f"[{self.id}] VEIL cache restoration failed, regenerating from current state")
+                    await self._regenerate_veil_state_after_replay()
+            elif replayed_count > 0:
+                # Only regenerate VEIL state if we actually replayed events
+                # For new agents with no events, let normal initialization handle VEIL setup
+                logger.info(f"[{self.id}] Regenerating VEIL state after replaying {replayed_count} events")
+                await self._regenerate_veil_state_after_replay()
+            else:
+                logger.info(f"[{self.id}] No events replayed, skipping VEIL regeneration - normal initialization will handle VEIL setup")
+            
+            # NEW: After VEIL regeneration, ensure uplinks are connected (crucial for InnerSpaces)
+            if replayed_count > 0:
+                logger.info(f"[{self.id}] Connecting uplinks after timeline replay")
+                await self._connect_uplinks_after_replay()
+            
+            # NEW: Verify replay integrity for message components
+            await self._verify_replay_integrity()
             
             return True
             
@@ -938,12 +969,36 @@ class Space(BaseElement):
                 
                 for mount_id, element in mounted_elements.items():
                     try:
-                        # Trigger VEIL emission for elements that have VEIL producers
+                        logger.debug(f"[{self.id}] Processing mounted element: {mount_id} (type: {type(element).__name__})")
+                        
+                        # Check if element is a Space with on_frame_end method
                         if hasattr(element, 'on_frame_end') and callable(element.on_frame_end):
                             element.on_frame_end()
-                            logger.debug(f"[{self.id}] Triggered VEIL emission for element {mount_id}")
+                            logger.debug(f"[{self.id}] ✓ Triggered on_frame_end for Space element {mount_id}")
+                        else:
+                            # For regular BaseElement instances, find and trigger VeilProducer components
+                            veil_producers_found = 0
+                            if hasattr(element, 'get_components') and callable(element.get_components):
+                                components = element.get_components()
+                                for component in components.values():
+                                    # Check if component is a VeilProducer (has emit_delta method)
+                                    if hasattr(component, 'emit_delta') and callable(component.emit_delta):
+                                        try:
+                                            component.emit_delta()
+                                            veil_producers_found += 1
+                                            logger.info(f"[{self.id}] ✓ Triggered emit_delta for VeilProducer {type(component).__name__} on element {mount_id}")
+                                        except Exception as e:
+                                            logger.error(f"[{self.id}] Error calling emit_delta on {type(component).__name__} for element {mount_id}: {e}")
+                            
+                            if veil_producers_found == 0:
+                                logger.debug(f"[{self.id}] No VeilProducer components found on element {mount_id}")
+                            else:
+                                logger.debug(f"[{self.id}] ✓ Triggered {veil_producers_found} VeilProducer(s) on element {mount_id}")
+                                
                     except Exception as e:
                         logger.warning(f"[{self.id}] Error triggering VEIL emission for element {mount_id}: {e}")
+            else:
+                logger.warning(f"[{self.id}] No container component found for VEIL regeneration")
             
             # Trigger own VEIL producer to ensure space root is updated
             if hasattr(self, 'on_frame_end') and callable(self.on_frame_end):
@@ -958,7 +1013,7 @@ class Space(BaseElement):
     
     def _should_replay_event(self, event_type: str, event_payload: Dict[str, Any]) -> bool:
         """
-        Determine if an event should be replayed based on type and content.
+        Determine if an event should be replayed based on its is_replayable flag or type.
         
         Args:
             event_type: The type of event
@@ -970,18 +1025,36 @@ class Space(BaseElement):
         if self._event_replay_mode == EventReplayMode.DISABLED:
             return False
             
+        # NEW: Check for explicit is_replayable flag on the event first
+        is_replayable = event_payload.get('is_replayable')
+        if is_replayable is not None:
+            logger.debug(f"[{self.id}] Event {event_type} has explicit is_replayable={is_replayable}")
+            return bool(is_replayable)
+            
+        # Fallback to default behavior based on event type
         # Never replay explicitly non-replayable events
-        if event_type in NON_REPLAYABLE_EVENTS:
+        if event_type in DEFAULT_NON_REPLAYABLE_EVENTS:
+            logger.debug(f"[{self.id}] Event {event_type} is in DEFAULT_NON_REPLAYABLE_EVENTS")
             return False
             
         if self._event_replay_mode == EventReplayMode.ENABLED:
-            # Replay all replayable system events
-            return event_type in REPLAYABLE_SYSTEM_EVENTS
+            # Replay events in default replayable list
+            should_replay = event_type in DEFAULT_REPLAYABLE_EVENTS
+            logger.debug(f"[{self.id}] Event {event_type} replayable by default: {should_replay}")
+            return should_replay
             
         elif self._event_replay_mode == EventReplayMode.SELECTIVE:
             # Future: implement selective replay logic
             # For now, same as ENABLED
-            return event_type in REPLAYABLE_SYSTEM_EVENTS
+            should_replay = event_type in DEFAULT_REPLAYABLE_EVENTS  
+            logger.debug(f"[{self.id}] Event {event_type} replayable (selective mode): {should_replay}")
+            return should_replay
+            
+        elif self._event_replay_mode == EventReplayMode.ENABLED_WITH_VEIL_SNAPSHOT:
+            # NEW: Structural replay + VEIL cache restoration - replay everything that's not explicitly non-replayable
+            should_replay = event_type not in DEFAULT_NON_REPLAYABLE_EVENTS
+            logger.debug(f"[{self.id}] Event {event_type} replayable (VEIL snapshot mode): {should_replay}")
+            return should_replay
             
         return False
     
@@ -1150,3 +1223,296 @@ class Space(BaseElement):
     def get_replayed_event_count(self) -> int:
         """Get the number of events that have been replayed."""
         return len(self._replayed_event_ids) 
+
+    async def store_veil_snapshot(self) -> bool:
+        """
+        Store current VEIL cache as a snapshot to storage.
+        Called during shutdown or periodically to preserve VEIL state.
+        
+        Returns:
+            True if snapshot was stored successfully, False otherwise
+        """
+        if self._event_replay_mode not in [EventReplayMode.ENABLED_WITH_VEIL_SNAPSHOT]:
+            # Only store snapshots when the mode supports it
+            return True
+            
+        try:
+            if not self._timeline or not hasattr(self._timeline, '_storage') or not self._timeline._storage:
+                logger.debug(f"[{self.id}] Cannot store VEIL snapshot: Timeline storage not available")
+                return False
+                
+            # Create snapshot data
+            snapshot_data = {
+                'veil_cache': self._flat_veil_cache.copy(),
+                'snapshot_timestamp': time.time(),
+                'space_id': self.id,
+                'space_type': self.__class__.__name__,
+                'element_count': len(self._container.get_mounted_elements()) if self._container else 0,
+                'cache_size': len(self._flat_veil_cache),
+                'metadata': {
+                    'is_inner_space': self.IS_INNER_SPACE,
+                    'is_uplink_space': self.IS_UPLINK_SPACE,
+                    'adapter_id': getattr(self, 'adapter_id', None),
+                    'external_conversation_id': getattr(self, 'external_conversation_id', None)
+                }
+            }
+            
+            # Store snapshot using timeline's storage
+            storage_key = f"veil_snapshot_{self.id}"
+            success = await self._timeline._storage.store_system_state(storage_key, snapshot_data)
+            
+            if success:
+                logger.info(f"[{self.id}] VEIL snapshot stored successfully. Cache size: {len(self._flat_veil_cache)}")
+            else:
+                logger.error(f"[{self.id}] Failed to store VEIL snapshot")
+                
+            return success
+            
+        except Exception as e:
+            logger.error(f"[{self.id}] Error storing VEIL snapshot: {e}", exc_info=True)
+            return False
+
+    async def _restore_veil_snapshot(self) -> bool:
+        """
+        Restore VEIL cache from stored snapshot.
+        Called during replay to restore previous VEIL state.
+        
+        Returns:
+            True if snapshot was restored successfully, False otherwise
+        """
+        try:
+            if not self._timeline or not hasattr(self._timeline, '_storage') or not self._timeline._storage:
+                logger.debug(f"[{self.id}] Cannot restore VEIL snapshot: Timeline storage not available")
+                return False
+                
+            # Load snapshot from storage
+            storage_key = f"veil_snapshot_{self.id}"
+            snapshot_data = await self._timeline._storage.load_system_state(storage_key)
+            
+            if not snapshot_data:
+                logger.info(f"[{self.id}] No VEIL snapshot found for restoration")
+                return False
+                
+            # Validate snapshot compatibility
+            if not self._validate_veil_snapshot(snapshot_data):
+                logger.warning(f"[{self.id}] VEIL snapshot validation failed, cannot restore")
+                return False
+                
+            # Restore VEIL cache
+            restored_cache = snapshot_data.get('veil_cache', {})
+            if not isinstance(restored_cache, dict):
+                logger.error(f"[{self.id}] Invalid VEIL cache format in snapshot")
+                return False
+                
+            self._flat_veil_cache.clear()
+            self._flat_veil_cache.update(restored_cache)
+            
+            snapshot_timestamp = snapshot_data.get('snapshot_timestamp', 0)
+            cache_size = len(self._flat_veil_cache)
+            
+            logger.info(f"[{self.id}] VEIL snapshot restored successfully. Cache size: {cache_size}, "
+                       f"Snapshot age: {time.time() - snapshot_timestamp:.1f}s")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"[{self.id}] Error restoring VEIL snapshot: {e}", exc_info=True)
+            return False
+
+    def _validate_veil_snapshot(self, snapshot_data: Dict[str, Any]) -> bool:
+        """
+        Validate that a VEIL snapshot is compatible with current space state.
+        
+        Args:
+            snapshot_data: The snapshot data to validate
+            
+        Returns:
+            True if snapshot is valid and compatible, False otherwise
+        """
+        try:
+            # Check basic snapshot structure
+            required_fields = ['veil_cache', 'snapshot_timestamp', 'space_id']
+            for field in required_fields:
+                if field not in snapshot_data:
+                    logger.warning(f"[{self.id}] VEIL snapshot missing required field: {field}")
+                    return False
+                    
+            # Verify space ID matches
+            if snapshot_data['space_id'] != self.id:
+                logger.warning(f"[{self.id}] VEIL snapshot space ID mismatch: {snapshot_data['space_id']} != {self.id}")
+                return False
+                
+            # Check snapshot age (don't restore very old snapshots)
+            max_age_seconds = 7 * 24 * 3600  # 7 days
+            snapshot_age = time.time() - snapshot_data.get('snapshot_timestamp', 0)
+            if snapshot_age > max_age_seconds:
+                logger.warning(f"[{self.id}] VEIL snapshot too old: {snapshot_age:.1f}s (max: {max_age_seconds}s)")
+                return False
+                
+            # Validate VEIL cache structure
+            veil_cache = snapshot_data.get('veil_cache', {})
+            if not isinstance(veil_cache, dict):
+                logger.warning(f"[{self.id}] VEIL snapshot cache is not a dictionary")
+                return False
+                
+            # Basic validation: check that cache contains expected root node
+            expected_root_id = f"{self.id}_space_root"
+            if expected_root_id not in veil_cache:
+                logger.warning(f"[{self.id}] VEIL snapshot missing expected root node: {expected_root_id}")
+                # Don't fail validation for this - root can be regenerated
+                
+            logger.debug(f"[{self.id}] VEIL snapshot validation passed. Cache size: {len(veil_cache)}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[{self.id}] Error validating VEIL snapshot: {e}", exc_info=True)
+            return False
+
+    async def shutdown_with_veil_snapshot(self) -> bool:
+        """
+        Perform shutdown operations including storing VEIL snapshot if enabled.
+        This should be called before system shutdown to preserve VEIL state.
+        
+        Returns:
+            True if shutdown completed successfully, False otherwise
+        """
+        try:
+            logger.info(f"[{self.id}] Beginning shutdown sequence")
+            
+            # Store VEIL snapshot if enabled
+            if self._event_replay_mode == EventReplayMode.ENABLED_WITH_VEIL_SNAPSHOT:
+                logger.info(f"[{self.id}] Storing VEIL snapshot before shutdown")
+                snapshot_success = await self.store_veil_snapshot()
+                if not snapshot_success:
+                    logger.warning(f"[{self.id}] Failed to store VEIL snapshot during shutdown")
+                else:
+                    logger.info(f"[{self.id}] VEIL snapshot stored successfully during shutdown")
+            
+            # Perform any additional shutdown operations here
+            # (component cleanup, connection closure, etc.)
+            
+            logger.info(f"[{self.id}] Shutdown sequence completed")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[{self.id}] Error during shutdown: {e}", exc_info=True)
+            return False
+    
+    def has_veil_snapshot_enabled(self) -> bool:
+        """
+        Check if VEIL snapshot functionality is enabled for this space.
+        
+        Returns:
+            True if VEIL snapshots are enabled, False otherwise
+        """
+        return self._event_replay_mode == EventReplayMode.ENABLED_WITH_VEIL_SNAPSHOT 
+
+    async def _connect_uplinks_after_replay(self) -> bool:
+        """
+        Connect uplinks after event replay to ensure recreated uplinks are connected to SharedSpaces and sync their content.
+        This is crucial because during timeline replay, uplinks are recreated but not automatically connected.
+        
+        Returns:
+            True if connection attempts were made, False if no uplinks found or errors occurred
+        """
+        try:
+            logger.info(f"[{self.id}] Searching for uplink elements to connect after replay")
+            
+            if not self._container:
+                logger.debug(f"[{self.id}] No container component, skipping uplink connection")
+                return True
+                
+            mounted_elements = self._container.get_mounted_elements()
+            uplink_count = 0
+            connected_count = 0
+            
+            for mount_id, element in mounted_elements.items():
+                # Check if this is an uplink element
+                if hasattr(element, 'IS_UPLINK_SPACE') and element.IS_UPLINK_SPACE:
+                    uplink_count += 1
+                    remote_space_id = getattr(element, 'remote_space_id', 'Unknown')
+                    logger.info(f"[{self.id}] Found uplink element {mount_id} -> {remote_space_id}")
+                    
+                    # Get the connection component and attempt to connect
+                    connection_component = getattr(element, '_connection_component', None)
+                    if connection_component and hasattr(connection_component, 'connect'):
+                        try:
+                            success = connection_component.connect()
+                            if success:
+                                connected_count += 1
+                                logger.info(f"[{self.id}] ✓ Successfully connected uplink {mount_id} to {remote_space_id}")
+                                
+                                # After connection, trigger a sync to populate cache
+                                cache_component = getattr(element, '_cache_component', None)
+                                if cache_component and hasattr(cache_component, 'sync_remote_state'):
+                                    sync_success = cache_component.sync_remote_state()
+                                    if sync_success:
+                                        logger.info(f"[{self.id}] ✓ Successfully synced cache for uplink {mount_id}")
+                                    else:
+                                        logger.warning(f"[{self.id}] ⚠ Failed to sync cache for uplink {mount_id}")
+                                else:
+                                    logger.debug(f"[{self.id}] No cache component found for uplink {mount_id}")
+                            else:
+                                logger.warning(f"[{self.id}] ✗ Failed to connect uplink {mount_id} to {remote_space_id}")
+                        except Exception as e:
+                            logger.error(f"[{self.id}] Error connecting uplink {mount_id}: {e}", exc_info=True)
+                    else:
+                        logger.warning(f"[{self.id}] Uplink element {mount_id} missing connection component")
+            
+            if uplink_count > 0:
+                logger.info(f"[{self.id}] Uplink connection results: {connected_count}/{uplink_count} connected successfully")
+            else:
+                logger.debug(f"[{self.id}] No uplink elements found to connect")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"[{self.id}] Error during uplink connection after replay: {e}", exc_info=True)
+            return False 
+
+    async def _verify_replay_integrity(self) -> bool:
+        """
+        Verify replay integrity across all components that should have state restored.
+        
+        Returns:
+            True if verification was successful, False otherwise
+        """
+        try:
+            logger.info(f"[{self.id}] Verifying replay integrity after event replay")
+            
+            # Check mounted elements for message components
+            if self._container:
+                mounted_elements = self._container.get_mounted_elements()
+                logger.info(f"[{self.id}] Checking {len(mounted_elements)} mounted elements for replay integrity")
+                
+                for mount_id, element in mounted_elements.items():
+                    try:
+                        # Check if element has MessageListComponent
+                        from .components.messaging.message_list import MessageListComponent
+                        message_list_comp = element.get_component_by_type(MessageListComponent)
+                        
+                        if message_list_comp:
+                            # Verify message integrity
+                            stats = message_list_comp.get_message_statistics()
+                            integrity = message_list_comp.verify_replay_integrity()
+                            
+                            logger.info(f"[{self.id}] Element {mount_id} has {stats['total_messages']} messages from {stats['unique_senders']} senders")
+                            
+                            if not integrity['integrity_ok']:
+                                logger.warning(f"[{self.id}] Element {mount_id} message integrity issues: {integrity['issues']}")
+                            else:
+                                logger.debug(f"[{self.id}] Element {mount_id} message integrity verified")
+                        else:
+                            logger.debug(f"[{self.id}] Element {mount_id} has no MessageListComponent")
+                            
+                    except Exception as e:
+                        logger.warning(f"[{self.id}] Error checking element {mount_id} replay integrity: {e}")
+            else:
+                logger.warning(f"[{self.id}] No container component found for integrity verification")
+            
+            logger.info(f"[{self.id}] Replay integrity verification completed")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[{self.id}] Error during replay integrity verification: {e}", exc_info=True)
+            return False 

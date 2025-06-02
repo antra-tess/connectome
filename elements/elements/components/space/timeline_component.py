@@ -143,14 +143,19 @@ class TimelineComponent(Component):
                 self._state['_all_events'] = timeline_events.get('_all_events', {})
                 logger.info(f"Loaded {len(self._state['_all_events'])} timeline events")
             
-            # NEW: Trigger event replay if enabled
-            if hasattr(self.owner, 'replay_events_from_timeline') and callable(self.owner.replay_events_from_timeline):
-                logger.info(f"Triggering event replay for space {self._space_id}")
+            # NEW: Only trigger event replay if there are events to replay AND replay is enabled
+            has_events_to_replay = len(self._state.get('_all_events', {})) > 0
+            if has_events_to_replay and hasattr(self.owner, 'replay_events_from_timeline') and callable(self.owner.replay_events_from_timeline):
+                logger.info(f"Triggering event replay for space {self._space_id} ({len(self._state['_all_events'])} events)")
                 replay_success = await self.owner.replay_events_from_timeline()
                 if replay_success:
                     logger.info(f"Event replay completed successfully for space {self._space_id}")
                 else:
                     logger.warning(f"Event replay failed for space {self._space_id}")
+            elif has_events_to_replay:
+                logger.info(f"Event replay disabled for space {self._space_id} ({len(self._state['_all_events'])} events found but not replaying)")
+            else:
+                logger.info(f"No events found for space {self._space_id}, skipping replay (fresh agent)")
             
             return True
             

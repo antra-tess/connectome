@@ -36,8 +36,7 @@ if TYPE_CHECKING:
     from host.event_loop import OutgoingActionCallback
     # from elements.space_registry import SpaceRegistry # No longer needed for type hint here
 
-# Re-define type hint for callback if not easily importable from event_loop
-MarkAgentForCycleCallable = Callable[[str, Dict[str, Any], float], None]
+# --- Agent cycle callback type removed - AgentLoop will self-trigger ---
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -80,7 +79,6 @@ class InnerSpace(Space):
         agent_purpose: Optional[str] = None,
         outgoing_action_callback: Optional['OutgoingActionCallback'] = None,
         # space_registry: Optional['SpaceRegistry'] = None, # REMOVE PARAMETER
-        mark_agent_for_cycle_callback: Optional[MarkAgentForCycleCallable] = None,
         additional_components: Optional[List[Type[Component]]] = None,
         **kwargs
     ):
@@ -98,7 +96,6 @@ class InnerSpace(Space):
             agent_purpose: Optional description of the agent's purpose
             outgoing_action_callback: Callback function for sending actions to external systems
             # space_registry: Reference to the SpaceRegistry instance # REMOVE FROM DOCSTRING
-            mark_agent_for_cycle_callback: Callback to HostEventLoop.mark_agent_for_cycle.
             additional_components: Optional list of additional component types to add
             **kwargs: Additional keyword arguments for Space initialization
         """
@@ -113,7 +110,6 @@ class InnerSpace(Space):
         self._llm_provider = llm_provider
         # self._outgoing_action_callback = outgoing_action_callback # Already set by super().__init__ if Space stores it
         # self._space_registry = space_registry # REMOVE ATTRIBUTE
-        self._mark_agent_for_cycle = mark_agent_for_cycle_callback
         
         # Determine orientation conversation to use
         if orientation_conversation:
@@ -256,10 +252,6 @@ class InnerSpace(Space):
         # Propagate the outgoing action callback if provided
         if outgoing_action_callback:
             self.set_outgoing_action_callback(outgoing_action_callback)
-            
-        # Check if mark_agent_for_cycle callback was provided
-        if not self._mark_agent_for_cycle:
-             logger.warning(f"InnerSpace {self.id} for agent {self.agent_id} initialized without mark_agent_for_cycle callback. Tool results will not trigger agent cycles via HostEventLoop.")
             
         # --- Register Tools from Components ---
         self._register_component_tools()
@@ -596,7 +588,7 @@ class InnerSpace(Space):
         if hud_comp:
             logger.debug(f"[{self.id}] Informing HUD component about new deltas from {uplink_id}. (Placeholder)")
 
-        if self._mark_agent_for_cycle and deltas: 
+        if self._agent_loop and deltas: 
             event_payload_for_cycle = {
                 "trigger_type": "uplink_delta_received",
                 "source_uplink_id": uplink_id,
@@ -604,7 +596,7 @@ class InnerSpace(Space):
             }
             current_time = time.time()
             logger.info(f"[{self.id}] Marking agent '{self.agent_id}' for cycle due to deltas from uplink '{uplink_id}'.")
-            self._mark_agent_for_cycle(self.agent_id, event_payload_for_cycle, current_time)
+            self._agent_loop.run_cycle()
 
     # --- VEIL Rendering & Context Generation (Delegated to HUDComponent) ---
     def get_rendered_veil(self, for_round_id: Optional[str] = None) -> Optional[str]:
@@ -633,14 +625,14 @@ class InnerSpace(Space):
             # A more precise check could be added if loop_component_id is available in event_payload.
             
             logger.info(f"[{self.id}] InnerSpace received 'tool_result_received'. Payload: {event_payload}")
-            if self._mark_agent_for_cycle:
+            if self._agent_loop:
                 current_time = time.time()
                 # Pass the original tool_result_received payload as context for the cycle
                 logger.info(f"[{self.id}] Marking agent '{self.agent_id}' for cycle due to tool_result_received.")
-                self._mark_agent_for_cycle(self.agent_id, event_payload, current_time) 
+                self._agent_loop.run_cycle()
                 handled_by_self = True # Considers this aspect handled
             else:
-                logger.warning(f"[{self.id}] Received tool_result_received but _mark_agent_for_cycle is not set.")
+                logger.warning(f"[{self.id}] Received tool_result_received but _agent_loop is not set.")
 
         return handled_by_self # Indicates if InnerSpace-specific logic handled it.
 

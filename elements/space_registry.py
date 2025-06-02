@@ -10,6 +10,7 @@ from typing import Dict, Any, Optional, List, Callable, Type
 import traceback
 import time
 import uuid
+import os
 
 from elements.elements.base import BaseElement, MountType
 # Removed direct imports of Space and InnerSpace from here
@@ -20,6 +21,10 @@ if TYPE_CHECKING:
     from .elements.space import Space
     from .elements.inner_space import InnerSpace
 
+# NEW: Import storage system for SpaceRegistry persistence
+from storage import create_storage_from_env, StorageInterface
+import asyncio
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -28,7 +33,7 @@ logger = logging.getLogger(__name__)
 class SpaceRegistry:
     """
     Manages spaces and facilitates event routing.
-    (Placeholder implementation)
+    NOW WITH PERSISTENCE: Stores registry state to enable coordinated replay.
     """
     _instance: Optional["SpaceRegistry"] = None  # Class variable to hold the singleton instance
 
@@ -55,7 +60,212 @@ class SpaceRegistry:
         self.response_callback: Optional[Callable] = None
         self.space_observers: Dict[str, List[Callable]] = {}
         self.socket_client: Optional[Any] = None
+        
+        # NEW: Storage integration for SpaceRegistry persistence
+        self._storage: Optional[StorageInterface] = None
+        self._storage_initialized = False
+        self._registry_id = "space_registry_main"  # Fixed ID for registry storage
+        
         logger.info("SpaceRegistry initialized.")
+
+    # NEW: Storage initialization methods
+    async def initialize_storage(self) -> bool:
+        """Initialize storage backend for SpaceRegistry persistence."""
+        try:
+            logger.info("Initializing storage backend for SpaceRegistry...")
+            
+            # Create storage from environment configuration
+            self._storage = create_storage_from_env()
+            
+            # Initialize the storage backend
+            success = await self._storage.initialize()
+            if not success:
+                logger.error("Failed to initialize storage backend for SpaceRegistry")
+                return False
+            
+            self._storage_initialized = True
+            logger.info("Storage backend successfully initialized for SpaceRegistry")
+            
+            # Load existing registry state from storage
+            await self._load_registry_from_storage()
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error initializing storage backend for SpaceRegistry: {e}", exc_info=True)
+            return False
+
+    async def _ensure_storage_ready(self) -> bool:
+        """Ensure storage backend is initialized before use."""
+        if self._storage_initialized:
+            return True
+        
+        if self._storage is None:
+            logger.debug("Storage not yet initialized for SpaceRegistry, initializing now...")
+            success = await self.initialize_storage()
+            return success
+        
+        return self._storage_initialized
+
+    async def _load_registry_from_storage(self) -> bool:
+        """Load existing registry state from storage and recreate spaces."""
+        if not self._storage_initialized:
+            return False
+        
+        try:
+            logger.info("Loading SpaceRegistry state from storage...")
+            
+            # Load registry metadata
+            registry_state = await self._storage.load_system_state(f"registry_state_{self._registry_id}")
+            if not registry_state:
+                logger.info("No previous SpaceRegistry state found - fresh start")
+                return True
+            
+            # Load space definitions
+            space_definitions = registry_state.get('space_definitions', {})
+            agent_mappings = registry_state.get('agent_inner_space_mappings', {})
+            
+            logger.info(f"Found {len(space_definitions)} space definitions in storage")
+            
+            # First pass: Recreate all SharedSpaces (non-InnerSpaces)
+            shared_spaces_created = 0
+            for space_id, space_def in space_definitions.items():
+                if not space_def.get('is_inner_space', False):
+                    success = await self._recreate_space_from_definition(space_id, space_def)
+                    if success:
+                        shared_spaces_created += 1
+                    else:
+                        logger.warning(f"Failed to recreate SharedSpace: {space_id}")
+            
+            logger.info(f"Recreated {shared_spaces_created} SharedSpaces from storage")
+            
+            # Note: InnerSpaces are typically created by agent initialization, not by registry
+            # But we store the agent mappings for validation/consistency
+            logger.info(f"Registry state loaded successfully. {len(agent_mappings)} agent mappings recorded.")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error loading registry state from storage: {e}", exc_info=True)
+            return False
+
+    async def _recreate_space_from_definition(self, space_id: str, space_def: Dict[str, Any]) -> bool:
+        """Recreate a Space from its stored definition."""
+        try:
+            from .elements.space import Space, EventReplayMode
+            
+            # Extract space parameters from definition
+            space_name = space_def.get('name', space_id)
+            space_description = space_def.get('description', 'Restored SharedSpace')
+            adapter_id = space_def.get('adapter_id')
+            external_conversation_id = space_def.get('external_conversation_id')
+            space_type = space_def.get('space_type', 'Space')
+            
+            # Currently only support base Space class recreation
+            # Could be extended for other Space subclasses
+            if space_type != 'Space':
+                logger.warning(f"Cannot recreate space {space_id}: unsupported type {space_type}")
+                return False
+            
+            # Create the space instance
+            recreated_space = Space(
+                element_id=space_id,
+                name=space_name,
+                description=space_description,
+                adapter_id=adapter_id,
+                external_conversation_id=external_conversation_id,
+                outgoing_action_callback=self.response_callback
+            )
+            
+            # NEW: Force VEIL snapshot replay mode for recreated SharedSpaces
+            # This ensures timeline replay will be triggered when TimelineComponent initializes
+            recreated_space._event_replay_mode = EventReplayMode.ENABLED_WITH_VEIL_SNAPSHOT
+            logger.info(f"Set event replay mode to ENABLED_WITH_VEIL_SNAPSHOT for recreated SharedSpace {space_id}")
+            
+            # Register the recreated space
+            if self.register_space(recreated_space):
+                logger.info(f"Successfully recreated SharedSpace: {space_name} ({space_id})")
+                logger.info(f"Timeline replay will be triggered automatically when TimelineComponent initializes storage")
+                return True
+            else:
+                logger.error(f"Failed to register recreated space: {space_id}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error recreating space {space_id}: {e}", exc_info=True)
+            return False
+
+    async def _persist_registry_state(self) -> bool:
+        """Persist current registry state to storage."""
+        if not await self._ensure_storage_ready():
+            return False
+        
+        try:
+            # Build space definitions for all registered spaces
+            space_definitions = {}
+            for space_id, space in self._spaces.items():
+                space_definitions[space_id] = {
+                    'space_id': space_id,
+                    'name': space.name,
+                    'description': space.description,
+                    'space_type': space.__class__.__name__,
+                    'is_inner_space': getattr(space, 'IS_INNER_SPACE', False),
+                    'adapter_id': getattr(space, 'adapter_id', None),
+                    'external_conversation_id': getattr(space, 'external_conversation_id', None),
+                    'created_at': time.time(),
+                    'metadata': {
+                        'is_uplink_space': getattr(space, 'IS_UPLINK_SPACE', False),
+                        # Add other metadata as needed
+                    }
+                }
+            
+            # Build agent mappings
+            agent_mappings = {}
+            for agent_id, inner_space in self._agent_inner_spaces.items():
+                agent_mappings[agent_id] = {
+                    'agent_id': agent_id,
+                    'inner_space_id': inner_space.id,
+                    'inner_space_name': inner_space.name
+                }
+            
+            # Create registry state
+            registry_state = {
+                'registry_id': self._registry_id,
+                'space_definitions': space_definitions,
+                'agent_inner_space_mappings': agent_mappings,
+                'last_updated': time.time(),
+                'total_spaces': len(self._spaces),
+                'shared_spaces_count': len([s for s in self._spaces.values() if not getattr(s, 'IS_INNER_SPACE', False)]),
+                'inner_spaces_count': len(self._agent_inner_spaces)
+            }
+            
+            # Store registry state
+            success = await self._storage.store_system_state(f"registry_state_{self._registry_id}", registry_state)
+            
+            if success:
+                logger.debug(f"Persisted SpaceRegistry state: {len(space_definitions)} spaces, {len(agent_mappings)} agents")
+            else:
+                logger.error("Failed to persist SpaceRegistry state")
+                
+            return success
+            
+        except Exception as e:
+            logger.error(f"Error persisting registry state: {e}", exc_info=True)
+            return False
+
+    async def shutdown_with_persistence(self) -> bool:
+        """Gracefully shutdown SpaceRegistry with final state persistence."""
+        try:
+            # Persist final registry state
+            if self._storage_initialized:
+                await self._persist_registry_state()
+                logger.info("SpaceRegistry final state persisted")
+                await self._storage.shutdown()
+                logger.info("SpaceRegistry storage backend shut down")
+            return True
+        except Exception as e:
+            logger.error(f"Error during SpaceRegistry shutdown: {e}", exc_info=True)
+            return False
 
     def register_space(self, space: "Space") -> bool:
         """Registers a Space element."""
@@ -69,6 +279,15 @@ class SpaceRegistry:
         self._spaces[space.id] = space
         self._elements[space.id] = space # Also register as a general element
         logger.info(f"Registered Space: {space.name} ({space.id})")
+        
+        # NEW: Schedule async persistence of registry state (non-blocking)
+        if self._storage_initialized:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._persist_registry_state())
+            except RuntimeError:
+                pass  # No event loop running, persistence will happen on shutdown
+        
         # TODO: Update routing map based on space properties?
         return True
         
@@ -83,6 +302,15 @@ class SpaceRegistry:
         
         self._agent_inner_spaces[agent_id] = inner_space
         logger.info(f"Registered InnerSpace for agent_id '{agent_id}': {inner_space.name} ({inner_space.id})")
+        
+        # NEW: Schedule async persistence of registry state (non-blocking)
+        if self._storage_initialized:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._persist_registry_state())
+            except RuntimeError:
+                pass  # No event loop running, persistence will happen on shutdown
+        
         # Also register it as a general space/element
         return self.register_space(inner_space)
 
@@ -615,6 +843,7 @@ class SpaceRegistry:
             # This is a bit of a safeguard, ideally it's created with the space.
             # Re-evaluate if this check is still needed or how it should work with factory
             if not existing_space.get_mounted_element(f"{identifier}_chat_interface"):
+                logger.critical(f"Existing SharedSpase {identifier} has next mounted elements: {list(map(lambda x: x.id, existing_space.get_mounted_elements().values()))}")
                 logger.warning(f"Existing SharedSpace {identifier} missing chat_interface. Attempting to add it via factory.")
                 self._create_chat_interface_in_shared_space_with_factory(existing_space)
             return existing_space

@@ -195,10 +195,10 @@ class ActivityClient:
                 logger.warning(f"Received non-dict request_queued from '{adapter_id}': {raw_payload}")
                 return
 
-            data = raw_payload.get('data', {})
-            adapter_specific_request_id = data.get('requestId') # Adapter's own ID for the operation
+            
+            adapter_specific_request_id = raw_payload.get('request_id') # Adapter's own ID for the operation
             # Adapter *must* echo back the internal_request_id we sent with the original bot_response
-            mah_internal_request_id_echo = data.get('internal_request_id') 
+            mah_internal_request_id_echo = raw_payload.get('internal_request_id') 
 
             if not adapter_specific_request_id or not mah_internal_request_id_echo:
                 logger.error(f"Received request_queued from '{adapter_id}' missing 'requestId' or 'internal_request_id'. Cannot link. Payload: {raw_payload}")
@@ -233,7 +233,7 @@ class ActivityClient:
                  return
             
             # For successful message sends, other actions (edit, delete etc.)
-            adapter_request_id = raw_payload.get('requestId') # Assuming adapter returns the original requestId
+            adapter_request_id = raw_payload.get('request_id') # Assuming adapter returns the original requestId
             data = raw_payload.get('data', {}) # The actual content data from the adapter response
 
             logger.debug(f"Received request_success from '{adapter_id}'. Adapter Request ID: {adapter_request_id}, Data: {data}")
@@ -497,11 +497,8 @@ class ActivityClient:
         # The adapter is more likely to return its *own* requestId in its immediate response.
         data_to_emit = {
              "event_type": outgoing_event_type, # e.g., "send_message"
-             "data": { 
-                 **outgoing_data, 
-                 # CRUCIAL: Send our internal_request_id so adapter can echo it in request_queued
-                 "internal_request_id_for_echo": internal_request_id_from_mah 
-            }
+             "internal_request_id": internal_request_id_from_mah,
+             "data": outgoing_data,
         }
         
         # Emit using the "bot_response" event name to the adapter
@@ -515,7 +512,6 @@ class ActivityClient:
             # For python-socketio, emit can have a callback for acknowledgment.
             
             adapter_response = await client.emit(event_name_to_emit, data_to_emit) # Adapters might not return directly
-            
             # SIMPLIFICATION: For now, we assume the adapter might return an immediate ack with its own requestId.
             # If not, this model is flawed and needs adapter-specific logic for how to get that initial adapter_request_id.
             # Example: If adapter_response = {"requestId": "adapter_req_xyz"}

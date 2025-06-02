@@ -296,7 +296,7 @@ class CompressionEngineComponent(Component):
         """
         try:
             interaction_record = {
-                "timestamp": datetime.now(),
+                "timestamp": datetime.now().isoformat(),  # Convert to string immediately
                 "context_received": chain_data.get("context_received"),
                 "agent_response": chain_data.get("agent_response"),
                 "tool_calls": chain_data.get("tool_calls", []),

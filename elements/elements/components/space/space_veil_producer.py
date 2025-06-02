@@ -131,7 +131,7 @@ class SpaceVeilProducer(VeilProducer):
 
         space_flat_cache = self.owner._flat_veil_cache # Corrected attribute name usage
         space_root_veil_id = f"{owner_id}_space_root"
-
+        
         if not space_flat_cache or space_root_veil_id not in space_flat_cache:
             logger.warning(f"[{owner_id}/{self.COMPONENT_TYPE}] Space's flat cache is empty or root node '{space_root_veil_id}' missing. Cannot build full VEIL via get_full_veil.")
             # Return a minimal representation of the root if it's missing, or an error structure
@@ -162,19 +162,26 @@ class SpaceVeilProducer(VeilProducer):
             logger.error(f"[{self.COMPONENT_TYPE}] Owner not set, cannot calculate delta.")
             return None
 
-        # Optional: Check if owner is of type Space, if Space class is available for import
-        # from ...space import Space # Adjust import as needed
-        # if not isinstance(self.owner, Space):
-        #     logger.error(f"[{self.owner.id if self.owner else 'UnknownOwner'}/{self.COMPONENT_TYPE}] SpaceVeilProducer attached to non-Space element: {type(self.owner)}. Cannot calculate delta.")
-        #     return None
-
         owner_id = self.owner.id
         delta_operations = []
         space_root_veil_id = f"{owner_id}_space_root"
         current_space_props = self._get_current_space_properties()
 
-        if not self._state.get('_has_produced_root_add_before', False):
-            logger.info(f"[{owner_id}/{self.COMPONENT_TYPE}] Generating 'add_node' for Space root '{space_root_veil_id}'.")
+        # NEW: Check actual cache state, not just the flag
+        # This prevents race conditions where cache gets cleared but flag says we already produced root
+        root_exists_in_cache = (hasattr(self.owner, '_flat_veil_cache') and 
+                               self.owner._flat_veil_cache and 
+                               space_root_veil_id in self.owner._flat_veil_cache)
+        
+        has_produced_flag = self._state.get('_has_produced_root_add_before', False)
+        
+        # Generate add_node if either: never produced before OR root missing from cache
+        if not has_produced_flag or not root_exists_in_cache:
+            if not root_exists_in_cache:
+                logger.warning(f"[{owner_id}/{self.COMPONENT_TYPE}] Space root '{space_root_veil_id}' missing from cache, regenerating add_node operation (flag was: {has_produced_flag})")
+            else:
+                logger.info(f"[{owner_id}/{self.COMPONENT_TYPE}] Generating initial 'add_node' for Space root '{space_root_veil_id}'.")
+            
             delta_operations.append({
                 "op": "add_node",
                 "node": {
@@ -185,6 +192,7 @@ class SpaceVeilProducer(VeilProducer):
                 }
             })
         else:
+            # Root exists in cache and we've produced it before, check for property updates
             last_space_props = self._state.get('_last_space_properties', {})
             if current_space_props != last_space_props:
                 logger.info(f"[{owner_id}/{self.COMPONENT_TYPE}] Generating 'update_node' for Space root properties on '{space_root_veil_id}'.")
@@ -200,7 +208,9 @@ class SpaceVeilProducer(VeilProducer):
             logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] No delta operations for Space root this frame.")
 
         self._state['_last_space_properties'] = copy.deepcopy(current_space_props)
-        if not self._state.get('_has_produced_root_add_before', False):
+        
+        # Update the flag based on what we actually generated
+        if not has_produced_flag:
             # Check if an add_node op for the root was actually generated
             for delta_op in delta_operations:
                 if delta_op.get("op") == "add_node" and \
@@ -213,5 +223,6 @@ class SpaceVeilProducer(VeilProducer):
         logger.debug(
             f"[{owner_id}/{self.COMPONENT_TYPE}] calculate_delta completed. "
             f"Root add produced flag: {self._state.get('_has_produced_root_add_before', False)}. "
+            f"Root exists in cache: {root_exists_in_cache}"
         )
         return delta_operations if delta_operations else None

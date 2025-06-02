@@ -19,6 +19,7 @@ from elements.space_registry import SpaceRegistry
 from llm.provider_factory import LLMProviderFactory # Use factory
 from host.event_loop import HostEventLoop
 from host.routing.external_event_router import ExternalEventRouter
+from host.modules.routing.host_router import HostRouter
 # Removed ActivityListener as ActivityClient handles incoming on its connections
 # from host.modules.activities.activity_listener import ActivityListener
 from host.modules.activities.activity_client import ActivityClient
@@ -37,7 +38,7 @@ from host.config import load_settings, HostSettings
 
 # ---------------
 
-def configure_logging(log_level: str = "INFO", log_format: str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'):
+def configure_logging(log_level: str = "CRITICAL", log_format: str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'):
     """Configure logging with the specified level and format."""
     try:
         # Get numeric log level from string
@@ -61,167 +62,127 @@ def configure_logging(log_level: str = "INFO", log_format: str = '%(asctime)s - 
 
 async def amain():
     """Asynchronous main entry point."""
-    logger.info("Starting Host Process (Async - Refactored)..." + "\n" + "-"*20)
-
-    # --- Configuration ---
+    settings = load_settings()
+    
+    # Configure logging with settings from configuration
+    configure_logging(log_level=settings.log_level, log_format=settings.log_format)
+    
+    # Get the SpaceRegistry instance and initialize its storage FIRST
+    space_registry = SpaceRegistry.get_instance()
+    logger.info("Initializing SpaceRegistry with storage for coordinated replay...")
+    
+    # NEW: Initialize SpaceRegistry storage first - this will recreate SharedSpaces
     try:
-        settings: HostSettings = load_settings()
-    except ValueError as e: # If load_settings re-raises
-        logger.critical(f"Halting due to configuration loading error: {e}")
+        registry_storage_success = await space_registry.initialize_storage()
+        if registry_storage_success:
+            logger.info("✓ SpaceRegistry storage initialized - SharedSpaces recreated from storage")
+        else:
+            logger.warning("⚠ SpaceRegistry storage initialization failed - will proceed without persistence")
+    except Exception as e:
+        logger.error(f"SpaceRegistry storage initialization error: {e}", exc_info=True)
+        logger.warning("Proceeding without SpaceRegistry persistence")
+
+    # Initialize LLM provider using factory and proper config structure
+    logger.info("Initializing LLM provider...")
+    if not settings.llm_provider.api_key:
+        logger.error("LLM API key not set. Please set CONNECTOME_LLM_API_KEY in your .env file.")
+        return
+        
+    try:
+        # Convert LLMConfig to dict for factory
+        llm_config_dict = settings.llm_provider.model_dump(exclude_none=True)
+        llm_provider = LLMProviderFactory.create_from_config(llm_config_dict)
+        logger.info(f"LLM Provider created: {settings.llm_provider.type} with model {settings.llm_provider.default_model}")
+    except Exception as e:
+        logger.error(f"Failed to create LLM provider: {e}", exc_info=True)
         return
     
-    # --- Configure Logging from Settings ---
-    configure_logging(settings.log_level, settings.log_format)
-    logger.info("Configuration loaded and logging configured.")
-    # -------------------------------------
-
-    # --- Scan and load components early ---
+    # Create HostRouter (simple dependency)
+    host_router = HostRouter()
+    
+    # Create a minimal HostEventLoop first
+    logger.info("Initializing HostEventLoop...")
+    event_loop = HostEventLoop(
+        host_router=host_router,
+        activity_client=None,  # Will be set after ActivityClient creation
+        external_event_router=None,  # Will be set after ExternalEventRouter creation
+        space_registry=space_registry
+    )
+    
+    # Now create ExternalEventRouter
+    logger.info("Initializing ExternalEventRouter...")
+    external_event_router = ExternalEventRouter(
+        space_registry=space_registry,
+        agent_configs=settings.agents
+    )
+    
+    # Set the external_event_router reference in event_loop
+    event_loop.external_event_router = external_event_router
+    
+    # Initialize Activity Client with proper parameters
+    logger.info("Initializing ActivityClient...")
+    adapter_configs_as_dicts = [config.model_dump() for config in settings.activity_client_adapter_configs]
+    activity_client = ActivityClient(host_event_loop=event_loop, adapter_api_configs=adapter_configs_as_dicts)
+    
+    # Set activity_client reference in event_loop after creation
+    event_loop.activity_client = activity_client
+    
+    # Load registered agent loops dynamically
     logger.info("Scanning for registered components...")
-    try:
-        scan_and_load_components()
-        logger.info(f"Component scanning complete. Registry: {list(COMPONENT_REGISTRY.keys())}")
-    except Exception as e:
-        logger.critical(f"Failed to scan and load components: {e}", exc_info=True)
-        return # Cannot proceed without components
-    # --------------------------------------
-
-    # --- Initialize Core Infrastructure ---
-    llm_provider = None
-    space_registry = None
-    activity_client = None
-    external_event_router = None
-    event_loop = None
-
-    try:
-        logger.info("Initializing Core Infrastructure...")
+    scan_and_load_components()
+    logger.info(f"Available agent loop component types: {list(COMPONENT_REGISTRY.keys())}")
+    
+    # After component scanning, we can validate agent configurations
+    logger.info("Processing agent configurations...")
+    agents_processed = 0
+    for agent_config in settings.agents:
+        try:
+            agent_loop_type = agent_config.agent_loop_component_type_name
+            if agent_loop_type not in COMPONENT_REGISTRY:
+                logger.error(f"Agent loop component type '{agent_loop_type}' not found in registry. Available types: {list(COMPONENT_REGISTRY.keys())}")
+                continue
+            
+            # Get the component class from registry
+            agent_loop_component_class = COMPONENT_REGISTRY[agent_loop_type]
+            
+            # Create InnerSpace for this agent directly
+            logger.info(f"Creating InnerSpace for agent '{agent_config.name}' ({agent_config.agent_id})")
+            inner_space = InnerSpace(
+                element_id=f"{agent_config.agent_id}_inner_space",
+                name=f"{agent_config.name}'s Mind", 
+                agent_name=agent_config.name,
+                description=f"Inner space for agent {agent_config.name}",
+                agent_id=agent_config.agent_id,
+                llm_provider=llm_provider,
+                agent_loop_component_type=agent_loop_component_class,
+                outgoing_action_callback=event_loop.get_outgoing_action_callback(),
+                agent_purpose=agent_config.description
+            )
+            
+            # Register the InnerSpace with SpaceRegistry
+            space_registry.register_inner_space(inner_space, agent_config.agent_id)
+            
+            agents_processed += 1
+            logger.info(f"✓ Agent '{agent_config.name}' ({agent_config.agent_id}) InnerSpace created and registered successfully")
+                
+        except Exception as e:
+            logger.exception(f"Error processing agent config {agent_config.agent_id}: {e}")
+    
+    if agents_processed == 0:
+        logger.error("No agents were successfully configured. Check your CONNECTOME_AGENTS_JSON configuration.")
+        return
         
-        # 1. LLM Provider (using factory and settings)
-        if not settings.llm_provider:
-             raise ValueError("LLM provider configuration ('llm_provider') is missing from settings.")
-        llm_provider_dict = settings.llm_provider.model_dump(exclude_none=True) # Exclude None for cleaner config
-        llm_provider = LLMProviderFactory.create_from_config(llm_provider_dict)
-        logger.info(f"LLM Provider created: {settings.llm_provider.type}")
+    logger.info(f"Successfully configured {agents_processed} agent(s)")
+    
+    # In this coordinated approach:
+    # 1. ✓ SpaceRegistry storage initialized first - SharedSpaces recreated
+    # 2. ✓ Agents initialized - InnerSpace replay can now connect to existing SharedSpaces  
+    # 3. ✓ ActivityClient connections happen after internal state restoration
+    
+    # Start Activity Client (external connections)
+    logger.info("Starting Activity Client connections...")
+    await activity_client.start_connections()
 
-        # 2. Space Registry
-        space_registry = SpaceRegistry.get_instance() # Use singleton getter
-        logger.info("SpaceRegistry initialized (singleton instance).")
-
-        # 3. Activity Client (Placeholder loop, injected later)
-        parsed_adapter_configs = [adapter.model_dump(exclude_none=True) for adapter in settings.activity_client_adapter_configs]
-        activity_client = ActivityClient(
-            host_event_loop=None, # Pass None initially
-            adapter_api_configs=parsed_adapter_configs
-        )
-        logger.info(f"ActivityClient initialized with {len(settings.activity_client_adapter_configs)} adapter configs.")
-        
-        # --- IMPORTANT: Initialization order ---
-        # Event loop needs dependencies, but some dependencies (like ExternalEventRouter)
-        # need callbacks from the event loop. Initialize loop partially, then router, then finalize loop.
-
-        # 4. Host Event Loop (Initial Pass - without Router callback yet)
-        # We need the loop instance to get the mark_agent_for_cycle callback for the router.
-        # Also need agent_configs for the loop.
-        event_loop = HostEventLoop(
-            host_router=None, # HostRouter seems obsolete, passing None
-            activity_client=activity_client,
-            external_event_router=None, # Pass None initially
-            space_registry=space_registry,
-            agent_configs=settings.agents # Pass parsed agent configs
-        )
-        logger.info("HostEventLoop partially initialized (pre-router).")
-
-        # 5. External Event Router (Inject SpaceRegistry and Loop Callback)
-        if not event_loop: raise RuntimeError("Event loop failed initialization") # Should not happen
-        
-        external_event_router = ExternalEventRouter(
-            space_registry=space_registry,
-            mark_agent_for_cycle_callback=event_loop.mark_agent_for_cycle, # Pass the method
-            agent_configs=settings.agents # <<< Pass agent configs
-        )
-        logger.info("ExternalEventRouter initialized and linked to HostEventLoop callback.")
-        
-        # 6. Finalize Host Event Loop (Inject Router)
-        event_loop.external_event_router = external_event_router # Inject the router instance
-        logger.info("HostEventLoop finalized with ExternalEventRouter reference.")
-        
-        # 7. Inject correct HostEventLoop instance into ActivityClient
-        if not activity_client: raise RuntimeError("Activity client failed initialization") # Should not happen
-        activity_client._host_event_loop = event_loop 
-        space_registry.response_callback = event_loop.get_outgoing_action_callback()
-        logger.info("HostEventLoop reference injected into ActivityClient.")
-        
-    except Exception as e:
-        logger.exception(f"Failed to initialize core infrastructure: {e}")
-        return 
-    # -------------------------------------
-
-    # --- Initialize InnerSpaces for Agents ---
-    if not settings.agents:
-         logger.warning("No agents configured in settings.")
-    else:
-         logger.info(f"Initializing {len(settings.agents)} agent(s)...")
-         for agent_config in settings.agents:
-              agent_id = agent_config.agent_id
-              agent_name = agent_config.name
-              if not agent_id:
-                   logger.error("Skipping agent config with missing 'agent_id'")
-                   continue
-                   
-              logger.info(f"Initializing InnerSpace for agent: {agent_name} ({agent_id})")
-              try:
-                   # Determine Agent Loop Component Type from Registry
-                   agent_loop_type_name = agent_config.agent_loop_component_type_name
-                   agent_loop_type = COMPONENT_REGISTRY.get(agent_loop_type_name)
-                   
-                   if not agent_loop_type:
-                       logger.error(f"Agent loop component type '{agent_loop_type_name}' not found in registry or not a subclass of BaseAgentLoopComponent for agent {agent_id}. Skipping.")
-                       continue
-                   
-                   # Get LLM Provider (use default or agent-specific override - TODO)
-                   agent_llm_provider = llm_provider # Default
-                   
-                   # Get callbacks from the event loop
-                   outgoing_callback = event_loop.get_outgoing_action_callback()
-                   mark_agent_callback = event_loop.mark_agent_for_cycle # Get the callback
-                   
-                   # Create InnerSpace instance, passing agent_id and mark_agent_callback
-                   inner_space = InnerSpace(
-                       element_id=f"innerspace_{agent_id}",
-                       name=f"{agent_name}_InnerSpace",
-                       agent_name=agent_name,
-                       description=agent_config.description,
-                       agent_id=agent_id, # <<< Pass agent_id
-                       llm_provider=agent_llm_provider,
-                       agent_loop_component_type=agent_loop_type,
-                       outgoing_action_callback=outgoing_callback,
-                       mark_agent_for_cycle_callback=mark_agent_callback, # <<< Pass callback
-                       # components_to_add=agent_config.inner_space_extra_components # If using this config
-                   )
-                   
-                   # Register InnerSpace with SpaceRegistry
-                   registration_success = space_registry.register_inner_space(inner_space, agent_id)
-                   
-                   if registration_success:
-                       logger.info(f"Successfully initialized and registered InnerSpace for {agent_name} ({agent_id}).")
-                   else:
-                       logger.error(f"Failed to register InnerSpace for {agent_name} ({agent_id}). Skipping agent.")
-              
-              except Exception as e:
-                   logger.exception(f"Error initializing InnerSpace for agent {agent_id}: {e}")
-    # -------------------------------------
-
-    # --- Start Activity Client Connections --- (After EventLoop is fully ready)
-    if activity_client:
-        logger.info("Starting ActivityClient connections...")
-        await activity_client.start_connections()
-        logger.info("ActivityClient connections started.")
-    # -----------------------------------------
-
-    # --- Start Event Loop --- 
-    if not event_loop:
-         logger.critical("HostEventLoop failed to initialize. Cannot run.")
-         return
-         
     try:
         logger.info("Starting Host Event Loop...")
         await event_loop.run() # Run the main async loop
@@ -232,13 +193,73 @@ async def amain():
          logger.exception(f"Host Event Loop encountered a critical error: {e}")
     finally:
          logger.info("Host process shutting down...")
+         
+         # NEW: Graceful shutdown with coordinated persistence
+         if space_registry:
+             await shutdown_all_spaces_gracefully(space_registry)
+             # NEW: SpaceRegistry persistence during shutdown
+             await space_registry.shutdown_with_persistence()
+         
          if event_loop: 
              event_loop.stop() 
          if activity_client:
              await activity_client.shutdown()
-         # Add shutdown for other components if needed (e.g., SpaceRegistry persistence)
          logger.info("Shutdown sequence complete.")
-    # ------------------------------------
+
+async def shutdown_all_spaces_gracefully(space_registry):
+    """
+    Gracefully shutdown all spaces in the registry, including VEIL snapshot storage.
+    
+    Args:
+        space_registry: The SpaceRegistry instance containing all spaces
+    """
+    try:
+        logger.info("Beginning graceful shutdown of all spaces...")
+        
+        # Get all registered spaces
+        all_spaces = []
+        
+        # Get all spaces (includes both InnerSpaces and SharedSpaces)
+        spaces_dict = space_registry.get_spaces()
+        if spaces_dict:
+            all_spaces.extend(spaces_dict.values())
+            logger.info(f"Found {len(spaces_dict)} total spaces for shutdown")
+        
+        if not all_spaces:
+            logger.info("No spaces found for shutdown")
+            return
+        
+        logger.info(f"Shutting down {len(all_spaces)} spaces...")
+        
+        # Shutdown each space
+        for space in all_spaces:
+            try:
+                space_name = getattr(space, 'name', 'Unknown')
+                space_id = getattr(space, 'id', 'Unknown')
+                space_type = space.__class__.__name__
+                
+                # Check if this space has VEIL snapshot capability
+                if hasattr(space, 'shutdown_with_veil_snapshot'):
+                    logger.info(f"Shutting down {space_type} with VEIL snapshot: {space_name} ({space_id})")
+                    success = await space.shutdown_with_veil_snapshot()
+                    if success:
+                        logger.info(f"✓ Successfully shut down space: {space_name}")
+                    else:
+                        logger.warning(f"⚠ Space shutdown completed with issues: {space_name}")
+                else:
+                    # Fallback for spaces without snapshot capability
+                    logger.info(f"Shutting down {space_type} (basic): {space_name} ({space_id})")
+                    # Could add other cleanup here if needed
+                    
+            except Exception as e:
+                space_name = getattr(space, 'name', 'Unknown')
+                logger.error(f"Error shutting down space {space_name}: {e}", exc_info=True)
+                # Continue with other spaces even if one fails
+        
+        logger.info("Graceful shutdown of all spaces completed")
+        
+    except Exception as e:
+        logger.error(f"Error during graceful spaces shutdown: {e}", exc_info=True)
 
 def main():
     """Synchronous entry point."""
