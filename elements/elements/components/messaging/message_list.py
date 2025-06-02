@@ -131,21 +131,34 @@ class MessageListComponent(Component):
         activation_needed = False
         activation_reason = None
         
-        # For first implementation: emit activation for any message that has "is_direct_message" flag
         if event_type == "message_received":
+            # Check for direct messages first
             is_dm = content_payload.get('is_dm', False)
             if is_dm:
                 activation_needed = True
                 activation_reason = "direct_message_received"
                 logger.debug(f"[{self.owner.id}] Activation check: DM received, triggering agent activation")
+            
+            # NEW: Check for mentions if not already activated by DM
+            if not activation_needed:
+                mentions = content_payload.get('mentions', [])
+                if mentions:
+                    # Check if any mention is for our agent
+                    parent_space = self.owner.get_parent_object() if hasattr(self.owner, 'get_parent_object') else None
+                    if parent_space and hasattr(parent_space, 'is_mention_for_agent'):
+                        if parent_space.is_mention_for_agent(mentions):
+                            activation_needed = True
+                            activation_reason = "agent_mentioned"
+                            logger.debug(f"[{self.owner.id}] Activation check: Agent mentioned in {mentions}, triggering agent activation")
+                        else:
+                            logger.debug(f"[{self.owner.id}] Mentions detected {mentions} but none are for our agent")
+                    else:
+                        logger.debug(f"[{self.owner.id}] Mentions detected {mentions} but cannot check if for our agent (no parent space or method)")
         
-        # Future expansion: could check other conditions like mentions, specific keywords, etc.
+        # Future expansion: could check other conditions like specific keywords, etc.
         # elif event_type == "message_received":
-        #     mentions = content_payload.get('mentions', [])
-        #     if mentions:
-        #         activation_needed = True
-        #         activation_reason = "agent_mentioned"
-        
+        #     # Check for keywords, urgent flags, etc.
+        logger.critical(f"[{self.owner.id}] Activation check: {activation_needed}")
         if activation_needed:
             self._emit_activation_call(activation_reason, event_type, content_payload)
     
@@ -155,7 +168,7 @@ class MessageListComponent(Component):
         This is a non-replayable event that signals AgentLoop to consider running a cycle.
         
         Args:
-            reason: Why activation was triggered (e.g., "direct_message_received")
+            reason: Why activation was triggered (e.g., "direct_message_received", "agent_mentioned")
             triggering_event_type: The event type that caused this activation
             triggering_payload: The payload of the triggering event
         """
@@ -179,7 +192,10 @@ class MessageListComponent(Component):
                 "is_dm": triggering_payload.get('is_dm', False),
                 "conversation_id": triggering_payload.get('external_conversation_id'),
                 "recent_sender": triggering_payload.get('sender_display_name'),
-                "recent_message_preview": triggering_payload.get('text', '')[:100] if triggering_payload.get('text') else None
+                "recent_message_preview": triggering_payload.get('text', '')[:100] if triggering_payload.get('text') else None,
+                # NEW: Include mention information for agent_mentioned activations
+                "activation_reason": reason,
+                "mentions": triggering_payload.get('mentions', []) if reason == "agent_mentioned" else None
             }
         }
         
@@ -199,7 +215,9 @@ class MessageListComponent(Component):
                 "focus_context": focus_context,  # Also include in payload for easy access
                 # Don't include full triggering_payload to keep event lightweight
                 "conversation_id": triggering_payload.get('external_conversation_id'),
-                "sender_id": triggering_payload.get('sender_external_id')
+                "sender_id": triggering_payload.get('sender_external_id'),
+                # NEW: Include mention information
+                "mentions": triggering_payload.get('mentions', []) if reason == "agent_mentioned" else None
             }
         }
         
@@ -214,6 +232,7 @@ class MessageListComponent(Component):
 
     def _handle_new_message(self, message_content: Dict[str, Any]) -> bool:
         """Adds a new message to the list. message_content is the actual message data (e.g., adapter_data)."""
+        
         # Extract relevant fields from the message_content
         internal_message_id = f"msg_{self.owner.id}_{int(time.time()*1000)}_{len(self._state['_messages'])}"
         

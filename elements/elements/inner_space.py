@@ -5,11 +5,12 @@ Uses the component architecture pattern consistently.
 """
 
 import logging
-from typing import Dict, Any, Optional, List, Type, Callable
+from typing import Dict, Any, Optional, List, Type, Callable, Set
 import inspect
 import time
 import re # For _generate_safe_id_string
 import asyncio
+import copy
 
 from .space import Space  # Inherit from Space to get Container and Timeline functionality
 from .base import BaseElement, MountType
@@ -108,6 +109,11 @@ class InnerSpace(Space):
         self.agent_id = agent_id
         self.agent_name = agent_name
         self._llm_provider = llm_provider
+        
+        # NEW: Adapter tracking for mention-based activation
+        self._adapter_mappings: Dict[str, Dict[str, str]] = {}  # {adapter_type: {adapter_name: adapter_id}}
+        self._agent_adapter_ids: Set[str] = set()  # Known adapter_ids for this agent
+        
         # self._outgoing_action_callback = outgoing_action_callback # Already set by super().__init__ if Space stores it
         # self._space_registry = space_registry # REMOVE ATTRIBUTE
         
@@ -695,3 +701,68 @@ class InnerSpace(Space):
 
         # Call the super method with the augmented context
         return await super().execute_action_on_element(element_id, action_name, parameters, calling_context=final_calling_context)
+    
+    def register_adapter_mapping(self, adapter_type: str, adapter_name: str, adapter_id: str) -> None:
+        """
+        Register an adapter mapping discovered from incoming messages.
+        
+        Args:
+            adapter_type: Type of adapter (e.g., 'zulip', 'discord')
+            adapter_name: Display name of the adapter/bot
+            adapter_id: Unique ID assigned by the platform
+        """
+        if adapter_type not in self._adapter_mappings:
+            self._adapter_mappings[adapter_type] = {}
+
+        logger.critical(f"[{self.agent_name}] Registering adapter mapping: {adapter_type}/{adapter_name} -> {adapter_id}")
+            
+        # Register adapter mapping - if message reached this InnerSpace, it's for this agent
+        previous_id = self._adapter_mappings[adapter_type].get(adapter_name)
+        if previous_id and previous_id != adapter_id:
+            logger.warning(f"[{self.id}] Adapter ID changed for {adapter_type}/{adapter_name}: {previous_id} -> {adapter_id}")
+        
+        self._adapter_mappings[adapter_type][adapter_name] = adapter_id
+        self._agent_adapter_ids.add(adapter_id)
+        
+        logger.critical(f"[{self.id}] Registered adapter mapping COMPLETE: {adapter_type}/{adapter_name} -> {adapter_id}")
+        logger.info(f"[{self.id}] Registered adapter mapping: {adapter_type}/{adapter_name} -> {adapter_id}")
+
+    def is_mention_for_agent(self, mentions: List[str]) -> bool:
+        """
+        Check if any of the mentions are for this agent.
+        
+        Args:
+            mentions: List of adapter_ids that were mentioned
+            
+        Returns:
+            True if this agent was mentioned, False otherwise
+        """
+        if not mentions:
+            return False
+            
+        # Check if any mentioned adapter_id belongs to this agent
+        for mention_id in mentions:
+            logger.critical(f"[{self.id}] Mention detected: {mention_id}, agent_adapter_ids: {self.get_agent_adapter_ids()}")
+            if mention_id in self._agent_adapter_ids:
+                logger.debug(f"[{self.id}] Agent mention detected: adapter_id {mention_id}")
+                return True
+                
+        return False
+
+    def get_agent_adapter_ids(self) -> Set[str]:
+        """
+        Get all known adapter IDs for this agent.
+        
+        Returns:
+            Set of adapter_ids associated with this agent
+        """
+        return self._agent_adapter_ids.copy()
+
+    def get_adapter_mappings(self) -> Dict[str, Dict[str, str]]:
+        """
+        Get all adapter mappings discovered so far.
+        
+        Returns:
+            Dictionary of adapter mappings {adapter_type: {adapter_name: adapter_id}}
+        """
+        return copy.deepcopy(self._adapter_mappings)

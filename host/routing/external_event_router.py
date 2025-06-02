@@ -55,10 +55,16 @@ class ExternalEventRouter:
         self.agent_configs = agent_configs
         logger.info(f"ExternalEventRouter initialized with {len(agent_configs)} agent configs.")
 
-    async def _create_chat_message_details_payload(self, source_adapter_id: str, adapter_data: Dict[str, Any], is_dm: bool) -> Dict[str, Any]:
+    async def _create_chat_message_details_payload(self, source_adapter_id: str, adapter_data: Dict[str, Any], is_dm: bool, adapter_type: Optional[str] = None) -> Dict[str, Any]:
         """
         Creates a standardized dictionary containing the core details of a message,
         intended to be the 'payload' part of the event that ChatManagerComponent processes.
+        
+        Args:
+            source_adapter_id: ID of the source adapter
+            adapter_data: Raw data from the adapter
+            is_dm: Whether this is a direct message
+            adapter_type: Type of adapter (e.g., 'zulip', 'discord') for adapter mapping registration
         """
         sender_info = adapter_data.get('sender', {})
         # The conversation_id from adapter_data is the key for external_conversation_id
@@ -75,7 +81,9 @@ class ExternalEventRouter:
             "original_message_id_external": adapter_data.get("message_id"),
             "mentions": adapter_data.get("mentions", []),
             "attachments": adapter_data.get("attachments", []),
-            "original_adapter_data": adapter_data # Keep the raw adapter data
+            "original_adapter_data": adapter_data, # Keep the raw adapter data
+            # NEW: Include adapter_type for adapter mapping registration
+            "adapter_type": adapter_type
         }
         return details_payload
     
@@ -98,6 +106,7 @@ class ExternalEventRouter:
                                              Expected structure:
                                              {
                                                  "source_adapter_id": "adapter_x",
+                                                 "adapter_type": "zulip",  # NEW: adapter type
                                                  "payload": {
                                                      "event_type_from_adapter": "message_received",
                                                      "adapter_data": { ... raw data ... }
@@ -111,6 +120,7 @@ class ExternalEventRouter:
             return
 
         source_adapter_id = event_data_from_activity_client.get("source_adapter_id")
+        adapter_type = event_data_from_activity_client.get("adapter_type")  # NEW: Extract adapter_type
         # The payload is now nested one level deeper
         payload = event_data_from_activity_client.get("payload") 
 
@@ -134,7 +144,7 @@ class ExternalEventRouter:
         logger.critical(f"ExternalEventRouter routing event: Adapter='{source_adapter_id}', Type='{event_type_from_adapter}', AdapterData='{adapter_data}'")
         # --- Routing Logic based on event_type_from_adapter ---
         if event_type_from_adapter == "message_received":
-            await self._handle_direct_message(source_adapter_id, adapter_data)
+            await self._handle_direct_message(source_adapter_id, adapter_data, adapter_type)
         elif event_type_from_adapter == "message_updated":
             await self._handle_message_updated(source_adapter_id, adapter_data)
         elif event_type_from_adapter == "message_deleted":
@@ -284,7 +294,7 @@ class ExternalEventRouter:
         return {"timeline_id": primary_timeline_id}
 
     # --- MODIFIED HANDLERS ---
-    async def _handle_direct_message(self, source_adapter_id: str, adapter_data: Dict[str, Any]):
+    async def _handle_direct_message(self, source_adapter_id: str, adapter_data: Dict[str, Any], adapter_type: Optional[str] = None):
         """
         Handles a direct message, routing it to the recipient agent's InnerSpace
         and notifying HostEventLoop to potentially trigger a cycle.
@@ -307,7 +317,7 @@ class ExternalEventRouter:
 
         # Construct the standardized inner payload for ChatManagerComponent
         is_dm_flag = self._is_direct_message(adapter_data)
-        chat_message_details = await self._create_chat_message_details_payload(source_adapter_id, adapter_data, is_dm=is_dm_flag)
+        chat_message_details = await self._create_chat_message_details_payload(source_adapter_id, adapter_data, is_dm=is_dm_flag, adapter_type=adapter_type)
         
         # Construct the event to be recorded on the InnerSpace's timeline
         # The 'payload' of this event will be what ChatManagerComponent processes.
@@ -330,7 +340,7 @@ class ExternalEventRouter:
         except Exception as e:
             logger.error(f"Error in InnerSpace {target_inner_space.id} receiving DM: {e}", exc_info=True)
 
-    async def _handle_channel_message(self, source_adapter_id: str, adapter_data: Dict[str, Any]):
+    async def _handle_channel_message(self, source_adapter_id: str, adapter_data: Dict[str, Any], adapter_type: Optional[str] = None):
         """
         Handles a public channel message, routing it to a SharedSpace.
         Then, checks ALL configured agents to see if they were mentioned and ensures an uplink.
@@ -359,7 +369,7 @@ class ExternalEventRouter:
         
         # Construct the standardized inner payload for ChatManagerComponent
         is_dm_flag = False # This is a channel message
-        chat_message_details = await self._create_chat_message_details_payload(source_adapter_id, adapter_data, is_dm=is_dm_flag)
+        chat_message_details = await self._create_chat_message_details_payload(source_adapter_id, adapter_data, is_dm=is_dm_flag, adapter_type=adapter_type)
 
         # Construct the event to be recorded on the SharedSpace's timeline
         channel_event_for_timeline = {

@@ -379,6 +379,52 @@ class Space(BaseElement):
         
         logger.debug(f"[{self.id}] Element with ID '{element_id}' not found in this space or its direct children.")
         return None
+
+    def _register_adapter_mapping_from_event(self, event_payload: Dict[str, Any]) -> None:
+        """
+        Register adapter mapping from a message event for mention detection.
+        Extracts agent adapter information from the event payload and registers it if it matches this agent.
+        
+        Args:
+            event_payload: The message event payload containing original_adapter_data
+        """
+        try:
+            # Only register for InnerSpaces that have the registration method
+            if not hasattr(self, 'register_adapter_mapping') or not callable(getattr(self, 'register_adapter_mapping')):
+                return
+            
+            # Extract data from the event payload (nested in payload.payload)
+            inner_payload = event_payload.get('payload', {})
+            original_adapter_data = inner_payload.get('original_adapter_data', {})
+            
+            if not original_adapter_data:
+                logger.debug(f"[{self.id}] No original_adapter_data found in event for adapter mapping registration")
+                return
+            
+            # Extract agent information from the original adapter data
+            agent_adapter_name = original_adapter_data.get('adapter_name')  # e.g., "Alena Bot 2"
+            agent_adapter_id = original_adapter_data.get('adapter_id')      # e.g., "756"
+            adapter_type = inner_payload.get('adapter_type')               # e.g., "zulip" (might be None)
+            
+            # Use a fallback if adapter_type is missing
+            if not adapter_type:
+                # Try to infer from source_adapter_id or use 'unknown'
+                source_adapter_id = inner_payload.get('source_adapter_id', '')
+                if 'zulip' in source_adapter_id.lower():
+                    adapter_type = 'zulip'
+                elif 'discord' in source_adapter_id.lower():
+                    adapter_type = 'discord'
+                else:
+                    adapter_type = 'unknown'
+                
+            if agent_adapter_name and agent_adapter_id:
+                logger.debug(f"[{self.id}] Registering adapter mapping from event: {adapter_type}/{agent_adapter_name} -> {agent_adapter_id}")
+                self.register_adapter_mapping(adapter_type, agent_adapter_name, agent_adapter_id)
+            else:
+                logger.debug(f"[{self.id}] Incomplete adapter mapping data in event: adapter_name={agent_adapter_name}, adapter_id={agent_adapter_id}")
+                
+        except Exception as e:
+            logger.warning(f"[{self.id}] Error registering adapter mapping from event: {e}")
             
     # --- Core Event Processing --- 
     def receive_event(self, event_payload: Dict[str, Any], timeline_context: Dict[str, Any]) -> None:
@@ -408,6 +454,10 @@ class Space(BaseElement):
         else:
             # In replay mode, use a dummy event ID for processing
             new_event_id = f"replay_{event_type}_{int(time.time() * 1000)}"
+        
+        # NEW: Handle adapter mapping registration for message events (only for InnerSpaces)
+        if self.IS_INNER_SPACE:
+            self._register_adapter_mapping_from_event(event_payload)
             
         # Construct the full event node as it exists in the DAG for handlers
         full_event_node = { 
