@@ -168,6 +168,21 @@ class MessageListComponent(Component):
             logger.warning(f"[{self.owner.id}] Cannot emit activation_call: Parent space not found or not event-capable")
             return
         
+        # NEW: Include focus context for targeted rendering
+        focus_context = {
+            "focus_element_id": self.owner.id,  # The element that should be rendered
+            "focus_element_type": self.owner.__class__.__name__,
+            "focus_element_name": getattr(self.owner, 'name', 'Unknown'),
+            "conversation_context": {
+                "adapter_id": getattr(self.owner, 'adapter_id', None),
+                "external_conversation_id": getattr(self.owner, 'external_conversation_id', None),
+                "is_dm": triggering_payload.get('is_dm', False),
+                "conversation_id": triggering_payload.get('external_conversation_id'),
+                "recent_sender": triggering_payload.get('sender_display_name'),
+                "recent_message_preview": triggering_payload.get('text', '')[:100] if triggering_payload.get('text') else None
+            }
+        }
+        
         activation_event = {
             "event_type": "activation_call",
             "event_id": f"activation_{self.owner.id}_{int(time.time()*1000)}",
@@ -176,10 +191,12 @@ class MessageListComponent(Component):
             "triggering_event_type": triggering_event_type,
             "timestamp": time.time(),
             "is_replayable": False,  # Explicit flag: activation calls are runtime-only
+            "focus_context": focus_context,  # NEW: Context for focused rendering
             "payload": {
                 "reason": reason,
                 "source_element_id": self.owner.id,
                 "triggering_event_type": triggering_event_type,
+                "focus_context": focus_context,  # Also include in payload for easy access
                 # Don't include full triggering_payload to keep event lightweight
                 "conversation_id": triggering_payload.get('external_conversation_id'),
                 "sender_id": triggering_payload.get('sender_external_id')
@@ -191,7 +208,7 @@ class MessageListComponent(Component):
         
         try:
             parent_space.receive_event(activation_event, timeline_context)
-            logger.info(f"[{self.owner.id}] Emitted activation_call event to parent space. Reason: {reason}")
+            logger.info(f"[{self.owner.id}] Emitted focused activation_call event to parent space. Reason: {reason}, Focus: {self.owner.id}")
         except Exception as e:
             logger.error(f"[{self.owner.id}] Error emitting activation_call event: {e}", exc_info=True)
 

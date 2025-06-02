@@ -137,8 +137,15 @@ class BaseAgentLoopComponent(Component):
         try:
             logger.debug(f"[{self.agent_loop_name}] Starting activation cycle for reason: {activation_reason}")
             
-            # Run the actual agent cycle
-            await self.trigger_cycle()
+            # NEW: Extract focus context for targeted rendering
+            focus_context = event_payload.get('focus_context', {})
+            focus_element_id = focus_context.get('focus_element_id')
+            
+            if focus_element_id:
+                logger.info(f"[{self.agent_loop_name}] Activation with focused context on element: {focus_element_id}")
+            
+            # Run the actual agent cycle with focus context
+            await self.trigger_cycle(focus_context=focus_context)
             
             # Call on_frame_end to complete the frame
             if hasattr(self.parent_inner_space, 'on_frame_end') and callable(self.parent_inner_space.on_frame_end):
@@ -150,10 +157,13 @@ class BaseAgentLoopComponent(Component):
         except Exception as e:
             logger.error(f"[{self.agent_loop_name}] Error during activation cycle: {e}", exc_info=True)
 
-    async def trigger_cycle(self):
+    async def trigger_cycle(self, focus_context: Optional[Dict[str, Any]] = None):
         """
         This method is called by the HostEventLoop to initiate one cognitive cycle
         for the agent. Subclasses must implement this.
+        
+        Args:
+            focus_context: Optional context for focused rendering on specific elements
         """
         raise NotImplementedError("Subclasses must implement the trigger_cycle method.")
 
@@ -423,7 +433,7 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
         super().__init__(parent_inner_space=parent_inner_space, agent_loop_name=agent_loop_name, **kwargs)
         logger.info(f"SimpleRequestResponseLoopComponent with memory & orientation conversations initialized for '{self.parent_inner_space.name}'")
 
-    async def trigger_cycle(self):
+    async def trigger_cycle(self, focus_context: Optional[Dict[str, Any]] = None):
         logger.info(f"{self.agent_loop_name} ({self.id}): Simple cycle with memory triggered in InnerSpace '{self.parent_inner_space.name}'.")
 
         # Get required components
@@ -441,7 +451,25 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
         try:
             # --- 1. Get Fresh Context from HUD (Current Frame) ---
             logger.debug(f"{self.agent_loop_name} ({self.id}): Getting current context from HUD...")
+            
+            # NEW: Configure render options for focused or full context
             render_options = {"render_style": "verbose_tags"}
+            
+            # NEW: Apply focus context if provided
+            if focus_context and focus_context.get('focus_element_id'):
+                focus_element_id = focus_context['focus_element_id']
+                render_options['focus_element_id'] = focus_element_id
+                render_options['focused_rendering'] = True
+                
+                # Add conversation context for better understanding
+                conversation_context = focus_context.get('conversation_context', {})
+                if conversation_context:
+                    render_options['conversation_context'] = conversation_context
+                
+                logger.info(f"{self.agent_loop_name} ({self.id}): Using FOCUSED rendering on element {focus_element_id}")
+            else:
+                logger.info(f"{self.agent_loop_name} ({self.id}): Using FULL context rendering (no focus specified)")
+            
             current_context = await hud.get_agent_context(options=render_options)
 
             logger.critical(f"Current context: {current_context}")
@@ -451,7 +479,9 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                 logger.warning(f"{self.agent_loop_name} ({self.id}): HUD provided empty context. Aborting cycle.")
                 return
 
-            logger.debug(f"Generated agent context: {len(current_context)} characters")
+            # Update context length logging to indicate if focused
+            context_type = "FOCUSED" if focus_context and focus_context.get('focus_element_id') else "FULL"
+            logger.debug(f"Generated {context_type} agent context: {len(current_context)} characters")
 
             # --- 2. Get Memory Context from CompressionEngine ---
             memory_messages = []
@@ -683,7 +713,7 @@ class MultiStepToolLoopComponent(BaseAgentLoopComponent):
              logger.warning(f"Unclear state from last event type: {event_type}. Defaulting to initial_request.")
              return "initial_request"
 
-    async def trigger_cycle(self):
+    async def trigger_cycle(self, focus_context: Optional[Dict[str, Any]] = None):
         logger.info(f"{self.agent_loop_name} ({self.id}): Multi-step cycle with memory triggered in InnerSpace '{self.parent_inner_space.name}'.")
 
         # Get required components

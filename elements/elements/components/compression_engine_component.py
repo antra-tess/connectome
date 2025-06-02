@@ -209,14 +209,15 @@ class CompressionEngineComponent(Component):
     
     async def get_memory_context(self) -> List[LLMMessage]:
         """
-        Retrieve all stored memory as LLM message format for AgentLoop.
-        Includes orientation conversation (if set) plus all stored interactions.
+        Retrieve stored interaction history as LLM message format for AgentLoop.
         
-        For now, returns full uncompressed history. Future versions will
-        implement intelligent compression strategies.
+        NEW APPROACH: Instead of storing full HUD contexts (which create redundancy),
+        we store interaction summaries focusing on what the agent learned/decided/did.
+        
+        The current HUD context provides fresh state; memory provides interaction history.
         
         Returns:
-            List of LLMMessage objects representing the agent's complete memory
+            List of LLMMessage objects representing interaction history (not redundant contexts)
         """
         memory_messages: List[LLMMessage] = []
         
@@ -226,13 +227,13 @@ class CompressionEngineComponent(Component):
                 memory_messages.extend(self._orientation_messages)
                 logger.debug(f"Added {len(self._orientation_messages)} orientation messages")
             
-            # Add stored interaction history
+            # Add stored interaction history (focused on what happened, not full contexts)
             for interaction in self._memory_interactions:
-                # Add the context that was received
-                context_received = interaction.get("context_received")
-                if context_received:
+                # NEW: Instead of storing full context_received, store interaction summary
+                interaction_summary = self._create_interaction_summary(interaction)
+                if interaction_summary:
                     memory_messages.append(
-                        LLMMessage(role="user", content=context_received)
+                        LLMMessage(role="user", content=interaction_summary)
                     )
                 
                 # Add the agent's response/reasoning
@@ -251,12 +252,78 @@ class CompressionEngineComponent(Component):
             
             total_interactions = len(self._memory_interactions)
             total_messages = len(memory_messages)
-            logger.debug(f"CompressionEngine provided {total_messages} total messages ({len(self._orientation_messages)} orientation + {total_interactions} interactions)")
+            logger.info(f"CompressionEngine provided {total_messages} total messages ({len(self._orientation_messages)} orientation + {total_interactions} interaction summaries)")
             return memory_messages
             
         except Exception as e:
             logger.error(f"Error retrieving memory context: {e}", exc_info=True)
             return []
+    
+    def _create_interaction_summary(self, interaction: Dict[str, Any]) -> Optional[str]:
+        """
+        Create a focused summary of what happened in this interaction.
+        
+        Instead of storing the full HUD context (which contains redundant message history),
+        we extract the key information about what the user was asking or what changed.
+        
+        Args:
+            interaction: The stored interaction record
+            
+        Returns:
+            A concise summary of the interaction, or None if no meaningful summary can be created
+        """
+        try:
+            # Try to extract meaningful information from the interaction
+            tool_calls = interaction.get("tool_calls", [])
+            tool_results = interaction.get("tool_results", [])
+            reasoning_notes = interaction.get("reasoning_notes", "")
+            metadata = interaction.get("metadata", {})
+            context_summary = interaction.get("context_summary", "")
+            
+            # If there were tool calls, focus on what the agent did
+            if tool_calls:
+                tool_actions = []
+                for i, tool_call in enumerate(tool_calls):
+                    tool_name = tool_call.get("tool_name", "unknown_tool")
+                    # Clean up prefixed tool names for readability
+                    clean_tool_name = tool_name.split("__")[-1] if "__" in tool_name else tool_name
+                    
+                    # Get result status if available
+                    if i < len(tool_results) and tool_results[i]:
+                        result = tool_results[i]
+                        if isinstance(result, dict):
+                            if result.get("success"):
+                                tool_actions.append(f"Successfully used {clean_tool_name}")
+                            elif "error" in result:
+                                tool_actions.append(f"Attempted {clean_tool_name} (encountered error)")
+                            else:
+                                tool_actions.append(f"Used {clean_tool_name}")
+                        else:
+                            tool_actions.append(f"Used {clean_tool_name}")
+                    else:
+                        tool_actions.append(f"Used {clean_tool_name}")
+                
+                if tool_actions:
+                    # Include context info if available
+                    context_info = f" (Context: {context_summary})" if context_summary else ""
+                    return f"[Previous Interaction]: Agent {', '.join(tool_actions)}{context_info}"
+            
+            # If no tool calls but there's reasoning, use that
+            if reasoning_notes and "cycle" in reasoning_notes:
+                cycle_type = "multi-step" if "multi-step" in reasoning_notes else "simple"
+                context_info = f" in context of: {context_summary}" if context_summary else ""
+                return f"[Previous Interaction]: Agent completed {cycle_type} reasoning cycle{context_info}"
+            
+            # If we have context summary but no tool calls, use that
+            if context_summary:
+                return f"[Previous Interaction]: Agent processed: {context_summary}"
+            
+            # Fallback: very generic summary
+            return f"[Previous Interaction]: Agent processed request and responded"
+            
+        except Exception as e:
+            logger.warning(f"Error creating interaction summary: {e}")
+            return "[Previous Interaction]: Agent activity occurred"
     
     def _format_tool_interaction_summary(self, interaction: Dict[str, Any]) -> Optional[str]:
         """Format tool calls and results into a readable summary."""
@@ -285,9 +352,12 @@ class CompressionEngineComponent(Component):
         """
         Store a complete reasoning chain from the AgentLoop.
         
+        NEW APPROACH: Store interaction metadata and reasoning, not full HUD contexts.
+        This eliminates redundancy while preserving essential interaction history.
+        
         Args:
             chain_data: Dictionary containing:
-                - context_received: The input context from HUD
+                - context_received: The input context from HUD (NEW: we'll extract key info instead of storing full context)
                 - agent_response: The agent's response/reasoning
                 - tool_calls: List of tool calls made (if any)
                 - tool_results: List of tool results received (if any)
@@ -295,9 +365,15 @@ class CompressionEngineComponent(Component):
                 - metadata: Any additional metadata
         """
         try:
+            # NEW: Extract key information instead of storing full context
+            context_received = chain_data.get("context_received", "")
+            context_summary = self._extract_context_key_info(context_received)
+            
             interaction_record = {
-                "timestamp": datetime.now().isoformat(),  # Convert to string immediately
-                "context_received": chain_data.get("context_received"),
+                "timestamp": datetime.now().isoformat(),
+                # NEW: Store context summary instead of full context to eliminate redundancy
+                "context_summary": context_summary,
+                "context_length": len(context_received) if context_received else 0,
                 "agent_response": chain_data.get("agent_response"),
                 "tool_calls": chain_data.get("tool_calls", []),
                 "tool_results": chain_data.get("tool_results", []),
@@ -309,7 +385,7 @@ class CompressionEngineComponent(Component):
             # Store in memory for immediate access
             self._memory_interactions.append(interaction_record)
             
-            # NEW: Persist to storage backend (ensure storage is ready first)
+            # Persist to storage backend (ensure storage is ready first)
             if await self._ensure_storage_ready():
                 agent_id = self._agent_name or self.id
                 success = await self._storage.store_reasoning_chain(agent_id, interaction_record)
@@ -318,32 +394,81 @@ class CompressionEngineComponent(Component):
             else:
                 logger.warning(f"Storage not ready, reasoning chain not persisted")
             
-            # Log storage (with truncation for readability)
+            # Log storage (with improved logging for new approach)
             response_preview = str(chain_data.get("agent_response", ""))[:100]
             tool_count = len(chain_data.get("tool_calls", []))
             
-            logger.info(f"Stored reasoning chain: {response_preview}{'...' if len(response_preview) == 100 else ''} (tools: {tool_count})")
+            logger.info(f"Stored interaction: {response_preview}{'...' if len(response_preview) == 100 else ''} (tools: {tool_count}, context: {len(context_received) if context_received else 0} chars)")
             
-            # NEW: Also store as raw messages for potential recompression
+            # Store as raw messages for potential recompression (but with summary approach)
             if await self._ensure_storage_ready() and self._conversation_id:
-                await self._store_raw_messages_for_chain(chain_data)
+                await self._store_interaction_messages(chain_data, context_summary)
             
         except Exception as e:
             logger.error(f"Error storing reasoning chain: {e}", exc_info=True)
     
-    async def _store_raw_messages_for_chain(self, chain_data: Dict[str, Any]) -> None:
-        """Store the raw message exchange for this reasoning chain."""
+    def _extract_context_key_info(self, context: str) -> str:
+        """
+        Extract key information from HUD context without storing the full redundant content.
+        
+        This helps preserve what's important about each frame without storing repetitive message lists.
+        
+        Args:
+            context: Full HUD context string
+            
+        Returns:
+            A summary of key information from the context
+        """
+        if not context:
+            return "Empty context"
+        
+        try:
+            # Look for new messages or changes (this is a simple heuristic)
+            lines = context.split('\n')
+            
+            # Count messages
+            message_lines = [line for line in lines if '<sender>' in line and '<message>' in line]
+            message_count = len(message_lines)
+            
+            # Look for recent activity (last few messages)
+            recent_messages = message_lines[-3:] if message_lines else []
+            
+            # Extract sender names
+            senders = set()
+            for line in recent_messages:
+                if '<sender>' in line and '</sender>' in line:
+                    sender_start = line.find('<sender>') + 8
+                    sender_end = line.find('</sender>')
+                    if sender_end > sender_start:
+                        senders.add(line[sender_start:sender_end])
+            
+            # Create summary
+            if recent_messages:
+                sender_list = ', '.join(sorted(senders)) if senders else "unknown senders"
+                return f"Context with {message_count} messages, recent activity from: {sender_list}"
+            else:
+                return f"Context with {message_count} messages"
+                
+        except Exception as e:
+            logger.warning(f"Error extracting context key info: {e}")
+            return f"Context ({len(context)} chars)"
+    
+    async def _store_interaction_messages(self, chain_data: Dict[str, Any], context_summary: str) -> None:
+        """
+        Store the interaction as messages for potential recompression.
+        
+        NEW: Store interaction-focused messages instead of full context repetition.
+        """
         try:
             messages = []
             
-            # User message (context received)
-            context_received = chain_data.get("context_received")
-            if context_received:
+            # User message (context summary instead of full context)
+            if context_summary:
                 messages.append({
                     "role": "user",
-                    "content": context_received,
+                    "content": context_summary,
                     "timestamp": datetime.now().isoformat(),
-                    "source": "hud_context"
+                    "source": "interaction_summary"
                 })
             
             # Assistant response
@@ -363,10 +488,10 @@ class CompressionEngineComponent(Component):
             
             # Store updated message list
             await self._storage.store_raw_messages(self._conversation_id, all_messages)
-            logger.debug(f"Stored raw messages for reasoning chain (total: {len(all_messages)})")
+            logger.debug(f"Stored interaction messages (total: {len(all_messages)})")
             
         except Exception as e:
-            logger.error(f"Error storing raw messages: {e}", exc_info=True)
+            logger.error(f"Error storing interaction messages: {e}", exc_info=True)
     
     async def get_memory_stats(self) -> Dict[str, Any]:
         """Get statistics about stored memory."""

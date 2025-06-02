@@ -68,7 +68,8 @@ class HUDComponent(Component):
         Args:
             options: Optional dictionary controlling context generation
                      (e.g., verbosity, max_tokens, focus_element_id,
-                      render_style: 'clean' (default) or 'verbose_tags').
+                      render_style: 'clean' (default) or 'verbose_tags',
+                      focused_rendering: bool - if True, only render focus_element_id).
 
         Returns:
             A string representing the agent's current context.
@@ -76,6 +77,241 @@ class HUDComponent(Component):
         logger.debug(f"Generating agent context for {self.owner.id}...")
         options = options or {}
 
+        # NEW: Check for focused rendering mode
+        focused_rendering = options.get('focused_rendering', False)
+        focus_element_id = options.get('focus_element_id')
+        conversation_context = options.get('conversation_context', {})
+        
+        if focused_rendering and focus_element_id:
+            logger.info(f"[{self.owner.id}] FOCUSED RENDERING: Generating context only for element {focus_element_id}")
+            return await self._get_focused_element_context(focus_element_id, conversation_context, options)
+        else:
+            logger.debug(f"[{self.owner.id}] FULL RENDERING: Generating complete space context")
+            return await self._get_full_space_context(options)
+
+    async def _get_focused_element_context(self, focus_element_id: str, conversation_context: Dict[str, Any], options: Dict[str, Any]) -> str:
+        """
+        Generate context for a specific focused element with essential InnerSpace context.
+        
+        This ensures the agent maintains their identity and workspace context while
+        focusing on the specific conversation that triggered activation.
+        
+        Args:
+            focus_element_id: The ID of the element to focus on
+            conversation_context: Additional context about the conversation
+            options: Rendering options
+            
+        Returns:
+            A focused context string containing InnerSpace essentials + the focused element
+        """
+        try:
+            # Find the focused element
+            focused_element = None
+            if focus_element_id == self.owner.id:
+                # If focusing on InnerSpace itself, use full context
+                logger.info(f"[{self.owner.id}] Focus target is InnerSpace itself, using full context")
+                return await self._get_full_space_context(options)
+            else:
+                # Check mounted elements
+                mounted_elements = self.owner.get_mounted_elements() if hasattr(self.owner, 'get_mounted_elements') else {}
+                for mount_id, element in mounted_elements.items():
+                    if element.id == focus_element_id or mount_id == focus_element_id:
+                        focused_element = element
+                        break
+            
+            if not focused_element:
+                logger.warning(f"[{self.owner.id}] Focused element {focus_element_id} not found, falling back to full context")
+                return await self._get_full_space_context(options)
+            
+            # Build contextual focused rendering: InnerSpace essentials + focused element
+            context_parts = []
+            
+            # 1. InnerSpace Identity & Context
+            innerspace_header = self._build_innerspace_identity_context()
+            context_parts.append(innerspace_header)
+            
+            # 2. Essential InnerSpace Components (scratchpad, etc.)
+            essential_components = await self._get_essential_innerspace_components(options)
+            if essential_components:
+                context_parts.append(essential_components)
+            
+            # 3. Focused Element Header
+            focus_header = self._build_focused_context_header(focused_element, conversation_context)
+            context_parts.append(focus_header)
+            
+            # 4. Focused Element Content
+            focused_veil = self._get_element_veil(focused_element)
+            if focused_veil:
+                attention_requests = {}  # No global attention in focused mode
+                focused_content = self._render_veil_node_to_string(focused_veil, attention_requests, options, indent=0)
+                context_parts.append(focused_content)
+            else:
+                context_parts.append(f"[No content available for {focus_element_id}]")
+            
+            # Combine all parts
+            full_focused_context = "\n\n".join(context_parts)
+            
+            logger.info(f"[{self.owner.id}] Generated CONTEXTUAL FOCUSED context: InnerSpace + {focus_element_id} ({len(full_focused_context)} chars)")
+            return full_focused_context
+            
+        except Exception as e:
+            logger.error(f"[{self.owner.id}] Error generating focused context for {focus_element_id}: {e}", exc_info=True)
+            # Fallback to full context on error
+            return await self._get_full_space_context(options)
+
+    def _build_innerspace_identity_context(self) -> str:
+        """Build essential InnerSpace identity and context."""
+        # Get basic InnerSpace info
+        space_name = getattr(self.owner, 'name', 'Unknown InnerSpace')
+        space_id = self.owner.id
+        
+        # Try to get agent name from the space
+        agent_name = getattr(self.owner, 'agent_name', None)
+        if not agent_name and hasattr(self.owner, 'name'):
+            agent_name = self.owner.name
+        
+        # Build identity context
+        identity_parts = [
+            f"[AGENT WORKSPACE] {space_name}",
+        ]
+        
+        if agent_name:
+            identity_parts.append(f"Agent: {agent_name}")
+        
+        identity_parts.append(f"Space Type: {self.owner.__class__.__name__}")
+        
+        # Add any InnerSpace-specific properties
+        if hasattr(self.owner, 'description') and self.owner.description:
+            identity_parts.append(f"Purpose: {self.owner.description}")
+        
+        return " | ".join(identity_parts)
+
+    async def _get_essential_innerspace_components(self, options: Dict[str, Any]) -> Optional[str]:
+        """
+        Get essential InnerSpace components that should always be visible.
+        
+        Args:
+            options: Rendering options
+            
+        Returns:
+            Rendered essential components or None if none found
+        """
+        try:
+            essential_parts = []
+            
+            # Look for scratchpad or similar essential components
+            if hasattr(self.owner, '_flat_veil_cache'):
+                flat_cache = self.owner._flat_veil_cache
+                
+                for veil_id, veil_node in flat_cache.items():
+                    node_props = veil_node.get('properties', {})
+                    node_type = veil_node.get('node_type', '')
+                    content_nature = node_props.get('content_nature', '')
+                    
+                    # Include scratchpad content
+                    if 'scratchpad' in node_type.lower() or 'scratchpad' in content_nature.lower():
+                        scratchpad_content = self._render_veil_node_to_string(veil_node, {}, options, indent=0)
+                        essential_parts.append(f"[SCRATCHPAD]\n{scratchpad_content}")
+                    
+                    # Include other essential components as needed
+                    # Could add agent status, important state, etc.
+            
+            return "\n\n".join(essential_parts) if essential_parts else None
+            
+        except Exception as e:
+            logger.warning(f"[{self.owner.id}] Error getting essential components: {e}")
+            return None
+
+    def _build_focused_context_header(self, focused_element, conversation_context: Dict[str, Any]) -> str:
+        """Build a descriptive header for the focused conversation element."""
+        element_name = getattr(focused_element, 'name', 'Unknown Element')
+        element_type = focused_element.__class__.__name__
+        
+        header = f"[ACTIVE CONVERSATION] {element_name} ({element_type})"
+        
+        # Add conversation details if available
+        if conversation_context:
+            is_dm = conversation_context.get('is_dm', False)
+            recent_sender = conversation_context.get('recent_sender')
+            adapter_id = conversation_context.get('adapter_id')
+            recent_preview = conversation_context.get('recent_message_preview', '')
+            
+            context_details = []
+            if is_dm:
+                context_details.append("Direct Message")
+            else:
+                context_details.append("Channel/Group")
+                
+            if recent_sender:
+                context_details.append(f"Recent activity from: {recent_sender}")
+                
+            if adapter_id:
+                context_details.append(f"Platform: {adapter_id}")
+            
+            if context_details:
+                header += f" - {' | '.join(context_details)}"
+                
+            # Add preview of recent activity
+            if recent_preview:
+                preview = recent_preview[:80] + "..." if len(recent_preview) > 80 else recent_preview
+                header += f"\nRecent: \"{preview}\""
+        
+        return header
+
+    def _get_element_veil(self, element) -> Optional[Dict[str, Any]]:
+        """
+        Get the VEIL representation for a specific element.
+        
+        Args:
+            element: The element to get VEIL data for
+            
+        Returns:
+            VEIL node data for the element, or None if not available
+        """
+        try:
+            # For elements with their own VEIL producer, get their VEIL directly
+            if hasattr(element, 'get_components'):
+                components = element.get_components()
+                for component in components.values():
+                    if hasattr(component, 'get_full_veil') and callable(component.get_full_veil):
+                        return component.get_full_veil()
+            
+            # Fallback: try to get from space's flat cache
+            if hasattr(self.owner, '_flat_veil_cache'):
+                flat_cache = self.owner._flat_veil_cache
+                # Look for VEIL nodes that belong to this element
+                for veil_id, veil_node in flat_cache.items():
+                    node_props = veil_node.get('properties', {})
+                    if node_props.get('element_id') == element.id:
+                        return veil_node
+            
+            # Last resort: create a basic VEIL representation
+            return {
+                "veil_id": f"{element.id}_basic",
+                "node_type": "basic_element",
+                "properties": {
+                    "element_id": element.id,
+                    "element_name": getattr(element, 'name', 'Unknown'),
+                    "element_type": element.__class__.__name__,
+                    "veil_status": "basic_representation"
+                },
+                "children": []
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting VEIL for element {element.id}: {e}", exc_info=True)
+            return None
+
+    async def _get_full_space_context(self, options: Dict[str, Any]) -> str:
+        """
+        Generate the full space context (original behavior).
+        
+        Args:
+            options: Rendering options
+            
+        Returns:
+            Full space context string
+        """
         # 1. Get the full aggregated VEIL from InnerSpace's producer
         veil_producer = self._get_space_veil_producer()
         if not veil_producer:
@@ -92,32 +328,19 @@ class HUDComponent(Component):
             return f"Error: Failed to retrieve internal state - {e}"
 
         # 2. Get attention signals (optional filtering)
-        # attention_comp = self._get_global_attention()
-        attention_requests = {} # attention_comp.get_attention_requests() if attention_comp else {}
+        attention_requests = {} 
 
         # 3. Render the VEIL structure into a string
-        #    This is the core logic block. Needs a recursive helper function.
-        #    It should traverse the 'full_veil' dict, paying attention to node_type,
-        #    properties, and children. It should format specific node types
-        #    (like message_list_container, message_item, uplink_proxy_root)
-        #    in a readable way. It might use attention_requests to prioritize or
-        #    highlight certain parts.
         try:
             # Render synchronously
             context_string = self._render_veil_node_to_string(full_veil, attention_requests, options, indent=0)
         except Exception as e:
             logger.error(f"[{self.owner.id}] Error rendering VEIL to string: {e}", exc_info=True)
             # Maybe return partial context or just the error?
-            # Let's try to return the raw VEIL structure on render error for debugging
             import json
             return f"Error rendering context: {e}\nRaw VEIL:\n{json.dumps(full_veil, indent=2)}"
 
-
-        # 4. Optional Post-processing (e.g., summarization with LLM if needed/available)
-        # if self._llm_provider and options.get("summarize"):
-        #     context_string = self._summarize_context(context_string)
-
-        logger.info(f"Generated agent context for {self.owner.id} (approx length: {len(context_string)}).")
+        logger.info(f"Generated FULL agent context for {self.owner.id} (approx length: {len(context_string)}).")
         return context_string
 
     # --- Rendering Helpers --- 
