@@ -207,45 +207,89 @@ class ChatManagerComponent(Component):
                 return self._handle_state_restoration(event_payload_from_space)
 
         # NEW: Handle message events (including replay events)
-        if connectome_event_type in ["message_received", "historical_message_received", "agent_message_confirmed"]:
+        if connectome_event_type in ["message_received", "historical_message_received", "agent_message_confirmed",
+                                     "connectome_message_updated", "connectome_message_deleted", 
+                                     "connectome_reaction_added", "connectome_reaction_removed",
+                                     "attachment_content_available",
+                                     "connectome_action_success", "connectome_action_failure"]:
             inner_message_payload = event_payload_from_space.get("payload", {}) # This is the EER payload
             if not isinstance(inner_message_payload, dict):
                 logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] '{connectome_event_type}' event has invalid inner payload.")
                 return False
 
-            is_dm = inner_message_payload.get("is_dm", False)
-            source_adapter_id = event_payload_from_space.get("source_adapter_id")
-            # external_conversation_id is the channel_id or user_id from the adapter perspective
-            external_conversation_id = event_payload_from_space.get("external_conversation_id")
-            if not source_adapter_id or not external_conversation_id:
-                logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] '{connectome_event_type}' missing source_adapter_id or conversation_id in outer payload. Event: {event_payload_from_space}")
-                return False
-
-            target_chat_element: Optional['BaseElement'] = None
-            
-            if isinstance(self.owner, InnerSpace):
-                # SIMPLIFIED: Unified message routing logic
-                # Use external_conversation_id as the primary key for finding/creating chat elements
-                # The sender info is used for display names and element configuration
+            # Extract routing information (different events have different payload structures)
+            if connectome_event_type in ["message_received", "historical_message_received", "agent_message_confirmed"]:
+                # These events have full message context in payload
+                is_dm = inner_message_payload.get("is_dm", False)
+                source_adapter_id = event_payload_from_space.get("source_adapter_id")
+                external_conversation_id = event_payload_from_space.get("external_conversation_id")
                 
                 # For display purposes, get sender information
                 sender_display_name = inner_message_payload.get("sender_display_name", "Unknown")
                 sender_external_id = inner_message_payload.get("sender_external_id", external_conversation_id)
                 
-                # For DMs, the external_conversation_id is typically the conversation/user ID
-                # For channels, it's the channel ID
-                # In both cases, we use it as the key for finding the right chat element
-                target_chat_element, _ = self._ensure_chat_element(
-                    source_adapter_id,
-                    external_conversation_id,  # Always use this as the conversation key
-                    sender_external_id,        # For naming/display purposes
-                    sender_display_name,       # For naming/display purposes
-                    is_dm=is_dm,              # DM flag determines behavior, not routing
-                )
+            else:
+                # For update/delete/reaction events, extract conversation context from payload
+                source_adapter_id = inner_message_payload.get("source_adapter_id") or event_payload_from_space.get("source_adapter_id")
+                external_conversation_id = inner_message_payload.get("external_conversation_id") or event_payload_from_space.get("external_conversation_id")
+                
+                # FIXED: Extract real context from original_adapter_data instead of hardcoding defaults
+                original_adapter_data = inner_message_payload.get("original_adapter_data", {})
+                
+                # Extract the real is_dm flag and sender info from the original adapter event
+                is_dm = original_adapter_data.get("is_direct_message", False)  # Use real DM flag
+                
+                # Extract real sender information if available
+                sender_info = original_adapter_data.get('sender', {})
+                if sender_info:
+                    sender_display_name = sender_info.get("display_name", "Unknown")
+                    sender_external_id = sender_info.get("user_id", external_conversation_id)
+                else:
+                    # Fallback for events without sender info (e.g., system deletions)
+                    sender_display_name = "Unknown"
+                    sender_external_id = external_conversation_id
+                    
+                logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Extracted context for {connectome_event_type}: is_dm={is_dm}, sender={sender_display_name}")
+                
+            if not source_adapter_id or not external_conversation_id:
+                logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] '{connectome_event_type}' missing source_adapter_id or conversation_id in payload. Event: {event_payload_from_space}")
+                return False
+
+            target_chat_element: Optional['BaseElement'] = None
+            
+            if isinstance(self.owner, InnerSpace):
+                # UNIFIED: All message-related events use the same routing logic
+                # Use external_conversation_id as the primary key for finding the chat element
+                
+                if connectome_event_type in ["message_received", "historical_message_received", "agent_message_confirmed"]:
+                    # For new messages, ensure the chat element exists (may create it)
+                    target_chat_element, _ = self._ensure_chat_element(
+                        source_adapter_id,
+                        external_conversation_id,  # Always use this as the conversation key
+                        sender_external_id,        # For naming/display purposes
+                        sender_display_name,       # For naming/display purposes
+                        is_dm=is_dm,              # DM flag determines behavior, not routing
+                    )
+                else:
+                    # For update/delete/reaction events, find existing chat element (don't create)
+                    session_key = (source_adapter_id, external_conversation_id)
+                    session_info = self._state["dm_sessions_map"].get(session_key)
+                    
+                    if session_info:
+                        mounted_element = self.owner.get_mounted_element(session_info["mount_id"])
+                        if mounted_element and mounted_element.id == session_info["element_id"]:
+                            target_chat_element = mounted_element
+                            logger.debug(f"Found existing chat element {target_chat_element.id} for {connectome_event_type} on conversation {external_conversation_id}")
+                        else:
+                            logger.warning(f"Chat session for {session_key} in map but element not found/mismatched for {connectome_event_type}.")
+                    
+                    if not target_chat_element:
+                        logger.warning(f"No existing chat element found for {connectome_event_type} on conversation {external_conversation_id}. Event may be dropped.")
+                        return False  # Don't process update/delete events without existing chat context
+                        
             else: # Should not happen if component is on a Space/InnerSpace
                 logger.error(f"[{self.COMPONENT_TYPE}] Owner is not InnerSpace or Space. Cannot process chat event.")
                 return False
-
             if target_chat_element and hasattr(target_chat_element, 'receive_event'):
                 # Forward the full event_node that ChatManagerComponent received from its parent's timeline
                 logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Routing {connectome_event_type} to chat element {target_chat_element.id}")

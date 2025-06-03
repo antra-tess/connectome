@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Define the structure of a message stored in the component's state
 # This can be expanded later (e.g., with reactions, read_status, edits)
-MessageType = Dict[str, Any] 
+MessageType = Dict[str, Any]
 
 # Internal event types for message send lifecycle
 CONNECTOME_MESSAGE_SEND_CONFIRMED = "connectome_message_send_confirmed"
@@ -37,8 +37,8 @@ class MessageListComponent(Component):
         "connectome_reaction_added",          # For handling added reactions
         "connectome_reaction_removed",        # For handling removed reactions
         "attachment_content_available",       # NEW: For when fetched attachment content arrives
-        CONNECTOME_MESSAGE_SEND_CONFIRMED,    # NEW: For outgoing message success
-        CONNECTOME_MESSAGE_SEND_FAILED        # NEW: For outgoing message failure
+        "connectome_action_success",          # NEW: Generic action success (replaces specific events)
+        "connectome_action_failure"           # NEW: Generic action failure (replaces specific events)
     ]
 
     def initialize(self, max_messages: Optional[int] = None, **kwargs) -> None:
@@ -57,22 +57,22 @@ class MessageListComponent(Component):
     def handle_event(self, event_node: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
         """
         Processes relevant timeline events to update the message list.
-        Expects `event_node['payload']` to contain the actual event details.
+        Expects `event_node['payload']['event_type']` to contain the event type and `event_node['payload']` to contain the actual event details.
         """
-        event_payload = event_node.get('payload', {}) # This is the inner payload
-        event_type = event_payload.get('event_type')
+        # FIXED: Get event_type from inside payload, where Space actually puts it
+        event_payload = event_node.get('payload', {})  # This is what Space provides
+        event_type = event_payload.get('event_type')    # Space puts event_type inside payload
         
         # Check if this is a replay event to avoid activation during startup
         is_replay_mode = timeline_context.get('replay_mode', False)
 
         if event_type in self.HANDLED_EVENT_TYPES:
             logger.debug(f"[{self.owner.id}] MessageListComponent handling event: {event_type} (replay: {is_replay_mode})")
-            # Message handlers now expect the *actual content* payload, 
-            # which is event_payload['payload'] if event_payload itself has a nested structure,
-            # or just event_payload if it's flat.
-            # For "message_received" from a Space, event_payload['payload'] is the adapter_data.
             
-            actual_content_payload = event_payload.get('payload', event_payload) # Default to event_payload if no deeper 'payload' key
+            # FIXED: For events from ExternalEventRouter via Space, the actual content is nested in event_payload['payload']
+            # The structure is: event_node['payload']['payload'] contains the actual message content
+            actual_content_payload = event_payload.get('payload', {})  # This contains the actual message content
+            
             if event_type == "message_received":
                 self._handle_new_message(actual_content_payload)
             elif event_type == "historical_message_received":
@@ -88,10 +88,10 @@ class MessageListComponent(Component):
                 self._handle_reaction_removed(actual_content_payload)
             elif event_type == "attachment_content_available":
                 self._handle_attachment_content_available(actual_content_payload)
-            elif event_type == CONNECTOME_MESSAGE_SEND_CONFIRMED: # NEW
-                self._handle_message_send_confirmed(actual_content_payload)
-            elif event_type == CONNECTOME_MESSAGE_SEND_FAILED: # NEW
-                self._handle_message_send_failed(actual_content_payload)
+            elif event_type == "connectome_action_success":
+                self._handle_action_success(actual_content_payload)
+            elif event_type == "connectome_action_failure":
+                self._handle_action_failure(actual_content_payload)
             elif event_type == "agent_message_confirmed":
                 self._handle_agent_message_confirmed(actual_content_payload)
             else:
@@ -158,7 +158,6 @@ class MessageListComponent(Component):
         # Future expansion: could check other conditions like specific keywords, etc.
         # elif event_type == "message_received":
         #     # Check for keywords, urgent flags, etc.
-        logger.critical(f"[{self.owner.id}] Activation check: {activation_needed}")
         if activation_needed:
             self._emit_activation_call(activation_reason, event_type, content_payload)
     
@@ -298,38 +297,84 @@ class MessageListComponent(Component):
 
     def _handle_delete_message(self, delete_content: Dict[str, Any]) -> bool:
         """
-        Removes a message based on its ID.
-        delete_content is the actual data for deletion (e.g., from event_payload['payload']).
+        Handles message deletion events from external sources.
+        
+        Two scenarios:
+        1. External deletion (other user deleted message) → Mark as deleted with tombstone
+        2. Confirmation of agent pending deletion → Remove pending state, mark as confirmed deleted
+        
+        Args:
+            delete_content: The actual data for deletion (e.g., from event_payload['payload']).
         """
         original_external_id = delete_content.get('original_message_id_external')
-        internal_id_to_delete = None
         
-        if original_external_id:
-            # Find internal message by external ID (requires iterating - slow)
-            found_idx = -1
-            for idx, msg in enumerate(self._state['_messages']):
-                if msg.get('original_external_id') == original_external_id:
-                    internal_id_to_delete = msg.get('internal_id')
-                    found_idx = idx
-                    break
-            if found_idx != -1:
-                del self._state['_messages'][found_idx]
-                if internal_id_to_delete: del self._state['_message_map'][internal_id_to_delete]
-                self._rebuild_message_map() # Inefficient!
-                logger.info(f"[{self.owner.id}] Message with external ID '{original_external_id}' deleted.")
-                return True
-            else:
-                logger.warning(f"[{self.owner.id}] Could not delete message: External ID '{original_external_id}' not found.")
-                return False
-        else:
+        if not original_external_id:
             logger.warning(f"[{self.owner.id}] Message deletion event lacked necessary identifier. Payload: {delete_content}")
             return False
+            
+        # Find the message by external ID
+        message_to_update = None
+        message_index = -1
+        for idx, msg in enumerate(self._state['_messages']):
+            if msg.get('original_external_id') == original_external_id:
+                message_to_update = msg
+                message_index = idx
+                break
+        
+        if not message_to_update:
+            logger.warning(f"[{self.owner.id}] Could not delete message: External ID '{original_external_id}' not found.")
+            return False
+        
+        current_status = message_to_update.get('status', 'received')
+        
+        if current_status == "pending_delete":
+            # Scenario 2: This is confirmation of our agent's pending deletion
+            pending_agent_id = message_to_update.get('pending_delete_by_agent_id')
+            logger.info(f"[{self.owner.id}] Confirmed deletion of message '{original_external_id}' that was pending delete by agent '{pending_agent_id}'")
+            
+            # Update to confirmed deleted state (keep as tombstone for context)
+            message_to_update['text'] = "[🗑️ Message deleted]"
+            message_to_update['status'] = "deleted"
+            message_to_update['deleted_timestamp'] = delete_content.get('timestamp', time.time())
+            message_to_update['confirmed_deleted'] = True
+            
+            # Clean up pending state
+            message_to_update.pop('original_text_before_pending_delete', None)
+            message_to_update.pop('pending_delete_by_agent_id', None)
+            message_to_update.pop('pending_delete_timestamp', None)
+            
+        else:
+            # Scenario 1: External deletion (another user deleted the message)
+            logger.info(f"[{self.owner.id}] External deletion of message '{original_external_id}' (was status: {current_status})")
+            
+            # Keep message as tombstone but mark as externally deleted
+            message_to_update['text'] = "[🗑️ Message was deleted]"
+            message_to_update['status'] = "deleted"
+            message_to_update['deleted_timestamp'] = delete_content.get('timestamp', time.time())
+            message_to_update['externally_deleted'] = True
+            
+            # Store original text for potential debugging/recovery
+            if 'original_text_before_delete' not in message_to_update:
+                original_text = message_to_update.get('original_text_before_pending_delete') or message_to_update.get('text')
+                message_to_update['original_text_before_delete'] = original_text
+        
+        # IMPORTANT: Keep message in list as tombstone for conversation context
+        # Agents need to see that messages existed but were deleted
+        logger.info(f"[{self.owner.id}] Message '{original_external_id}' marked as deleted (tombstone preserved)")
+        return True
 
     def _handle_edit_message(self, edit_content: Dict[str, Any]) -> bool:
         """
-        Updates the content of an existing message.
-        edit_content is the actual data for edit (e.g., from event_payload['payload']).
+        Handles message edit events from external sources.
+        
+        Two scenarios:
+        1. External edit (other user edited message) → Apply edit immediately
+        2. Confirmation of agent pending edit → Remove pending state, apply confirmed edit
+        
+        Args:
+            edit_content: The actual data for edit (e.g., from event_payload['payload']).
         """
+        logger.critical(f"[{self.owner.id}] Handling edit message: {edit_content}")
         original_external_id = edit_content.get('original_message_id_external')
         new_text = edit_content.get('new_text')
         edit_timestamp = edit_content.get('timestamp', time.time())
@@ -338,28 +383,82 @@ class MessageListComponent(Component):
              logger.warning(f"[{self.owner.id}] Message edit event lacked necessary identifier or new_text. Payload: {edit_content}")
              return False
              
-        # Find message by external ID (inefficient)
+        # Find message by external ID
         message_to_edit = None
         for msg in self._state['_messages']:
             if msg.get('original_external_id') == original_external_id:
                 message_to_edit = msg
                 break
         
-        if message_to_edit:
+        if not message_to_edit:
+            logger.warning(f"[{self.owner.id}] Could not edit message: External ID '{original_external_id}' not found.")
+            return False
+            
+        current_status = message_to_edit.get('status', 'received')
+        
+        if current_status == "pending_edit":
+            # Scenario 2: This is confirmation of our agent's pending edit
+            pending_agent_id = message_to_edit.get('pending_edit_by_agent_id')
+            pending_new_text = message_to_edit.get('pending_new_text')
+            
+            # Check if confirmed edit matches what agent requested
+            if new_text.strip() == pending_new_text.strip():
+                logger.info(f"[{self.owner.id}] Confirmed edit of message '{original_external_id}' that was pending edit by agent '{pending_agent_id}'")
+                
+                # Apply confirmed edit (remove pending indicator)
+                message_to_edit['text'] = new_text
+                message_to_edit['status'] = "received"  # Back to normal status
+                message_to_edit['is_edited'] = True
+                message_to_edit['last_edited_timestamp'] = edit_timestamp
+                message_to_edit['confirmed_edited'] = True
+                
+                # Clean up pending state
+                message_to_edit.pop('original_text_before_pending_edit', None)
+                message_to_edit.pop('pending_edit_by_agent_id', None)
+                message_to_edit.pop('pending_edit_timestamp', None)
+                message_to_edit.pop('pending_new_text', None)
+            else:
+                logger.warning(f"[{self.owner.id}] Edit confirmation text mismatch for '{original_external_id}'. Expected: '{pending_new_text}', Got: '{new_text}'. Applying external version.")
+                
+                # External edit took precedence - apply it and clear pending
+                message_to_edit['text'] = new_text
+                message_to_edit['status'] = "received"
+                message_to_edit['is_edited'] = True
+                message_to_edit['last_edited_timestamp'] = edit_timestamp
+                message_to_edit['externally_overridden'] = True
+                
+                # Clean up pending state
+                message_to_edit.pop('original_text_before_pending_edit', None)
+                message_to_edit.pop('pending_edit_by_agent_id', None)
+                message_to_edit.pop('pending_edit_timestamp', None)
+                message_to_edit.pop('pending_new_text', None)
+        else:
+            # Scenario 1: External edit (another user edited the message)
+            logger.info(f"[{self.owner.id}] External edit of message '{original_external_id}' (was status: {current_status})")
+            
+            # Store original text if not already stored
+            if 'original_text_before_edit' not in message_to_edit and not message_to_edit.get('is_edited', False):
+                message_to_edit['original_text_before_edit'] = message_to_edit.get('text')
+            
+            # Apply external edit
             message_to_edit['text'] = new_text
             message_to_edit['is_edited'] = True
             message_to_edit['last_edited_timestamp'] = edit_timestamp
-            logger.info(f"[{self.owner.id}] Message with external ID '{original_external_id}' edited.")
-            # TODO: Emit event?
-            return True
-        else:
-            logger.warning(f"[{self.owner.id}] Could not edit message: External ID '{original_external_id}' not found.")
-            return False
+            message_to_edit['externally_edited'] = True
+            
+        logger.info(f"[{self.owner.id}] Message '{original_external_id}' edit processed successfully")
+        return True
 
     def _handle_reaction_added(self, reaction_content: Dict[str, Any]) -> bool:
         """
-        Adds a reaction to an existing message.
-        reaction_content is the actual data for the reaction (e.g., from event_payload['payload']).
+        Handles reaction addition events from external sources.
+        
+        Two scenarios:
+        1. External reaction (other user added reaction) → Add immediately
+        2. Confirmation of agent pending reaction → Remove pending state, add confirmed reaction
+        
+        Args:
+            reaction_content: The actual data for the reaction (e.g., from event_payload['payload']).
         """
         original_external_id = reaction_content.get('original_message_id_external')
         emoji = reaction_content.get('emoji')
@@ -376,35 +475,68 @@ class MessageListComponent(Component):
                 message_to_update = msg
                 break
         
-        if message_to_update:
-            if 'reactions' not in message_to_update:
-                message_to_update['reactions'] = {}
+        if not message_to_update:
+            logger.warning(f"[{self.owner.id}] Could not add reaction: Message with external ID '{original_external_id}' not found.")
+            return False
+
+        if 'reactions' not in message_to_update:
+            message_to_update['reactions'] = {}
+        
+        if emoji not in message_to_update['reactions']:
+            message_to_update['reactions'][emoji] = []
+
+        # Check if this is confirmation of a pending reaction by checking for pending markers
+        pending_reactions = message_to_update.get('pending_reactions', {})
+        pending_key = None
+        for key, pending_info in pending_reactions.items():
+            if pending_info.get('emoji') == emoji and user_id and pending_info.get('agent_id') == user_id:
+                pending_key = key
+                break
+
+        if pending_key:
+            # Scenario 2: This is confirmation of our agent's pending reaction
+            logger.info(f"[{self.owner.id}] Confirmed reaction '{emoji}' addition to message '{original_external_id}' that was pending by agent '{user_id}'")
             
-            if emoji not in message_to_update['reactions']:
-                message_to_update['reactions'][emoji] = []
+            # Remove the pending marker and add the confirmed user ID
+            pending_marker = f"pending_{user_id}"
+            if pending_marker in message_to_update['reactions'][emoji]:
+                message_to_update['reactions'][emoji].remove(pending_marker)
+            
+            # Add the confirmed user ID if not already present
+            if user_id and user_id not in message_to_update['reactions'][emoji]:
+                message_to_update['reactions'][emoji].append(user_id)
+            
+            # Clean up pending tracking
+            del pending_reactions[pending_key]
+            if not pending_reactions:
+                message_to_update.pop('pending_reactions', None)
+            
+            logger.info(f"[{self.owner.id}] Reaction '{emoji}' by agent '{user_name}' confirmed and finalized on message '{original_external_id}'")
+        else:
+            # Scenario 1: External reaction (another user added the reaction)
+            logger.info(f"[{self.owner.id}] External reaction '{emoji}' added to message '{original_external_id}' by user '{user_name}'")
             
             # Add user to list if not already present (some platforms might send redundant events)
             if user_id and user_id not in message_to_update['reactions'][emoji]:
                 message_to_update['reactions'][emoji].append(user_id)
             elif not user_id:
-                # If user_id is not provided by the adapter, we might just increment a counter
-                # or store a generic reaction without specific user attribution.
-                # For now, let's assume a reaction implies one user if ID is missing.
-                # This could be a list of anonymous markers, or just a count if we change structure.
+                # If user_id is not provided by the adapter, add anonymous marker
                 message_to_update['reactions'][emoji].append("anonymous_reaction") 
                 logger.debug(f"[{self.owner.id}] Added anonymous reaction '{emoji}' to message {original_external_id}")
 
-            logger.info(f"[{self.owner.id}] Reaction '{emoji}' by '{user_name if user_id else 'anonymous'}' added to message '{original_external_id}'.")
-            # TODO: Emit event?
-            return True
-        else:
-            logger.warning(f"[{self.owner.id}] Could not add reaction: Message with external ID '{original_external_id}' not found.")
-            return False
+        logger.info(f"[{self.owner.id}] Reaction '{emoji}' by '{user_name if user_id else 'anonymous'}' processed for message '{original_external_id}'")
+        return True
 
     def _handle_reaction_removed(self, reaction_content: Dict[str, Any]) -> bool:
         """
-        Removes a reaction from an existing message.
-        reaction_content is the actual data for reaction removal (e.g., from event_payload['payload']).
+        Handles reaction removal events from external sources.
+        
+        Two scenarios:
+        1. External reaction removal (other user removed reaction) → Remove immediately
+        2. Confirmation of agent pending reaction removal → Finalize removal
+        
+        Args:
+            reaction_content: The actual data for reaction removal (e.g., from event_payload['payload']).
         """
         original_external_id = reaction_content.get('original_message_id_external')
         emoji = reaction_content.get('emoji')
@@ -421,33 +553,57 @@ class MessageListComponent(Component):
                 message_to_update = msg
                 break
 
-        if message_to_update and 'reactions' in message_to_update and emoji in message_to_update['reactions']:
+        if not message_to_update or 'reactions' not in message_to_update or emoji not in message_to_update['reactions']:
+            logger.warning(f"[{self.owner.id}] Could not remove reaction: Message '{original_external_id}' not found or no such reaction '{emoji}'.")
+            return False
+
+        # Check if this is confirmation of a pending reaction removal
+        pending_removals = message_to_update.get('pending_reaction_removals', {})
+        pending_removal_key = None
+        for key, pending_info in pending_removals.items():
+            if pending_info.get('emoji') == emoji and user_id and pending_info.get('agent_id') == user_id:
+                pending_removal_key = key
+                break
+
+        if pending_removal_key:
+            # Scenario 2: This is confirmation of our agent's pending reaction removal
+            logger.info(f"[{self.owner.id}] Confirmed reaction '{emoji}' removal from message '{original_external_id}' that was pending by agent '{user_id}'")
+            
+            # The reaction should already be removed from the local state by remove_pending_reaction
+            # Just clean up the pending removal tracking
+            del pending_removals[pending_removal_key]
+            if not pending_removals:
+                message_to_update.pop('pending_reaction_removals', None)
+                
+            logger.info(f"[{self.owner.id}] Reaction '{emoji}' removal by agent '{user_name}' confirmed and finalized for message '{original_external_id}'")
+        else:
+            # Scenario 1: External reaction removal (another user removed their reaction)
+            logger.info(f"[{self.owner.id}] External reaction '{emoji}' removal from message '{original_external_id}' by user '{user_name}'")
+            
+            reactions_list = message_to_update['reactions'][emoji]
             if user_id:
-                if user_id in message_to_update['reactions'][emoji]:
-                    message_to_update['reactions'][emoji].remove(user_id)
-                    logger.info(f"[{self.owner.id}] Reaction '{emoji}' by '{user_name}' removed from message '{original_external_id}'.")
+                if user_id in reactions_list:
+                    reactions_list.remove(user_id)
+                    logger.info(f"[{self.owner.id}] Reaction '{emoji}' by '{user_name}' removed from message '{original_external_id}'")
                 else:
-                    logger.debug(f"[{self.owner.id}] User '{user_name}' did not have reaction '{emoji}' on message '{original_external_id}' to remove.")
+                    logger.debug(f"[{self.owner.id}] User '{user_name}' did not have reaction '{emoji}' on message '{original_external_id}' to remove")
                     return False # User hadn't reacted with this emoji
             else:
                 # If user_id is None, try to remove a generic "anonymous_reaction" marker if present
-                if "anonymous_reaction" in message_to_update['reactions'][emoji]:
-                    message_to_update['reactions'][emoji].remove("anonymous_reaction")
-                    logger.info(f"[{self.owner.id}] Anonymous reaction '{emoji}' removed from message '{original_external_id}'.")
+                if "anonymous_reaction" in reactions_list:
+                    reactions_list.remove("anonymous_reaction")
+                    logger.info(f"[{self.owner.id}] Anonymous reaction '{emoji}' removed from message '{original_external_id}'")
                 else:
-                    logger.debug(f"[{self.owner.id}] No anonymous reaction '{emoji}' on message '{original_external_id}' to remove.")
+                    logger.debug(f"[{self.owner.id}] No anonymous reaction '{emoji}' on message '{original_external_id}' to remove")
                     return False # No anonymous reaction to remove
 
             # If the list for this emoji is now empty, remove the emoji key itself
-            if not message_to_update['reactions'][emoji]:
+            if not reactions_list:
                 del message_to_update['reactions'][emoji]
-                logger.debug(f"[{self.owner.id}] Emoji '{emoji}' removed from message '{original_external_id}' as no users left.")
-            
-            # TODO: Emit event?
-            return True
-        else:
-            logger.warning(f"[{self.owner.id}] Could not remove reaction: Message '{original_external_id}' not found or no such reaction '{emoji}'.")
-            return False
+                logger.debug(f"[{self.owner.id}] Emoji '{emoji}' removed from message '{original_external_id}' as no users left")
+        
+        logger.info(f"[{self.owner.id}] Reaction '{emoji}' removal by '{user_name if user_id else 'anonymous'}' processed for message '{original_external_id}'")
+        return True
 
     def _rebuild_message_map(self):
         """Inefficiently rebuilds the internal ID to index map."""
@@ -692,16 +848,18 @@ class MessageListComponent(Component):
     def _handle_message_send_confirmed(self, confirm_content: Dict[str, Any]) -> bool:
         """
         Updates a pending message to 'sent' status upon confirmation from adapter.
-        confirm_content is expected to contain:
-        - internal_request_id: str
-        - external_message_ids: List[str] (IDs assigned by the external platform)
-        - confirmed_timestamp: Optional[float]
+        Now handles generic action success payload structure.
         """
+        logger.critical(f"[{self.owner.id}] MessageListComponent handling send confirmation: {confirm_content}")
+        
         internal_req_id = confirm_content.get('internal_request_id')
-        external_ids = confirm_content.get('external_message_ids')
+        adapter_response_data = confirm_content.get('adapter_response_data', {})
+        
+        # Extract external message IDs from adapter response data (action-specific logic)
+        external_ids = adapter_response_data.get('message_ids', [])
 
         if not internal_req_id or not external_ids:
-            logger.warning(f"[{self.owner.id}] Message send confirmation missing 'internal_request_id' or 'external_message_ids'. Payload: {confirm_content}")
+            logger.warning(f"[{self.owner.id}] Message send confirmation missing 'internal_request_id' or 'message_ids' in adapter_response_data. Payload: {confirm_content}")
             return False
 
         message_to_update: Optional[MessageType] = None
@@ -760,7 +918,13 @@ class MessageListComponent(Component):
             message_to_update['error_details'] = error_msg or "Unknown send failure"
             if 'failed_timestamp' in failure_content and failure_content['failed_timestamp']:
                 message_to_update['timestamp'] = failure_content['failed_timestamp'] # Update to failure time
-            logger.info(f"[{self.owner.id}] Pending message (req_id: {internal_req_id}) marked as failed_to_send. Error: {error_msg}")
+            
+            logger.error(f"[{self.owner.id}] Agent message failed to send (req_id: {internal_req_id}). Error: {error_msg}")
+            
+            # NEW: Trigger agent activation for message send failure
+            # This allows the agent to respond to the failure, potentially retry, or take alternative action
+            self._emit_send_failure_activation_call(message_to_update, failure_content)
+            
             return True
         else:
             logger.warning(f"[{self.owner.id}] Could not find 'pending_send' message with internal_request_id '{internal_req_id}' to mark as failed.")
@@ -847,12 +1011,51 @@ class MessageListComponent(Component):
         Handles agent_message_confirmed events during replay.
         This restores agent outgoing messages to maintain complete conversation history.
         
+        FIXED: Now checks if message already exists to prevent duplicates during live confirmations.
+        
         Args:
             agent_message_content: The agent message payload from the timeline event
             
         Returns:
             True if handled successfully, False otherwise
         """
+        # FIXED: Check if this message already exists to prevent duplicates
+        # This can happen when:
+        # 1. Live confirmation: message exists as pending, just got confirmed, and then this event is processed
+        # 2. Replay: message doesn't exist yet and needs to be restored from timeline
+        
+        internal_request_id = agent_message_content.get('internal_request_id')
+        external_message_id = agent_message_content.get('original_message_id_external')
+        
+        # Check if message already exists by internal_request_id or external_id
+        existing_message = None
+        if internal_request_id:
+            for msg in self._state['_messages']:
+                if msg.get('internal_request_id') == internal_request_id:
+                    existing_message = msg
+                    break
+        
+        # If not found by internal_request_id, try external_id
+        if not existing_message and external_message_id:
+            for msg in self._state['_messages']:
+                if msg.get('original_external_id') == external_message_id:
+                    existing_message = msg
+                    break
+        
+        if existing_message:
+            # Message already exists (live confirmation scenario) - just ensure it's marked correctly
+            logger.debug(f"[{self.owner.id}] Agent message with req_id '{internal_request_id}' already exists. Status: {existing_message.get('status')}. Skipping duplicate addition.")
+            
+            # Ensure the existing message has the correct external_id if it was missing
+            if not existing_message.get('original_external_id') and external_message_id:
+                existing_message['original_external_id'] = external_message_id
+                logger.debug(f"[{self.owner.id}] Updated existing message with external_id: {external_message_id}")
+                
+            return True
+        
+        # Message doesn't exist - this is a replay scenario, add it
+        logger.info(f"[{self.owner.id}] REPLAY: Adding agent message with req_id '{internal_request_id}' from timeline")
+        
         # During replay, we want to add the agent message to the conversation
         # as if it were a regular message (which it is, just from the agent)
         
@@ -902,5 +1105,409 @@ class MessageListComponent(Component):
                 logger.debug(f"[{self.owner.id}] Pruned oldest message due to max_messages limit during agent message replay.")
         
         logger.info(f"[{self.owner.id}] REPLAY: Restored agent outgoing message '{agent_message_content.get('text', '')[:50]}...' ({len(self._state.get('_messages', []))} total messages)")
+        
+        return True
+
+    def _emit_send_failure_activation_call(self, failed_message: MessageType, failure_content: Dict[str, Any]) -> None:
+        """
+        Emits an "activation_call" event when an agent's message fails to send.
+        This allows the agent to respond to the failure, potentially retry, or take alternative action.
+        
+        Args:
+            failed_message: The message that failed to send
+            failure_content: The failure payload from the adapter
+        """
+        if not self.owner:
+            logger.warning(f"[MessageListComponent] Cannot emit send failure activation: No owner element")
+            return
+            
+        parent_space = self.owner.get_parent_object()
+        if not parent_space or not hasattr(parent_space, 'receive_event'):
+            logger.warning(f"[{self.owner.id}] Cannot emit send failure activation: Parent space not found or not event-capable")
+            return
+        
+        # Get conversation context from the chat element itself
+        adapter_id = getattr(self.owner, 'adapter_id', failed_message.get('adapter_id', 'unknown'))
+        external_conversation_id = getattr(self.owner, 'external_conversation_id', failure_content.get('conversation_id', 'unknown'))
+        
+        # Determine if this is a DM from the chat element's recipient_info
+        is_dm = False
+        if hasattr(self.owner, 'recipient_info'):
+            recipient_info = getattr(self.owner, 'recipient_info', {})
+            is_dm = recipient_info.get('is_dm', False)
+        else:
+            # Fallback: assume it's a DM if we can't determine otherwise
+            is_dm = True  # Conservative default for agent messages
+        
+        # Create focused activation context for the failed message
+        focus_context = {
+            "focus_element_id": self.owner.id,  # The element that should be rendered
+            "focus_element_type": self.owner.__class__.__name__,
+            "focus_element_name": getattr(self.owner, 'name', 'Unknown'),
+            "conversation_context": {
+                "adapter_id": adapter_id,
+                "external_conversation_id": external_conversation_id,
+                "is_dm": is_dm,
+                "conversation_id": external_conversation_id,
+                "activation_reason": "message_send_failed",
+                "failed_message_text": failed_message.get('text', '')[:100],  # Preview of failed message
+                "error_message": failure_content.get('error_message', 'Unknown send failure'),
+                "internal_request_id": failed_message.get('internal_request_id'),
+                "failed_timestamp": failure_content.get('failed_timestamp', time.time())
+            }
+        }
+        
+        activation_event = {
+            "event_type": "activation_call",
+            "event_id": f"activation_send_failure_{self.owner.id}_{int(time.time()*1000)}",
+            "source_element_id": self.owner.id,
+            "activation_reason": "message_send_failed",
+            "triggering_event_type": "connectome_message_send_failed",
+            "timestamp": time.time(),
+            "is_replayable": False,  # Activation calls are runtime-only
+            "focus_context": focus_context,  # Context for focused rendering
+            "payload": {
+                "reason": "message_send_failed",
+                "source_element_id": self.owner.id,
+                "triggering_event_type": "connectome_message_send_failed",
+                "focus_context": focus_context,
+                "conversation_id": external_conversation_id,
+                "failed_message": {
+                    "internal_request_id": failed_message.get('internal_request_id'),
+                    "text": failed_message.get('text'),
+                    "timestamp": failed_message.get('timestamp'),
+                    "error_details": failed_message.get('error_details')
+                },
+                "error_message": failure_content.get('error_message', 'Unknown send failure'),
+                "adapter_id": adapter_id
+            }
+        }
+        
+        # Use basic timeline context (let parent space handle specifics)
+        timeline_context = {"timeline_id": parent_space.get_primary_timeline() if hasattr(parent_space, 'get_primary_timeline') else None}
+        
+        try:
+            parent_space.receive_event(activation_event, timeline_context)
+            logger.warning(f"[{self.owner.id}] Emitted activation_call for message send failure. Reason: message_send_failed, Error: {failure_content.get('error_message', 'Unknown')}")
+        except Exception as e:
+            logger.error(f"[{self.owner.id}] Error emitting send failure activation: {e}", exc_info=True)
+
+    # --- NEW: Methods for immediate local state updates (called by tools before external confirmation) ---
+    def mark_message_pending_delete(self, external_message_id: str, requesting_agent_id: str) -> bool:
+        """
+        Immediately marks a message as pending deletion in local state.
+        Called by delete_message tool before external confirmation.
+        
+        Args:
+            external_message_id: External ID of message to mark as pending delete
+            requesting_agent_id: ID of agent requesting the deletion
+            
+        Returns:
+            True if message found and marked, False otherwise
+        """
+        message_to_update = None
+        for msg in self._state['_messages']:
+            if msg.get('original_external_id') == external_message_id:
+                message_to_update = msg
+                break
+        
+        if message_to_update:
+            # Store original text for potential restore if deletion fails
+            if 'original_text_before_pending_delete' not in message_to_update:
+                message_to_update['original_text_before_pending_delete'] = message_to_update.get('text')
+            
+            message_to_update['text'] = "[🗑️ Deleting message...]"
+            message_to_update['status'] = "pending_delete"
+            message_to_update['pending_delete_by_agent_id'] = requesting_agent_id
+            message_to_update['pending_delete_timestamp'] = time.time()
+            
+            logger.info(f"[{self.owner.id}] Marked message '{external_message_id}' as pending deletion by agent '{requesting_agent_id}'")
+            return True
+        else:
+            logger.warning(f"[{self.owner.id}] Cannot mark message '{external_message_id}' as pending delete: Message not found")
+            return False
+
+    def mark_message_pending_edit(self, external_message_id: str, new_text: str, requesting_agent_id: str) -> bool:
+        """
+        Immediately shows edited text with pending status in local state.
+        Called by edit_message tool before external confirmation.
+        
+        Args:
+            external_message_id: External ID of message to edit
+            new_text: New text content to show
+            requesting_agent_id: ID of agent requesting the edit
+            
+        Returns:
+            True if message found and updated, False otherwise
+        """
+        message_to_update = None
+        for msg in self._state['_messages']:
+            if msg.get('original_external_id') == external_message_id:
+                message_to_update = msg
+                break
+        
+        if message_to_update:
+            # Store original text for potential restore if edit fails
+            if 'original_text_before_pending_edit' not in message_to_update:
+                message_to_update['original_text_before_pending_edit'] = message_to_update.get('text')
+            
+            message_to_update['text'] = f"{new_text} ✏️"  # Show new text with edit indicator
+            message_to_update['status'] = "pending_edit"
+            message_to_update['pending_edit_by_agent_id'] = requesting_agent_id
+            message_to_update['pending_edit_timestamp'] = time.time()
+            message_to_update['pending_new_text'] = new_text  # Store clean version
+            
+            logger.info(f"[{self.owner.id}] Marked message '{external_message_id}' as pending edit by agent '{requesting_agent_id}'")
+            return True
+        else:
+            logger.warning(f"[{self.owner.id}] Cannot mark message '{external_message_id}' as pending edit: Message not found")
+            return False
+
+    def add_pending_reaction(self, external_message_id: str, emoji: str, requesting_agent_id: str) -> bool:
+        """
+        Immediately adds a reaction with pending status in local state.
+        Called by add_reaction tool before external confirmation.
+        
+        Args:
+            external_message_id: External ID of message to react to
+            emoji: Emoji to add
+            requesting_agent_id: ID of agent adding the reaction
+            
+        Returns:
+            True if message found and reaction added, False otherwise
+        """
+        message_to_update = None
+        for msg in self._state['_messages']:
+            if msg.get('original_external_id') == external_message_id:
+                message_to_update = msg
+                break
+        
+        if message_to_update:
+            if 'reactions' not in message_to_update:
+                message_to_update['reactions'] = {}
+            
+            if emoji not in message_to_update['reactions']:
+                message_to_update['reactions'][emoji] = []
+            
+            # Add reaction with pending marker
+            pending_reaction_id = f"pending_{requesting_agent_id}"
+            if pending_reaction_id not in message_to_update['reactions'][emoji]:
+                message_to_update['reactions'][emoji].append(pending_reaction_id)
+                
+                # Track pending reactions for cleanup
+                if 'pending_reactions' not in message_to_update:
+                    message_to_update['pending_reactions'] = {}
+                message_to_update['pending_reactions'][f"{emoji}_{requesting_agent_id}"] = {
+                    "emoji": emoji,
+                    "agent_id": requesting_agent_id,
+                    "timestamp": time.time()
+                }
+                
+                logger.info(f"[{self.owner.id}] Added pending reaction '{emoji}' by agent '{requesting_agent_id}' to message '{external_message_id}'")
+                return True
+        
+        logger.warning(f"[{self.owner.id}] Cannot add pending reaction to message '{external_message_id}': Message not found")
+        return False
+
+    def remove_pending_reaction(self, external_message_id: str, emoji: str, requesting_agent_id: str) -> bool:
+        """
+        Immediately removes a reaction with pending status in local state.
+        Called by remove_reaction tool before external confirmation.
+        
+        Args:
+            external_message_id: External ID of message to remove reaction from
+            emoji: Emoji to remove
+            requesting_agent_id: ID of agent removing the reaction
+            
+        Returns:
+            True if message found and reaction removed, False otherwise
+        """
+        message_to_update = None
+        for msg in self._state['_messages']:
+            if msg.get('original_external_id') == external_message_id:
+                message_to_update = msg
+                break
+        
+        if message_to_update and 'reactions' in message_to_update and emoji in message_to_update['reactions']:
+            # Look for existing reaction by this agent (could be pending or confirmed)
+            reactions_list = message_to_update['reactions'][emoji]
+            agent_reaction_found = False
+            
+            # Remove confirmed reaction or pending reaction
+            for reaction_marker in [requesting_agent_id, f"pending_{requesting_agent_id}"]:
+                if reaction_marker in reactions_list:
+                    reactions_list.remove(reaction_marker)
+                    agent_reaction_found = True
+                    break
+            
+            if agent_reaction_found:
+                # If no reactions left for this emoji, remove the emoji
+                if not reactions_list:
+                    del message_to_update['reactions'][emoji]
+                
+                # Add pending removal marker
+                if 'pending_reaction_removals' not in message_to_update:
+                    message_to_update['pending_reaction_removals'] = {}
+                message_to_update['pending_reaction_removals'][f"{emoji}_{requesting_agent_id}"] = {
+                    "emoji": emoji,
+                    "agent_id": requesting_agent_id,
+                    "timestamp": time.time()
+                }
+                
+                logger.info(f"[{self.owner.id}] Removed pending reaction '{emoji}' by agent '{requesting_agent_id}' from message '{external_message_id}'")
+                return True
+        
+        logger.warning(f"[{self.owner.id}] Cannot remove pending reaction from message '{external_message_id}': Message or reaction not found")
+        return False
+
+    def restore_message_from_pending_state(self, external_message_id: str, operation_type: str) -> bool:
+        """
+        Restores a message from pending state if external operation fails.
+        
+        Args:
+            external_message_id: External ID of message to restore
+            operation_type: Type of operation that failed ("delete", "edit", "add_reaction", "remove_reaction")
+            
+        Returns:
+            True if message found and restored, False otherwise
+        """
+        message_to_restore = None
+        for msg in self._state['_messages']:
+            if msg.get('original_external_id') == external_message_id:
+                message_to_restore = msg
+                break
+        
+        if not message_to_restore:
+            logger.warning(f"[{self.owner.id}] Cannot restore message '{external_message_id}': Message not found")
+            return False
+        
+        if operation_type == "delete":
+            if 'original_text_before_pending_delete' in message_to_restore:
+                message_to_restore['text'] = message_to_restore['original_text_before_pending_delete']
+                del message_to_restore['original_text_before_pending_delete']
+            message_to_restore['status'] = "received"  # Restore to normal
+            message_to_restore.pop('pending_delete_by_agent_id', None)
+            message_to_restore.pop('pending_delete_timestamp', None)
+            
+        elif operation_type == "edit":
+            if 'original_text_before_pending_edit' in message_to_restore:
+                message_to_restore['text'] = message_to_restore['original_text_before_pending_edit']
+                del message_to_restore['original_text_before_pending_edit']
+            message_to_restore['status'] = "received"  # Restore to normal
+            message_to_restore.pop('pending_edit_by_agent_id', None)
+            message_to_restore.pop('pending_edit_timestamp', None)
+            message_to_restore.pop('pending_new_text', None)
+        
+        # Clear pending reaction markers
+        message_to_restore.pop('pending_reactions', None)
+        message_to_restore.pop('pending_reaction_removals', None)
+        
+        logger.info(f"[{self.owner.id}] Restored message '{external_message_id}' from pending {operation_type} state")
+        return True
+
+    def _handle_action_success(self, success_content: Dict[str, Any]) -> bool:
+        """
+        Handles generic action success events and routes to action-specific handlers.
+        
+        Args:
+            success_content: The action success payload containing action_type and adapter_response_data
+            
+        Returns:
+            True if handled successfully, False otherwise
+        """
+        action_type = success_content.get('action_type')
+        
+        if action_type == "send_message":
+            return self._handle_message_send_confirmed(success_content)
+        elif action_type == "delete_message":
+            return self._handle_delete_message_confirmed(success_content)
+        elif action_type == "edit_message":
+            return self._handle_edit_message_confirmed(success_content)
+        elif action_type in ["add_reaction", "remove_reaction"]:
+            return self._handle_reaction_action_confirmed(success_content)
+        else:
+            logger.warning(f"[{self.owner.id}] Unknown action_type '{action_type}' in action success. Ignoring.")
+            return False
+
+    def _handle_action_failure(self, failure_content: Dict[str, Any]) -> bool:
+        """
+        Handles generic action failure events and routes to action-specific handlers.
+        
+        Args:
+            failure_content: The action failure payload containing action_type and error details
+            
+        Returns:
+            True if handled successfully, False otherwise
+        """
+        action_type = failure_content.get('action_type')
+        
+        if action_type == "send_message":
+            return self._handle_message_send_failed(failure_content)
+        elif action_type in ["delete_message", "edit_message", "add_reaction", "remove_reaction"]:
+            return self._handle_message_action_failed(failure_content)
+        else:
+            logger.warning(f"[{self.owner.id}] Unknown action_type '{action_type}' in action failure. Ignoring.")
+            return False
+
+    def _handle_delete_message_confirmed(self, success_content: Dict[str, Any]) -> bool:
+        """
+        Handles confirmation of delete_message action success.
+        """
+        internal_req_id = success_content.get('internal_request_id')
+        adapter_response_data = success_content.get('adapter_response_data', {})
+        
+        # For delete confirmations, we just need to know it succeeded
+        logger.info(f"[{self.owner.id}] Delete message action confirmed for req_id: {internal_req_id}")
+        
+        # The actual deletion should have already been handled by _handle_delete_message
+        # This confirmation just means the adapter successfully processed our request
+        return True
+
+    def _handle_edit_message_confirmed(self, success_content: Dict[str, Any]) -> bool:
+        """
+        Handles confirmation of edit_message action success.
+        """
+        internal_req_id = success_content.get('internal_request_id')
+        adapter_response_data = success_content.get('adapter_response_data', {})
+        
+        # For edit confirmations, we just need to know it succeeded
+        logger.info(f"[{self.owner.id}] Edit message action confirmed for req_id: {internal_req_id}")
+        
+        # The actual edit should have already been handled by _handle_edit_message
+        # This confirmation just means the adapter successfully processed our request
+        return True
+
+    def _handle_reaction_action_confirmed(self, success_content: Dict[str, Any]) -> bool:
+        """
+        Handles confirmation of add_reaction or remove_reaction action success.
+        """
+        action_type = success_content.get('action_type')
+        internal_req_id = success_content.get('internal_request_id')
+        adapter_response_data = success_content.get('adapter_response_data', {})
+        
+        logger.info(f"[{self.owner.id}] Reaction action '{action_type}' confirmed for req_id: {internal_req_id}")
+        
+        # The actual reaction add/remove should have already been handled by 
+        # _handle_reaction_added or _handle_reaction_removed
+        # This confirmation just means the adapter successfully processed our request
+        return True
+
+    def _handle_message_action_failed(self, failure_content: Dict[str, Any]) -> bool:
+        """
+        Handles failure of message action (delete, edit, reaction).
+        Restores the message from pending state if needed.
+        """
+        action_type = failure_content.get('action_type')
+        internal_req_id = failure_content.get('internal_request_id')
+        error_msg = failure_content.get('error_message')
+        adapter_response_data = failure_content.get('adapter_response_data', {})
+        
+        logger.warning(f"[{self.owner.id}] Message action '{action_type}' failed for req_id: {internal_req_id}. Error: {error_msg}")
+        
+        # Try to extract affected message ID for restoration
+        affected_message_id = adapter_response_data.get('message_id') or adapter_response_data.get('affected_message_id')
+        if affected_message_id:
+            # Restore message from pending state since the action failed
+            self.restore_message_from_pending_state(affected_message_id, action_type.replace('_message', '').replace('_reaction', ''))
         
         return True

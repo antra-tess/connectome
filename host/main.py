@@ -127,6 +127,10 @@ async def amain():
     # Set activity_client reference in event_loop after creation
     event_loop.activity_client = activity_client
     
+    # NEW: Set ActivityClient reference in ExternalEventRouter for outgoing action dispatch
+    external_event_router.set_activity_client(activity_client)
+    logger.info("ExternalEventRouter configured with ActivityClient reference for action preprocessing")
+    
     # Load registered agent loops dynamically
     logger.info("Scanning for registered components...")
     scan_and_load_components()
@@ -181,7 +185,7 @@ async def amain():
     
     # Start Activity Client (external connections)
     logger.info("Starting Activity Client connections...")
-    await activity_client.start_connections()
+    await activity_client.connect_to_all_adapters()
 
     try:
         logger.info("Starting Host Event Loop...")

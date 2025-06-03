@@ -108,17 +108,28 @@ class HostEventLoop:
                 # payload = action_request.get("payload") # Payload is part of the full request dict
                 logger.debug(f"Processing outgoing action: Type='{action_type}', Target='{target_module_name}'")
                 
-                # --- Routing Logic --- 
+                # --- Enhanced Routing Logic with ExternalEventRouter as Preprocessor --- 
                 handler_called = False
-                if target_module_name == "ActivityClient": # <<< Added handler routing
-                     if hasattr(self.activity_client, 'handle_outgoing_action') and callable(getattr(self.activity_client, 'handle_outgoing_action')):
-                          try:
-                               await self.activity_client.handle_outgoing_action(action_request) # Pass full request
-                               handler_called = True
-                          except Exception as client_error:
-                               logger.error(f"Error in ActivityClient handling action '{action_type}': {client_error}", exc_info=True)
-                     else:
-                          logger.error(f"ActivityClient module does not have a callable 'handle_outgoing_action' method.")
+                if target_module_name == "ActivityClient":
+                    # NEW: Route through ExternalEventRouter first for action-specific processing
+                    if hasattr(self.external_event_router, 'handle_outgoing_action') and callable(getattr(self.external_event_router, 'handle_outgoing_action')):
+                        try:
+                            # ExternalEventRouter processes action-specific logic and routes to ActivityClient
+                            await self.external_event_router.handle_outgoing_action(action_request)
+                            handler_called = True
+                        except Exception as router_error:
+                            logger.error(f"Error in ExternalEventRouter preprocessing action '{action_type}': {router_error}", exc_info=True)
+                    else:
+                        # Fallback to direct ActivityClient (for backward compatibility during transition)
+                        logger.warning(f"ExternalEventRouter does not have 'handle_outgoing_action'. Falling back to direct ActivityClient routing.")
+                        if hasattr(self.activity_client, 'handle_outgoing_action') and callable(getattr(self.activity_client, 'handle_outgoing_action')):
+                            try:
+                                await self.activity_client.handle_outgoing_action(action_request) # Pass full request
+                                handler_called = True
+                            except Exception as client_error:
+                                logger.error(f"Error in ActivityClient handling action '{action_type}': {client_error}", exc_info=True)
+                        else:
+                            logger.error(f"ActivityClient module does not have a callable 'handle_outgoing_action' method.")
                 # Add routing for other target modules here...
                 # elif target_module_name == "PersistenceModule":
                 #     await self.persistence_module.handle_action(...) 

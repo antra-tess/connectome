@@ -242,6 +242,24 @@ class MessageActionHandler(Component):
                 logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] delete_message_tool: _get_message_context failed.")
                 return {"success": False, "error": f"Could not determine context for deleting message."} 
                 
+            requesting_agent_id = self._get_requesting_agent_id(calling_context)
+            
+            # NEW: Immediately update local state before external dispatch
+            msg_list_comp = self.get_sibling_component(MessageListComponent)
+            if msg_list_comp:
+                local_update_success = msg_list_comp.mark_message_pending_delete(message_external_id, requesting_agent_id or "unknown_agent")
+                if local_update_success:
+                    logger.info(f"[{self.owner.id}] Immediately marked message '{message_external_id}' as pending deletion in local state")
+                    
+                    # Trigger VEIL update to show pending state immediately
+                    veil_producer = self.get_sibling_component("MessageListVeilProducer")
+                    if veil_producer:
+                        veil_producer.emit_delta()
+                else:
+                    logger.warning(f"[{self.owner.id}] Could not mark message '{message_external_id}' as pending delete in local state")
+            else:
+                logger.warning(f"[{self.owner.id}] MessageListComponent not found for immediate local state update")
+                
             action_request = {
                 "target_module": "ActivityClient",
                 "action_type": "delete_message",
@@ -250,15 +268,20 @@ class MessageActionHandler(Component):
                     "conversation_id": conversation_id,
                     "message_external_id": message_external_id,
                     "requesting_element_id": self.owner.id,
-                    "requesting_agent_id": self._get_requesting_agent_id(calling_context) # Pass context
+                    "requesting_agent_id": requesting_agent_id
                 }
             }
             
             try:
                 await self._outgoing_action_callback(action_request)
                 logger.info(f"[{self.owner.id}] Dispatched 'delete_message' action for ID '{message_external_id}' to adapter '{adapter_id}'.")
-                return {"success": True, "status": "Delete request sent to outgoing queue."} 
+                return {"success": True, "status": "Delete request sent. Message marked as pending deletion in conversation.", "message_external_id": message_external_id} 
             except Exception as e:
+                 # NEW: Restore message state if dispatch fails
+                 if msg_list_comp:
+                     msg_list_comp.restore_message_from_pending_state(message_external_id, "delete")
+                     if veil_producer:
+                         veil_producer.emit_delta()  # Update VEIL to show restore
                  logger.error(f"[{self.owner.id}] Error dispatching delete_message action: {e}", exc_info=True)
                  return {"success": False, "error": f"Error dispatching delete request: {e}"}
                  
@@ -280,6 +303,24 @@ class MessageActionHandler(Component):
                 logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] edit_message_tool: _get_message_context failed.")
                 return {"success": False, "error": f"Could not determine context for editing message."} 
                 
+            requesting_agent_id = self._get_requesting_agent_id(calling_context)
+            
+            # NEW: Immediately update local state before external dispatch
+            msg_list_comp = self.get_sibling_component(MessageListComponent)
+            if msg_list_comp:
+                local_update_success = msg_list_comp.mark_message_pending_edit(message_external_id, new_text, requesting_agent_id or "unknown_agent")
+                if local_update_success:
+                    logger.info(f"[{self.owner.id}] Immediately marked message '{message_external_id}' as pending edit in local state")
+                    
+                    # Trigger VEIL update to show pending state immediately
+                    veil_producer = self.get_sibling_component("MessageListVeilProducer")
+                    if veil_producer:
+                        veil_producer.emit_delta()
+                else:
+                    logger.warning(f"[{self.owner.id}] Could not mark message '{message_external_id}' as pending edit in local state")
+            else:
+                logger.warning(f"[{self.owner.id}] MessageListComponent not found for immediate local state update")
+                
             action_request = {
                 "target_module": "ActivityClient",
                 "action_type": "edit_message",
@@ -289,15 +330,20 @@ class MessageActionHandler(Component):
                     "message_external_id": message_external_id,
                     "new_text": new_text,
                     "requesting_element_id": self.owner.id,
-                    "requesting_agent_id": self._get_requesting_agent_id(calling_context) # Pass context
+                    "requesting_agent_id": requesting_agent_id
                 }
             }
             
             try:
                 await self._outgoing_action_callback(action_request)
                 logger.info(f"[{self.owner.id}] Dispatched 'edit_message' action for ID '{message_external_id}' to adapter '{adapter_id}'.")
-                return {"success": True, "status": "Edit request sent to outgoing queue."} 
+                return {"success": True, "status": "Edit request sent. Message updated with new text in conversation.", "message_external_id": message_external_id} 
             except Exception as e:
+                 # NEW: Restore message state if dispatch fails
+                 if msg_list_comp:
+                     msg_list_comp.restore_message_from_pending_state(message_external_id, "edit")
+                     if veil_producer:
+                         veil_producer.emit_delta()  # Update VEIL to show restore
                  logger.error(f"[{self.owner.id}] Error dispatching edit_message action: {e}", exc_info=True)
                  return {"success": False, "error": f"Error dispatching edit request: {e}"}
 
@@ -319,6 +365,24 @@ class MessageActionHandler(Component):
                 logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] add_reaction_tool: _get_message_context failed.")
                 return {"success": False, "error": f"Could not determine context for adding reaction."} 
                 
+            requesting_agent_id = self._get_requesting_agent_id(calling_context)
+            
+            # NEW: Immediately update local state before external dispatch
+            msg_list_comp = self.get_sibling_component(MessageListComponent)
+            if msg_list_comp:
+                local_update_success = msg_list_comp.add_pending_reaction(message_external_id, emoji, requesting_agent_id or "unknown_agent")
+                if local_update_success:
+                    logger.info(f"[{self.owner.id}] Immediately added pending reaction '{emoji}' to message '{message_external_id}' in local state")
+                    
+                    # Trigger VEIL update to show pending state immediately
+                    veil_producer = self.get_sibling_component("MessageListVeilProducer")
+                    if veil_producer:
+                        veil_producer.emit_delta()
+                else:
+                    logger.warning(f"[{self.owner.id}] Could not add pending reaction '{emoji}' to message '{message_external_id}' in local state")
+            else:
+                logger.warning(f"[{self.owner.id}] MessageListComponent not found for immediate local state update")
+                
             action_request = {
                 "target_module": "ActivityClient",
                 "action_type": "add_reaction",
@@ -328,15 +392,20 @@ class MessageActionHandler(Component):
                     "message_external_id": message_external_id,
                     "emoji": emoji,
                     "requesting_element_id": self.owner.id,
-                    "requesting_agent_id": self._get_requesting_agent_id(calling_context) # Pass context
+                    "requesting_agent_id": requesting_agent_id
                 }
             }
             
             try:
                 await self._outgoing_action_callback(action_request)
                 logger.info(f"[{self.owner.id}] Dispatched 'add_reaction' ({emoji}) action for ID '{message_external_id}' to adapter '{adapter_id}'.")
-                return {"success": True, "status": "Add reaction request sent to outgoing queue."} 
+                return {"success": True, "status": f"Reaction '{emoji}' added to message in conversation.", "message_external_id": message_external_id} 
             except Exception as e:
+                 # NEW: Restore message state if dispatch fails
+                 if msg_list_comp:
+                     msg_list_comp.restore_message_from_pending_state(message_external_id, "add_reaction")
+                     if veil_producer:
+                         veil_producer.emit_delta()  # Update VEIL to show restore
                  logger.error(f"[{self.owner.id}] Error dispatching add_reaction action: {e}", exc_info=True)
                  return {"success": False, "error": f"Error dispatching add reaction request: {e}"}
 
@@ -358,6 +427,24 @@ class MessageActionHandler(Component):
                 logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] remove_reaction_tool: _get_message_context failed.")
                 return {"success": False, "error": f"Could not determine context for removing reaction."} 
                 
+            requesting_agent_id = self._get_requesting_agent_id(calling_context)
+            
+            # NEW: Immediately update local state before external dispatch
+            msg_list_comp = self.get_sibling_component(MessageListComponent)
+            if msg_list_comp:
+                local_update_success = msg_list_comp.remove_pending_reaction(message_external_id, emoji, requesting_agent_id or "unknown_agent")
+                if local_update_success:
+                    logger.info(f"[{self.owner.id}] Immediately removed pending reaction '{emoji}' from message '{message_external_id}' in local state")
+                    
+                    # Trigger VEIL update to show pending state immediately
+                    veil_producer = self.get_sibling_component("MessageListVeilProducer")
+                    if veil_producer:
+                        veil_producer.emit_delta()
+                else:
+                    logger.warning(f"[{self.owner.id}] Could not remove pending reaction '{emoji}' from message '{message_external_id}' in local state")
+            else:
+                logger.warning(f"[{self.owner.id}] MessageListComponent not found for immediate local state update")
+                
             action_request = {
                 "target_module": "ActivityClient",
                 "action_type": "remove_reaction",
@@ -367,15 +454,20 @@ class MessageActionHandler(Component):
                     "message_external_id": message_external_id,
                     "emoji": emoji,
                     "requesting_element_id": self.owner.id,
-                    "requesting_agent_id": self._get_requesting_agent_id(calling_context) # Pass context
+                    "requesting_agent_id": requesting_agent_id
                 }
             }
             
             try:
                 await self._outgoing_action_callback(action_request)
                 logger.info(f"[{self.owner.id}] Dispatched 'remove_reaction' ({emoji}) action for ID '{message_external_id}' to adapter '{adapter_id}'.")
-                return {"success": True, "status": "Remove reaction request sent to outgoing queue."} 
+                return {"success": True, "status": f"Reaction '{emoji}' removed from message in conversation.", "message_external_id": message_external_id} 
             except Exception as e:
+                 # NEW: Restore message state if dispatch fails
+                 if msg_list_comp:
+                     msg_list_comp.restore_message_from_pending_state(message_external_id, "remove_reaction")
+                     if veil_producer:
+                         veil_producer.emit_delta()  # Update VEIL to show restore
                  logger.error(f"[{self.owner.id}] Error dispatching remove_reaction action: {e}", exc_info=True)
                  return {"success": False, "error": f"Error dispatching remove reaction request: {e}"}
 

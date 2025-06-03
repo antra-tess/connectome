@@ -32,9 +32,8 @@ logger = logging.getLogger(__name__)
 
 class ExternalEventRouter:
     """
-    Routes normalized events from external adapters (via HostEventLoop)
-    to the appropriate InnerSpace or SharedSpace. It also notifies the
-    HostEventLoop when an event relevant to an agent has been routed.
+    Routes external events from ActivityClient to appropriate Space/Element structures.
+    Handles incoming message events and outgoing action confirmations with proper context management.
     """
 
     def __init__(self, space_registry: 'SpaceRegistry', agent_configs: List['AgentConfig']):
@@ -53,6 +52,12 @@ class ExternalEventRouter:
         self.space_registry = space_registry
         # --- Agent cycle callback removed - AgentLoop will self-trigger ---
         self.agent_configs = agent_configs
+        self._activity_client = None  # Will be set via set_activity_client()
+        
+        # NEW: Store full context for pending outgoing actions (for proper confirmation routing)
+        # Key: internal_request_id, Value: Full action context including routing info
+        self._pending_action_contexts: Dict[str, Dict[str, Any]] = {}
+        
         logger.info(f"ExternalEventRouter initialized with {len(agent_configs)} agent configs.")
 
     async def _create_chat_message_details_payload(self, source_adapter_id: str, adapter_data: Dict[str, Any], is_dm: bool, adapter_type: Optional[str] = None) -> Dict[str, Any]:
@@ -153,30 +158,37 @@ class ExternalEventRouter:
             await self._handle_reaction_added(source_adapter_id, adapter_data)
         elif event_type_from_adapter == "reaction_removed":
             await self._handle_reaction_removed(source_adapter_id, adapter_data)
-        # --- NEW: Handle Conversation Started --- 
         elif event_type_from_adapter == "conversation_started":
              await self._handle_conversation_started(source_adapter_id, adapter_data)
-        # ----------------------------------------
-        # TODO: Handle system notifications (user_added_to_channel etc.) if needed
-        # elif event_type_from_adapter == "user_added_to_channel":
-        #     await self._handle_system_notification(source_adapter_id, adapter_data)
         elif event_type_from_adapter == "connectome_history_received":
             await self._handle_history_received(source_adapter_id, payload.get("conversation_id"), payload.get("messages", []), adapter_data)
         elif event_type_from_adapter == "connectome_attachment_received":
             await self._handle_attachment_received(source_adapter_id, payload.get("conversation_id"), payload)
         elif event_type_from_adapter == "connectome_attachment_data_received":
             await self._handle_attachment_data_received(source_adapter_id, adapter_data)
-        # --- NEW: Handle Send Confirmations/Failures ---
-        elif event_type_from_adapter == "adapter_send_success_ack": # Example type from ActivityClient
-            await self._handle_message_send_success_ack(source_adapter_id, adapter_data)
-        elif event_type_from_adapter == "adapter_send_failure_ack": # Example type from ActivityClient
-            await self._handle_message_send_failure_ack(source_adapter_id, adapter_data)
+        # --- NEW: Handle Generic Action Confirmations/Failures ---
+        elif event_type_from_adapter == "adapter_action_success": # Generic success for any action
+            await self._handle_action_success_ack(source_adapter_id, adapter_data)
+        elif event_type_from_adapter == "adapter_action_failure": # Generic failure for any action
+            await self._handle_action_failure_ack(source_adapter_id, adapter_data)
+        # --- DEPRECATED: Keep old handlers for backward compatibility ---
+        elif event_type_from_adapter == "adapter_send_success_ack": # Legacy - redirect to generic handler
+            logger.warning(f"Received legacy 'adapter_send_success_ack' event. Redirecting to generic handler.")
+            await self._handle_action_success_ack(source_adapter_id, adapter_data)
+        elif event_type_from_adapter == "adapter_send_failure_ack": # Legacy - redirect to generic handler
+            logger.warning(f"Received legacy 'adapter_send_failure_ack' event. Redirecting to generic handler.")
+            await self._handle_action_failure_ack(source_adapter_id, adapter_data)
         else:
             logger.warning(f"ExternalEventRouter: Unhandled event type '{event_type_from_adapter}' from adapter '{source_adapter_id}'. Data: {adapter_data}")
 
-    # --- Placeholder for DM detection --- (NEEDS IMPLEMENTATION)
+    # TEMPORARY: DEPRECATED: This method is part of the old SharedSpace routing logic.
     def _is_direct_message(self, adapter_data: Dict[str, Any]) -> bool:
         """
+        🚨 DEPRECATED: This method is part of the old SharedSpace routing logic.
+        
+        New implementation uses unified agent-based routing to InnerSpaces only.
+        SharedSpace logic is shelved for good and should not be used.
+        
         Determines if a message is a Direct Message based on the adapter data.
 
         Checks for an explicit 'is_direct_message' boolean flag in the adapter_data.
@@ -202,9 +214,15 @@ class ExternalEventRouter:
             logger.debug(f"'is_direct_message' key not found in adapter_data for conversation: {adapter_data.get('conversation_id')}. Assuming channel message.")
             return False
 
-    # --- Placeholder for finding target space --- (NEEDS IMPLEMENTATION)
+    # TEMPORARY: DEPRECATED: This method is part of the old SharedSpace routing logic.
     async def _find_target_space_for_conversation(self, source_adapter_id: str, conversation_id: str, adapter_data: Dict[str, Any]) -> Optional[Space]:
         """
+        🚨 DEPRECATED: This method is part of the old SharedSpace routing logic.
+        
+        New implementation uses unified agent-based routing to InnerSpaces only.
+        Use _find_target_inner_space_for_agent() instead.
+        SharedSpace logic is shelved for good and should not be used.
+        
         Finds the target InnerSpace or SharedSpace for an event based on 
         adapter ID, conversation ID, and the provided adapter_data.
 
@@ -222,6 +240,8 @@ class ExternalEventRouter:
         Returns:
             The target Space instance (InnerSpace or SharedSpace) or None if not found/ambiguous.
         """
+        logger.warning(f"🚨 DEPRECATED: _find_target_space_for_conversation called for {conversation_id}. This method uses old SharedSpace logic which is deprecated.")
+        
         is_dm = adapter_data.get('is_direct_message')
 
         if is_dm is True: 
@@ -255,6 +275,7 @@ class ExternalEventRouter:
             
         else: 
             # --- Handle Channel/Shared Space Routing --- 
+            logger.warning(f"🚨 DEPRECATED: SharedSpace routing requested for {conversation_id}. SharedSpace logic is shelved and should not be used.")
             if is_dm is False:
                  logger.debug(f"Finding SharedSpace (is_dm=False): adapter={source_adapter_id}, conv={conversation_id}")
             else: # is_dm flag was missing
@@ -293,7 +314,29 @@ class ExternalEventRouter:
         # letting the TimelineComponent append to the head of the specified timeline.
         return {"timeline_id": primary_timeline_id}
 
-    # --- MODIFIED HANDLERS ---
+    async def _find_target_inner_space_for_agent(self, adapter_data: Dict[str, Any]) -> Optional[InnerSpace]:
+        """
+        Unified method to find target InnerSpace for any message-related event.
+        Uses the same agent-based routing logic as _handle_direct_message.
+        
+        Args:
+            adapter_data: Raw adapter data containing recipient_connectome_agent_id
+            
+        Returns:
+            Target InnerSpace for the agent, or None if not found
+        """
+        recipient_agent_id = adapter_data.get("recipient_connectome_agent_id")
+        if not recipient_agent_id:
+            logger.error(f"Event missing 'recipient_connectome_agent_id' in adapter_data. Cannot route to InnerSpace.")
+            return None
+        
+        target_inner_space = self.space_registry.get_inner_space_for_agent(recipient_agent_id)
+        if not target_inner_space:
+            logger.error(f"Could not find InnerSpace for agent_id '{recipient_agent_id}'.")
+            return None
+        
+        return target_inner_space
+
     async def _handle_direct_message(self, source_adapter_id: str, adapter_data: Dict[str, Any], adapter_type: Optional[str] = None):
         """
         Handles a direct message, routing it to the recipient agent's InnerSpace
@@ -316,7 +359,7 @@ class ExternalEventRouter:
             return
 
         # Construct the standardized inner payload for ChatManagerComponent
-        is_dm_flag = self._is_direct_message(adapter_data)
+        is_dm_flag = adapter_data.get("is_direct_message", False)
         chat_message_details = await self._create_chat_message_details_payload(source_adapter_id, adapter_data, is_dm=is_dm_flag, adapter_type=adapter_type)
         
         # Construct the event to be recorded on the InnerSpace's timeline
@@ -340,12 +383,21 @@ class ExternalEventRouter:
         except Exception as e:
             logger.error(f"Error in InnerSpace {target_inner_space.id} receiving DM: {e}", exc_info=True)
 
+    # TEMPORARY: DEPRECATED: This method is part of the old SharedSpace routing logic.
     async def _handle_channel_message(self, source_adapter_id: str, adapter_data: Dict[str, Any], adapter_type: Optional[str] = None):
         """
+        🚨 DEPRECATED: This method is part of the old SharedSpace routing logic.
+        
+        New implementation uses unified agent-based routing to InnerSpaces only.
+        All message events now route through _handle_direct_message using agent-based selection.
+        SharedSpace logic is shelved for good and should not be used.
+        
         Handles a public channel message, routing it to a SharedSpace.
         Then, checks ALL configured agents to see if they were mentioned and ensures an uplink.
         (Assumes _is_direct_message already determined this is NOT a DM)
         """
+        logger.warning(f"🚨 DEPRECATED: _handle_channel_message called for adapter '{source_adapter_id}'. This method uses old SharedSpace logic which is deprecated.")
+        
         external_channel_id = adapter_data.get("conversation_id") # Channel ID is in conversation_id
         if not external_channel_id:
             logger.error(f"Channel message from adapter '{source_adapter_id}' missing 'conversation_id' in adapter_data. Data: {adapter_data}")
@@ -430,162 +482,190 @@ class ExternalEventRouter:
             logger.error(f"Error in SharedSpace {target_shared_space.id} receiving channel message or during agent uplink/mention check: {e}", exc_info=True)
 
     # --- NEW HANDLERS for Send ACKs ---
-    async def _handle_message_send_success_ack(self, source_adapter_id: str, adapter_data: Dict[str, Any]):
+    async def _handle_action_success_ack(self, source_adapter_id: str, adapter_data: Dict[str, Any]):
         """
-        Handles an acknowledgment from an adapter (via ActivityClient) that a message was successfully sent.
-        Routes a CONNECTOME_MESSAGE_SEND_CONFIRMED event to the relevant MessageListComponent
-        via the parent Space of the target element.
-
-        adapter_data is expected to contain:
-        - internal_request_id: The ID generated by MessageActionHandler.
-        - conversation_id: Original conversation/channel ID.
-        - is_direct_message: Boolean indicating if the original context was a DM.
-        - target_element_id_for_confirmation: The ID of the DMElement/UplinkProxy owning the MessageListComponent.
-        - external_message_ids: List of IDs assigned by the external platform.
-        - confirmed_timestamp: Optional float timestamp of adapter confirmation.
+        ENHANCED: Handles action success acknowledgments with full context lookup and proper routing.
+        
+        Uses stored context from handle_outgoing_action to create properly routed events 
+        with all necessary fields for ChatManagerComponent routing.
         """
-        target_element_id = adapter_data.get("target_element_id_for_confirmation")
         internal_request_id = adapter_data.get("internal_request_id")
         
-        if not target_element_id or not internal_request_id:
-            logger.error(f"[_handle_message_send_success_ack] Missing 'target_element_id_for_confirmation' or 'internal_request_id' in adapter_data: {adapter_data}")
+        if not internal_request_id:
+            logger.error(f"[_handle_action_success_ack] Missing 'internal_request_id' in adapter_data: {adapter_data}")
             return
 
-        # Get the target element (DMElement or UplinkProxy) using deep search
-        target_element = self.space_registry.find_element_deep(target_element_id)
-        if not target_element:
-            logger.error(f"[_handle_message_send_success_ack] Could not find target element '{target_element_id}' for confirmation using deep search.")
-            return
-
-        # Get the parent space of the target element (this should be an InnerSpace or a SharedSpace)
-        parent_space_of_target_element = target_element.get_parent_object()
-        if not parent_space_of_target_element:
-            logger.error(f"[_handle_message_send_success_ack] Could not find parent Space for element '{target_element_id}'.")
-            return
+        # NEW: Lookup stored context instead of relying on ActivityClient
+        stored_context = self._pending_action_contexts.pop(internal_request_id, None)
         
-        # Ensure the parent is actually a Space capable of receiving events
-        if not hasattr(parent_space_of_target_element, 'receive_event') or not hasattr(parent_space_of_target_element, 'id'):
-            logger.error(f"[_handle_message_send_success_ack] Parent object for '{target_element_id}' is not a routable Space (ID: {parent_space_of_target_element.id if hasattr(parent_space_of_target_element, 'id') else 'Unknown'}). Type: {type(parent_space_of_target_element)}")
+        if not stored_context:
+            logger.warning(f"[_handle_action_success_ack] No stored context found for internal_request_id '{internal_request_id}'. Action may have failed during dispatch or timed out.")
             return
+            
+        # Extract routing info from stored context
+        target_element_id = stored_context["target_element_id"]
+        action_type = stored_context["action_type"]
+        source_adapter_id_from_context = stored_context["source_adapter_id"]
+        external_conversation_id = stored_context["external_conversation_id"]
+        
+        logger.info(f"[_handle_action_success_ack] Processing {action_type} success for req_id '{internal_request_id}' using stored context: adapter={source_adapter_id_from_context}, conv={external_conversation_id}")
 
-        logger.info(f"[_handle_message_send_success_ack] Routing CONNECTOME_MESSAGE_SEND_CONFIRMED for req_id '{internal_request_id}' to element '{target_element_id}' within space '{parent_space_of_target_element.id}'.")
-
-        # Construct payload for MessageListComponent
-        confirmation_payload_for_mlc = {
-            "event_type": CONNECTOME_MESSAGE_SEND_CONFIRMED,
-            "target_element_id": target_element_id,
-            "internal_request_id": internal_request_id,
-            "external_message_ids": adapter_data.get("external_message_ids", []),
-            "confirmed_timestamp": adapter_data.get("confirmed_timestamp", time.time())
-        }
-
-        connectome_event = {
-            "event_type": CONNECTOME_MESSAGE_SEND_CONFIRMED,
-            "target_element_id": target_element_id, # MessageListComponent is on this element
-            "is_replayable": True,  # Message send confirmations should be replayed for outgoing message state
-            "payload": confirmation_payload_for_mlc # This is what MessageListComponent handler expects
-        }
-        # The timeline_context is for the parent_space_of_target_element
-        timeline_context = await self._construct_timeline_context_for_space(parent_space_of_target_element) 
-
-        try:
-            # The parent_space_of_target_element (e.g., InnerSpace) receives the event.
-            # Its receive_event method should then record it and propagate to the
-            # child element specified in connectome_event["target_element_id"].
-            parent_space_of_target_element.receive_event(connectome_event, timeline_context)
-            logger.info(f"{connectome_event['event_type']} event for req_id '{internal_request_id}' routed via Space '{parent_space_of_target_element.id}' to Element '{target_element_id}'.")
-        except Exception as e:
-            logger.error(f"Error routing {connectome_event['event_type']} via Space '{parent_space_of_target_element.id}': {e}", exc_info=True)
-
-    async def _handle_message_send_failure_ack(self, source_adapter_id: str, adapter_data: Dict[str, Any]):
-        """
-        Handles an acknowledgment from an adapter (via ActivityClient) that a message failed to send.
-        Routes a CONNECTOME_MESSAGE_SEND_FAILED event to the relevant MessageListComponent
-        via the parent Space of the target element.
-
-        adapter_data is expected to contain:
-        - internal_request_id: The ID generated by MessageActionHandler.
-        - conversation_id: Original conversation/channel ID.
-        - is_direct_message: Boolean indicating if the original context was a DM.
-        - target_element_id_for_confirmation: The ID of the DMElement/UplinkProxy owning the MessageListComponent.
-        - error_message: String describing the failure.
-        - failed_timestamp: Optional float timestamp of adapter failure detection.
-        """
-        target_element_id = adapter_data.get("target_element_id_for_confirmation")
-        internal_request_id = adapter_data.get("internal_request_id")
-
-        if not target_element_id or not internal_request_id:
-            logger.error(f"[_handle_message_send_failure_ack] Missing 'target_element_id_for_confirmation' or 'internal_request_id' in adapter_data: {adapter_data}")
-            return
-
-        # Get the target element (DMElement or UplinkProxy) using deep search
+        # Get the target element using deep search
         target_element = self.space_registry.find_element_deep(target_element_id)
         if not target_element:
-            logger.error(f"[_handle_message_send_failure_ack] Could not find target element '{target_element_id}' for failure ack using deep search.")
+            logger.error(f"[_handle_action_success_ack] Could not find target element '{target_element_id}' for {action_type} confirmation using deep search.")
             return
 
         # Get the parent space of the target element
         parent_space_of_target_element = target_element.get_parent_object()
         if not parent_space_of_target_element:
-            logger.error(f"[_handle_message_send_failure_ack] Could not find parent Space for element '{target_element_id}'.")
+            logger.error(f"[_handle_action_success_ack] Could not find parent Space for element '{target_element_id}'.")
+            return
+        
+        # Ensure the parent is actually a Space capable of receiving events
+        if not hasattr(parent_space_of_target_element, 'receive_event') or not hasattr(parent_space_of_target_element, 'id'):
+            logger.error(f"[_handle_action_success_ack] Parent object for '{target_element_id}' is not a routable Space.")
+            return
+
+        # Create properly routed connectome event with all necessary fields
+        connectome_event_type = "connectome_action_success"
+        
+        confirmation_payload = {
+            "internal_request_id": internal_request_id,
+            "action_type": action_type,
+            "confirmed_timestamp": adapter_data.get("confirmed_timestamp", time.time()),
+            "adapter_response_data": adapter_data.get("adapter_response_data", {}),
+            "raw_adapter_response": adapter_data.get("raw_adapter_response", {})
+        }
+
+        # NEW: Create event with proper routing fields
+        connectome_event = {
+            "event_type": connectome_event_type,
+            "source_adapter_id": source_adapter_id_from_context,        # ✅ For ChatManagerComponent routing
+            "external_conversation_id": external_conversation_id,       # ✅ For ChatManagerComponent routing
+            "target_element_id": target_element_id,
+            "is_replayable": True,  # Action confirmations should be replayed for state consistency
+            "payload": confirmation_payload
+        }
+        
+        timeline_context = await self._construct_timeline_context_for_space(parent_space_of_target_element) 
+
+        try:
+            parent_space_of_target_element.receive_event(connectome_event, timeline_context)
+            logger.info(f"{connectome_event_type} event for {action_type} req_id '{internal_request_id}' routed via Space '{parent_space_of_target_element.id}' to Element '{target_element_id}' with full routing context.")
+        except Exception as e:
+            logger.error(f"Error routing {connectome_event_type} via Space '{parent_space_of_target_element.id}': {e}", exc_info=True)
+
+    async def _handle_action_failure_ack(self, source_adapter_id: str, adapter_data: Dict[str, Any]):
+        """
+        ENHANCED: Handles action failure acknowledgments with full context lookup and proper routing.
+        
+        Uses stored context from handle_outgoing_action to create properly routed events 
+        with all necessary fields for ChatManagerComponent routing.
+        """
+        internal_request_id = adapter_data.get("internal_request_id")
+        
+        if not internal_request_id:
+            logger.error(f"[_handle_action_failure_ack] Missing 'internal_request_id' in adapter_data: {adapter_data}")
+            return
+
+        # NEW: Lookup stored context instead of relying on ActivityClient
+        stored_context = self._pending_action_contexts.pop(internal_request_id, None)
+        
+        if not stored_context:
+            logger.warning(f"[_handle_action_failure_ack] No stored context found for internal_request_id '{internal_request_id}'. Action may have failed during dispatch or timed out.")
+            return
+            
+        # Extract routing info from stored context
+        target_element_id = stored_context["target_element_id"]
+        action_type = stored_context["action_type"]
+        source_adapter_id_from_context = stored_context["source_adapter_id"]
+        external_conversation_id = stored_context["external_conversation_id"]
+        
+        # Extract error information from adapter response
+        error_message = adapter_data.get("error_message", "Unknown failure from adapter")
+        if not isinstance(error_message, str):
+            error_message = str(error_message)
+        failed_timestamp = adapter_data.get("failed_timestamp", time.time())
+
+        logger.info(f"[_handle_action_failure_ack] Processing {action_type} failure for req_id '{internal_request_id}' using stored context: adapter={source_adapter_id_from_context}, conv={external_conversation_id}. Error: {error_message}")
+
+        # Get the target element using deep search
+        target_element = self.space_registry.find_element_deep(target_element_id)
+        if not target_element:
+            logger.error(f"[_handle_action_failure_ack] Could not find target element '{target_element_id}' for {action_type} failure ack using deep search.")
+            return
+
+        # Get the parent space of the target element
+        parent_space_of_target_element = target_element.get_parent_object()
+        if not parent_space_of_target_element:
+            logger.error(f"[_handle_action_failure_ack] Could not find parent Space for element '{target_element_id}'.")
             return
 
         # Ensure the parent is actually a Space capable of receiving events
         if not hasattr(parent_space_of_target_element, 'receive_event') or not hasattr(parent_space_of_target_element, 'id'):
-            logger.error(f"[_handle_message_send_failure_ack] Parent object for '{target_element_id}' is not a routable Space (ID: {parent_space_of_target_element.id if hasattr(parent_space_of_target_element, 'id') else 'Unknown'}). Type: {type(parent_space_of_target_element)}")
+            logger.error(f"[_handle_action_failure_ack] Parent object for '{target_element_id}' is not a routable Space.")
             return
 
-        error_message = adapter_data.get("error_message", "Unknown send failure from adapter.")
-        failed_timestamp = adapter_data.get("failed_timestamp", time.time())
-
-        logger.info(f"Handling 'adapter_send_failure_ack' for req_id '{internal_request_id}', target_element '{target_element_id}'")
-
-        failure_payload_for_mlc = {
+        # Create properly routed connectome event with all necessary fields
+        connectome_event_type = "connectome_action_failure"
+        
+        failure_payload = {
             "internal_request_id": internal_request_id,
+            "action_type": action_type,
             "error_message": error_message,
             "failed_timestamp": failed_timestamp,
-            "target_element_id": target_element_id,
-            "event_type": CONNECTOME_MESSAGE_SEND_FAILED
+            "adapter_response_data": adapter_data.get("adapter_response_data", {}),
+            "raw_adapter_response": adapter_data.get("raw_adapter_response", {})
         }
 
+        # NEW: Create event with proper routing fields
         connectome_event = {
-            "event_type": CONNECTOME_MESSAGE_SEND_FAILED,
-            "target_element_id": target_element_id, # MessageListComponent is on this element
-            "is_replayable": True,  # Message send failures should be replayed for outgoing message state
-            "payload": failure_payload_for_mlc
+            "event_type": connectome_event_type,
+            "source_adapter_id": source_adapter_id_from_context,        # ✅ For ChatManagerComponent routing
+            "external_conversation_id": external_conversation_id,       # ✅ For ChatManagerComponent routing
+            "target_element_id": target_element_id,
+            "is_replayable": True,  # Action failures should be replayed for state consistency
+            "payload": failure_payload
         }
         
-        # The timeline_context is for the parent_space_of_target_element
         timeline_context = await self._construct_timeline_context_for_space(parent_space_of_target_element)
 
         try:
-            # The parent_space_of_target_element (e.g., InnerSpace) receives the event.
-            # Its receive_event method should then record it and propagate to the
-            # child element specified in connectome_event["target_element_id"].
             parent_space_of_target_element.receive_event(connectome_event, timeline_context)
-            logger.info(f"{connectome_event['event_type']} event for req_id '{internal_request_id}' routed via Space '{parent_space_of_target_element.id}' to Element '{target_element_id}'.")
+            logger.info(f"{connectome_event_type} event for {action_type} req_id '{internal_request_id}' routed via Space '{parent_space_of_target_element.id}' to Element '{target_element_id}' with full routing context.")
         except Exception as e:
-            logger.error(f"Error routing {connectome_event['event_type']} via Space '{parent_space_of_target_element.id}': {e}", exc_info=True)
+            logger.error(f"Error routing {connectome_event_type} via Space '{parent_space_of_target_element.id}': {e}", exc_info=True)
 
-    # --- NEW HANDLERS --- (Need Implementation)
     async def _handle_message_updated(self, source_adapter_id: str, adapter_data: Dict[str, Any]):
+        """
+        Handles a message update event, routing it to the recipient agent's InnerSpace.
+        Uses unified agent-based routing for consistency with all message events.
+        """
         logger.info(f"Handling 'message_updated' event from {source_adapter_id}. Data: {adapter_data}")
+        
+        # Extract recipient agent ID like _handle_direct_message does
+        adapter_name = adapter_data.get("adapter_name")
+        agent_id = self._get_agent_id_by_alias(adapter_name)
+        adapter_data["recipient_connectome_agent_id"] = agent_id
+        
+        # Use unified InnerSpace routing
+        target_inner_space = await self._find_target_inner_space_for_agent(adapter_data)
+        if not target_inner_space:
+            logger.error(f"Cannot route message_updated: Target InnerSpace not found.")
+            return
+        
         conversation_id = adapter_data.get("conversation_id")
         message_id = adapter_data.get("message_id")
         if not conversation_id or not message_id:
             logger.error("message_updated event missing conversation_id or message_id.")
             return
-            
-        target_space = await self._find_target_space_for_conversation(source_adapter_id, conversation_id, adapter_data)
-        if not target_space:
-            logger.error(f"Cannot route message_updated: Target space not found for conversation {conversation_id}.")
-            return
-            
+        
         # Determine if this is a DM for proper target element ID generation
         is_dm = adapter_data.get("is_direct_message", False)
-        target_element_id = self._generate_target_element_id(source_adapter_id, conversation_id, is_dm, target_space)
-            
-        # Construct internal event payload
+        target_element_id = self._generate_target_element_id(source_adapter_id, conversation_id, is_dm, target_inner_space)
+        
+        # Construct event payload
         event_payload = {
             "source_adapter_id": source_adapter_id,
             "original_message_id_external": message_id,
@@ -594,135 +674,180 @@ class ExternalEventRouter:
             "timestamp": adapter_data.get("timestamp", time.time()),
             "original_adapter_data": adapter_data
         }
+        
         connectome_event = {
             "event_type": "connectome_message_updated",
-            "target_element_id": target_element_id,  # NEW: Use generated ID
+            "target_element_id": target_element_id,
             "is_replayable": True,  # Message edits should be replayed for message state
             "payload": event_payload
         }
-        timeline_context = await self._construct_timeline_context_for_space(target_space)
+        
+        timeline_context = await self._construct_timeline_context_for_space(target_inner_space)
+        logger.critical(f"Sending update event to the agent; connectome_event: {connectome_event}")
         try:
-            target_space.receive_event(connectome_event, timeline_context)
-            logger.info(f"message_updated event routed to space {target_space.id}")
+            target_inner_space.receive_event(connectome_event, timeline_context)
+            logger.info(f"message_updated event routed to InnerSpace {target_inner_space.id}")
         except Exception as e:
             logger.error(f"Error routing message_updated event: {e}", exc_info=True)
 
     async def _handle_message_deleted(self, source_adapter_id: str, adapter_data: Dict[str, Any]):
+        """
+        Handles a message deletion event, routing it to the recipient agent's InnerSpace.
+        Uses unified agent-based routing for consistency with all message events.
+        """
         logger.info(f"Handling 'message_deleted' event from {source_adapter_id}. Data: {adapter_data}")
+        
+        # Extract recipient agent ID like _handle_direct_message does
+        adapter_name = adapter_data.get("adapter_name")
+        agent_id = self._get_agent_id_by_alias(adapter_name)
+        adapter_data["recipient_connectome_agent_id"] = agent_id
+        
+        # Use unified InnerSpace routing
+        target_inner_space = await self._find_target_inner_space_for_agent(adapter_data)
+        if not target_inner_space:
+            logger.error(f"Cannot route message_deleted: Target InnerSpace not found.")
+            return
+        
         conversation_id = adapter_data.get("conversation_id")
         message_id = adapter_data.get("message_id")
         if not conversation_id or not message_id:
             logger.error("message_deleted event missing conversation_id or message_id.")
             return
-            
-        target_space = await self._find_target_space_for_conversation(source_adapter_id, conversation_id, adapter_data)
-        if not target_space:
-            logger.error(f"Cannot route message_deleted: Target space not found for conversation {conversation_id}.")
-            return
-            
+        
         # Determine if this is a DM for proper target element ID generation
         is_dm = adapter_data.get("is_direct_message", False)
-        target_element_id = self._generate_target_element_id(source_adapter_id, conversation_id, is_dm, target_space)
-            
+        target_element_id = self._generate_target_element_id(source_adapter_id, conversation_id, is_dm, target_inner_space)
+        
         event_payload = {
             "source_adapter_id": source_adapter_id,
             "original_message_id_external": message_id,
             "external_conversation_id": conversation_id,
-            "timestamp": adapter_data.get("timestamp", time.time()), # May not be provided
+            "timestamp": adapter_data.get("timestamp", time.time()),
             "original_adapter_data": adapter_data
         }
+        
         connectome_event = {
             "event_type": "connectome_message_deleted",
-            "target_element_id": target_element_id,  # NEW: Use generated ID
+            "target_element_id": target_element_id,
             "is_replayable": True,  # Message deletions should be replayed for message state
             "payload": event_payload
         }
-        timeline_context = await self._construct_timeline_context_for_space(target_space)
+        
+        timeline_context = await self._construct_timeline_context_for_space(target_inner_space)
+        
         try:
-            target_space.receive_event(connectome_event, timeline_context)
-            logger.info(f"message_deleted event routed to space {target_space.id}")
+            target_inner_space.receive_event(connectome_event, timeline_context)
+            logger.info(f"message_deleted event routed to InnerSpace {target_inner_space.id}")
         except Exception as e:
             logger.error(f"Error routing message_deleted event: {e}", exc_info=True)
 
     async def _handle_reaction_added(self, source_adapter_id: str, adapter_data: Dict[str, Any]):
+        """
+        Handles a reaction added event, routing it to the recipient agent's InnerSpace.
+        Uses unified agent-based routing for consistency with all message events.
+        """
         logger.info(f"Handling 'reaction_added' event from {source_adapter_id}. Data: {adapter_data}")
+        
+        # Extract recipient agent ID like _handle_direct_message does
+        adapter_name = adapter_data.get("adapter_name")
+        agent_id = self._get_agent_id_by_alias(adapter_name)
+        adapter_data["recipient_connectome_agent_id"] = agent_id
+        
+        # Use unified InnerSpace routing
+        target_inner_space = await self._find_target_inner_space_for_agent(adapter_data)
+        if not target_inner_space:
+            logger.error(f"Cannot route reaction_added: Target InnerSpace not found.")
+            return
+        
         conversation_id = adapter_data.get("conversation_id")
         message_id = adapter_data.get("message_id")
         emoji = adapter_data.get("emoji")
         if not conversation_id or not message_id or not emoji:
             logger.error("reaction_added event missing conversation_id, message_id, or emoji.")
             return
-            
-        target_space = await self._find_target_space_for_conversation(source_adapter_id, conversation_id, adapter_data)
-        if not target_space:
-            logger.error(f"Cannot route reaction_added: Target space not found for conversation {conversation_id}.")
-            return
-            
+        
         # Determine if this is a DM for proper target element ID generation
         is_dm = adapter_data.get("is_direct_message", False)
-        target_element_id = self._generate_target_element_id(source_adapter_id, conversation_id, is_dm, target_space)
-            
+        target_element_id = self._generate_target_element_id(source_adapter_id, conversation_id, is_dm, target_inner_space)
+        
         event_payload = {
             "source_adapter_id": source_adapter_id,
             "original_message_id_external": message_id,
             "external_conversation_id": conversation_id,
             "emoji": emoji,
-            "user_external_id": adapter_data.get('user', {}).get('user_id'), # If adapter provides who reacted
+            "user_external_id": adapter_data.get('user', {}).get('user_id'),
             "user_display_name": adapter_data.get('user', {}).get('display_name'),
             "timestamp": adapter_data.get("timestamp", time.time()),
             "original_adapter_data": adapter_data
         }
+        
         connectome_event = {
             "event_type": "connectome_reaction_added",
-            "target_element_id": target_element_id,  # NEW: Use generated ID
+            "target_element_id": target_element_id,
             "is_replayable": True,  # Reaction additions should be replayed for message state
             "payload": event_payload
         }
-        timeline_context = await self._construct_timeline_context_for_space(target_space)
+        
+        timeline_context = await self._construct_timeline_context_for_space(target_inner_space)
+        
         try:
-            target_space.receive_event(connectome_event, timeline_context)
-            logger.info(f"reaction_added event routed to space {target_space.id}")
+            target_inner_space.receive_event(connectome_event, timeline_context)
+            logger.info(f"reaction_added event routed to InnerSpace {target_inner_space.id}")
         except Exception as e:
             logger.error(f"Error routing reaction_added event: {e}", exc_info=True)
 
     async def _handle_reaction_removed(self, source_adapter_id: str, adapter_data: Dict[str, Any]):
+        """
+        Handles a reaction removed event, routing it to the recipient agent's InnerSpace.
+        Uses unified agent-based routing for consistency with all message events.
+        """
         logger.info(f"Handling 'reaction_removed' event from {source_adapter_id}. Data: {adapter_data}")
+        
+        # Extract recipient agent ID like _handle_direct_message does
+        adapter_name = adapter_data.get("adapter_name")
+        agent_id = self._get_agent_id_by_alias(adapter_name)
+        adapter_data["recipient_connectome_agent_id"] = agent_id
+        
+        # Use unified InnerSpace routing
+        target_inner_space = await self._find_target_inner_space_for_agent(adapter_data)
+        if not target_inner_space:
+            logger.error(f"Cannot route reaction_removed: Target InnerSpace not found.")
+            return
+        
         conversation_id = adapter_data.get("conversation_id")
         message_id = adapter_data.get("message_id")
         emoji = adapter_data.get("emoji")
         if not conversation_id or not message_id or not emoji:
             logger.error("reaction_removed event missing conversation_id, message_id, or emoji.")
             return
-            
-        target_space = await self._find_target_space_for_conversation(source_adapter_id, conversation_id, adapter_data)
-        if not target_space:
-            logger.error(f"Cannot route reaction_removed: Target space not found for conversation {conversation_id}.")
-            return
-            
+        
         # Determine if this is a DM for proper target element ID generation
         is_dm = adapter_data.get("is_direct_message", False)
-        target_element_id = self._generate_target_element_id(source_adapter_id, conversation_id, is_dm, target_space)
-            
+        target_element_id = self._generate_target_element_id(source_adapter_id, conversation_id, is_dm, target_inner_space)
+        
         event_payload = {
             "source_adapter_id": source_adapter_id,
             "original_message_id_external": message_id,
             "external_conversation_id": conversation_id,
             "emoji": emoji,
-            "user_external_id": adapter_data.get('user', {}).get('user_id'), # If adapter provides who reacted
+            "user_external_id": adapter_data.get('user', {}).get('user_id'),
             "user_display_name": adapter_data.get('user', {}).get('display_name'),
             "timestamp": adapter_data.get("timestamp", time.time()),
             "original_adapter_data": adapter_data
         }
+        
         connectome_event = {
             "event_type": "connectome_reaction_removed",
-            "target_element_id": target_element_id,  # NEW: Use generated ID
+            "target_element_id": target_element_id,
             "is_replayable": True,  # Reaction removals should be replayed for message state
             "payload": event_payload
         }
-        timeline_context = await self._construct_timeline_context_for_space(target_space)
+        
+        timeline_context = await self._construct_timeline_context_for_space(target_inner_space)
+        
         try:
-            target_space.receive_event(connectome_event, timeline_context)
-            logger.info(f"reaction_removed event routed to space {target_space.id}")
+            target_inner_space.receive_event(connectome_event, timeline_context)
+            logger.info(f"reaction_removed event routed to InnerSpace {target_inner_space.id}")
         except Exception as e:
             logger.error(f"Error routing reaction_removed event: {e}", exc_info=True)
 
@@ -816,27 +941,30 @@ class ExternalEventRouter:
     async def _handle_history_received(self, source_adapter_id: str, conversation_id: str, messages: List[Dict[str, Any]], adapter_data: Dict[str, Any]):
         """
         Handles the internally routed 'connectome_history_received' event.
-        Finds the target space and replays the provided messages onto its timeline.
+        Uses unified agent-based routing for consistency with all message events.
         """
         logger.info(f"Handling 'connectome_history_received' event for conv '{conversation_id}' from {source_adapter_id} with {len(messages)} messages.")
 
-        # --- Find Target Space --- 
-        # Use the adapter_data passed along with the history payload for context
-        target_space = await self._find_target_space_for_conversation(source_adapter_id, conversation_id, adapter_data)
-        
-        if not target_space:
-            logger.error(f"Failed to find target space for history received for conv '{conversation_id}'. History cannot be processed.")
+        # Extract recipient agent ID like _handle_direct_message does
+        adapter_name = adapter_data.get("adapter_name")
+        agent_id = self._get_agent_id_by_alias(adapter_name)
+        adapter_data["recipient_connectome_agent_id"] = agent_id
+
+        # Use unified InnerSpace routing
+        target_inner_space = await self._find_target_inner_space_for_agent(adapter_data)
+        if not target_inner_space:
+            logger.error(f"Failed to find target InnerSpace for history received for conv '{conversation_id}'. History cannot be processed.")
             return
 
-        logger.info(f"Found target space '{target_space.id}'. Processing {len(messages)} history messages...")
+        logger.info(f"Found target InnerSpace '{target_inner_space.id}'. Processing {len(messages)} history messages...")
 
-        # --- Replay History (Similar to conversation_started) --- 
-        timeline_context = await self._construct_timeline_context_for_space(target_space)
+        # Process History for the Target InnerSpace
+        timeline_context = await self._construct_timeline_context_for_space(target_inner_space)
         processed_count = 0
         error_count = 0
 
-        # Determine if context is DM based on the space type found
-        is_dm_context = isinstance(target_space, InnerSpace)
+        # Determine if context is DM based on adapter_data
+        is_dm_context = adapter_data.get("is_direct_message", False)
 
         for message_dict in messages:
             if not isinstance(message_dict, dict):
@@ -853,10 +981,10 @@ class ExternalEventRouter:
                     "sender_external_id": sender_info.get("user_id"),
                     "sender_display_name": sender_info.get("display_name", "Unknown Sender"),
                     "text": message_dict.get("text"),
-                    "is_dm": is_dm_context, # Set based on the target space type
+                    "is_dm": is_dm_context,
                     "mentions": message_dict.get("mentions", []), 
                     "original_message_id_external": message_dict.get("message_id"),
-                    "external_channel_id": conversation_id, 
+                    "external_conversation_id": conversation_id, 
                     "original_adapter_data": message_dict,
                     "attachments": message_dict.get("attachments", []),
                 }
@@ -864,13 +992,13 @@ class ExternalEventRouter:
                 connectome_history_event = {
                     "source_adapter_id": source_adapter_id,
                     "conversation_id": conversation_id,
-                    "event_type": "historical_message_received",  # Use historical event type to prevent activation
-                    "target_element_id": self._generate_target_element_id(source_adapter_id, conversation_id, adapter_data.get("is_direct_message", False), target_space),  # NEW: Use generated ID
+                    "event_type": "historical_message_received",
+                    "target_element_id": self._generate_target_element_id(source_adapter_id, conversation_id, is_dm_context, target_inner_space),
                     "is_replayable": True,  # Historical messages should be replayed for state restoration
                     "payload": history_message_payload
                 }
                 
-                target_space.receive_event(connectome_history_event, timeline_context)
+                target_inner_space.receive_event(connectome_history_event, timeline_context)
                 processed_count += 1
 
             except Exception as e:
@@ -883,39 +1011,43 @@ class ExternalEventRouter:
     async def _handle_attachment_received(self, source_adapter_id: str, conversation_id: str, attachment_event_payload: Dict[str, Any]):
         """
         Handles the internally routed 'connectome_attachment_received' event.
-        Finds the target space and puts the attachment event onto its timeline.
+        Uses unified agent-based routing for consistency with all message events.
         """
         adapter_data = attachment_event_payload.get("adapter_data", {})
         attachment_id = adapter_data.get("attachment_id")
         logger.info(f"Handling 'connectome_attachment_received' for conv '{conversation_id}' from {source_adapter_id}, attachment '{attachment_id}'.")
 
-        # --- Find Target Space --- 
-        # Use adapter_data from the payload for context
-        target_space = await self._find_target_space_for_conversation(source_adapter_id, conversation_id, adapter_data)
-        
-        if not target_space:
-            logger.error(f"Failed to find target space for attachment received for conv '{conversation_id}'. Attachment event ignored.")
+        # Extract recipient agent ID like _handle_direct_message does
+        adapter_name = adapter_data.get("adapter_name")
+        agent_id = self._get_agent_id_by_alias(adapter_name)
+        adapter_data["recipient_connectome_agent_id"] = agent_id
+
+        # Use unified InnerSpace routing
+        target_inner_space = await self._find_target_inner_space_for_agent(adapter_data)
+        if not target_inner_space:
+            logger.error(f"Failed to find target InnerSpace for attachment received for conv '{conversation_id}'. Attachment event ignored.")
             return
 
-        logger.info(f"Found target space '{target_space.id}'. Routing attachment event.")
+        logger.info(f"Found target InnerSpace '{target_inner_space.id}'. Routing attachment event.")
 
-        # --- Route the full attachment event onto the timeline --- 
-        timeline_context = await self._construct_timeline_context_for_space(target_space)
+        # Route the attachment event onto the timeline
+        timeline_context = await self._construct_timeline_context_for_space(target_inner_space)
         
-        # Construct the event to be recorded on the timeline
-        # The payload already contains conversation_id and adapter_data (with attachment info)
+        # Determine if this is a DM for proper target element ID generation
+        is_dm = adapter_data.get("is_direct_message", False)
+        target_element_id = self._generate_target_element_id(source_adapter_id, conversation_id, is_dm, target_inner_space)
+        
         connectome_attachment_event = {
             "event_type": "connectome_attachment_received", 
             "source_adapter_id": source_adapter_id,
-             # Target element? Could target the chat element, or maybe a specific attachment element?
-             # For simplicity, let's target the chat element for now.
-            "target_element_id": f"chat_{conversation_id}", 
-            "payload": attachment_event_payload # Pass the whole payload received from ActivityClient
+            "target_element_id": target_element_id,
+            "is_replayable": True,  # Attachment events should be replayed for message state restoration
+            "payload": attachment_event_payload
         }
 
         try:
-            target_space.receive_event(connectome_attachment_event, timeline_context)
-            logger.info(f"Routed connectome_attachment_received event for attachment '{attachment_id}' to space '{target_space.id}'.")
+            target_inner_space.receive_event(connectome_attachment_event, timeline_context)
+            logger.info(f"Routed connectome_attachment_received event for attachment '{attachment_id}' to InnerSpace '{target_inner_space.id}'.")
         except Exception as e:
             logger.error(f"Error routing connectome_attachment_received event: {e}", exc_info=True)
 
@@ -923,7 +1055,7 @@ class ExternalEventRouter:
     async def _handle_attachment_data_received(self, source_adapter_id: str, adapter_data_with_content: Dict[str, Any]):
         """
         Handles an event from ActivityClient containing the actual fetched content of an attachment.
-        Routes this data to the appropriate space to update the message/attachment state.
+        Uses unified agent-based routing for consistency with all message events.
 
         Args:
             source_adapter_id: The adapter that fetched the data.
@@ -935,7 +1067,7 @@ class ExternalEventRouter:
                 - content_type: MIME type of the content.
                 - content: The actual attachment content (e.g., bytes or base64 string).
                 - adapter_data: Crucially, this nested dict must contain routing info
-                                for _find_target_space_for_conversation (e.g., is_dm, recipient_id).
+                                including adapter_name for agent identification.
         """
         conversation_id = adapter_data_with_content.get("conversation_id")
         original_message_id = adapter_data_with_content.get("original_message_id_external")
@@ -947,15 +1079,21 @@ class ExternalEventRouter:
             logger.error(f"_handle_attachment_data_received: Missing key identifiers in payload. Data: {adapter_data_with_content}")
             return
 
-        # This nested adapter_data is crucial for routing to the correct space (DM or Channel)
+        # This nested adapter_data is crucial for routing to the correct agent
         routing_adapter_data = adapter_data_with_content.get("adapter_data")
         if not isinstance(routing_adapter_data, dict):
             logger.error(f"_handle_attachment_data_received: 'adapter_data' for routing is missing or not a dict in payload. Data: {adapter_data_with_content}")
             return
 
-        target_space = await self._find_target_space_for_conversation(source_adapter_id, conversation_id, routing_adapter_data)
-        if not target_space:
-            logger.error(f"_handle_attachment_data_received: Target space not found for conv '{conversation_id}'. Attachment data for '{attachment_id}' cannot be delivered.")
+        # Extract recipient agent ID like _handle_direct_message does
+        adapter_name = routing_adapter_data.get("adapter_name")
+        agent_id = self._get_agent_id_by_alias(adapter_name)
+        routing_adapter_data["recipient_connectome_agent_id"] = agent_id
+
+        # Use unified InnerSpace routing
+        target_inner_space = await self._find_target_inner_space_for_agent(routing_adapter_data)
+        if not target_inner_space:
+            logger.error(f"_handle_attachment_data_received: Target InnerSpace not found for conv '{conversation_id}'. Attachment data for '{attachment_id}' cannot be delivered.")
             return
 
         # Prepare payload for the internal event to be stored in the space
@@ -966,25 +1104,28 @@ class ExternalEventRouter:
             "attachment_id": attachment_id,
             "filename": adapter_data_with_content.get("filename"),
             "content_type": adapter_data_with_content.get("content_type"),
-            "content": adapter_data_with_content.get("content"), # The actual content
+            "content": adapter_data_with_content.get("content"),
             "status": "content_available",
             "timestamp": adapter_data_with_content.get("timestamp", time.time())
         }
 
+        # Determine if this is a DM for proper target element ID generation
+        is_dm = routing_adapter_data.get("is_direct_message", False)
+        target_element_id = self._generate_target_element_id(source_adapter_id, conversation_id, is_dm, target_inner_space)
+
         connectome_internal_event = {
-            "event_type": "attachment_content_available", # New internal event type
-            # Target a generic chat element or the message element if messages are elements
-            "target_element_id": self._generate_target_element_id(source_adapter_id, conversation_id, adapter_data.get("is_direct_message", False), target_space), # NEW: Use generated ID
+            "event_type": "attachment_content_available",
+            "target_element_id": target_element_id,
             "is_replayable": True,  # Attachment content should be replayed for message state restoration
             "payload": internal_event_payload
         }
 
-        timeline_context = await self._construct_timeline_context_for_space(target_space)
+        timeline_context = await self._construct_timeline_context_for_space(target_inner_space)
         try:
-            target_space.receive_event(connectome_internal_event, timeline_context)
-            logger.info(f"Routed 'attachment_content_available' for attachment '{attachment_id}' to space '{target_space.id}'.")
+            target_inner_space.receive_event(connectome_internal_event, timeline_context)
+            logger.info(f"Routed 'attachment_content_available' for attachment '{attachment_id}' to InnerSpace '{target_inner_space.id}'.")
         except Exception as e:
-            logger.error(f"Error routing 'attachment_content_available' event to space '{target_space.id}': {e}", exc_info=True)
+            logger.error(f"Error routing 'attachment_content_available' event to InnerSpace '{target_inner_space.id}': {e}", exc_info=True)
 
     def _generate_target_element_id(self, source_adapter_id: str, conversation_id: str, is_dm: bool, target_space: Optional[Space] = None) -> str:
         """
@@ -1006,3 +1147,141 @@ class ExternalEventRouter:
             is_dm=is_dm,
             owner_space_id=owner_space_id
         )
+
+    async def handle_outgoing_action(self, action_request: Dict[str, Any]):
+        """
+        ENHANCED: Handles outgoing actions with full context storage and message-specific preprocessing.
+        
+        This method serves as the context keeper that:
+        1. Stores full action context (including routing info) for confirmations
+        2. Handles message/action-specific logic (validation, context, formatting)
+        3. Dispatches clean, generic actions to ActivityClient (thin I/O layer)
+        
+        ActivityClient becomes a pure I/O layer while this handles all business logic.
+        """
+        action_type = action_request.get("action_type")
+        payload = action_request.get("payload", {})
+        target_module = action_request.get("target_module")
+        
+        logger.info(f"ExternalEventRouter preprocessing outgoing {action_type} action for {target_module}")
+        
+        # Only preprocess actions targeting ActivityClient for now
+        if target_module != "ActivityClient":
+            logger.debug(f"Action target '{target_module}' not ActivityClient, skipping preprocessing")
+            return
+            
+        # Extract key fields for tracking and validation
+        requesting_element_id = payload.get("requesting_element_id")
+        internal_request_id = payload.get("internal_request_id")
+        adapter_id = payload.get("adapter_id")
+        conversation_id = payload.get("conversation_id")
+        
+        # Basic validation
+        if not adapter_id:
+            logger.error(f"Cannot preprocess {action_type}: Missing 'adapter_id' in payload")
+            return
+        if not requesting_element_id:
+            logger.error(f"Cannot preprocess {action_type}: Missing 'requesting_element_id' in payload")
+            return
+        if not internal_request_id:
+            logger.error(f"Cannot preprocess {action_type}: Missing 'internal_request_id' in payload")
+            return
+            
+        # NEW: Store full context for confirmation routing
+        self._pending_action_contexts[internal_request_id] = {
+            "source_adapter_id": adapter_id,
+            "external_conversation_id": conversation_id,
+            "action_type": action_type,
+            "target_element_id": requesting_element_id,
+            "original_action_request": action_request,
+            "timestamp": time.time()
+        }
+        logger.debug(f"Stored action context for req_id {internal_request_id}: adapter={adapter_id}, conv={conversation_id}")
+            
+        # Create clean, action-specific payload for ActivityClient
+        clean_payload = {
+            "action_type": action_type,
+            "adapter_id": adapter_id,
+            "internal_request_id": internal_request_id,
+            "requesting_element_id": requesting_element_id,
+        }
+        
+        # Add action-specific fields with proper mapping and validation
+        if action_type == "send_message":
+            clean_payload.update({
+                "conversation_id": conversation_id,
+                "text": payload.get("text"),
+                "attachments": payload.get("attachments", []),
+                "reply_to_external_id": payload.get("reply_to_external_id")
+            })
+            
+        elif action_type == "delete_message":
+            clean_payload.update({
+                "conversation_id": conversation_id,
+                "message_external_id": payload.get("message_external_id")
+            })
+            
+        elif action_type == "edit_message":
+            clean_payload.update({
+                "conversation_id": conversation_id,
+                "message_external_id": payload.get("message_external_id"),
+                "new_text": payload.get("new_text")
+            })
+            
+        elif action_type in ["add_reaction", "remove_reaction"]:
+            clean_payload.update({
+                "conversation_id": conversation_id,
+                "message_external_id": payload.get("message_external_id"),
+                "emoji": payload.get("emoji")
+            })
+            
+        elif action_type == "fetch_message_history":
+            clean_payload.update({
+                "conversation_id": conversation_id,
+                "before_timestamp_ms": payload.get("before_timestamp_ms"),
+                "after_timestamp_ms": payload.get("after_timestamp_ms"),
+                "limit": payload.get("limit", 100)
+            })
+            
+        elif action_type == "fetch_attachment_content":
+            clean_payload.update({
+                "conversation_id": conversation_id,
+                "message_external_id": payload.get("message_external_id"),
+                "attachment_id": payload.get("attachment_id"),
+                "attachment_url": payload.get("attachment_url")
+            })
+            
+        else:
+            logger.warning(f"Unknown action_type '{action_type}' in outgoing action preprocessing. Passing through with minimal changes.")
+            clean_payload.update(payload)  # Pass through unknown actions
+        
+        # Create clean action request for ActivityClient (thin I/O layer)
+        clean_action_request = {
+            "action_type": action_type,
+            "target_module": "ActivityClient",
+            "payload": clean_payload
+        }
+        
+        logger.debug(f"Dispatching clean {action_type} action to ActivityClient: {clean_action_request}")
+        
+        # Dispatch to ActivityClient as thin I/O layer
+        try:
+            if not self._activity_client:
+                logger.error("ExternalEventRouter doesn't have ActivityClient reference. Cannot dispatch action.")
+                return
+                
+            await self._activity_client.handle_outgoing_action(clean_action_request)
+            logger.info(f"Successfully dispatched {action_type} action to ActivityClient")
+            
+        except Exception as e:
+            logger.error(f"Error dispatching {action_type} action to ActivityClient: {e}", exc_info=True)
+            # Clean up stored context since action failed to dispatch
+            self._pending_action_contexts.pop(internal_request_id, None)
+            
+    def set_activity_client(self, activity_client):
+        """
+        Sets the ActivityClient reference for outgoing action dispatch.
+        Called during initialization to resolve circular dependencies.
+        """
+        self._activity_client = activity_client
+        logger.debug("ExternalEventRouter: ActivityClient reference set for outgoing action dispatch")

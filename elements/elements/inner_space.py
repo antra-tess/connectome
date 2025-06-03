@@ -714,7 +714,6 @@ class InnerSpace(Space):
         if adapter_type not in self._adapter_mappings:
             self._adapter_mappings[adapter_type] = {}
 
-        logger.critical(f"[{self.agent_name}] Registering adapter mapping: {adapter_type}/{adapter_name} -> {adapter_id}")
             
         # Register adapter mapping - if message reached this InnerSpace, it's for this agent
         previous_id = self._adapter_mappings[adapter_type].get(adapter_name)
@@ -724,7 +723,6 @@ class InnerSpace(Space):
         self._adapter_mappings[adapter_type][adapter_name] = adapter_id
         self._agent_adapter_ids.add(adapter_id)
         
-        logger.critical(f"[{self.id}] Registered adapter mapping COMPLETE: {adapter_type}/{adapter_name} -> {adapter_id}")
         logger.info(f"[{self.id}] Registered adapter mapping: {adapter_type}/{adapter_name} -> {adapter_id}")
 
     def is_mention_for_agent(self, mentions: List[str]) -> bool:
@@ -742,7 +740,6 @@ class InnerSpace(Space):
             
         # Check if any mentioned adapter_id belongs to this agent
         for mention_id in mentions:
-            logger.critical(f"[{self.id}] Mention detected: {mention_id}, agent_adapter_ids: {self.get_agent_adapter_ids()}")
             if mention_id in self._agent_adapter_ids:
                 logger.debug(f"[{self.id}] Agent mention detected: adapter_id {mention_id}")
                 return True
