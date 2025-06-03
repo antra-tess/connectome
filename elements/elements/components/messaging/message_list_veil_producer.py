@@ -97,6 +97,9 @@ class MessageListVeilProducer(VeilProducer):
                     VEIL_EXTERNAL_ID_PROP: msg_data.get('original_external_id'),
                     VEIL_ADAPTER_ID_PROP: msg_data.get('adapter_id'),
                     VEIL_EDITED_FLAG_PROP: msg_data.get('is_edited', False),
+                    # NEW: Include reaction data for HUD rendering
+                    "reactions": msg_data.get('reactions', {}),  # Include full reaction dict {emoji: [user_ids]}
+                    "message_status": msg_data.get('status', 'received'),  # Include message status for pending states
                     # VEIL_ATTACHMENT_METADATA_PROP: processed_attachments_from_mlc # Store the rich attachment dicts
                     # Let's refine this: the VEIL_ATTACHMENT_METADATA_PROP should probably just be the metadata part,
                     # and the content part should lead to a child node if content exists.
@@ -245,6 +248,9 @@ class MessageListVeilProducer(VeilProducer):
                     VEIL_EXTERNAL_ID_PROP: msg_data.get('original_external_id'),
                     VEIL_ADAPTER_ID_PROP: msg_data.get('adapter_id'),
                     VEIL_EDITED_FLAG_PROP: msg_data.get('is_edited', False),
+                    # NEW: Include reaction data for HUD rendering in deltas too
+                    "reactions": msg_data.get('reactions', {}),  # Include full reaction dict {emoji: [user_ids]}
+                    "message_status": msg_data.get('status', 'received'),  # Include message status for pending states
                     VEIL_ATTACHMENT_METADATA_PROP: [
                         {k: v for k, v in att.items() if k != 'content'} 
                         for att in processed_attachments_from_mlc

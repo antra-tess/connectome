@@ -510,6 +510,8 @@ class HUDComponent(Component):
         timestamp_iso_val = props.get("timestamp_iso", "") 
         is_edited = props.get("is_edited", False)
         original_external_id = props.get("external_id")
+        message_status = props.get("message_status", "received")  # NEW: Get message status
+        reactions = props.get("reactions", {})  # NEW: Get reactions
 
         formatted_timestamp = "[timestamp N/A]"
         if isinstance(timestamp_iso_val, (int, float)):
@@ -526,8 +528,37 @@ class HUDComponent(Component):
         if is_edited:
             output += " (edited)"
         
+        # NEW: Add message status indicators for pending states
+        if message_status == "pending_send":
+            output += " ⏳"
+        elif message_status == "pending_edit":
+            output += " ✏️"
+        elif message_status == "pending_delete":
+            output += " 🗑️"
+        elif message_status == "failed_to_send":
+            output += " ❌"
+        
         if original_external_id:
             output += f" [ext_id: {original_external_id}]"
+
+        # NEW: Render reactions if present
+        if reactions:
+            reaction_parts = []
+            for emoji, user_list in reactions.items():
+                if user_list:  # Only show emojis that have users
+                    # Filter out pending markers for display
+                    actual_users = [u for u in user_list if not u.startswith("pending_")]
+                    pending_users = [u for u in user_list if u.startswith("pending_")]
+                    
+                    user_count = len(actual_users)
+                    if user_count > 0:
+                        reaction_display = f"{emoji}:{user_count}"
+                        if pending_users:
+                            reaction_display += "⏳"  # Indicate pending reactions
+                        reaction_parts.append(reaction_display)
+            
+            if reaction_parts:
+                output += f" [{', '.join(reaction_parts)}]"
 
         # --- NEW: Render Attachment Metadata ---
         attachment_metadata = props.get("attachment_metadata", [])
