@@ -146,7 +146,6 @@ class ExternalEventRouter:
             return
 
         logger.debug(f"ExternalEventRouter routing event: Adapter='{source_adapter_id}', Type='{event_type_from_adapter}', AdapterData='{adapter_data}'")
-        logger.critical(f"ExternalEventRouter routing event: Adapter='{source_adapter_id}', Type='{event_type_from_adapter}', AdapterData='{adapter_data}'")
         # --- Routing Logic based on event_type_from_adapter ---
         if event_type_from_adapter == "message_received":
             await self._handle_direct_message(source_adapter_id, adapter_data, adapter_type)
@@ -683,7 +682,6 @@ class ExternalEventRouter:
         }
         
         timeline_context = await self._construct_timeline_context_for_space(target_inner_space)
-        logger.critical(f"Sending update event to the agent; connectome_event: {connectome_event}")
         try:
             target_inner_space.receive_event(connectome_event, timeline_context)
             logger.info(f"message_updated event routed to InnerSpace {target_inner_space.id}")

@@ -60,59 +60,115 @@ class HUDComponent(Component):
 
     async def get_agent_context(self, options: Optional[Dict[str, Any]] = None) -> str:
         """
-        (Async) Generates the agent's context, suitable for an LLM prompt.
-
-        Retrieves the aggregated VEIL from the InnerSpace, filters/renders it,
-        and returns a structured string representation.
-
+        Generate agent context using modular rendering functions.
+        
         Args:
-            options: Optional dictionary controlling context generation
-                     (e.g., verbosity, max_tokens, focus_element_id,
-                      render_style: 'clean' (default) or 'verbose_tags',
-                      focused_rendering: bool - if True, only render focus_element_id).
+            options: Optional dictionary controlling which rendering function to use:
+                     - render_type: 'memory', 'focused', 'full', or 'combined' (default: 'full')
+                     - focus_element_id: Element ID for focused rendering
+                     - memory_context: Memory data for memory rendering
+                     - Other rendering-specific options
 
         Returns:
-            A string representing the agent's current context.
+            A string representing the agent's context.
         """
         logger.debug(f"Generating agent context for {self.owner.id}...")
         options = options or {}
-
-        # NEW: Check for focused rendering mode
-        focused_rendering = options.get('focused_rendering', False)
-        focus_element_id = options.get('focus_element_id')
-        conversation_context = options.get('conversation_context', {})
         
-        if focused_rendering and focus_element_id:
-            logger.info(f"[{self.owner.id}] FOCUSED RENDERING: Generating context only for element {focus_element_id}")
-            return await self._get_focused_element_context(focus_element_id, conversation_context, options)
-        else:
-            logger.debug(f"[{self.owner.id}] FULL RENDERING: Generating complete space context")
-            return await self._get_full_space_context(options)
+        render_type = options.get('render_type', 'full')
+        
+        try:
+            if render_type == 'memory':
+                return await self.render_memory_frame_part(options)
+            elif render_type == 'focused':
+                return await self.render_focused_frame_part(options)
+            elif render_type == 'full':
+                return await self.render_full_frame(options)
+            elif render_type == 'combined':
+                return await self.render_combined_frame(options)
+            else:
+                logger.warning(f"Unknown render_type '{render_type}', falling back to full rendering")
+                return await self.render_full_frame(options)
+                
+        except Exception as e:
+            logger.error(f"Error in get_agent_context with render_type '{render_type}': {e}", exc_info=True)
+            # Fallback to basic full rendering
+            return await self.render_full_frame({})
 
-    async def _get_focused_element_context(self, focus_element_id: str, conversation_context: Dict[str, Any], options: Dict[str, Any]) -> str:
+    async def render_memory_frame_part(self, options: Dict[str, Any]) -> str:
         """
-        Generate context for a specific focused element with essential InnerSpace context.
-        
-        This ensures the agent maintains their identity and workspace context while
-        focusing on the specific conversation that triggered activation.
+        Render memory context part of the frame.
         
         Args:
-            focus_element_id: The ID of the element to focus on
-            conversation_context: Additional context about the conversation
-            options: Rendering options
+            options: Rendering options, should include 'memory_context' with memory data
             
         Returns:
-            A focused context string containing InnerSpace essentials + the focused element
+            Rendered memory frame part
         """
         try:
+            memory_context = options.get('memory_context')
+            if not memory_context:
+                return "[MEMORY]\n(No memory context provided)"
+            
+            frame_parts = []
+            
+            # Agent Workspace Header
+            workspace_section = self._render_workspace_section(memory_context.get('agent_info', {}))
+            if workspace_section:
+                frame_parts.append(workspace_section)
+            
+            # Scratchpad Section
+            scratchpad_section = self._render_scratchpad_section(memory_context.get('scratchpad'))
+            if scratchpad_section:
+                frame_parts.append(scratchpad_section)
+            
+            # Orientation Section
+            orientation_section = self._render_orientation_section(memory_context.get('orientation'))
+            if orientation_section:
+                frame_parts.append(orientation_section)
+            
+            # Compressed Context Section
+            compressed_section = self._render_compressed_context_section(memory_context.get('compressed_context', {}))
+            if compressed_section:
+                frame_parts.append(compressed_section)
+            
+            # Latest Reasoning Section
+            reasoning_section = self._render_latest_reasoning_section(memory_context.get('latest_reasoning'))
+            if reasoning_section:
+                frame_parts.append(reasoning_section)
+            
+            memory_frame = "\n\n".join(frame_parts)
+            logger.info(f"[{self.owner.id}] Rendered memory frame: {len(memory_frame)} chars, {len(frame_parts)} sections")
+            return memory_frame
+            
+        except Exception as e:
+            logger.error(f"[{self.owner.id}] Error rendering memory frame: {e}", exc_info=True)
+            return "[MEMORY]\n(Error rendering memory context)"
+
+    async def render_focused_frame_part(self, options: Dict[str, Any]) -> str:
+        """
+        Render focused element with essential InnerSpace context.
+        
+        Args:
+            options: Rendering options, should include 'focus_element_id' and optionally 'conversation_context'
+            
+        Returns:
+            Rendered focused frame part
+        """
+        try:
+            focus_element_id = options.get('focus_element_id')
+            if not focus_element_id:
+                logger.warning(f"[{self.owner.id}] No focus_element_id provided for focused rendering")
+                return await self.render_full_frame(options)
+            
+            conversation_context = options.get('conversation_context', {})
+            
             # Find the focused element
             focused_element = None
             if focus_element_id == self.owner.id:
-                # If focusing on InnerSpace itself, use full context
                 logger.info(f"[{self.owner.id}] Focus target is InnerSpace itself, using full context")
-                return await self._get_full_space_context(options)
+                return await self.render_full_frame(options)
             else:
-                # Check mounted elements
                 mounted_elements = self.owner.get_mounted_elements() if hasattr(self.owner, 'get_mounted_elements') else {}
                 for mount_id, element in mounted_elements.items():
                     if element.id == focus_element_id or mount_id == focus_element_id:
@@ -121,25 +177,25 @@ class HUDComponent(Component):
             
             if not focused_element:
                 logger.warning(f"[{self.owner.id}] Focused element {focus_element_id} not found, falling back to full context")
-                return await self._get_full_space_context(options)
+                return await self.render_full_frame(options)
             
-            # Build contextual focused rendering: InnerSpace essentials + focused element
+            # Build focused rendering: InnerSpace essentials + focused element
             context_parts = []
             
-            # 1. InnerSpace Identity & Context
+            # InnerSpace Identity & Context
             innerspace_header = self._build_innerspace_identity_context()
             context_parts.append(innerspace_header)
             
-            # 2. Essential InnerSpace Components (scratchpad, etc.)
+            # Essential InnerSpace Components
             essential_components = await self._get_essential_innerspace_components(options)
             if essential_components:
                 context_parts.append(essential_components)
             
-            # 3. Focused Element Header
+            # Focused Element Header
             focus_header = self._build_focused_context_header(focused_element, conversation_context)
             context_parts.append(focus_header)
             
-            # 4. Focused Element Content
+            # Focused Element Content
             focused_veil = self._get_element_veil(focused_element)
             if focused_veil:
                 attention_requests = {}  # No global attention in focused mode
@@ -148,16 +204,145 @@ class HUDComponent(Component):
             else:
                 context_parts.append(f"[No content available for {focus_element_id}]")
             
-            # Combine all parts
-            full_focused_context = "\n\n".join(context_parts)
-            
-            logger.info(f"[{self.owner.id}] Generated CONTEXTUAL FOCUSED context: InnerSpace + {focus_element_id} ({len(full_focused_context)} chars)")
-            return full_focused_context
+            focused_frame = "\n\n".join(context_parts)
+            logger.info(f"[{self.owner.id}] Rendered focused frame: InnerSpace + {focus_element_id} ({len(focused_frame)} chars)")
+            return focused_frame
             
         except Exception as e:
-            logger.error(f"[{self.owner.id}] Error generating focused context for {focus_element_id}: {e}", exc_info=True)
-            # Fallback to full context on error
-            return await self._get_full_space_context(options)
+            logger.error(f"[{self.owner.id}] Error rendering focused frame: {e}", exc_info=True)
+            return await self.render_full_frame(options)
+
+    async def render_full_frame(self, options: Dict[str, Any]) -> str:
+        """
+        Render complete space context with all VEIL objects.
+        
+        Args:
+            options: Rendering options (render_style, etc.)
+            
+        Returns:
+            Rendered full frame
+        """
+        try:
+            # Get the full aggregated VEIL from InnerSpace's producer
+            veil_producer = self._get_space_veil_producer()
+            if not veil_producer:
+                logger.error(f"[{self.owner.id}] Cannot generate context: SpaceVeilProducer not found.")
+                return "Error: Could not retrieve internal state."
+
+            full_veil = veil_producer.get_full_veil()
+            if not full_veil:
+                logger.warning(f"[{self.owner.id}] SpaceVeilProducer returned empty VEIL.")
+                return "Current context is empty."
+
+            # Get attention signals
+            attention_requests = {}
+
+            # Render the VEIL structure into a string
+            context_string = self._render_veil_node_to_string(full_veil, attention_requests, options, indent=0)
+            
+            logger.info(f"[{self.owner.id}] Rendered full frame: {len(context_string)} chars")
+            return context_string
+            
+        except Exception as e:
+            logger.error(f"[{self.owner.id}] Error rendering full frame: {e}", exc_info=True)
+            import json
+            return f"Error rendering context: {e}\nRaw VEIL:\n{json.dumps(full_veil, indent=2) if 'full_veil' in locals() else 'N/A'}"
+
+    async def render_combined_frame(self, options: Dict[str, Any]) -> str:
+        """
+        Render combined frame with memory + focused element.
+        
+        Args:
+            options: Rendering options, should include 'memory_context' and 'focus_element_id'
+            
+        Returns:
+            Rendered combined frame
+        """
+        try:
+            frame_parts = []
+            
+            # Memory part
+            memory_frame = await self.render_memory_frame_part(options)
+            logger.critical("MEMORY FRAME: " + memory_frame)
+            if memory_frame:
+                frame_parts.append(memory_frame)
+            
+            # Focused part
+            focused_frame = await self.render_focused_frame_part(options)
+            if focused_frame:
+                frame_parts.append(focused_frame)
+            
+            combined_frame = "\n\n".join(frame_parts)
+            logger.info(f"[{self.owner.id}] Rendered combined frame: {len(combined_frame)} chars, {len(frame_parts)} parts")
+            return combined_frame
+            
+        except Exception as e:
+            logger.error(f"[{self.owner.id}] Error rendering combined frame: {e}", exc_info=True)
+            # Fallback to full frame
+            return await self.render_full_frame(options)
+
+    def _render_workspace_section(self, agent_info: Dict[str, Any]) -> str:
+        """Render the agent workspace section."""
+        agent_name = agent_info.get('agent_name', 'Unknown Agent')
+        workspace_desc = agent_info.get('workspace_description', 'Agent workspace')
+        total_interactions = agent_info.get('total_stored_interactions', 0)
+        
+        return f"[AGENT WORKSPACE]\n{workspace_desc}\nAgent: {agent_name} | Total interactions in memory: {total_interactions}"
+
+    def _render_scratchpad_section(self, scratchpad_data: Optional[Dict[str, Any]]) -> Optional[str]:
+        """Render the scratchpad section if data exists."""
+        if not scratchpad_data:
+            return "[SCRATCHPAD]\n(Empty - no scratchpad data available)"
+        
+        # TODO: Implement actual scratchpad rendering when scratchpad functionality is added
+        return "[SCRATCHPAD]\n(Scratchpad functionality not yet implemented)"
+
+    def _render_orientation_section(self, orientation_data: Optional[Dict[str, Any]]) -> Optional[str]:
+        """Render the orientation section if agent has been oriented."""
+        if not orientation_data or not orientation_data.get('has_orientation'):
+            return "[ORIENTATION]\n(No orientation conversation on record)"
+        
+        summary = orientation_data.get('summary', 'Agent has been oriented to the system.')
+        message_count = orientation_data.get('message_count', 0)
+        
+        return f"[ORIENTATION]\n{summary}\n(Based on {message_count} orientation messages)"
+
+    def _render_compressed_context_section(self, compressed_data: Dict[str, Any]) -> Optional[str]:
+        """Render compressed context of other conversations/interactions."""
+        interaction_count = compressed_data.get('interaction_count', 0)
+        
+        if interaction_count == 0:
+            return "[COMPRESSED CONTEXT]\n(No previous interactions to reference)"
+        
+        summary = compressed_data.get('summary', f"I have {interaction_count} previous interactions.")
+        recent_interactions = compressed_data.get('recent_interactions', [])
+        
+        context_parts = [f"[COMPRESSED CONTEXT]\n{summary}"]
+        
+        if recent_interactions:
+            context_parts.append("Recent interactions:")
+            for interaction in recent_interactions:
+                interaction_summary = interaction.get('summary', 'Unknown context')
+                tool_count = interaction.get('tool_calls_made', 0)
+                interaction_index = interaction.get('interaction_index', '?')
+                
+                tools_text = f" (used {tool_count} tools)" if tool_count > 0 else ""
+                context_parts.append(f"  {interaction_index}. {interaction_summary}{tools_text}")
+        
+        return "\n".join(context_parts)
+
+    def _render_latest_reasoning_section(self, reasoning_data: Optional[Dict[str, Any]]) -> Optional[str]:
+        """Render the latest reasoning chain for context."""
+        if not reasoning_data or not reasoning_data.get('has_reasoning'):
+            return "[LATEST REASONING]\n(No previous reasoning chain available for this conversation)"
+        
+        context_summary = reasoning_data.get('context_summary', 'Unknown context')
+        response_preview = reasoning_data.get('agent_response_preview', 'No response recorded')
+        tool_count = reasoning_data.get('tool_calls_made', 0)
+        
+        tools_text = f" using {tool_count} tools" if tool_count > 0 else ""
+        
+        return f"[LATEST REASONING]\nIn this conversation, on my last turn I acted with the following reasoning:\nContext: {context_summary}\nResponse: {response_preview}{tools_text}"
 
     def _build_innerspace_identity_context(self) -> str:
         """Build essential InnerSpace identity and context."""
@@ -301,47 +486,6 @@ class HUDComponent(Component):
         except Exception as e:
             logger.error(f"Error getting VEIL for element {element.id}: {e}", exc_info=True)
             return None
-
-    async def _get_full_space_context(self, options: Dict[str, Any]) -> str:
-        """
-        Generate the full space context (original behavior).
-        
-        Args:
-            options: Rendering options
-            
-        Returns:
-            Full space context string
-        """
-        # 1. Get the full aggregated VEIL from InnerSpace's producer
-        veil_producer = self._get_space_veil_producer()
-        if not veil_producer:
-            logger.error(f"[{self.owner.id}] Cannot generate context: SpaceVeilProducer not found.")
-            return "Error: Could not retrieve internal state."
-
-        try:
-            full_veil = veil_producer.get_full_veil()
-            if not full_veil:
-                 logger.warning(f"[{self.owner.id}] SpaceVeilProducer returned empty VEIL.")
-                 return "Current context is empty."
-        except Exception as e:
-            logger.error(f"[{self.owner.id}] Error getting full VEIL from SpaceVeilProducer: {e}", exc_info=True)
-            return f"Error: Failed to retrieve internal state - {e}"
-
-        # 2. Get attention signals (optional filtering)
-        attention_requests = {} 
-
-        # 3. Render the VEIL structure into a string
-        try:
-            # Render synchronously
-            context_string = self._render_veil_node_to_string(full_veil, attention_requests, options, indent=0)
-        except Exception as e:
-            logger.error(f"[{self.owner.id}] Error rendering VEIL to string: {e}", exc_info=True)
-            # Maybe return partial context or just the error?
-            import json
-            return f"Error rendering context: {e}\nRaw VEIL:\n{json.dumps(full_veil, indent=2)}"
-
-        logger.info(f"Generated FULL agent context for {self.owner.id} (approx length: {len(context_string)}).")
-        return context_string
 
     # --- Rendering Helpers --- 
 

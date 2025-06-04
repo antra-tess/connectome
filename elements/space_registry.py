@@ -843,7 +843,6 @@ class SpaceRegistry:
             # This is a bit of a safeguard, ideally it's created with the space.
             # Re-evaluate if this check is still needed or how it should work with factory
             if not existing_space.get_mounted_element(f"{identifier}_chat_interface"):
-                logger.critical(f"Existing SharedSpase {identifier} has next mounted elements: {list(map(lambda x: x.id, existing_space.get_mounted_elements().values()))}")
                 logger.warning(f"Existing SharedSpace {identifier} missing chat_interface. Attempting to add it via factory.")
                 self._create_chat_interface_in_shared_space_with_factory(existing_space)
             return existing_space

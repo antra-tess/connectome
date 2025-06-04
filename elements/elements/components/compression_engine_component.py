@@ -682,4 +682,124 @@ class CompressionEngineComponent(Component):
             return await self._storage.load_memories(self._conversation_id)
         except Exception as e:
             logger.error(f"Error loading memories: {e}", exc_info=True)
-            return [] 
+            return []
+
+    async def get_memory_data(self) -> Dict[str, Any]:
+        """
+        NEW: Get structured memory data in VEIL-like format for HUD rendering.
+        
+        This replaces the message-based approach with a comprehensive frame that includes:
+        - Agent workspace metadata
+        - Scratchpad data (if any) 
+        - Orientation summary
+        - Compressed context (summaries of interactions)
+        - Latest reasoning chain for current conversation
+        
+        Returns:
+            VEIL-like structure that HUD can render into the comprehensive frame
+        """
+        try:
+            memory_data = {
+                "memory_type": "agent_memory_context",
+                "agent_info": await self._get_agent_workspace_data(),
+                "scratchpad": await self._get_scratchpad_data(),
+                "orientation": await self._get_orientation_summary(),
+                "compressed_context": await self._get_compressed_context_summary(),
+                "latest_reasoning": await self._get_latest_reasoning_summary(),
+                "metadata": {
+                    "total_interactions": len(self._memory_interactions),
+                    "has_orientation": len(self._orientation_messages) > 0,
+                    "conversation_id": self._conversation_id,
+                    "agent_name": self._agent_name,
+                    "last_updated": datetime.now().isoformat()
+                }
+            }
+            
+            logger.info(f"Generated memory data: {len(self._memory_interactions)} interactions, orientation: {memory_data['metadata']['has_orientation']}")
+            return memory_data
+            
+        except Exception as e:
+            logger.error(f"Error generating memory data: {e}", exc_info=True)
+            return {
+                "memory_type": "agent_memory_context",
+                "error": str(e),
+                "metadata": {"agent_name": self._agent_name}
+            }
+
+    async def _get_agent_workspace_data(self) -> Dict[str, Any]:
+        """Get agent workspace metadata."""
+        return {
+            "agent_name": self._agent_name or "Unknown Agent",
+            "conversation_id": self._conversation_id,
+            "workspace_description": f"Agent workspace for {self._agent_name}" if self._agent_name else "Agent workspace",
+            "storage_initialized": self._storage_initialized,
+            "total_stored_interactions": len(self._memory_interactions)
+        }
+
+    async def _get_scratchpad_data(self) -> Optional[Dict[str, Any]]:
+        """Get scratchpad data (placeholder for future implementation)."""
+        # TODO: Implement actual scratchpad functionality
+        # For now, return None to indicate no scratchpad data
+        return None
+
+    async def _get_orientation_summary(self) -> Optional[Dict[str, Any]]:
+        """Get orientation conversation summary."""
+        if not self._orientation_messages:
+            return None
+            
+        return {
+            "has_orientation": True,
+            "message_count": len(self._orientation_messages),
+            "summary": "Agent has been oriented to the Connectome system and understands their role and capabilities.",
+            "last_exchange": self._orientation_messages[-1].content[:100] + "..." if self._orientation_messages[-1].content else "No content"
+        }
+
+    async def _get_compressed_context_summary(self) -> Dict[str, Any]:
+        """Get compressed summaries of non-focused interactions."""
+        if not self._memory_interactions:
+            return {
+                "interaction_count": 0,
+                "summary": "No previous interactions to summarize."
+            }
+        
+        # Group interactions by type/context
+        interaction_summaries = []
+        total_interactions = len(self._memory_interactions)
+        
+        # For now, create a simple summary
+        # TODO: More sophisticated grouping and summarization
+        recent_interactions = self._memory_interactions[-3:] if len(self._memory_interactions) > 3 else self._memory_interactions
+        
+        for i, interaction in enumerate(recent_interactions):
+            context_summary = interaction.get("context_summary", "Unknown context")
+            tool_count = len(interaction.get("tool_calls", []))
+            
+            interaction_summaries.append({
+                "interaction_index": total_interactions - len(recent_interactions) + i + 1,
+                "summary": context_summary,
+                "tool_calls_made": tool_count,
+                "timestamp": interaction.get("timestamp", "Unknown")
+            })
+        
+        return {
+            "interaction_count": total_interactions,
+            "showing_recent": len(recent_interactions),
+            "summary": f"I have {total_interactions} previous interactions in my memory.",
+            "recent_interactions": interaction_summaries
+        }
+
+    async def _get_latest_reasoning_summary(self) -> Optional[Dict[str, Any]]:
+        """Get the latest reasoning chain for the current conversation."""
+        if not self._memory_interactions:
+            return None
+            
+        latest_interaction = self._memory_interactions[-1]
+        
+        return {
+            "has_reasoning": True,
+            "timestamp": latest_interaction.get("timestamp"),
+            "context_summary": latest_interaction.get("context_summary", "Unknown context"),
+            "agent_response_preview": (latest_interaction.get("agent_response", "")[:200] + "...") if latest_interaction.get("agent_response") else "No response recorded",
+            "tool_calls_made": len(latest_interaction.get("tool_calls", [])),
+            "reasoning_notes": latest_interaction.get("reasoning_notes", "")
+        } 

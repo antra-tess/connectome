@@ -56,8 +56,15 @@ class ActivityClient:
         # Key: internal_request_id, Value: Basic correlation info for I/O matching only
         self._pending_io_requests: Dict[str, Dict[str, Any]] = {}
         
+        # NEW: Keepalive and idle state management
+        self._keepalive_interval = 120  # Send keepalive every 2 minutes
+        self._idle_threshold = 300  # Consider connection idle after 5 minutes
+        self._last_activity: Dict[str, float] = {}  # adapter_id -> timestamp of last activity
+        self._keepalive_tasks: Dict[str, asyncio.Task] = {}  # adapter_id -> keepalive task
+        
         self._load_adapter_configs(adapter_api_configs)
         logger.info(f"ActivityClient initialized with {len(self.adapters)} adapter API configs.")
+        logger.info(f"Keepalive interval: {self._keepalive_interval}s, idle threshold: {self._idle_threshold}s")
 
     def _load_adapter_configs(self, adapter_api_configs: List[Dict[str, Any]]) -> None:
         """Load and validate adapter configurations."""
@@ -123,21 +130,29 @@ class ActivityClient:
 
             # --- Define Event Handlers ---
             @client.event
-            async def connect():
+            async def connect(*args):
                 logger.info(f"Successfully connected to adapter API '{adapter_id}' at {url}")
                 self.adapters[adapter_id]["connected"] = True
+                # Record initial adapter signal
+                self._record_activity(adapter_id)
+                # Start keepalive task for this adapter
+                self._start_keepalive(adapter_id)
                 # Send registration/hello message if needed by adapter API
                 # await self._register_with_adapter_api(adapter_id, config)
 
             @client.event  
-            async def disconnect():
+            async def disconnect(*args):
                 logger.info(f"Disconnected from adapter API '{adapter_id}'")
                 self.adapters[adapter_id]["connected"] = False
+                # Stop keepalive task
+                self._stop_keepalive(adapter_id)
 
             @client.event
             async def connect_error(data):
                 logger.error(f"Connection error with adapter API '{adapter_id}': {data}")
                 self.adapters[adapter_id]["connected"] = False
+                # Stop keepalive task
+                self._stop_keepalive(adapter_id)
                 # No need to disconnect client instance here, library handles retries
 
             # --- Handler for Incoming Events from Adapter API --- 
@@ -145,6 +160,9 @@ class ActivityClient:
             @client.on("bot_request") 
             async def handle_bot_request(raw_payload: Dict[str, Any]):
                 """Handles incoming events (structured as per user spec) from the adapter API."""
+                
+                # Record activity for this outgoing action
+                self._record_activity(adapter_id)
                 
                 if not isinstance(raw_payload, dict):
                      logger.warning(f"Received non-dict bot_request from '{adapter_id}': {raw_payload}")
@@ -201,6 +219,9 @@ class ActivityClient:
                 This event confirms the adapter has received our request and gives us its internal ID for it.
                 It should also echo back the internal_request_id we sent from MessageActionHandler.
                 """
+                # Record activity for this outgoing action
+                self._record_activity(adapter_id)
+                
                 if not isinstance(raw_payload, dict):
                     logger.warning(f"Received non-dict request_queued from '{adapter_id}': {raw_payload}")
                     return
@@ -232,7 +253,10 @@ class ActivityClient:
             @client.on("request_success")
             async def handle_request_success(raw_payload: Dict[str, Any]):
                 """SIMPLIFIED: Thin I/O layer for adapter success responses. Routes to ExternalEventRouter."""
-                logger.critical(f"Received request_success from '{adapter_id}': {raw_payload}")
+                
+                # Record activity for this outgoing action
+                self._record_activity(adapter_id)
+                
                 if not isinstance(raw_payload, dict):
                      logger.warning(f"Received non-dict request_success from '{adapter_id}': {raw_payload}")
                      return
@@ -282,6 +306,10 @@ class ActivityClient:
             @client.on("request_failed")
             async def handle_request_failure(raw_payload: Dict[str, Any]):
                 """SIMPLIFIED: Thin I/O layer for adapter failure responses. Routes to ExternalEventRouter."""
+                
+                # Record activity for this outgoing action
+                self._record_activity(adapter_id)
+                
                 if not isinstance(raw_payload, dict):
                     logger.warning(f"Received non-dict request_failed from '{adapter_id}': {raw_payload}")
                     return
@@ -369,7 +397,6 @@ class ActivityClient:
         ExternalEventRouter now handles all action-specific preprocessing.
         This method focuses purely on adapter communication.
         """
-        logger.critical(f"ActivityClient (thin I/O) dispatching action: {action}")
         payload = action.get("payload", {})
         
         # Extract required fields from payload
@@ -399,6 +426,26 @@ class ActivityClient:
         client = self.adapters[target_adapter_id]["client"]
         
         try:
+            # NEW: Check for idle connection and proactively refresh if needed
+            current_time = time.time()
+            last_activity = self._last_activity.get(target_adapter_id, 0)
+            idle_duration = current_time - last_activity
+            
+            if idle_duration > self._idle_threshold:
+                logger.warning(f"Adapter '{target_adapter_id}' has been idle for {idle_duration:.1f}s (threshold: {self._idle_threshold}s). Proactively refreshing connection before send.")
+                
+                # Attempt to refresh the connection proactively
+                refresh_success = await self._refresh_idle_connection(target_adapter_id)
+                if not refresh_success:
+                    logger.error(f"Failed to refresh idle connection for adapter '{target_adapter_id}'")
+                    if internal_request_id:
+                        self._pending_io_requests.pop(internal_request_id, None)
+                        self._emit_connection_failure_event(target_adapter_id, internal_action_type, internal_request_id, requesting_element_id, "Failed to refresh idle connection")
+                    return
+            
+            # Record activity for this outgoing action
+            self._record_activity(target_adapter_id)
+            
             # Store minimal pending request for correlation tracking (action-agnostic)
             if internal_request_id:
                 # ENHANCED: Include conversation_id for routing confirmations back to correct chat
@@ -428,21 +475,84 @@ class ActivityClient:
                 "data": data_payload  # Nested data structure as adapter expects
             }
             
-            # Dispatch to adapter using generic event emit
-            logger.debug(f"Emitting {internal_action_type} to adapter '{target_adapter_id}': {adapter_payload}")
-            
-            # Additional connection health check before emit
+            # Enhanced connection health checks before emit
             if not hasattr(client, 'connected') or not client.connected:
                 raise ConnectionError(f"SocketIO client for adapter '{target_adapter_id}' reports not connected (client.connected = {getattr(client, 'connected', 'N/A')})")
+            
+            # NEW: Comprehensive queue and connection state validation
+            connection_issues = []
+            
+            # Check engine.io connection state if available
+            if hasattr(client, 'eio') and client.eio:
+                if hasattr(client.eio, 'state') and client.eio.state != 'connected':
+                    connection_issues.append(f"Engine.IO state is '{client.eio.state}', not 'connected'")
+                
+                # Check packet queue state more thoroughly
+                if hasattr(client.eio, 'queue'):
+                    if hasattr(client.eio.queue, 'empty') and client.eio.queue.empty():
+                        connection_issues.append("Engine.IO packet queue is empty")
+                    elif hasattr(client.eio.queue, 'qsize') and client.eio.queue.qsize() == 0:
+                        connection_issues.append("Engine.IO packet queue size is 0")
+                    
+                # Check if transport is available and healthy
+                if hasattr(client.eio, 'transport') and client.eio.transport:
+                    if hasattr(client.eio.transport, 'state') and client.eio.transport.state != 'open':
+                        connection_issues.append(f"Transport state is '{client.eio.transport.state}', not 'open'")
+                else:
+                    connection_issues.append("Engine.IO transport is missing or None")
+            
+            # If we detected connection issues, attempt proactive refresh
+            if connection_issues:
+                logger.warning(f"Detected connection issues for adapter '{target_adapter_id}': {'; '.join(connection_issues)}. Attempting connection refresh.")
+                
+                # Try to refresh the connection
+                refresh_success = await self._refresh_idle_connection(target_adapter_id, force=True)
+                if not refresh_success:
+                    error_msg = f"Connection validation failed and refresh unsuccessful: {'; '.join(connection_issues)}"
+                    raise ConnectionError(error_msg)
+                
+                # Update client reference after refresh
+                client = self.adapters[target_adapter_id]["client"]
+                logger.info(f"Connection refreshed successfully for adapter '{target_adapter_id}', proceeding with emit")
             
             # Double-check our connection tracking
             if not self.adapters[target_adapter_id]["connected"]:
                 logger.warning(f"Our connection tracking shows adapter '{target_adapter_id}' as disconnected, but proceeding with emit attempt")
             
-            # Use "bot_response" as the consistent event name for all outgoing actions
-            await client.emit("bot_response", adapter_payload)
-            logger.info(f"Successfully dispatched {internal_action_type} to adapter '{target_adapter_id}' (req_id: {internal_request_id})")
+            # Dispatch to adapter using generic event emit
+            logger.debug(f"Emitting {internal_action_type} to adapter '{target_adapter_id}': {adapter_payload}")
             
+            # Enhanced emit with timeout and retry logic
+            try:
+                # Use shorter timeout for emit to detect connection issues faster
+                await asyncio.wait_for(
+                    client.emit("bot_response", adapter_payload),
+                    timeout=10.0  # 10 second timeout for emit operation
+                )
+                logger.info(f"Successfully dispatched {internal_action_type} to adapter '{target_adapter_id}' (req_id: {internal_request_id})")
+            except asyncio.TimeoutError:
+                # Emit timed out - connection may be stuck
+                logger.error(f"Emit timeout for {internal_action_type} to adapter '{target_adapter_id}' - connection may be stuck")
+                # Mark adapter as disconnected to trigger reconnection
+                self.adapters[target_adapter_id]["connected"] = False
+                raise ConnectionError(f"Emit operation timed out - connection to adapter '{target_adapter_id}' may be stuck")
+            except (socketio.exceptions.DisconnectedError, socketio.exceptions.ConnectionError) as se:
+                # SocketIO specific connection errors
+                logger.error(f"SocketIO connection error during emit to adapter '{target_adapter_id}': {se}")
+                self.adapters[target_adapter_id]["connected"] = False
+                raise ConnectionError(f"SocketIO connection lost during emit: {se}")
+            except Exception as emit_error:
+                # Check if it's a packet queue error or similar low-level issue
+                error_str = str(emit_error).lower()
+                if 'packet queue' in error_str or 'queue is empty' in error_str:
+                    logger.error(f"Packet queue error for adapter '{target_adapter_id}': {emit_error}")
+                    # Mark adapter as disconnected to trigger reconnection
+                    self.adapters[target_adapter_id]["connected"] = False
+                    raise ConnectionError(f"Packet queue error - connection to adapter '{target_adapter_id}' unstable: {emit_error}")
+                else:
+                    # Re-raise other emit errors
+                    raise emit_error
+
         except ConnectionError as ce:
             logger.error(f"Connection error dispatching {internal_action_type} to adapter '{target_adapter_id}': {ce}")
             # Mark adapter as disconnected and clean up
@@ -450,6 +560,11 @@ class ActivityClient:
             if internal_request_id:
                 self._pending_io_requests.pop(internal_request_id, None)
                 self._emit_connection_failure_event(target_adapter_id, internal_action_type, internal_request_id, requesting_element_id, str(ce))
+            
+            # Try to reconnect if it's a connection stability issue
+            logger.info(f"Attempting to reconnect to adapter '{target_adapter_id}' after connection error...")
+            asyncio.create_task(self._attempt_reconnect(target_adapter_id))
+            
         except Exception as e:
             logger.error(f"Error dispatching {internal_action_type} to adapter '{target_adapter_id}': {e}", exc_info=True)
             # Remove from pending if it was added, as it didn't reach adapter successfully
@@ -531,6 +646,11 @@ class ActivityClient:
     async def shutdown(self):
         """Disconnects from all adapter APIs."""
         logger.info("Disconnecting from all Adapter APIs...")
+        
+        # Stop all keepalive tasks first
+        for adapter_id in list(self._keepalive_tasks.keys()):
+            self._stop_keepalive(adapter_id)
+        
         disconnect_tasks = []
         for adapter_id, adapter_info in self.adapters.items():
              if adapter_info.get("connected") and adapter_info.get("client"):
@@ -546,4 +666,182 @@ class ActivityClient:
                       logger.error(f"Error disconnecting from adapter '{adapter_ids[i]}': {res}")
                       
         self.adapters.clear()
-        logger.info("All adapter API connections closed.") 
+        self._last_activity.clear()
+        self._keepalive_tasks.clear()
+        logger.info("All adapter API connections closed.")
+
+    async def _attempt_reconnect(self, adapter_id: str, max_attempts: int = 3, delay: float = 2.0):
+        """
+        Attempt to reconnect to an adapter that experienced connection issues.
+        
+        Args:
+            adapter_id: ID of the adapter to reconnect to
+            max_attempts: Maximum number of reconnection attempts
+            delay: Delay between attempts in seconds
+        """
+        if adapter_id not in self.adapters:
+            logger.error(f"Cannot reconnect to adapter '{adapter_id}': not in adapter list")
+            return
+        
+        adapter_info = self.adapters[adapter_id]
+        config = adapter_info.get("config")
+        if not config:
+            logger.error(f"Cannot reconnect to adapter '{adapter_id}': missing config")
+            return
+        
+        logger.info(f"Starting reconnection attempts for adapter '{adapter_id}' (max {max_attempts} attempts)")
+        
+        for attempt in range(1, max_attempts + 1):
+            try:
+                logger.info(f"Reconnection attempt {attempt}/{max_attempts} for adapter '{adapter_id}'")
+                
+                # Disconnect existing client if still connected
+                if adapter_info.get("client"):
+                    try:
+                        await adapter_info["client"].disconnect()
+                        await asyncio.sleep(0.5)  # Brief pause for clean disconnect
+                    except Exception as disconnect_error:
+                        logger.debug(f"Error during disconnect cleanup for '{adapter_id}': {disconnect_error}")
+                
+                # Reset connection state
+                adapter_info["client"] = None
+                adapter_info["connected"] = False
+                
+                # Attempt reconnection
+                success = await self._connect_to_adapter_api(adapter_id, config)
+                if success:
+                    logger.info(f"Successfully reconnected to adapter '{adapter_id}' on attempt {attempt}")
+                    return True
+                else:
+                    logger.warning(f"Reconnection attempt {attempt}/{max_attempts} failed for adapter '{adapter_id}'")
+                    
+            except Exception as reconnect_error:
+                logger.error(f"Error during reconnection attempt {attempt} for adapter '{adapter_id}': {reconnect_error}")
+            
+            # Wait before next attempt (except on last attempt)
+            if attempt < max_attempts:
+                logger.info(f"Waiting {delay} seconds before next reconnection attempt for adapter '{adapter_id}'")
+                await asyncio.sleep(delay)
+                delay *= 1.5  # Exponential backoff
+        
+        logger.error(f"Failed to reconnect to adapter '{adapter_id}' after {max_attempts} attempts")
+        return False 
+
+    def _record_activity(self, adapter_id: str):
+        """Record activity timestamp for an adapter to track idle state."""
+        self._last_activity[adapter_id] = time.time()
+
+    def _start_keepalive(self, adapter_id: str):
+        """Start keepalive task for an adapter to prevent idle timeout."""
+        # Stop existing task if any
+        self._stop_keepalive(adapter_id)
+        
+        # Start new keepalive task
+        task = asyncio.create_task(self._keepalive_loop(adapter_id))
+        self._keepalive_tasks[adapter_id] = task
+        logger.debug(f"Started keepalive task for adapter '{adapter_id}'")
+
+    def _stop_keepalive(self, adapter_id: str):
+        """Stop keepalive task for an adapter."""
+        if adapter_id in self._keepalive_tasks:
+            task = self._keepalive_tasks.pop(adapter_id)
+            if not task.done():
+                task.cancel()
+            logger.debug(f"Stopped keepalive task for adapter '{adapter_id}'")
+
+    async def _keepalive_loop(self, adapter_id: str):
+        """Keepalive task that sends keepalive messages to prevent idle timeout."""
+        try:
+            while True:
+                await asyncio.sleep(self._keepalive_interval)
+                
+                # Check if adapter is still connected
+                if (adapter_id not in self.adapters or 
+                    not self.adapters[adapter_id].get("connected") or 
+                    not self.adapters[adapter_id].get("client")):
+                    logger.debug(f"Stopping keepalive task for adapter '{adapter_id}' - no longer connected")
+                    break
+                
+                try:
+                    client = self.adapters[adapter_id]["client"]
+                    
+                    # Send lightweight ping to keep connection alive
+                    await client.emit("ping", {"timestamp": time.time(), "keepalive": True})
+                    logger.debug(f"Sent keepalive ping to adapter '{adapter_id}'")
+                    
+                    # Record this as activity
+                    self._record_activity(adapter_id)
+                    
+                except Exception as e:
+                    logger.warning(f"Keepalive ping failed for adapter '{adapter_id}': {e}")
+                    # Don't break the loop immediately - connection might recover
+                    
+        except asyncio.CancelledError:
+            logger.debug(f"Keepalive task for adapter '{adapter_id}' was cancelled")
+        except Exception as e:
+            logger.error(f"Unexpected error in keepalive loop for adapter '{adapter_id}': {e}")
+
+    async def _refresh_idle_connection(self, adapter_id: str, force: bool = False) -> bool:
+        """
+        Refresh an idle connection to prevent packet queue issues.
+        
+        Args:
+            adapter_id: ID of the adapter to refresh
+            force: If True, refresh even if not technically idle
+            
+        Returns:
+            True if refresh was successful, False otherwise
+        """
+        if adapter_id not in self.adapters:
+            logger.error(f"Cannot refresh connection for unknown adapter '{adapter_id}'")
+            return False
+        
+        adapter_info = self.adapters[adapter_id]
+        config = adapter_info.get("config")
+        
+        if not config:
+            logger.error(f"Cannot refresh connection for adapter '{adapter_id}': missing config")
+            return False
+        
+        # Check if refresh is needed (unless forced)
+        if not force:
+            current_time = time.time()
+            last_activity = self._last_activity.get(adapter_id, 0)
+            idle_duration = current_time - last_activity
+            
+            if idle_duration < self._idle_threshold:
+                logger.debug(f"Adapter '{adapter_id}' not idle ({idle_duration:.1f}s < {self._idle_threshold}s), skipping refresh")
+                return True
+        
+        logger.info(f"Refreshing {'idle' if not force else 'problematic'} connection for adapter '{adapter_id}'")
+        
+        try:
+            # Stop keepalive task during refresh
+            self._stop_keepalive(adapter_id)
+            
+            # Gracefully disconnect existing client
+            old_client = adapter_info.get("client")
+            if old_client:
+                try:
+                    await old_client.disconnect()
+                    await asyncio.sleep(0.5)  # Brief pause for clean disconnect
+                except Exception as disconnect_error:
+                    logger.debug(f"Error during disconnect in refresh for '{adapter_id}': {disconnect_error}")
+            
+            # Reset state
+            adapter_info["client"] = None
+            adapter_info["connected"] = False
+            
+            # Reconnect
+            success = await self._connect_to_adapter_api(adapter_id, config)
+            if success:
+                logger.info(f"Successfully refreshed connection for adapter '{adapter_id}'")
+                # Activity and keepalive are started in connect event handler
+                return True
+            else:
+                logger.error(f"Failed to refresh connection for adapter '{adapter_id}'")
+                return False
+                
+        except Exception as refresh_error:
+            logger.error(f"Error during connection refresh for adapter '{adapter_id}': {refresh_error}")
+            return False 

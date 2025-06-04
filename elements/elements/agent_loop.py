@@ -449,60 +449,53 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
             logger.warning(f"{self.agent_loop_name} ({self.id}): CompressionEngine not available. Proceeding without memory.")
 
         try:
-            # --- 1. Get Fresh Context from HUD (Current Frame) ---
-            logger.debug(f"{self.agent_loop_name} ({self.id}): Getting current context from HUD...")
-            
-            # NEW: Configure render options for focused or full context
-            render_options = {"render_style": "verbose_tags"}
-            
-            # NEW: Apply focus context if provided
+            # --- Determine Rendering Type Based on Context ---
             if focus_context and focus_context.get('focus_element_id'):
-                focus_element_id = focus_context['focus_element_id']
-                render_options['focus_element_id'] = focus_element_id
-                render_options['focused_rendering'] = True
+                # Combined rendering: memory + focused element
+                render_type = 'combined'
+                render_options = {
+                    'render_type': render_type,
+                    'focus_element_id': focus_context.get('focus_element_id'),
+                    'conversation_context': focus_context.get('conversation_context', {}),
+                    'render_style': 'verbose_tags'
+                }
                 
-                # Add conversation context for better understanding
-                conversation_context = focus_context.get('conversation_context', {})
-                if conversation_context:
-                    render_options['conversation_context'] = conversation_context
-                
-                logger.info(f"{self.agent_loop_name} ({self.id}): Using FOCUSED rendering on element {focus_element_id}")
+                # Get memory data for combined rendering
+                if compression_engine:
+                    memory_data = await compression_engine.get_memory_data()
+                    render_options['memory_context'] = memory_data
+                    logger.info(f"Using combined rendering (memory + focused) on element {focus_context.get('focus_element_id')}")
+                else:
+                    logger.warning(f"No memory available for combined rendering, falling back to focused only")
+                    render_type = 'focused'
+                    render_options['render_type'] = render_type
             else:
-                logger.info(f"{self.agent_loop_name} ({self.id}): Using FULL context rendering (no focus specified)")
-            
-            current_context = await hud.get_agent_context(options=render_options)
+                # Full rendering with all VEIL objects
+                render_type = 'full'
+                render_options = {
+                    'render_type': render_type,
+                    'render_style': 'verbose_tags'
+                }
+                logger.info(f"Using full context rendering")
 
-            logger.critical(f"Current context: {current_context}")
-            logger.critical(f"Owner's mounted elements: {self.parent_inner_space.get_mounted_elements()}")
+            # --- Get Context from HUD ---
+            comprehensive_frame = await hud.get_agent_context(options=render_options)
             
-            if not current_context:
-                logger.warning(f"{self.agent_loop_name} ({self.id}): HUD provided empty context. Aborting cycle.")
+            if not comprehensive_frame:
+                logger.warning(f"{self.agent_loop_name} ({self.id}): HUD provided empty frame. Aborting cycle.")
                 return
 
-            # Update context length logging to indicate if focused
-            context_type = "FOCUSED" if focus_context and focus_context.get('focus_element_id') else "FULL"
-            logger.debug(f"Generated {context_type} agent context: {len(current_context)} characters")
+            logger.info(f"Generated {render_type} frame: {len(comprehensive_frame)} characters")
 
-            # --- 2. Get Memory Context from CompressionEngine ---
-            memory_messages = []
-            if compression_engine:
-                logger.debug(f"{self.agent_loop_name} ({self.id}): Retrieving memory context...")
-                memory_messages = await compression_engine.get_memory_context()
-                logger.info(f"Retrieved {len(memory_messages)} memory messages")
-
-            # --- 3. Build Complete Message History ---
-            # Start with memory context (includes orientation conversation + interaction history)
-            messages = memory_messages.copy()
+            # --- Build Single Message for LLM ---
+            messages = [LLMMessage(role="user", content=comprehensive_frame)]
             
-            # Add current context as latest user input
-            messages.append(LLMMessage(role="user", content=current_context))
-            
-            logger.debug(f"Built message history: {len(messages)} messages ({len(memory_messages)} memory + 1 current)")
+            logger.debug(f"Built single-message prompt: {len(messages)} message ({len(comprehensive_frame)} chars)")
 
-            # --- 4. Get Available Tools ---
+            # --- Get Available Tools ---
             aggregated_tools = await self.aggregate_tools()
 
-            # --- 5. Send to LLM ---
+            # --- Send to LLM (Single Frame) ---
             llm_response_obj = llm_provider.complete(messages=messages, tools=aggregated_tools)
             
             if not llm_response_obj:
@@ -514,7 +507,7 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
 
             logger.info(f"LLM response: {len(agent_response_text or '')} chars, {len(agent_tool_calls)} tool calls")
 
-            # --- 6. Process Tool Calls ---
+            # --- 7. Process Tool Calls (unchanged - still essential) ---
             tool_results = []
             if agent_tool_calls:
                 logger.info(f"Processing {len(agent_tool_calls)} tool calls...")
@@ -576,7 +569,7 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                             "result": {"error": str(e)}
                         })
 
-            # --- 7. Process Text Response (if no tool calls) ---
+            # --- 8. Process Text Response (if no tool calls) ---
             if agent_response_text and not agent_tool_calls:
                 logger.debug("No tool calls. Processing text response via HUD...")
                 try:
@@ -614,46 +607,43 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                 except Exception as e:
                     logger.error(f"Error processing text response: {e}", exc_info=True)
 
-            # --- 8. Store Complete Reasoning Chain in CompressionEngine ---
+            # --- 8. Store Complete Reasoning Chain in CompressionEngine (NEW APPROACH) ---
             if compression_engine:
-                reasoning_chain_data = {
-                    "context_received": current_context,
-                    "agent_response": agent_response_text,
-                    "tool_calls": [
-                        {
-                            "tool_name": tc.tool_name,
-                            "parameters": tc.parameters
-                        } for tc in agent_tool_calls
-                    ],
-                    "tool_results": tool_results,
-                    "reasoning_notes": f"Simple cycle at {datetime.now().isoformat()}",
-                    "metadata": {
-                        "message_count": len(messages),
-                        "memory_message_count": len(memory_messages),
-                        "tools_available": len(aggregated_tools),
-                        "loop_component_id": self.id,
-                        "loop_type": "simple"
+                try:
+                    # Store reasoning chain with context summary instead of full redundant context
+                    reasoning_chain_data = {
+                        "render_type_used": render_type,  # Track which rendering approach was used
+                        "render_options": render_options,  # Store the options for reference
+                        "agent_response": agent_response_text,
+                        "tool_calls": [
+                            {
+                                "tool_name": tc.tool_name if hasattr(tc, 'tool_name') else str(tc), 
+                                "parameters": tc.parameters if hasattr(tc, 'parameters') else {}
+                            } 
+                            for tc in agent_tool_calls
+                        ],
+                        "tool_results": tool_results,
+                        "reasoning_notes": f"simple_cycle with {render_type} rendering",
+                        "metadata": {
+                            "cycle_type": "simple_request_response",
+                            "had_focus_context": bool(focus_context),
+                            "focus_element_id": focus_context.get('focus_element_id') if focus_context else None
+                        }
                     }
-                }
-                
-                await compression_engine.store_reasoning_chain(reasoning_chain_data)
-                logger.info(f"Stored reasoning chain with {len(tool_results)} tool results")
-
-            # --- 9. Record Timeline Event ---
-            try:
-                self.parent_inner_space.add_event_to_primary_timeline({
-                    "event_type": "agent_context_generated",
-                    "data": {
-                        "loop_component_id": self.id,
-                        "context_preview": current_context[:250] + ('...' if len(current_context) > 250 else ''),
-                        "context_length": len(current_context),
-                        "render_options": render_options,
-                        "memory_messages_used": len(memory_messages),
-                        "tool_calls_made": len(agent_tool_calls)
-                    }
-                })
-            except Exception as tl_err:
-                logger.error(f"Error recording agent context to timeline: {tl_err}", exc_info=True)
+                    
+                    # Instead of storing the full frame, create a context summary
+                    context_summary = f"{render_type.title()} rendering"
+                    if focus_context and focus_context.get('focus_element_id'):
+                        context_summary += f" focused on {focus_context.get('focus_element_id')}"
+                    if render_type == 'combined':
+                        context_summary += " with memory context"
+                    
+                    reasoning_chain_data["context_received"] = f"Agent processed {context_summary} ({len(comprehensive_frame)} chars)"
+                    
+                    await compression_engine.store_reasoning_chain(reasoning_chain_data)
+                    logger.info(f"Stored reasoning chain with {render_type} rendering summary")
+                except Exception as store_err:
+                    logger.error(f"Error storing reasoning chain: {store_err}", exc_info=True)
 
         except Exception as e:
             logger.error(f"{self.agent_loop_name} ({self.id}): Error during simple cycle: {e}", exc_info=True)
@@ -755,17 +745,42 @@ class MultiStepToolLoopComponent(BaseAgentLoopComponent):
             current_stage = self._determine_stage(last_relevant_event)
             logger.debug(f"Determined current stage: {current_stage}")
 
-            # --- 2. Execute Logic Based on Stage (with Memory Integration) --- 
+            # --- 2. Execute Logic Based on Stage (with Modular Rendering) --- 
 
             if current_stage == "initial_request" or current_stage == "tool_result_received":
-                # --- Get Fresh Context from HUD ---
-                render_options = {"render_style": "clean"} 
+                # --- Determine Context Strategy ---
+                if focus_context and focus_context.get('focus_element_id'):
+                    # Combined rendering for focused multi-step
+                    render_options = {
+                        'render_type': 'combined',
+                        'focus_element_id': focus_context.get('focus_element_id'),
+                        'conversation_context': focus_context.get('conversation_context', {}),
+                        'render_style': 'clean'
+                    }
+                    
+                    # Get memory data for combined rendering
+                    if compression_engine:
+                        memory_data = await compression_engine.get_memory_data()
+                        render_options['memory_context'] = memory_data
+                        logger.info(f"Multi-step using combined rendering (memory + focused) on element {focus_context.get('focus_element_id')}")
+                    else:
+                        logger.warning(f"No memory for multi-step combined rendering, using focused only")
+                        render_options['render_type'] = 'focused'
+                else:
+                    # Full rendering for general multi-step
+                    render_options = {
+                        'render_type': 'full',
+                        'render_style': 'clean'
+                    }
+                    logger.info(f"Multi-step using full context rendering")
+                
+                # --- Get Context from HUD ---
                 current_context = await hud.get_agent_context(options=render_options)
                 if not current_context:
                     logger.warning(f"Empty context from HUD. Aborting cycle.")
                     return
                 
-                # --- Get Memory Context from CompressionEngine ---
+                # --- Get Memory Context from CompressionEngine (for message history) ---
                 memory_messages = []
                 if compression_engine:
                     logger.debug(f"Retrieving memory context for multi-step stage '{current_stage}'...")
@@ -780,20 +795,6 @@ class MultiStepToolLoopComponent(BaseAgentLoopComponent):
                 messages.append(LLMMessage(role="user", content=current_context))
                 
                 logger.debug(f"Built multi-step message history: {len(messages)} messages ({len(memory_messages)} memory + 1 current)")
-                
-                # Record context generated
-                try:
-                     self.parent_inner_space.add_event_to_primary_timeline({
-                         "event_type": self.EVENT_TYPE_AGENT_CONTEXT_GENERATED,
-                         "data": {
-                             "loop_component_id": self.id, 
-                             "stage": current_stage, 
-                             "context_length": len(current_context),
-                             "memory_messages_used": len(memory_messages)
-                         }
-                     })
-                except Exception as e: 
-                    logger.error(f"Error recording context event: {e}")
 
                 # --- Get Available Tools ---
                 aggregated_tools = await self.aggregate_tools()
@@ -819,7 +820,7 @@ class MultiStepToolLoopComponent(BaseAgentLoopComponent):
                         if not isinstance(tool_call, LLMToolCall): 
                             continue
                         
-                        # Parse tool target and name (same logic as SimpleRequestResponseLoopComponent)
+                        # Parse tool target and name
                         raw_tool_name = tool_call.tool_name
                         target_element_id = None
                         actual_tool_name = raw_tool_name
@@ -864,17 +865,7 @@ class MultiStepToolLoopComponent(BaseAgentLoopComponent):
                                 "result": action_result
                             })
                             
-                            # Record the structured dispatch event
-                            self.parent_inner_space.add_event_to_primary_timeline({
-                                "event_type": self.EVENT_TYPE_STRUCTURED_TOOL_ACTION_DISPATCHED,
-                                "data": {
-                                    "loop_component_id": self.id, 
-                                    "tool_call_name": raw_tool_name, 
-                                    "tool_call_params": tool_call.parameters, 
-                                    "sync_result_preview": str(action_result)[:100],
-                                    "target_element_id": target_element_id
-                                }
-                            })
+                            # REMOVED: Excessive timeline event recording - tool execution creates its own events
                             dispatched_tool_action = True
                         except Exception as exec_err: 
                             logger.error(f"Error executing multi-step tool '{actual_tool_name}': {exec_err}", exc_info=True)
@@ -898,54 +889,10 @@ class MultiStepToolLoopComponent(BaseAgentLoopComponent):
                                       await callback(action_request)
                                   except Exception as e: 
                                       logger.error(f"Error dispatching final external action: {e}")
-                        # Record LLM_RESPONSE_PROCESSED event (no tool dispatched)
-                        self.parent_inner_space.add_event_to_primary_timeline({
-                             "event_type": self.EVENT_TYPE_LLM_RESPONSE_PROCESSED,
-                             "data": {
-                                 "loop_component_id": self.id, 
-                                 "dispatched_tool_action": False, 
-                                 "final_actions_count": len(final_action_requests),
-                                 "memory_messages_used": len(memory_messages)
-                             }
-                        })
+                            # REMOVED: Excessive timeline event recording - action dispatching creates its own events
                     else:
                          logger.info("Multi-step LLM response had no tool calls and no text content.")
-                         self.parent_inner_space.add_event_to_primary_timeline({
-                              "event_type": self.EVENT_TYPE_LLM_RESPONSE_PROCESSED,
-                              "data": {
-                                  "loop_component_id": self.id, 
-                                  "dispatched_tool_action": False, 
-                                  "final_actions_count": 0,
-                                  "memory_messages_used": len(memory_messages)
-                              }
-                         })
-
-                # --- Store Complete Reasoning Chain in CompressionEngine ---
-                if compression_engine:
-                    reasoning_chain_data = {
-                        "context_received": current_context,
-                        "agent_response": agent_response_text,
-                        "tool_calls": [
-                            {
-                                "tool_name": tc.tool_name,
-                                "parameters": tc.parameters
-                            } for tc in agent_tool_calls
-                        ],
-                        "tool_results": tool_results,
-                        "reasoning_notes": f"Multi-step cycle (stage: {current_stage}) at {datetime.now().isoformat()}",
-                        "metadata": {
-                            "message_count": len(messages),
-                            "memory_message_count": len(memory_messages),
-                            "tools_available": len(aggregated_tools),
-                            "loop_component_id": self.id,
-                            "loop_type": "multi_step",
-                            "interaction_stage": current_stage,
-                            "tool_action_dispatched": dispatched_tool_action
-                        }
-                    }
-                    
-                    await compression_engine.store_reasoning_chain(reasoning_chain_data)
-                    logger.info(f"Stored multi-step reasoning chain (stage: {current_stage}) with {len(tool_results)} tool results")
+                         # REMOVED: Excessive timeline event recording
 
             elif current_stage == "waiting_for_tool_result":
                 logger.info(f"Multi-step currently waiting for tool result. No action taken this cycle.")

@@ -374,7 +374,6 @@ class MessageListComponent(Component):
         Args:
             edit_content: The actual data for edit (e.g., from event_payload['payload']).
         """
-        logger.critical(f"[{self.owner.id}] Handling edit message: {edit_content}")
         original_external_id = edit_content.get('original_message_id_external')
         new_text = edit_content.get('new_text')
         edit_timestamp = edit_content.get('timestamp', time.time())
@@ -850,7 +849,6 @@ class MessageListComponent(Component):
         Updates a pending message to 'sent' status upon confirmation from adapter.
         Now handles generic action success payload structure.
         """
-        logger.critical(f"[{self.owner.id}] MessageListComponent handling send confirmation: {confirm_content}")
         
         internal_req_id = confirm_content.get('internal_request_id')
         adapter_response_data = confirm_content.get('adapter_response_data', {})
