@@ -12,18 +12,45 @@ from typing import Dict, Any, List, Optional, Union
 class LLMMessage:
     """Representation of a message in a conversation with an LLM."""
     
-    def __init__(self, role: str, content: str, name: Optional[str] = None):
+    def __init__(self, role: str, content: Union[str, List[Dict[str, Any]]], name: Optional[str] = None):
         """
         Initialize a message.
         
         Args:
             role: The role of the message sender (e.g., "user", "assistant", "system")
-            content: The content of the message
+            content: The content of the message. Can be:
+                     - str: Plain text content
+                     - List[Dict]: Multimodal content with parts like:
+                       [{"type": "text", "text": "..."}, {"type": "image_url", "image_url": {"url": "..."}}]
             name: Optional name for function calls
         """
         self.role = role
         self.content = content
         self.name = name
+    
+    def is_multimodal(self) -> bool:
+        """Check if this message contains multimodal content."""
+        return isinstance(self.content, list)
+    
+    def get_text_content(self) -> str:
+        """Extract text content from the message, regardless of format."""
+        if isinstance(self.content, str):
+            return self.content
+        elif isinstance(self.content, list):
+            # Extract all text parts
+            text_parts = []
+            for part in self.content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    text_parts.append(part.get("text", ""))
+            return " ".join(text_parts)
+        else:
+            return str(self.content)
+    
+    def get_attachment_count(self) -> int:
+        """Get the number of non-text attachments in this message."""
+        if not isinstance(self.content, list):
+            return 0
+        return len([part for part in self.content if isinstance(part, dict) and part.get("type") != "text"])
 
 
 class LLMToolDefinition:

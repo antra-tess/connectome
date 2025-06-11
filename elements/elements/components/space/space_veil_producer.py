@@ -202,7 +202,9 @@ class SpaceVeilProducer(VeilProducer):
                     "properties": current_space_props
                 })
         
+        # NEW: Add owner tracking to all delta operations
         if delta_operations:
+            delta_operations = self._add_owner_tracking_to_delta_ops(delta_operations)
             logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] Calculated delta for Space root: {delta_operations}")
         else:
             logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] No delta operations for Space root this frame.")

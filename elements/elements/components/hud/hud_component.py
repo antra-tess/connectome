@@ -1,6 +1,7 @@
 import logging
-from typing import Dict, Any, Optional, List, TYPE_CHECKING
+from typing import Dict, Any, Optional, List, TYPE_CHECKING, Union
 from datetime import datetime, timezone
+import copy
 
 from ..base_component import Component
 # Needs access to the SpaceVeilProducer on the owner (InnerSpace)
@@ -58,46 +59,288 @@ class HUDComponent(Component):
     #         return None
     #     return self.owner.get_component(GlobalAttentionComponent)
 
-    async def get_agent_context(self, options: Optional[Dict[str, Any]] = None) -> str:
+    async def get_agent_context(self, options: Optional[Dict[str, Any]] = None) -> Union[str, Dict[str, Any]]:
         """
         Generate agent context using modular rendering functions.
         
         Args:
             options: Optional dictionary controlling which rendering function to use:
-                     - render_type: 'memory', 'focused', 'full', or 'combined' (default: 'full')
+                     - render_type: 'memory', 'focused', 'full', or 'combined' (default: 'combined')
                      - focus_element_id: Element ID for focused rendering
                      - memory_context: Memory data for memory rendering
                      - Other rendering-specific options
 
         Returns:
-            A string representing the agent's context.
+            A string representing the agent's context (if no live multimodal content)
+            OR a dictionary with 'text' and 'attachments' keys (if live multimodal content detected)
         """
         logger.debug(f"Generating agent context for {self.owner.id}...")
         options = options or {}
         
-        render_type = options.get('render_type', 'full')
+        render_type = options.get('render_type', 'combined')  # Changed default from 'full' to 'combined'
+        
+        # Set default render_style to use rich tags for better structure
+        if 'render_style' not in options:
+            options['render_style'] = 'verbose_tags'
         
         try:
             if render_type == 'memory':
-                return await self.render_memory_frame_part(options)
+                context = await self.render_memory_frame_part(options)
             elif render_type == 'focused':
-                return await self.render_focused_frame_part(options)
+                context = await self.render_focused_frame_part(options)
             elif render_type == 'full':
-                return await self.render_full_frame(options)
+                context = await self.render_full_frame(options)
             elif render_type == 'combined':
-                return await self.render_combined_frame(options)
+                context = await self.render_combined_frame(options)
             else:
                 logger.warning(f"Unknown render_type '{render_type}', falling back to full rendering")
-                return await self.render_full_frame(options)
+                context = await self.render_full_frame(options)
+            
+            # FIXED: Auto-detect multimodal content for all render types
+            # (render_combined_frame already handles this internally, so check if it's a dict)
+            if isinstance(context, dict):
+                # Combined frame already detected and structured multimodal content
+                return context
+            elif isinstance(context, str):
+                # Other render types return strings, check for live multimodal content
+                focus_element_id = options.get('focus_element_id')
+                if focus_element_id and self.owner:
+                    # OPTIMIZED: Single-pass detection and extraction instead of separate operations
+                    return await self._detect_and_extract_multimodal_content(context, options, focus_element_id)
+                
+                # No multimodal content detected, return text
+                return context
+            else:
+                # Fallback for unexpected types
+                return context
                 
         except Exception as e:
             logger.error(f"Error in get_agent_context with render_type '{render_type}': {e}", exc_info=True)
             # Fallback to basic full rendering
-            return await self.render_full_frame({})
+            fallback_context = await self.render_full_frame({})
+            return fallback_context
+    
+    async def _extract_multimodal_content(self, text_context: str, options: Dict[str, Any], focus_element_id: str) -> Dict[str, Any]:
+        """
+        Extract multimodal content from VEIL and return structured data.
+        
+        OPTIMIZED: Uses targeted element filtering when focus_element_id is provided,
+        then recursively searches through those nodes for maximum efficiency.
+        
+        Args:
+            text_context: The rendered text context
+            options: Rendering options
+            focus_element_id: Element ID to search for attachments
+            
+        Returns:
+            Dictionary with 'text' and 'attachments' keys
+        """
+        try:
+            if not self.owner:
+                logger.warning(f"Cannot extract multimodal content: No owner element.")
+                return {"text": text_context, "attachments": []}
+
+            # OPTIMIZED: Use provided focus element for targeted search
+            if focus_element_id:
+                # Use targeted search for the focused element
+                attachment_nodes = self._find_attachment_nodes_for_element(focus_element_id)
+                logger.info(f"[{self.owner.id}] Using targeted search for element {focus_element_id}")
+            else:
+                # Fall back to full VEIL search if no focus element
+                attachment_nodes = self._find_attachment_nodes_recursively()
+                logger.info(f"[{self.owner.id}] Using full VEIL search (no focus element)")
+            
+            # Process attachment nodes into LiteLLM-compatible format
+            processed_attachments = []
+            for attachment_node in attachment_nodes:
+                processed_attachment = await self._process_attachment_node_for_llm(attachment_node)
+                if processed_attachment:
+                    processed_attachments.append(processed_attachment)
+            
+            logger.info(f"[{self.owner.id}] Extracted {len(processed_attachments)} multimodal attachments using optimized search")
+
+            return {
+                "text": text_context,
+                "attachments": processed_attachments
+            }
+            
+        except Exception as e:
+            logger.error(f"[{self.owner.id}] Error extracting multimodal content: {e}", exc_info=True)
+            return {"text": text_context, "attachments": []}
+    
+    def _find_attachment_nodes_for_element(self, element_id: str) -> List[Dict[str, Any]]:
+        """
+        NEW: Efficiently find attachment nodes for a specific element using granular filtering.
+        
+        This is much more efficient than searching the entire VEIL when we know which element
+        we're interested in.
+        
+        Args:
+            element_id: The element ID to search for attachments
+            
+        Returns:
+            List of attachment content node dictionaries
+        """
+        try:
+            attachment_nodes = []
+            
+            # Get only the VEIL nodes for this specific element
+            element_nodes = self.owner.get_veil_nodes_by_owner(element_id)
+            if not element_nodes:
+                logger.debug(f"No VEIL nodes found for element {element_id}")
+                return []
+            
+            # Recursively search through this element's nodes
+            def search_node_for_attachments(node: Dict[str, Any]):
+                if not isinstance(node, dict):
+                    return
+                
+                # Check if this node is an attachment content item
+                node_type = node.get("node_type", "")
+                props = node.get("properties", {})
+                structural_role = props.get("structural_role", "")
+                
+                if (node_type == "attachment_content_item" or 
+                    structural_role == "attachment_content"):
+                    # Found an attachment node!
+                    attachment_nodes.append(node)
+                    logger.debug(f"Found attachment node {node.get('veil_id')} for element {element_id}")
+                
+                # Recursively search children
+                children = node.get("children", [])
+                for child in children:
+                    search_node_for_attachments(child)
+            
+            # Search through all nodes owned by this element
+            for veil_id, node_data in element_nodes.items():
+                search_node_for_attachments(node_data)
+            
+            logger.debug(f"Found {len(attachment_nodes)} attachment nodes for element {element_id}")
+            return attachment_nodes
+            
+        except Exception as e:
+            logger.error(f"Error finding attachment nodes for element {element_id}: {e}", exc_info=True)
+            return []
+
+    def _find_attachment_nodes_recursively(self) -> List[Dict[str, Any]]:
+        """
+        NEW: Recursively search through the entire VEIL hierarchy to find attachment content nodes.
+        
+        This handles the case where attachment nodes are children of message nodes rather than
+        top-level nodes in the flat VEIL cache.
+        
+        Returns:
+            List of attachment content node dictionaries
+        """
+        try:
+            attachment_nodes = []
+            
+            # Get the full VEIL from SpaceVeilProducer to search through hierarchy
+            veil_producer = self._get_space_veil_producer()
+            if not veil_producer:
+                logger.warning(f"Cannot find attachments: SpaceVeilProducer not available")
+                return []
+            
+            full_veil = veil_producer.get_full_veil()
+            if not full_veil:
+                logger.debug(f"No VEIL available for attachment search")
+                return []
+            
+            # Recursively search through VEIL hierarchy
+            def search_node_for_attachments(node: Dict[str, Any]):
+                if not isinstance(node, dict):
+                    return
+                
+                # Check if this node is an attachment content item
+                node_type = node.get("node_type", "")
+                props = node.get("properties", {})
+                structural_role = props.get("structural_role", "")
+                
+                if (node_type == "attachment_content_item" or 
+                    structural_role == "attachment_content"):
+                    # Found an attachment node!
+                    attachment_nodes.append(node)
+                    logger.debug(f"Found attachment node {node.get('veil_id')} at depth")
+                
+                # Recursively search children
+                children = node.get("children", [])
+                for child in children:
+                    search_node_for_attachments(child)
+            
+            # Start recursive search from root
+            search_node_for_attachments(full_veil)
+            
+            logger.debug(f"Found {len(attachment_nodes)} attachment nodes through recursive search")
+            return attachment_nodes
+            
+        except Exception as e:
+            logger.error(f"Error in recursive attachment search: {e}", exc_info=True)
+            return []
+
+    async def _process_attachment_node_for_llm(self, attachment_node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Process an attachment VEIL node into LiteLLM-compatible format.
+        
+        Args:
+            attachment_node: VEIL node representing attachment content
+            
+        Returns:
+            LiteLLM-compatible content part or None if not processable
+        """
+        try:
+            props = attachment_node.get("properties", {})
+            content_type = props.get("content_nature", "unknown")
+            filename = props.get("filename", "unknown_file")
+            attachment_id = props.get("attachment_id")
+            
+            # NEW: Get content directly from VEIL node properties (much simpler!)
+            content = props.get("content")
+            content_available = props.get("content_available", False)
+            
+            if "image" in content_type.lower():
+                # For images, we need base64 data
+                logger.debug(f"Processing image attachment: {filename}")
+                
+                if content and isinstance(content, str):
+                    # Content is available directly in VEIL node
+                    return {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/{content_type.split('/')[-1] if '/' in content_type else 'png'};base64,{content}"
+                        }
+                    }
+                else:
+                    logger.warning(f"No content available for image attachment {filename} (content_available: {content_available})")
+                    return None
+                    
+            elif "text" in content_type.lower():
+                # For text files, include the content directly
+                logger.debug(f"Processing text attachment: {filename}")
+                
+                if content:
+                    return {
+                        "type": "text",
+                        "text": f"[Attachment: {filename}]\n{content}"
+                    }
+                else:
+                    logger.warning(f"No content available for text attachment {filename} (content_available: {content_available})")
+                    return None
+            else:
+                # For other file types, just mention them
+                logger.debug(f"Unsupported attachment type for LLM: {content_type}")
+                return {
+                    "type": "text", 
+                    "text": f"[Attachment: {filename} (Type: {content_type}) - Content not directly viewable]"
+                }
+                
+        except Exception as e:
+            logger.error(f"Error processing attachment node for LLM: {e}", exc_info=True)
+            return None
 
     async def render_memory_frame_part(self, options: Dict[str, Any]) -> str:
         """
         Render memory context part of the frame.
+   
         
         Args:
             options: Rendering options, should include 'memory_context' with memory data
@@ -122,20 +365,12 @@ class HUDComponent(Component):
             if scratchpad_section:
                 frame_parts.append(scratchpad_section)
             
-            # Orientation Section
-            orientation_section = self._render_orientation_section(memory_context.get('orientation'))
-            if orientation_section:
-                frame_parts.append(orientation_section)
-            
             # Compressed Context Section
             compressed_section = self._render_compressed_context_section(memory_context.get('compressed_context', {}))
             if compressed_section:
                 frame_parts.append(compressed_section)
             
-            # Latest Reasoning Section
-            reasoning_section = self._render_latest_reasoning_section(memory_context.get('latest_reasoning'))
-            if reasoning_section:
-                frame_parts.append(reasoning_section)
+            # No more latest reasoning section - removed in Phase 2 cleanup
             
             memory_frame = "\n\n".join(frame_parts)
             logger.info(f"[{self.owner.id}] Rendered memory frame: {len(memory_frame)} chars, {len(frame_parts)} sections")
@@ -248,7 +483,7 @@ class HUDComponent(Component):
             import json
             return f"Error rendering context: {e}\nRaw VEIL:\n{json.dumps(full_veil, indent=2) if 'full_veil' in locals() else 'N/A'}"
 
-    async def render_combined_frame(self, options: Dict[str, Any]) -> str:
+    async def render_combined_frame(self, options: Dict[str, Any]) -> Union[str, Dict[str, Any]]:
         """
         Render combined frame with memory + focused element.
         
@@ -256,14 +491,13 @@ class HUDComponent(Component):
             options: Rendering options, should include 'memory_context' and 'focus_element_id'
             
         Returns:
-            Rendered combined frame
+            Rendered combined frame (string or dict with multimodal content)
         """
         try:
             frame_parts = []
             
             # Memory part
             memory_frame = await self.render_memory_frame_part(options)
-            logger.critical("MEMORY FRAME: " + memory_frame)
             if memory_frame:
                 frame_parts.append(memory_frame)
             
@@ -272,14 +506,181 @@ class HUDComponent(Component):
             if focused_frame:
                 frame_parts.append(focused_frame)
             
-            combined_frame = "\n\n".join(frame_parts)
-            logger.info(f"[{self.owner.id}] Rendered combined frame: {len(combined_frame)} chars, {len(frame_parts)} parts")
-            return combined_frame
+            combined_text = "\n\n".join(frame_parts)
+            
+            # OPTIMIZED: Single pass detection + extraction instead of two separate searches
+            focus_element_id = options.get('focus_element_id')
+            if focus_element_id and self.owner:
+                # Single efficient operation: detect AND extract if found
+                return await self._detect_and_extract_multimodal_content(combined_text, options, focus_element_id)
+            else:
+                # No focus element - return text only
+                logger.info(f"[{self.owner.id}] Rendered combined frame: {len(combined_text)} chars, {len(frame_parts)} parts")
+                return combined_text
             
         except Exception as e:
             logger.error(f"[{self.owner.id}] Error rendering combined frame: {e}", exc_info=True)
             # Fallback to full frame
             return await self.render_full_frame(options)
+
+    async def _detect_and_extract_multimodal_content(self, text_context: str, options: Dict[str, Any], focus_element_id: str) -> Union[str, Dict[str, Any]]:
+        """
+        OPTIMIZED: Single-pass multimodal detection and extraction.
+        
+        Combines detection and extraction into one efficient operation, eliminating
+        the need for separate detection + extraction searches.
+        
+        Args:
+            text_context: The rendered text context
+            options: Rendering options
+            focus_element_id: Element ID to check for live attachments
+            
+        Returns:
+            Text string if no multimodal content, or dict with 'text' and 'attachments' if multimodal
+        """
+        try:
+            # Single search operation - find attachments and process them if found
+            attachment_nodes = self._find_attachment_nodes_for_element(focus_element_id)
+            
+            if not attachment_nodes:
+                # No multimodal content found - return text only
+                logger.debug(f"No live attachment content found for element {focus_element_id}")
+                logger.info(f"[{self.owner.id}] Rendered combined frame: {len(text_context)} chars (text-only)")
+                return text_context
+            
+            # Multimodal content found - process attachments immediately
+            logger.info(f"[{self.owner.id}] Live multimodal content detected, processing {len(attachment_nodes)} attachments")
+            
+            # Process attachment nodes into LiteLLM-compatible format
+            processed_attachments = []
+            for attachment_node in attachment_nodes:
+                processed_attachment = await self._process_attachment_node_for_llm(attachment_node)
+                if processed_attachment:
+                    processed_attachments.append(processed_attachment)
+            
+            logger.info(f"[{self.owner.id}] Extracted {len(processed_attachments)} multimodal attachments in single pass")
+
+            return {
+                "text": text_context,
+                "attachments": processed_attachments
+            }
+            
+        except Exception as e:
+            logger.error(f"[{self.owner.id}] Error in combined multimodal detection/extraction: {e}", exc_info=True)
+            # Fallback to text-only on error
+            return text_context
+
+    def _has_live_multimodal_content_for_element(self, element_id: str) -> bool:
+        """
+        OPTIMIZED: Check if element has LIVE multimodal content using granular filtering + recursive search.
+        
+        This only looks for fresh attachment content, not compressed memory descriptions.
+        Compressed memories containing attachment descriptions are rendered as text.
+        
+        OPTIMIZED: First filters VEIL nodes by element_id, then recursively searches only 
+        through those nodes for efficiency.
+        
+        Args:
+            element_id: Element ID to check for live attachments
+            
+        Returns:
+            True if live attachment nodes are found
+        """
+        try:
+            if not self.owner:
+                return False
+            
+            # OPTIMIZED: First get only the VEIL nodes for this specific element
+            element_nodes = self.owner.get_veil_nodes_by_owner(element_id)
+            if not element_nodes:
+                logger.debug(f"No VEIL nodes found for element {element_id}")
+                return False
+            
+            # OPTIMIZED: Recursively search only through this element's nodes
+            def search_element_nodes_for_attachments(nodes_dict: Dict[str, Any]) -> bool:
+                for veil_id, node_data in nodes_dict.items():
+                    if not isinstance(node_data, dict):
+                        continue
+                    
+                    # Check if this node is an attachment content item
+                    node_type = node_data.get("node_type", "")
+                    props = node_data.get("properties", {})
+                    structural_role = props.get("structural_role", "")
+                    content_nature = props.get("content_nature", "")
+                    
+                    # If this is an attachment node
+                    if (node_type == "attachment_content_item" or 
+                        structural_role == "attachment_content" or
+                        content_nature.startswith("image") or
+                        content_nature == "attachment_content"):
+                        
+                        # Make sure this is NOT a compressed memory describing attachments
+                        if node_type not in ["content_memory", "memorized_content"]:
+                            logger.debug(f"Found live attachment node {veil_id} for element {element_id}")
+                            return True
+                    
+                    # OPTIMIZED: Also check if this node has children with attachments
+                    if self._node_has_attachment_children(node_data):
+                        return True
+                
+                return False
+            
+            # Search through the element's nodes
+            has_attachments = search_element_nodes_for_attachments(element_nodes)
+            
+            if not has_attachments:
+                logger.debug(f"No live attachment content found for element {element_id}")
+            
+            return has_attachments
+            
+        except Exception as e:
+            logger.error(f"Error checking live multimodal content for element {element_id}: {e}", exc_info=True)
+            return False
+    
+    def _node_has_attachment_children(self, node: Dict[str, Any]) -> bool:
+        """
+        NEW: Recursively check if a node has attachment children.
+        
+        This efficiently searches through a node's children hierarchy to find attachment nodes.
+        
+        Args:
+            node: VEIL node to search through
+            
+        Returns:
+            True if attachment children are found
+        """
+        try:
+            children = node.get("children", [])
+            
+            for child in children:
+                if not isinstance(child, dict):
+                    continue
+                
+                # Check if this child is an attachment
+                child_node_type = child.get("node_type", "")
+                child_props = child.get("properties", {})
+                child_structural_role = child_props.get("structural_role", "")
+                child_content_nature = child_props.get("content_nature", "")
+                
+                if (child_node_type == "attachment_content_item" or 
+                    child_structural_role == "attachment_content" or
+                    child_content_nature.startswith("image") or
+                    child_content_nature == "attachment_content"):
+                    
+                    # Make sure this is NOT a compressed memory
+                    if child_node_type not in ["content_memory", "memorized_content"]:
+                        logger.debug(f"Found attachment child: {child.get('veil_id')}")
+                        return True
+                
+                # Recursively check this child's children
+                if self._node_has_attachment_children(child):
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error checking node children for attachments: {e}", exc_info=True)
+            return False
 
     def _render_workspace_section(self, agent_info: Dict[str, Any]) -> str:
         """Render the agent workspace section."""
@@ -296,16 +697,6 @@ class HUDComponent(Component):
         
         # TODO: Implement actual scratchpad rendering when scratchpad functionality is added
         return "[SCRATCHPAD]\n(Scratchpad functionality not yet implemented)"
-
-    def _render_orientation_section(self, orientation_data: Optional[Dict[str, Any]]) -> Optional[str]:
-        """Render the orientation section if agent has been oriented."""
-        if not orientation_data or not orientation_data.get('has_orientation'):
-            return "[ORIENTATION]\n(No orientation conversation on record)"
-        
-        summary = orientation_data.get('summary', 'Agent has been oriented to the system.')
-        message_count = orientation_data.get('message_count', 0)
-        
-        return f"[ORIENTATION]\n{summary}\n(Based on {message_count} orientation messages)"
 
     def _render_compressed_context_section(self, compressed_data: Dict[str, Any]) -> Optional[str]:
         """Render compressed context of other conversations/interactions."""
@@ -330,19 +721,6 @@ class HUDComponent(Component):
                 context_parts.append(f"  {interaction_index}. {interaction_summary}{tools_text}")
         
         return "\n".join(context_parts)
-
-    def _render_latest_reasoning_section(self, reasoning_data: Optional[Dict[str, Any]]) -> Optional[str]:
-        """Render the latest reasoning chain for context."""
-        if not reasoning_data or not reasoning_data.get('has_reasoning'):
-            return "[LATEST REASONING]\n(No previous reasoning chain available for this conversation)"
-        
-        context_summary = reasoning_data.get('context_summary', 'Unknown context')
-        response_preview = reasoning_data.get('agent_response_preview', 'No response recorded')
-        tool_count = reasoning_data.get('tool_calls_made', 0)
-        
-        tools_text = f" using {tool_count} tools" if tool_count > 0 else ""
-        
-        return f"[LATEST REASONING]\nIn this conversation, on my last turn I acted with the following reasoning:\nContext: {context_summary}\nResponse: {response_preview}{tools_text}"
 
     def _build_innerspace_identity_context(self) -> str:
         """Build essential InnerSpace identity and context."""
@@ -445,43 +823,130 @@ class HUDComponent(Component):
 
     def _get_element_veil(self, element) -> Optional[Dict[str, Any]]:
         """
-        Get the VEIL representation for a specific element.
+        Get the VEIL representation for a specific element using granular filtering.
         
         Args:
             element: The element to get VEIL data for
             
         Returns:
-            VEIL node data for the element, or None if not available
+            VEIL node data for the element with properly reconstructed hierarchy, or None if not available
         """
         try:
-            # For elements with their own VEIL producer, get their VEIL directly
-            if hasattr(element, 'get_components'):
-                components = element.get_components()
-                for component in components.values():
-                    if hasattr(component, 'get_full_veil') and callable(component.get_full_veil):
-                        return component.get_full_veil()
+            # NEW: Use granular filtering by owner_id for much better performance
+            if not self.owner:
+                logger.warning(f"Cannot get element VEIL: No owner InnerSpace")
+                return None
             
-            # Fallback: try to get from space's flat cache
-            if hasattr(self.owner, '_flat_veil_cache'):
-                flat_cache = self.owner._flat_veil_cache
-                # Look for VEIL nodes that belong to this element
-                for veil_id, veil_node in flat_cache.items():
-                    node_props = veil_node.get('properties', {})
-                    if node_props.get('element_id') == element.id:
-                        return veil_node
+            # Get all VEIL nodes belonging to this element
+            element_nodes = self.owner.get_veil_nodes_by_owner(element.id)
             
-            # Last resort: create a basic VEIL representation
-            return {
-                "veil_id": f"{element.id}_basic",
-                "node_type": "basic_element",
-                "properties": {
-                    "element_id": element.id,
-                    "element_name": getattr(element, 'name', 'Unknown'),
-                    "element_type": element.__class__.__name__,
-                    "veil_status": "basic_representation"
-                },
-                "children": []
+            if not element_nodes:
+                logger.debug(f"No VEIL nodes found for element {element.id}")
+                return None
+            
+            # Find the root/container node for this element
+            container_nodes = {
+                veil_id: node_data 
+                for veil_id, node_data in element_nodes.items()
+                if isinstance(node_data, dict) and 
+                node_data.get("properties", {}).get("structural_role") == "container"
             }
+            
+            if container_nodes:
+                # Return the first container node found (should typically be only one)
+                container_veil_id, container_node = next(iter(container_nodes.items()))
+                
+                # NEW: Properly reconstruct hierarchy using parent-child relationships
+                # Instead of just flattening children, reconstruct the proper hierarchy
+                reconstructed_container = copy.deepcopy(container_node)
+                
+                # Build hierarchy by finding child nodes and organizing them by parent_id
+                child_nodes_by_parent = {}
+                root_children = []
+                
+                for veil_id, node_data in element_nodes.items():
+                    if veil_id == container_veil_id:
+                        continue  # Skip the container itself
+                    
+                    if isinstance(node_data, dict):
+                        props = node_data.get("properties", {})
+                        parent_id = props.get("parent_id")
+                        
+                        # If parent_id points to the container, it's a direct child
+                        if parent_id == container_veil_id:
+                            root_children.append(copy.deepcopy(node_data))
+                        elif parent_id:
+                            # Group by parent for sub-hierarchy
+                            if parent_id not in child_nodes_by_parent:
+                                child_nodes_by_parent[parent_id] = []
+                            child_nodes_by_parent[parent_id].append(copy.deepcopy(node_data))
+                        else:
+                            # No parent_id, treat as direct child
+                            root_children.append(copy.deepcopy(node_data))
+                
+                # NEW: Recursively attach children to their parents to maintain hierarchy
+                def attach_children_recursively(node):
+                    node_veil_id = node.get("veil_id")
+                    if node_veil_id in child_nodes_by_parent:
+                        node["children"] = child_nodes_by_parent[node_veil_id]
+                        # Recursively process the children
+                        for child in node["children"]:
+                            attach_children_recursively(child)
+                
+                # Attach children to root-level nodes
+                for child in root_children:
+                    attach_children_recursively(child)
+                
+                # Set the properly organized children on the container
+                reconstructed_container["children"] = root_children
+                
+                logger.debug(f"Retrieved VEIL for element {element.id}: container + {len(root_children)} root children (hierarchy preserved)")
+                return reconstructed_container
+            else:
+                # No container found, create a synthetic one from all nodes but still preserve hierarchy
+                logger.debug(f"No container node found for element {element.id}, creating synthetic structure with hierarchy")
+                
+                # Try to build hierarchy from all available nodes
+                nodes_by_veil_id = {veil_id: copy.deepcopy(node_data) for veil_id, node_data in element_nodes.items()}
+                root_nodes = []
+                
+                # Find root nodes (no parent or parent not in this element's nodes)
+                for veil_id, node_data in nodes_by_veil_id.items():
+                    props = node_data.get("properties", {})
+                    parent_id = props.get("parent_id")
+                    
+                    if not parent_id or parent_id not in nodes_by_veil_id:
+                        root_nodes.append(node_data)
+                
+                # Build hierarchy recursively
+                def build_synthetic_hierarchy(node):
+                    node_veil_id = node.get("veil_id")
+                    children = []
+                    
+                    for other_veil_id, other_node in nodes_by_veil_id.items():
+                        if other_veil_id != node_veil_id:
+                            other_props = other_node.get("properties", {})
+                            if other_props.get("parent_id") == node_veil_id:
+                                child_with_hierarchy = build_synthetic_hierarchy(other_node)
+                                children.append(child_with_hierarchy)
+                    
+                    node["children"] = children
+                    return node
+                
+                # Build hierarchy for all root nodes
+                hierarchical_roots = [build_synthetic_hierarchy(root) for root in root_nodes]
+                
+                return {
+                    "veil_id": f"{element.id}_synthetic_root",
+                    "node_type": "synthetic_container",
+                    "properties": {
+                        "element_id": element.id,
+                        "element_name": getattr(element, 'name', 'Unknown'),
+                        "element_type": element.__class__.__name__,
+                        "veil_status": "synthetic_from_granular_filtering_with_hierarchy"
+                    },
+                    "children": hierarchical_roots
+                }
             
         except Exception as e:
             logger.error(f"Error getting VEIL for element {element.id}: {e}", exc_info=True)
@@ -531,13 +996,19 @@ class HUDComponent(Component):
         element_name = props.get("element_name", "Unknown Element")
         element_id = props.get("element_id", "unknown_id")
         content_nature = props.get("content_nature", "container")
+        element_type = props.get("element_type", "Element")
         
         # NEW: Include tool targeting information
         available_tools = props.get("available_tools", [])
         tool_target_element_id = props.get("tool_target_element_id")
         
-        # Build header with element information
-        header = f"{indent_str}{element_name}:"
+        # Build header with element information - always include element type and ID for future needs
+        header = f"{indent_str}{element_name}"
+        
+        # NEW: Always show element ID and type (important for targeting and debugging)
+        header += f" (ID: {element_id})"
+        if element_type != "Element":  # Only show type if it's not generic
+            header += f" [{element_type}]"
         
         # Add tool information if available
         if available_tools:
@@ -561,20 +1032,24 @@ class HUDComponent(Component):
             prefixed_tools = [f"{short_prefix}__{tool}" for tool in available_tools]
             
             if tool_target_element_id and tool_target_element_id != element_id:
-                header += f" [Tools: {', '.join(prefixed_tools)} → {tool_target_element_id}]"
+                header += f" - Tools: {', '.join(prefixed_tools)} → {tool_target_element_id}"
             else:
-                header += f" [Tools: {', '.join(prefixed_tools)}]"
+                header += f" - Tools: {', '.join(prefixed_tools)}"
                 
             # If using uplink proxy prefix, add clarification with chat prefix info
             if prefix_element_id != element_id:
                 header += f" (via uplink{chat_prefix_info})"
         
+        header += ":"  # End with colon for readability
         output = f"{header}\n"
         
-        # Add element ID for verbose mode
+        # Add additional details in verbose mode
         use_verbose_tags = options.get("render_style") == "verbose_tags"
-        if use_verbose_tags and element_id:
-            output += f"{indent_str}  (Element ID: {element_id})\n"
+        if use_verbose_tags:
+            if content_nature and content_nature != "container":
+                output += f"{indent_str}  (Content Nature: {content_nature})\n"
+            if tool_target_element_id and tool_target_element_id != element_id:
+                output += f"{indent_str}  (Tool Target: {tool_target_element_id})\n"
         
         return output
 
@@ -737,16 +1212,115 @@ class HUDComponent(Component):
         return output
 
     def _render_attachment_content(self, node: Dict[str, Any], attention: Dict[str, Any], options: Dict[str, Any], indent_str: str, node_info: str) -> str:
-        """Renders a placeholder for fetched attachment content."""
+        """Renders attachment content with preview when available."""
         props = node.get("properties", {})
         filename = props.get("filename", "unknown_file")
         content_type = props.get("content_nature", "unknown_type")
         attachment_id = props.get("attachment_id", "unknown_id")
         
-        output = f"{indent_str}  >> Fetched Attachment: {filename} (Type: {content_type}, ID: {attachment_id}) - Content ready for processing by agent.\n"
-        # For text-based content, a preview could be rendered here if available in props.
-        # if "content_preview" in props:
-        #    output += f"{indent_str}     Preview: {props['content_preview'][:100]}...\n"
+        output = f"{indent_str}  >> Attachment: {filename} (Type: {content_type}, ID: {attachment_id})\n"
+        
+        # Try to get actual content for preview
+        try:
+            # This is a synchronous preview - for async operations, we'd need a different approach
+            # For now, we'll just indicate that content is available
+            if props.get("content_available", False):
+                if "image" in content_type.lower():
+                    output += f"{indent_str}     [Image content available for multimodal processing]\n"
+                elif "text" in content_type.lower():
+                    # For text, we could show a preview if content is small enough
+                    output += f"{indent_str}     [Text content available for LLM processing]\n"
+                else:
+                    output += f"{indent_str}     [Content available but not directly viewable]\n"
+            else:
+                output += f"{indent_str}     [Content not yet fetched or unavailable]\n"
+        except Exception as e:
+            logger.warning(f"Error checking attachment content availability: {e}")
+            output += f"{indent_str}     [Content status unknown]\n"
+        
+        return output
+
+    def _render_memory_context(self, node: Dict[str, Any], attention: Dict[str, Any], options: Dict[str, Any], indent_str: str, node_info: str) -> str:
+        """Renders memory context nodes injected by CompressionEngine."""
+        props = node.get("properties", {})
+        memory_type = props.get("memory_type", "unknown")
+        
+        if memory_type == "workspace_info":
+            agent_name = props.get("agent_name", "Unknown")
+            workspace_desc = props.get("workspace_description", "")
+            total_interactions = props.get("total_interactions", 0)
+            
+            output = f"{indent_str}[AGENT WORKSPACE]\n"
+            output += f"{indent_str}{workspace_desc}\n"
+            output += f"{indent_str}Agent: {agent_name} | Total interactions in memory: {total_interactions}\n"
+            
+        elif memory_type == "compressed_context":
+            interaction_count = props.get("interaction_count", 0)
+            summary = props.get("summary", "")
+            recent_interactions = props.get("recent_interactions", [])
+            
+            output = f"{indent_str}[COMPRESSED CONTEXT]\n"
+            output += f"{indent_str}{summary}\n"
+            
+            if recent_interactions:
+                output += f"{indent_str}Recent interactions:\n"
+                for interaction in recent_interactions:
+                    interaction_summary = interaction.get('summary', 'Unknown context')
+                    tool_count = interaction.get('tool_calls_made', 0)
+                    interaction_index = interaction.get('interaction_index', '?')
+                    
+                    tools_text = f" (used {tool_count} tools)" if tool_count > 0 else ""
+                    output += f"{indent_str}  {interaction_index}. {interaction_summary}{tools_text}\n"
+        else:
+            # Generic memory context (no more reasoning chain support)
+            output = f"{indent_str}[MEMORY: {memory_type.upper()}]\n"
+            output += f"{indent_str}(Memory context of type {memory_type})\n"
+        
+        return output
+
+    def _render_content_memory(self, node: Dict[str, Any], attention: Dict[str, Any], options: Dict[str, Any], indent_str: str, node_info: str) -> str:
+        """Renders compressed content memory summaries created by CompressionEngine."""
+        props = node.get("properties", {})
+        memory_summary = props.get("memory_summary", "Content summary unavailable")
+        original_element_id = props.get("original_element_id", "unknown")
+        original_child_count = props.get("original_child_count", 0)
+        
+        output = f"{indent_str}<content_memory>{memory_summary}</content_memory>\n"
+        
+        # Add optional compression details in verbose mode
+        use_verbose_tags = options.get("render_style") == "verbose_tags"
+        if use_verbose_tags:
+            output += f"{indent_str}  (Compressed {original_child_count} items from {original_element_id})\n"
+        
+        return output
+
+    def _render_memorized_content(self, node: Dict[str, Any], attention: Dict[str, Any], options: Dict[str, Any], indent_str: str, node_info: str) -> str:
+        """Renders memorized content nodes created by MemoryCompressor."""
+        props = node.get("properties", {})
+        memory_summary = props.get("memory_summary", "Memory content unavailable")
+        memory_id = props.get("memory_id", "unknown")
+        original_element_ids = props.get("original_element_ids", [])
+        original_node_count = props.get("original_node_count", 0)
+        token_count = props.get("token_count", 0)
+        compression_timestamp = props.get("compression_timestamp", "")
+        compressor_type = props.get("compressor_type", "unknown")
+        
+        output = f"{indent_str}<memorized_content>{memory_summary}</memorized_content>\n"
+        
+        # Add optional compression details in verbose mode
+        use_verbose_tags = options.get("render_style") == "verbose_tags"
+        if use_verbose_tags:
+            element_info = ", ".join(original_element_ids) if original_element_ids else "unknown elements"
+            output += f"{indent_str}  (Memory {memory_id}: {original_node_count} nodes from {element_info}, {token_count} tokens, {compressor_type})\n"
+            if compression_timestamp:
+                from datetime import datetime
+                try:
+                    dt = datetime.fromisoformat(compression_timestamp.replace('Z', '+00:00'))
+                    formatted_time = dt.strftime("%Y-%m-%d %H:%M:%S")
+                    output += f"{indent_str}  (Compressed: {formatted_time})\n"
+                except:
+                    output += f"{indent_str}  (Compressed: {compression_timestamp})\n"
+        
         return output
 
     # --- Main Recursive Renderer (Dispatcher) --- 
@@ -791,6 +1365,12 @@ class HUDComponent(Component):
              render_func = self._render_uplink_summary
         elif node_type == "attachment_content_item": # From VEIL_ATTACHMENT_CONTENT_NODE_TYPE
              render_func = self._render_attachment_content
+        elif node_type == "memory_context": # NEW: Memory context nodes from CompressionEngine
+             render_func = self._render_memory_context
+        elif node_type == "content_memory": # NEW: Compressed content memory from CompressionEngine
+             render_func = self._render_content_memory
+        elif node_type == "memorized_content": # NEW: Memorized content from MemoryCompressor
+             render_func = self._render_memorized_content
         elif structural_role == "container" or node_type == "message_list_container": # Treat message list container like other containers
              render_func = self._render_container
         # Add more dispatch rules here...
@@ -852,6 +1432,83 @@ class HUDComponent(Component):
              output += f"{indent_str}</{node_type}>\n"
                  
         return output # Return accumulated string
+
+    # NEW: Unified VEIL Processing Pipeline
+
+    async def get_agent_context_via_compression_engine(self, options: Optional[Dict[str, Any]] = None) -> Union[str, Dict[str, Any]]:
+        """
+        NEW: Generate agent context using CompressionEngine as VEIL processor for unified rendering.
+        
+        This creates the unified rendering pipeline where:
+        1. CompressionEngine processes full VEIL (compression + memory integration)
+        2. HUD renders the processed VEIL using standard rendering methods
+        3. All rendering logic is centralized in HUD, CompressionEngine handles preprocessing
+        
+        Args:
+            options: Rendering options including focus_context, memory integration, etc.
+            
+        Returns:
+            Rendered context (string or dict with multimodal content)
+        """
+        try:
+            logger.critical(f"Generating agent context via CompressionEngine unified pipeline...")
+            options = options or {}
+            
+            # Get required components
+            compression_engine = self.get_sibling_component("CompressionEngineComponent")
+            veil_producer = self._get_space_veil_producer()
+            
+            if not compression_engine:
+                logger.critical(f"CompressionEngine not available, falling back to standard rendering")
+                return await self.get_agent_context(options)
+            
+            if not veil_producer:
+                logger.error(f"SpaceVeilProducer not available, cannot generate context")
+                return "Error: Could not retrieve internal state."
+            
+            # Get full VEIL from SpaceVeilProducer
+            full_veil = veil_producer.get_full_veil()
+            if not full_veil:
+                logger.warning(f"Empty VEIL from SpaceVeilProducer")
+                return "Current context is empty."
+            
+            # Get memory data if needed
+            memory_data = None
+            focus_context = options.get('focus_context')
+            include_memory = options.get('include_memory', True)
+            
+            if include_memory:
+                memory_data = await compression_engine.get_memory_data()
+                logger.debug(f"Retrieved memory data for VEIL processing")
+            
+            # Process VEIL through CompressionEngine
+            processed_veil = await compression_engine.process_veil_with_compression(
+                full_veil=full_veil,
+                focus_context=focus_context,
+                memory_data=memory_data
+            )
+            
+            # Set render style
+            if 'render_style' not in options:
+                options['render_style'] = 'verbose_tags'
+            
+            # Render the processed VEIL using standard HUD rendering
+            attention_requests = {}  # Could integrate attention system here if needed
+            context_string = self._render_veil_node_to_string(processed_veil, attention_requests, options, indent=0)
+            
+            # FIXED: Auto-detect live multimodal content (consistent with get_agent_context)
+            focus_element_id = focus_context.get('focus_element_id') if focus_context else None
+            if focus_element_id:
+                # OPTIMIZED: Single-pass detection and extraction instead of separate operations
+                return await self._detect_and_extract_multimodal_content(context_string, options, focus_element_id)
+            else:
+                logger.info(f"Generated context via CompressionEngine pipeline: {len(context_string)} chars (text-only)")
+                return context_string
+                
+        except Exception as e:
+            logger.error(f"Error in unified CompressionEngine pipeline: {e}", exc_info=True)
+            # Fallback to standard rendering
+            return await self.get_agent_context(options)
 
     async def process_llm_response(self, llm_response_text: str) -> List[Dict[str, Any]]:
         """

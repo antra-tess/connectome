@@ -339,7 +339,7 @@ class LiteLLMProvider(LLMProvider):
         for message in messages:
             msg_dict = {
                 "role": message.role,
-                "content": message.content
+                "content": message.content  # Can now be string or list for multimodal
             }
             
             # Add name if provided (for function messages)

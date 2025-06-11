@@ -310,3 +310,55 @@ class VeilProducer(Component):
         """
         logger.warning(f"[{self.owner.id if self.owner else 'Unknown'}/{self.COMPONENT_TYPE}] calculate_delta() not implemented.")
         return None
+    
+    def _add_owner_tracking(self, veil_node: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Add owner_id tracking to a VEIL node for efficient filtering.
+        
+        This enables granular access to VEIL nodes without full tree reconstruction
+        by allowing direct filtering of the Space's flat cache by owner_id.
+        
+        Args:
+            veil_node: VEIL node dictionary to add tracking to
+            
+        Returns:
+            The same VEIL node with owner_id added to properties
+        """
+        if not self.owner:
+            logger.warning(f"[{self.COMPONENT_TYPE}] Cannot add owner tracking: no owner set")
+            return veil_node
+        
+        # Ensure properties exist
+        if "properties" not in veil_node:
+            veil_node["properties"] = {}
+        
+        # Add owner tracking for granular filtering
+        veil_node["properties"]["owner_id"] = self.owner.id
+        veil_node["properties"]["producer_type"] = self.COMPONENT_TYPE
+        
+        return veil_node
+    
+    def _add_owner_tracking_to_delta_ops(self, delta_operations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Add owner_id tracking to all nodes in delta operations.
+        
+        Args:
+            delta_operations: List of delta operations to process
+            
+        Returns:
+            The same delta operations with owner_id added to all nodes
+        """
+        if not delta_operations:
+            return delta_operations
+        
+        for delta_op in delta_operations:
+            if delta_op.get("op") == "add_node" and "node" in delta_op:
+                self._add_owner_tracking(delta_op["node"])
+            elif delta_op.get("op") == "update_node" and "properties" in delta_op:
+                # For update operations, also add owner tracking to the properties being updated
+                if not self.owner:
+                    continue
+                delta_op["properties"]["owner_id"] = self.owner.id
+                delta_op["properties"]["producer_type"] = self.COMPONENT_TYPE
+        
+        return delta_operations

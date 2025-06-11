@@ -128,13 +128,19 @@ class MessageListVeilProducer(VeilProducer):
                             "content_available": True, # Explicitly state content is here
                             "attachment_id": attachment_id,
                             "original_message_veil_id": internal_id,
+                            # NEW: Include actual content for multimodal processing
+                            "content": att_data_from_mlc.get("content"),  # Direct content access!
                             # "content_preview": str(att_data_from_mlc.get("content"))[:100] # Optional: Careful with large content
                         }
                     }
+                    # NEW: Add owner tracking to attachment nodes
+                    self._add_owner_tracking(attachment_content_node)
                     message_node["children"].append(attachment_content_node)
                 # else: No content available for this attachment in MessageListComponent's state.
                 # The metadata is already in VEIL_ATTACHMENT_METADATA_PROP.
 
+            # NEW: Add owner tracking to message nodes
+            self._add_owner_tracking(message_node)
             message_nodes.append(message_node)
 
         # Create the root container node for the list
@@ -154,6 +160,9 @@ class MessageListVeilProducer(VeilProducer):
             },
             "children": message_nodes
         }
+        
+        # NEW: Add owner tracking to the root container
+        self._add_owner_tracking(root_veil_node)
         
         # Update state for delta calculation - message IDs are handled in signal_delta_produced_this_frame
         # self._state['_last_generated_veil_message_ids'] = current_message_ids
@@ -272,6 +281,8 @@ class MessageListVeilProducer(VeilProducer):
                                 "content_available": True,
                                 "attachment_id": attachment_id,
                                 "original_message_veil_id": internal_id,
+                                # NEW: Include actual content for multimodal processing
+                                "content": att_data_from_mlc.get("content"),  # Direct content access!
                             }
                         }
                         message_children_nodes.append(attachment_content_node)
@@ -302,8 +313,10 @@ class MessageListVeilProducer(VeilProducer):
         #     # This requires storing _last_generated_message_properties_map {msg_id: properties}
         #     pass
 
+        # NEW: Add owner tracking to all delta operations
         if delta_operations:
-            logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Calculated VEIL delta with {len(delta_operations)} operations.")
+            delta_operations = self._add_owner_tracking_to_delta_ops(delta_operations)
+            logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Calculated VEIL delta with {len(delta_operations)} operations (owner-tracked).")
         else:
             logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] No VEIL delta operations calculated.")
         

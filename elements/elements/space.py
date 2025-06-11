@@ -41,7 +41,7 @@ class EventReplayMode(Enum):
 DEFAULT_REPLAYABLE_EVENTS = {
     # Structural events - generally safe to replay
     'element_mounted', 'element_unmounted', 'component_initialized', 
-    'tool_provider_registered', 'element_created_from_prefab', 'orientation_conversation_set',
+    'tool_provider_registered', 'element_created_from_prefab',
     'component_state_updated',
     
     # Message events - content restoration
@@ -1148,7 +1148,7 @@ class Space(BaseElement):
                 return await self._replay_element_created_from_prefab(event_data)
                 
             # For events that are handled sufficiently by component processing:
-            elif event_type in ['component_initialized', 'tool_provider_registered', 'orientation_conversation_set']:
+            elif event_type in ['component_initialized', 'tool_provider_registered']:
                 # These events are primarily informational or handled by component loading
                 return True
                 
@@ -1566,3 +1566,118 @@ class Space(BaseElement):
         except Exception as e:
             logger.error(f"[{self.id}] Error during replay integrity verification: {e}", exc_info=True)
             return False 
+
+    def get_flat_veil_cache_snapshot(self) -> Dict[str, Any]:
+        """
+        Returns a deep copy of the entire flat VEIL cache for external analysis.
+        
+        Returns:
+            Deep copy of the flat VEIL cache
+        """
+        logger.debug(f"[{self.id}] Providing flat VEIL cache snapshot. Size: {len(self._flat_veil_cache)}")
+        return copy.deepcopy(self._flat_veil_cache)
+    
+    def get_veil_nodes_by_owner(self, owner_id: str) -> Dict[str, Any]:
+        """
+        Get all VEIL nodes belonging to a specific owner element.
+        
+        This enables efficient granular access without full VEIL tree reconstruction.
+        
+        Args:
+            owner_id: Element ID to filter by
+            
+        Returns:
+            Dictionary of {veil_id: veil_node} for nodes owned by the specified element
+        """
+        filtered_nodes = {}
+        
+        for veil_id, node_data in self._flat_veil_cache.items():
+            if isinstance(node_data, dict):
+                props = node_data.get("properties", {})
+                if props.get("owner_id") == owner_id:
+                    filtered_nodes[veil_id] = copy.deepcopy(node_data)
+        
+        logger.debug(f"[{self.id}] Filtered {len(filtered_nodes)} VEIL nodes for owner {owner_id}")
+        return filtered_nodes
+    
+    def get_veil_nodes_by_type(self, node_type: str, owner_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get all VEIL nodes of a specific type, optionally filtered by owner.
+        
+        Args:
+            node_type: VEIL node type to filter by
+            owner_id: Optional owner ID to further filter by
+            
+        Returns:
+            Dictionary of {veil_id: veil_node} matching the criteria
+        """
+        filtered_nodes = {}
+        
+        for veil_id, node_data in self._flat_veil_cache.items():
+            if isinstance(node_data, dict):
+                if node_data.get("node_type") == node_type:
+                    # If owner_id is specified, also filter by owner
+                    if owner_id is None:
+                        filtered_nodes[veil_id] = copy.deepcopy(node_data)
+                    else:
+                        props = node_data.get("properties", {})
+                        if props.get("owner_id") == owner_id:
+                            filtered_nodes[veil_id] = copy.deepcopy(node_data)
+        
+        logger.debug(f"[{self.id}] Filtered {len(filtered_nodes)} VEIL nodes of type '{node_type}'" + 
+                    (f" for owner {owner_id}" if owner_id else ""))
+        return filtered_nodes
+    
+    def get_veil_nodes_by_content_nature(self, content_nature: str, owner_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get all VEIL nodes with specific content_nature, optionally filtered by owner.
+        
+        Args:
+            content_nature: Content nature to filter by (e.g., "chat_message", "attachment_content")
+            owner_id: Optional owner ID to further filter by
+            
+        Returns:
+            Dictionary of {veil_id: veil_node} matching the criteria
+        """
+        filtered_nodes = {}
+        
+        for veil_id, node_data in self._flat_veil_cache.items():
+            if isinstance(node_data, dict):
+                props = node_data.get("properties", {})
+                if props.get("content_nature") == content_nature:
+                    # If owner_id is specified, also filter by owner
+                    if owner_id is None:
+                        filtered_nodes[veil_id] = copy.deepcopy(node_data)
+                    else:
+                        if props.get("owner_id") == owner_id:
+                            filtered_nodes[veil_id] = copy.deepcopy(node_data)
+        
+        logger.debug(f"[{self.id}] Filtered {len(filtered_nodes)} VEIL nodes with content_nature '{content_nature}'" + 
+                    (f" for owner {owner_id}" if owner_id else ""))
+        return filtered_nodes
+    
+    def has_multimodal_content(self, owner_id: Optional[str] = None) -> bool:
+        """
+        Check if the space contains multimodal content (attachment nodes with content).
+        
+        Args:
+            owner_id: Optional owner ID to filter by
+            
+        Returns:
+            True if multimodal content is found, False otherwise
+        """
+        for veil_id, node_data in self._flat_veil_cache.items():
+            if isinstance(node_data, dict):
+                props = node_data.get("properties", {})
+                
+                # Check if it's an attachment content node
+                if (props.get("content_nature", "").startswith("image") or 
+                    props.get("structural_role") == "attachment_content" or
+                    node_data.get("node_type") == "attachment_content_item"):
+                    
+                    # If owner_id filter is specified, check ownership
+                    if owner_id is None or props.get("owner_id") == owner_id:
+                        logger.debug(f"[{self.id}] Found multimodal content in node {veil_id}")
+                        return True
+        
+        return False

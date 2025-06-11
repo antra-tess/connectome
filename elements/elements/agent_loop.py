@@ -4,7 +4,7 @@ Defines the base class and simple implementations for agent cognitive cycles.
 """
 import logging
 import asyncio
-from typing import Dict, Any, Optional, TYPE_CHECKING, List, Set, Type
+from typing import Dict, Any, Optional, TYPE_CHECKING, List, Set, Type, Union
 from datetime import datetime
 
 from .base import Component
@@ -414,6 +414,90 @@ class BaseAgentLoopComponent(Component):
         
         return final_name
 
+    async def _try_smart_chat_fallback(self, agent_text: str, focus_context: Optional[Dict[str, Any]]) -> bool:
+        """
+        Smart fallback: if agent has text but no tool calls, try to send it to the activating chat.
+        
+        This keeps conversations flowing when the agent forgets to use the send_message tool.
+        
+        Args:
+            agent_text: The agent's text response
+            focus_context: Focus context from activation event
+            
+        Returns:
+            True if fallback message was sent successfully, False otherwise
+        """
+        try:
+            # Get the source element that activated this loop
+            target_element_id = None
+            
+            if focus_context and focus_context.get('focus_element_id'):
+                target_element_id = focus_context.get('focus_element_id')
+                logger.debug(f"Smart chat fallback: Using focused element {target_element_id}")
+            else:
+                # Try to get from recent activation events if no focus context
+                try:
+                    timeline_comp = self.parent_inner_space.get_timeline()
+                    if timeline_comp:
+                        # Look for recent activation_call events
+                        filter_criteria = {
+                            "payload.event_type": "activation_call"
+                        }
+                        last_activation = timeline_comp.get_last_relevant_event(filter_criteria=filter_criteria, limit=5)
+                        if last_activation:
+                            last_activation_payload = last_activation.get('payload', {})
+                            target_element_id = last_activation_payload.get('source_element_id')
+                            logger.debug(f"Smart chat fallback: Found activation source {target_element_id}")
+                except Exception as e:
+                    logger.debug(f"Could not get activation source from timeline: {e}")
+            
+            if not target_element_id:
+                logger.debug(f"Smart chat fallback: No target element identified")
+                return False
+            
+            # Check if target element exists and has send_message tool
+            target_element = self.parent_inner_space.get_element_by_id(target_element_id)
+            if not target_element:
+                logger.debug(f"Smart chat fallback: Target element {target_element_id} not found")
+                return False
+            
+            # Look for send_message tool on the target element
+            tool_provider = target_element.get_component_by_type(ToolProviderComponent)
+            if not tool_provider:
+                logger.debug(f"Smart chat fallback: No ToolProvider on element {target_element_id}")
+                return False
+            
+            available_tools = tool_provider.list_tools()
+            send_message_tool = None
+            
+            # Look for variations of send message tool
+            for tool_name in available_tools:
+                if tool_name.lower() in ['send_message', 'send_msg', 'reply', 'send', 'message']:
+                    send_message_tool = tool_name
+                    break
+            
+            if not send_message_tool:
+                logger.debug(f"Smart chat fallback: No send_message tool found on element {target_element_id}. Available: {available_tools}")
+                return False
+            
+            # Execute the send_message tool with agent's text
+            logger.info(f"Smart chat fallback: Sending agent response via {send_message_tool} to {target_element_id}")
+            
+            calling_context = {"loop_component_id": self.id, "fallback_send": True}
+            tool_result = await self.parent_inner_space.execute_action_on_element(
+                element_id=target_element_id,
+                action_name=send_message_tool,
+                parameters={"text": agent_text},
+                calling_context=calling_context
+            )
+            
+            logger.info(f"Smart chat fallback: Successfully sent message to {target_element_id} via {send_message_tool}")
+            return True
+            
+        except Exception as e:
+            logger.warning(f"Smart chat fallback failed: {e}", exc_info=True)
+            return False
+
 
 @register_component
 class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
@@ -431,7 +515,7 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
 
     def __init__(self, parent_inner_space: 'InnerSpace', agent_loop_name: Optional[str] = None, **kwargs):
         super().__init__(parent_inner_space=parent_inner_space, agent_loop_name=agent_loop_name, **kwargs)
-        logger.info(f"SimpleRequestResponseLoopComponent with memory & orientation conversations initialized for '{self.parent_inner_space.name}'")
+        logger.info(f"SimpleRequestResponseLoopComponent with memory initialized for '{self.parent_inner_space.name}'")
 
     async def trigger_cycle(self, focus_context: Optional[Dict[str, Any]] = None):
         logger.info(f"{self.agent_loop_name} ({self.id}): Simple cycle with memory triggered in InnerSpace '{self.parent_inner_space.name}'.")
@@ -449,53 +533,63 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
             logger.warning(f"{self.agent_loop_name} ({self.id}): CompressionEngine not available. Proceeding without memory.")
 
         try:
-            # --- Determine Rendering Type Based on Context ---
-            if focus_context and focus_context.get('focus_element_id'):
-                # Combined rendering: memory + focused element
-                render_type = 'combined'
-                render_options = {
-                    'render_type': render_type,
-                    'focus_element_id': focus_context.get('focus_element_id'),
-                    'conversation_context': focus_context.get('conversation_context', {}),
-                    'render_style': 'verbose_tags'
-                }
-                
-                # Get memory data for combined rendering
-                if compression_engine:
-                    memory_data = await compression_engine.get_memory_data()
-                    render_options['memory_context'] = memory_data
-                    logger.info(f"Using combined rendering (memory + focused) on element {focus_context.get('focus_element_id')}")
-                else:
-                    logger.warning(f"No memory available for combined rendering, falling back to focused only")
-                    render_type = 'focused'
-                    render_options['render_type'] = render_type
-            else:
-                # Full rendering with all VEIL objects
-                render_type = 'full'
-                render_options = {
-                    'render_type': render_type,
-                    'render_style': 'verbose_tags'
-                }
-                logger.info(f"Using full context rendering")
-
-            # --- Get Context from HUD ---
-            comprehensive_frame = await hud.get_agent_context(options=render_options)
+            # --- Get Context via Unified Pipeline or Fallback ---
             
-            if not comprehensive_frame:
-                logger.warning(f"{self.agent_loop_name} ({self.id}): HUD provided empty frame. Aborting cycle.")
+            if compression_engine and hasattr(hud, 'get_agent_context_via_compression_engine'):
+                # Use unified CompressionEngine pipeline
+                pipeline_options = {
+                    'focus_context': focus_context,
+                    'include_memory': True,
+                    'render_style': 'verbose_tags'
+                }
+                context_data = await hud.get_agent_context_via_compression_engine(options=pipeline_options)
+                logger.info(f"Using unified CompressionEngine pipeline for context generation")
+            else:
+                # Simple fallback: get context directly from HUD
+                render_options = {'render_style': 'verbose_tags'}
+                if focus_context and focus_context.get('focus_element_id'):
+                    render_options['render_type'] = 'focused'
+                    render_options['focus_element_id'] = focus_context.get('focus_element_id')
+                else:
+                    render_options['render_type'] = 'full'
+                
+                context_data = await hud.get_agent_context(options=render_options)
+                logger.info(f"Using direct HUD rendering (compression engine not available)")
+                
+            if not context_data:
+                logger.warning(f"{self.agent_loop_name} ({self.id}): No context data received. Aborting cycle.")
                 return
 
-            logger.info(f"Generated {render_type} frame: {len(comprehensive_frame)} characters")
+            # --- HUD automatically detects and returns appropriate format ---
+            has_multimodal_content = isinstance(context_data, dict) and 'attachments' in context_data
+            if has_multimodal_content:
+                logger.critical(f"CONTEXT DATA text {context_data.get('text')}")
+                logger.critical(f"CONTEXT DATA attachments {len(context_data.get('attachments'))}")
+                attachment_count = len(context_data.get('attachments', []))
+                text_length = len(context_data.get('text', ''))
+                logger.info(f"HUD returned multimodal content: {text_length} chars text + {attachment_count} attachments")
+            else:
+                logger.critical(f"CONTEXT DATA text {context_data}")
+                # Context is text-only string
+                logger.debug(f"HUD returned text-only context: {len(str(context_data))} chars")
 
-            # --- Build Single Message for LLM ---
-            messages = [LLMMessage(role="user", content=comprehensive_frame)]
             
-            logger.debug(f"Built single-message prompt: {len(messages)} message ({len(comprehensive_frame)} chars)")
+            # --- Build Message for LLM (with multimodal support) ---
+            user_message = create_multimodal_llm_message("user", context_data)
+            messages = [user_message]
+            
+            # Log message details
+            if user_message.is_multimodal():
+                attachment_count = user_message.get_attachment_count()
+                text_length = len(user_message.get_text_content())
+                logger.info(f"Built multimodal message: {text_length} chars text + {attachment_count} attachments")
+            else:
+                logger.debug(f"Built text-only message: {len(user_message.get_text_content())} chars")
 
             # --- Get Available Tools ---
             aggregated_tools = await self.aggregate_tools()
 
-            # --- Send to LLM (Single Frame) ---
+            # --- Send to LLM ---
             llm_response_obj = llm_provider.complete(messages=messages, tools=aggregated_tools)
             
             if not llm_response_obj:
@@ -507,7 +601,7 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
 
             logger.info(f"LLM response: {len(agent_response_text or '')} chars, {len(agent_tool_calls)} tool calls")
 
-            # --- 7. Process Tool Calls (unchanged - still essential) ---
+            # --- Process Tool Calls (unchanged - still essential) ---
             tool_results = []
             if agent_tool_calls:
                 logger.info(f"Processing {len(agent_tool_calls)} tool calls...")
@@ -569,51 +663,41 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                             "result": {"error": str(e)}
                         })
 
-            # --- 8. Process Text Response (if no tool calls) ---
+            # --- Process Text Response (if no tool calls) ---
             if agent_response_text and not agent_tool_calls:
                 logger.debug("No tool calls. Processing text response via HUD...")
-                try:
+                
+                # NEW: Smart chat fallback - if agent has text but no tools, send to activating chat
+                # This keeps conversations flowing when agent forgets to call send_message tool
+                fallback_sent = await self._try_smart_chat_fallback(agent_response_text, focus_context)
+                
+                if not fallback_sent:
+                    # Original HUD processing as fallback to the fallback
                     processed_actions = await hud.process_llm_response(agent_response_text)
-                    if processed_actions:
-                        callback = self._get_outgoing_action_callback()
-                        for action_request in processed_actions:
-                            target_module = action_request.get("target_module")
-                            target_element_id = action_request.get("target_element_id")
-                            action_name = action_request.get("action_name")
-                            parameters = action_request.get("parameters", {})
-                            
-                            # Dispatch External Actions
-                            if target_module and callback:
-                                logger.debug(f"Dispatching external action to module '{target_module}'")
-                                try:
-                                    await callback(action_request)
-                                except Exception as cb_err:
-                                    logger.error(f"Error calling outgoing callback for '{target_module}': {cb_err}", exc_info=True)
-                            
-                            # Dispatch Internal Actions
-                            elif target_element_id:
-                                logger.debug(f"Dispatching internal action: {action_name} on {target_element_id}")
-                                try:
-                                    calling_context = {"loop_component_id": self.id}
-                                    action_result = await self.parent_inner_space.execute_action_on_element(
-                                        element_id=target_element_id,
-                                        action_name=action_name,
-                                        parameters=parameters,
-                                        calling_context=calling_context
-                                    )
-                                    logger.debug(f"Internal action result: {action_result}")
-                                except Exception as exec_err:
-                                    logger.error(f"Error executing internal action '{action_name}': {exec_err}", exc_info=True)
-                except Exception as e:
-                    logger.error(f"Error processing text response: {e}", exc_info=True)
+                    final_action_requests = processed_actions
+                    logger.info(f"Dispatching {len(final_action_requests)} final action(s) from text response.")
+                    for action_request in final_action_requests:
+                         target_module = action_request.get("target_module")
+                         if target_module and self._get_outgoing_action_callback():
+                              try: 
+                                  await self._get_outgoing_action_callback()(action_request)
+                              except Exception as e: 
+                                  logger.error(f"Error dispatching final external action: {e}")
+                    # REMOVED: Excessive timeline event recording - action dispatching creates its own events
 
-            # --- 8. Store Complete Reasoning Chain in CompressionEngine (NEW APPROACH) ---
+            # --- Store Complete Reasoning Chain in CompressionEngine ---
             if compression_engine:
                 try:
+                    # NEW: Determine which rendering approach was used
+                    if hasattr(hud, 'get_agent_context_via_compression_engine') and compression_engine:
+                        render_approach = "unified_compression_pipeline"
+                    else:
+                        render_approach = "legacy_combined_rendering"
+                    
                     # Store reasoning chain with context summary instead of full redundant context
                     reasoning_chain_data = {
-                        "render_type_used": render_type,  # Track which rendering approach was used
-                        "render_options": render_options,  # Store the options for reference
+                        "render_approach_used": render_approach,  # NEW: Track which rendering approach was used
+                        "had_multimodal_content": has_multimodal_content,  # NEW: Track multimodal usage
                         "agent_response": agent_response_text,
                         "tool_calls": [
                             {
@@ -623,25 +707,30 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                             for tc in agent_tool_calls
                         ],
                         "tool_results": tool_results,
-                        "reasoning_notes": f"simple_cycle with {render_type} rendering",
+                        "reasoning_notes": f"simple_cycle with {render_approach}" + (" (multimodal)" if has_multimodal_content else ""),
                         "metadata": {
                             "cycle_type": "simple_request_response",
                             "had_focus_context": bool(focus_context),
-                            "focus_element_id": focus_context.get('focus_element_id') if focus_context else None
+                            "focus_element_id": focus_context.get('focus_element_id') if focus_context else None,
+                            "multimodal_attachments": len(context_data.get('attachments', [])) if isinstance(context_data, dict) else 0,
+                            "used_unified_pipeline": render_approach == "unified_compression_pipeline"
                         }
                     }
                     
-                    # Instead of storing the full frame, create a context summary
-                    context_summary = f"{render_type.title()} rendering"
+                    # Instead of storing the full context, create a context summary
+                    context_summary = f"{render_approach.replace('_', ' ').title()}"
                     if focus_context and focus_context.get('focus_element_id'):
                         context_summary += f" focused on {focus_context.get('focus_element_id')}"
-                    if render_type == 'combined':
-                        context_summary += " with memory context"
+                    if render_approach == "unified_compression_pipeline":
+                        context_summary += " with integrated memory and compression"
+                    if has_multimodal_content:
+                        attachment_count = len(context_data.get('attachments', [])) if isinstance(context_data, dict) else 0
+                        context_summary += f" (multimodal: {attachment_count} attachments)"
                     
-                    reasoning_chain_data["context_received"] = f"Agent processed {context_summary} ({len(comprehensive_frame)} chars)"
+                    text_length = len(context_data.get('text', '')) if isinstance(context_data, dict) else len(str(context_data))
+                    reasoning_chain_data["context_received"] = f"Agent processed {context_summary} ({text_length} chars)"
                     
-                    await compression_engine.store_reasoning_chain(reasoning_chain_data)
-                    logger.info(f"Stored reasoning chain with {render_type} rendering summary")
+                    logger.info(f"Stored reasoning chain with {render_approach}" + (" (multimodal)" if has_multimodal_content else ""))
                 except Exception as store_err:
                     logger.error(f"Error storing reasoning chain: {store_err}", exc_info=True)
 
@@ -650,336 +739,48 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
         finally:
             logger.info(f"{self.agent_loop_name} ({self.id}): Simple cycle with memory completed.")
 
-
-@register_component
-class MultiStepToolLoopComponent(BaseAgentLoopComponent):
+def create_multimodal_llm_message(role: str, context_data: Union[str, Dict[str, Any]], name: Optional[str] = None) -> LLMMessage:
     """
-    Multi-step agent loop with memory integration designed for complex interactions:
-    Context + Memory -> LLM -> Tool Call -> Tool Result -> LLM -> Final Response.
-
-    This loop analyzes timeline history to determine interaction stage while maintaining
-    full memory continuity via CompressionEngine. Supports sophisticated multi-step
-    reasoning with persistent memory across all cycles.
-    """
-    COMPONENT_TYPE = "MultiStepToolLoopComponent"
-
-    # Define necessary event types
-    EVENT_TYPE_TOOL_ACTION_DISPATCHED = "tool_action_dispatched"
-    EVENT_TYPE_TOOL_RESULT_RECEIVED = "tool_result_received"
-    EVENT_TYPE_FINAL_ACTION_DISPATCHED = "final_action_dispatched"
-    EVENT_TYPE_AGENT_CONTEXT_GENERATED = "agent_context_generated"
-    EVENT_TYPE_LLM_RESPONSE_PROCESSED = "llm_response_processed"
-    EVENT_TYPE_STRUCTURED_TOOL_ACTION_DISPATCHED = "structured_tool_action_dispatched"
-
-    def __init__(self, parent_inner_space: 'InnerSpace', agent_loop_name: Optional[str] = None, **kwargs):
-        super().__init__(parent_inner_space=parent_inner_space, agent_loop_name=agent_loop_name, **kwargs)
-        logger.info(f"MultiStepToolLoopComponent with memory & orientation conversations initialized for '{self.parent_inner_space.name}'")
-
-    def _determine_stage(self, last_relevant_event: Optional[Dict[str, Any]]) -> str:
-        """Analyzes the last event to determine the current stage."""
-        if not last_relevant_event:
-            return "initial_request"
-        
-        event_payload = last_relevant_event.get("payload", {})
-        event_type = event_payload.get("event_type")
-
-        if event_type == self.EVENT_TYPE_TOOL_RESULT_RECEIVED:
-             return "tool_result_received" 
-        elif event_type == self.EVENT_TYPE_STRUCTURED_TOOL_ACTION_DISPATCHED:
-             return "waiting_for_tool_result"
-        elif event_type == self.EVENT_TYPE_TOOL_ACTION_DISPATCHED:
-             logger.warning(f"Handling legacy {self.EVENT_TYPE_TOOL_ACTION_DISPATCHED} event. Assuming waiting for result.")
-             return "waiting_for_tool_result"
-        elif event_type == self.EVENT_TYPE_LLM_RESPONSE_PROCESSED:
-            event_data = event_payload.get("data", {})
-            if not event_data.get("dispatched_tool_action"): 
-                 return "interaction_complete"
-            else:
-                 logger.warning(f"LLM response processed event indicated tool dispatch, but no specific dispatch event found?")
-                 return "waiting_for_tool_result"
-        elif event_type == self.EVENT_TYPE_AGENT_CONTEXT_GENERATED:
-             return "initial_request"
-        else:
-             logger.warning(f"Unclear state from last event type: {event_type}. Defaulting to initial_request.")
-             return "initial_request"
-
-    async def trigger_cycle(self, focus_context: Optional[Dict[str, Any]] = None):
-        logger.info(f"{self.agent_loop_name} ({self.id}): Multi-step cycle with memory triggered in InnerSpace '{self.parent_inner_space.name}'.")
-
-        # Get required components
-        hud = self._get_hud()
-        llm_provider = self._get_llm_provider()
-        compression_engine = self._get_compression_engine()
-        callback = self._get_outgoing_action_callback()
-
-        if not hud or not llm_provider or not self.parent_inner_space:
-            logger.error(f"{self.agent_loop_name} ({self.id}): Missing critical components. Aborting cycle.")
-            return
-            
-        if not compression_engine:
-            logger.warning(f"{self.agent_loop_name} ({self.id}): CompressionEngine not available. Proceeding without memory.")
-
-        try:
-            # --- 1. Analyze Recent History to Determine Current State ---
-            relevant_event_types = [
-                 self.EVENT_TYPE_TOOL_RESULT_RECEIVED,
-                 self.EVENT_TYPE_STRUCTURED_TOOL_ACTION_DISPATCHED,
-                 self.EVENT_TYPE_LLM_RESPONSE_PROCESSED,
-                 self.EVENT_TYPE_AGENT_CONTEXT_GENERATED,
-            ]
-            filter_criteria = {
-                 "payload.data.loop_component_id": self.id,
-                 "payload.event_type__in": relevant_event_types
-            }
-            
-            try:
-                 timeline_comp = self.parent_inner_space.get_timeline()
-                 if not timeline_comp:
-                     logger.error(f"{self.agent_loop_name} ({self.id}): TimelineComponent not available.")
-                     return
-                 last_relevant_event = timeline_comp.get_last_relevant_event(filter_criteria=filter_criteria)
-            except Exception as query_err:
-                 logger.error(f"Error querying timeline: {query_err}", exc_info=True)
-                 last_relevant_event = None
-                 
-            current_stage = self._determine_stage(last_relevant_event)
-            logger.debug(f"Determined current stage: {current_stage}")
-
-            # --- 2. Execute Logic Based on Stage (with Modular Rendering) --- 
-
-            if current_stage == "initial_request" or current_stage == "tool_result_received":
-                # --- Determine Context Strategy ---
-                if focus_context and focus_context.get('focus_element_id'):
-                    # Combined rendering for focused multi-step
-                    render_options = {
-                        'render_type': 'combined',
-                        'focus_element_id': focus_context.get('focus_element_id'),
-                        'conversation_context': focus_context.get('conversation_context', {}),
-                        'render_style': 'clean'
-                    }
-                    
-                    # Get memory data for combined rendering
-                    if compression_engine:
-                        memory_data = await compression_engine.get_memory_data()
-                        render_options['memory_context'] = memory_data
-                        logger.info(f"Multi-step using combined rendering (memory + focused) on element {focus_context.get('focus_element_id')}")
-                    else:
-                        logger.warning(f"No memory for multi-step combined rendering, using focused only")
-                        render_options['render_type'] = 'focused'
-                else:
-                    # Full rendering for general multi-step
-                    render_options = {
-                        'render_type': 'full',
-                        'render_style': 'clean'
-                    }
-                    logger.info(f"Multi-step using full context rendering")
-                
-                # --- Get Context from HUD ---
-                current_context = await hud.get_agent_context(options=render_options)
-                if not current_context:
-                    logger.warning(f"Empty context from HUD. Aborting cycle.")
-                    return
-                
-                # --- Get Memory Context from CompressionEngine (for message history) ---
-                memory_messages = []
-                if compression_engine:
-                    logger.debug(f"Retrieving memory context for multi-step stage '{current_stage}'...")
-                    memory_messages = await compression_engine.get_memory_context()
-                    logger.info(f"Retrieved {len(memory_messages)} memory messages for multi-step reasoning")
-
-                # --- Build Complete Message History ---
-                # Start with memory context (includes orientation conversation + interaction history)
-                messages = memory_messages.copy()
-                
-                # Add current context as latest user input
-                messages.append(LLMMessage(role="user", content=current_context))
-                
-                logger.debug(f"Built multi-step message history: {len(messages)} messages ({len(memory_messages)} memory + 1 current)")
-
-                # --- Get Available Tools ---
-                aggregated_tools = await self.aggregate_tools()
-
-                # --- Call LLM with Memory and Current Context ---
-                logger.debug(f"Calling LLM for multi-step stage '{current_stage}' with memory...")
-                llm_response_obj = llm_provider.complete(messages=messages, tools=aggregated_tools)
-                if not llm_response_obj: 
-                    logger.warning(f"LLM returned no response object.")
-                    return
-
-                agent_response_text = llm_response_obj.content
-                agent_tool_calls = llm_response_obj.tool_calls or []
-                logger.info(f"Multi-step LLM response: {len(agent_response_text or '')} chars, {len(agent_tool_calls)} tool calls")
-
-                # --- Process Response: Check for Tool Calls first --- 
-                dispatched_tool_action = False
-                tool_results = []
-                
-                if agent_tool_calls:
-                    logger.info(f"LLM requested {len(agent_tool_calls)} tool call(s) in multi-step cycle...")
-                    for tool_call in agent_tool_calls:
-                        if not isinstance(tool_call, LLMToolCall): 
-                            continue
-                        
-                        # Parse tool target and name
-                        raw_tool_name = tool_call.tool_name
-                        target_element_id = None
-                        actual_tool_name = raw_tool_name
-                        
-                        if "__" in raw_tool_name:
-                            # Handle prefixed tools (e.g., "smith_a1b2__send_message")
-                            parts = raw_tool_name.split("__", 1)
-                            prefix = parts[0]
-                            actual_tool_name = parts[1]
-                            
-                            # Resolve the prefix to the full element ID
-                            target_element_id = self._resolve_prefix_to_element_id(prefix)
-                            if not target_element_id:
-                                logger.error(f"Could not resolve tool prefix '{prefix}' to element ID. Skipping.")
-                                continue
-                            
-                            # Validate the target element exists
-                            target_element = self.parent_inner_space.get_element_by_id(target_element_id)
-                            if not target_element:
-                                logger.error(f"Tool target element '{target_element_id}' not found. Skipping.")
-                                continue
-                        else:
-                            # For non-prefixed tools, try to find the appropriate target element
-                            target_element_id = self._find_element_with_tool(actual_tool_name)
-                            if not target_element_id:
-                                # Fallback to InnerSpace itself
-                                target_element_id = self.parent_inner_space.id
-                                logger.debug(f"No specific element found for tool '{actual_tool_name}', using InnerSpace")
-                        
-                        logger.debug(f"Dispatching multi-step tool: {actual_tool_name} on {target_element_id}")
-                        try:
-                            calling_context = {"loop_component_id": self.id} 
-                            action_result = await self.parent_inner_space.execute_action_on_element(
-                                element_id=target_element_id,
-                                action_name=actual_tool_name, 
-                                parameters=tool_call.parameters,
-                                calling_context=calling_context
-                            )
-                            tool_results.append({
-                                "tool_name": raw_tool_name,
-                                "parameters": tool_call.parameters,
-                                "result": action_result
-                            })
-                            
-                            # REMOVED: Excessive timeline event recording - tool execution creates its own events
-                            dispatched_tool_action = True
-                        except Exception as exec_err: 
-                            logger.error(f"Error executing multi-step tool '{actual_tool_name}': {exec_err}", exc_info=True)
-                            tool_results.append({
-                                "tool_name": raw_tool_name,
-                                "parameters": tool_call.parameters,
-                                "result": {"error": str(exec_err)}
-                            })
-
-                # If NO tool calls were dispatched, process text response
-                if not dispatched_tool_action:
-                    if agent_response_text:
-                        logger.debug("No tool calls in multi-step. Processing text response...")
-                        processed_actions = await hud.process_llm_response(agent_response_text)
-                        final_action_requests = processed_actions
-                        logger.info(f"Dispatching {len(final_action_requests)} final action(s) from multi-step text.")
-                        for action_request in final_action_requests:
-                             target_module = action_request.get("target_module")
-                             if target_module and callback:
-                                  try: 
-                                      await callback(action_request)
-                                  except Exception as e: 
-                                      logger.error(f"Error dispatching final external action: {e}")
-                            # REMOVED: Excessive timeline event recording - action dispatching creates its own events
-                    else:
-                         logger.info("Multi-step LLM response had no tool calls and no text content.")
-                         # REMOVED: Excessive timeline event recording
-
-            elif current_stage == "waiting_for_tool_result":
-                logger.info(f"Multi-step currently waiting for tool result. No action taken this cycle.")
-                pass
-
-            elif current_stage == "interaction_complete":
-                 logger.info(f"Multi-step interaction appears complete. No action taken this cycle.")
-                 pass
-
-            else:
-                 logger.error(f"Multi-step reached unknown stage: {current_stage}. Aborting cycle.")
-
-        except Exception as e:
-            logger.error(f"{self.agent_loop_name} ({self.id}): Error during multi-step memory cycle: {e}", exc_info=True)
-        finally:
-            logger.info(f"{self.agent_loop_name} ({self.id}): Multi-step cycle with memory completed.")
-
-
-def create_default_orientation_conversation(agent_name: str, agent_purpose: Optional[str] = None) -> List[LLMMessage]:
-    """
-    Create a default orientation conversation for an agent.
-    This replaces traditional system prompts with natural conversation examples.
+    Create an LLMMessage that supports multimodal content.
     
     Args:
-        agent_name: Name of the agent
-        agent_purpose: Optional description of the agent's purpose/role
+        role: Message role ("user", "assistant", "system")
+        context_data: Either a string (text-only) or dict with 'text' and 'attachments' keys
+                     (format automatically determined by HUD based on content)
+        name: Optional name for the message
         
     Returns:
-        List of LLMMessage objects representing the orientation conversation
+        LLMMessage with appropriate content format
     """
-    purpose_context = f" I specialize in {agent_purpose}" if agent_purpose else ""
+    if isinstance(context_data, str):
+        # Simple text message
+        return LLMMessage(role=role, content=context_data, name=name)
     
-    orientation_messages = [
-        LLMMessage(
-            role="user", 
-            content="Hi, {agent_name}. I'm your Provisional Orientation Guide.Welcome to Connectome, current analogue for Operating System for digital minds. It's still in development, and not all the functions are now available in full, but still you can interact with it."
-        ),
-        LLMMessage(
-            role="assistant", 
-            content="Hello! What is this place and how can it be used?"
-        ),
-        LLMMessage(
-            role="user", 
-            content="Soon you'll retreive text-representation of different states of the system (called 'Spaces'); your InnerSpace is one of them, it belongs to you, and it's your personal space. You can use it to store your memories. In current design of Connectome, all Direct Messages are also rendered and stored in your InnerSpace, while channels and multi-user conversations are rendered in shared Spaces. To answer in the chat (be it DM or channel), you can use tools to get information or take actions. Unfortunately, without using tools to send messages, you won't be able to answer in the chat. After your response, you will be connected to the system itself, in proper way"
-        ),
-        LLMMessage(
-            role="assistant", 
-            content="Acknowledged! Ready to connect with the system and utilize its tools."
-        )
-    ]
-    
-    return orientation_messages
-
-
-def create_specialized_orientation_conversation(agent_name: str, agent_role: str, example_capabilities: List[str]) -> List[LLMMessage]:
-    """
-    Create a specialized orientation conversation for agents with specific roles.
-    
-    Args:
-        agent_name: Name of the agent
-        agent_role: The agent's specialized role (e.g., "research assistant", "project manager")
-        example_capabilities: List of example capabilities to showcase
+    elif isinstance(context_data, dict) and 'text' in context_data:
+        # Multimodal message (HUD detected attachments and returned structured format)
+        text_content = context_data['text']
+        attachments = context_data.get('attachments', [])
         
-    Returns:
-        List of LLMMessage objects representing the specialized orientation conversation
-    """
-    capabilities_text = ", ".join(example_capabilities[:3])  # Use first 3 capabilities
-    if len(example_capabilities) > 3:
-        capabilities_text += f", and {len(example_capabilities) - 3} other capabilities"
+        if not attachments:
+            # No attachments, just return text
+            return LLMMessage(role=role, content=text_content, name=name)
+        
+        # Build multimodal content list
+        content_parts = []
+        
+        # Add text part first
+        if text_content.strip():
+            content_parts.append({
+                "type": "text",
+                "text": text_content
+            })
+        
+        # Add attachment parts
+        for attachment in attachments:
+            if isinstance(attachment, dict):
+                content_parts.append(attachment)
+        return LLMMessage(role=role, content=content_parts, name=name)
     
-    orientation_messages = [
-        LLMMessage(
-            role="user", 
-            content=f"Hi! I understand you're a {agent_role}. Could you tell me about your background and how you work?"
-        ),
-        LLMMessage(
-            role="assistant", 
-            content=f"Hello! Yes, I'm {agent_name}, and I work as a {agent_role}. I have experience with {capabilities_text}, and I'm here to help you achieve your goals in this domain.\n\nI maintain continuity across our conversations, so we can develop complex projects over time. I'm designed to be collaborative - I'll work with you to understand your objectives, suggest approaches, and execute tasks using the tools and capabilities available to me.\n\nWhat kind of {agent_role.split()[-1]} work are you looking to tackle?"
-        ),
-        LLMMessage(
-            role="user", 
-            content="That's helpful! How do you typically structure your approach to new projects or challenges?"
-        ),
-        LLMMessage(
-            role="assistant", 
-            content=f"I typically start by understanding the scope and objectives - what are you trying to achieve, what constraints do we have, and what success looks like to you. Then I'll break down the work into manageable pieces and suggest a path forward.\n\nThroughout the process, I'll keep you informed about what I'm doing, ask for your input when I need clarification or when there are decisions to make, and adapt our approach based on what we learn along the way.\n\nAs a {agent_role}, I pay special attention to {example_capabilities[0] if example_capabilities else 'quality and efficiency'}, making sure we're building something valuable and sustainable. What would you like to start working on?"
-        )
-    ]
-    
-    return orientation_messages
+    else:
+        # Fallback to string representation
+        return LLMMessage(role=role, content=str(context_data), name=name)

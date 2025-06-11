@@ -22,7 +22,7 @@ def register_component(cls: Type[Component]):
     Uses the class's COMPONENT_TYPE attribute as the key.
     """
     if not issubclass(cls, Component):
-        raise TypeError(f"Class {cls.__name__} must inherit from BaseComponent to be registered.")
+        raise TypeError(f"Class {cls.__name__} must inherit from Component to be registered.")
         
     component_type = getattr(cls, 'COMPONENT_TYPE', None)
     if not component_type or not isinstance(component_type, str):
