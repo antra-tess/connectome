@@ -70,18 +70,15 @@ class AgentMemoryCompressor(MemoryCompressor):
             
             logger.info(f"AgentMemoryCompressor compressing {len(raw_veil_nodes)} nodes for elements {element_ids}")
             
-            # Prepare content for agent reflection
-            veil_content_for_reflection = await self._prepare_content_for_reflection(raw_veil_nodes)
-            
-            # NEW: Add raw VEIL nodes to compression context for multimodal extraction
-            enhanced_compression_context = (compression_context or {}).copy()
-            enhanced_compression_context["raw_veil_nodes"] = raw_veil_nodes
+            # OPTIMIZED: Single-pass parsing of VEIL content and attachments
+            text_content, attachments = await self._parse_veil_content_and_attachments(raw_veil_nodes)
             
             # Get agent's self-reflection on the experience
             agent_memory_summary = await self._agent_reflect_on_experience(
-                veil_content_for_reflection, 
+                text_content,
+                attachments,
                 element_ids, 
-                enhanced_compression_context
+                compression_context
             )
             
             # Count tokens in original content
@@ -97,7 +94,9 @@ class AgentMemoryCompressor(MemoryCompressor):
                 "compression_timestamp": datetime.now().isoformat(),
                 "compressor_type": self.__class__.__name__,
                 "compression_context": compression_context or {},
-                "content_fingerprint": compression_context.get("content_fingerprint") if compression_context else None
+                "content_fingerprint": compression_context.get("content_fingerprint") if compression_context else None,
+                "has_multimodal_content": len(attachments) > 0,  # NEW: Structural detection
+                "attachment_count": len(attachments)  # NEW: Track attachment count
             }
             
             # Generate memory ID
@@ -132,7 +131,9 @@ class AgentMemoryCompressor(MemoryCompressor):
             # Update correlations
             self.add_correlation(element_ids, memory_id)
             
-            logger.info(f"Created agent memory {memory_id}: {agent_memory_summary[:50]}... ({total_tokens} tokens)")
+            # NEW: Better logging with multimodal context
+            multimodal_info = f" with {len(attachments)} attachments" if attachments else ""
+            logger.info(f"Created agent memory {memory_id}: {agent_memory_summary[:50]}... ({total_tokens} tokens{multimodal_info})")
             
             return memorized_node
             
@@ -141,128 +142,154 @@ class AgentMemoryCompressor(MemoryCompressor):
             # Fallback to basic compression
             return await self._fallback_compression(raw_veil_nodes, element_ids, compression_context)
     
-    async def _prepare_content_for_reflection(self, raw_veil_nodes: List[Dict[str, Any]]) -> str:
+    async def _parse_veil_content_and_attachments(self, raw_veil_nodes: List[Dict[str, Any]]) -> tuple[str, List[Dict[str, Any]]]:
         """
-        Prepare VEIL content in a format suitable for agent reflection.
+        NEW: Single-pass parsing of VEIL nodes to extract both text content and attachments.
         
-        ENHANCED: Now includes attachment content analysis for multimodal memories.
-        This renders the VEIL content in a clean, readable format for the agent to reflect on.
+        This replaces the inefficient dual-traversal approach with a clean single-pass operation
+        that extracts text content for reflection and attachment data for multimodal LLM calls.
+        
+        Args:
+            raw_veil_nodes: List of VEIL nodes to process
+            
+        Returns:
+            Tuple of (formatted_text_content, llm_compatible_attachments)
         """
         try:
             content_parts = []
+            attachments = []
+            attachment_ids_seen = set()  # Simple deduplication
             
             for node in raw_veil_nodes:
-                props = node.get("properties", {})
-                content_nature = props.get("content_nature", "")
+                # Extract text content for reflection
+                text_part = await self._format_node_for_reflection(node)
+                if text_part:
+                    content_parts.append(text_part)
                 
-                if content_nature == "chat_message":
-                    # Format chat messages nicely
-                    sender = props.get("sender_name", "Unknown")
-                    text = props.get("text_content", "")
-                    timestamp = props.get("timestamp_iso", props.get("timestamp", ""))
-                    
-                    message_line = f"[{timestamp}] {sender}: {text}"
-                    
-                    # NEW: Enhanced attachment info with content analysis
-                    attachments = props.get("attachment_metadata", [])
-                    if attachments:
-                        attachment_descriptions = []
-                        for att in attachments:
-                            filename = att.get("filename", "attachment")
-                            content_type = att.get("attachment_type", att.get("content_type", "unknown"))
-                            
-                            # Basic attachment description
-                            att_desc = f"{filename} ({content_type})"
-                            attachment_descriptions.append(att_desc)
-                        
-                        message_line += f" (attachments: {', '.join(attachment_descriptions)})"
-                    
-                    # NEW: Look for attachment content in child nodes
-                    attachment_content_descriptions = await self._process_attachment_children_for_reflection(node)
-                    if attachment_content_descriptions:
-                        message_line += f"\n    Attachment content: {attachment_content_descriptions}"
-                    
-                    content_parts.append(message_line)
-                    
-                elif content_nature == "uplink_summary":
-                    # Include uplink information
-                    remote_name = props.get("remote_space_name", "Remote Space")
-                    content_parts.append(f"[Uplink] Connected to {remote_name}")
-                    
-                elif props.get("structural_role") == "container":
-                    # Include container context
-                    element_name = props.get("element_name", "Element")
-                    available_tools = props.get("available_tools", [])
-                    
-                    container_line = f"[Context] {element_name}"
-                    if available_tools:
-                        container_line += f" (tools available: {', '.join(available_tools)})"
-                    content_parts.append(container_line)
-                
-                # Handle other content types as needed
-                elif props.get("text_content"):
-                    # Generic text content
-                    content_parts.append(f"[Content] {props['text_content']}")
+                # Extract attachments in single pass (both direct and children)
+                node_attachments = await self._extract_node_attachments_single_pass(node, attachment_ids_seen)
+                attachments.extend(node_attachments)
             
-            return "\n".join(content_parts)
+            text_content = "\n".join(content_parts)
+            
+            logger.debug(f"Single-pass extraction: {len(content_parts)} content parts, {len(attachments)} unique attachments")
+            return text_content, attachments
             
         except Exception as e:
-            logger.error(f"Error preparing content for reflection: {e}", exc_info=True)
-            # Fallback to basic representation
-            return str(raw_veil_nodes)
+            logger.error(f"Error in single-pass VEIL parsing: {e}", exc_info=True)
+            # Fallback to text-only
+            return str(raw_veil_nodes), []
     
-    async def _process_attachment_children_for_reflection(self, message_node: Dict[str, Any]) -> str:
+    async def _format_node_for_reflection(self, node: Dict[str, Any]) -> str:
         """
-        NEW: Process attachment child nodes to extract content descriptions for agent reflection.
+        NEW: Format a single VEIL node for agent reflection text content.
         
         Args:
-            message_node: VEIL message node that may have attachment children
+            node: VEIL node to format
             
         Returns:
-            String description of attachment content for agent reflection
+            Formatted text line for reflection, or empty string if not relevant
         """
         try:
-            children = message_node.get("children", [])
-            attachment_descriptions = []
+            props = node.get("properties", {})
+            content_nature = props.get("content_nature", "")
             
-            for child in children:
-                child_props = child.get("properties", {})
-                if child.get("node_type") == "attachment_content_item":
-                    filename = child_props.get("filename", "unknown_file")
-                    content_nature = child_props.get("content_nature", "unknown")
-                    attachment_id = child_props.get("attachment_id", "unknown")
+            if content_nature == "chat_message":
+                # Format chat messages with attachment info
+                sender = props.get("sender_name", "Unknown")
+                text = props.get("text_content", "")
+                timestamp = props.get("timestamp_iso", props.get("timestamp", ""))
+                
+                message_line = f"[{timestamp}] {sender}: {text}"
+                
+                # Add attachment metadata (but not content - that's handled separately)
+                attachments = props.get("attachment_metadata", [])
+                if attachments:
+                    attachment_descriptions = []
+                    for att in attachments:
+                        filename = att.get("filename", "attachment")
+                        content_type = att.get("attachment_type", att.get("content_type", "unknown"))
+                        attachment_descriptions.append(f"{filename} ({content_type})")
                     
-                    # Create description based on content type
-                    if "image" in content_nature.lower():
-                        # For images, we could analyze content if available
-                        attachment_descriptions.append(f"{filename} (image content available for analysis)")
-                    elif "text" in content_nature.lower() or content_nature in ["application/pdf", "text/plain"]:
-                        # For text/document content
-                        attachment_descriptions.append(f"{filename} (document content available for analysis)")
-                    else:
-                        # For other file types
-                        attachment_descriptions.append(f"{filename} ({content_nature} content)")
+                    message_line += f" (attachments: {', '.join(attachment_descriptions)})"
+                
+                return message_line
+                
+            elif content_nature == "uplink_summary":
+                # Include uplink information
+                remote_name = props.get("remote_space_name", "Remote Space")
+                return f"[Uplink] Connected to {remote_name}"
+                
+            elif props.get("structural_role") == "container":
+                # Include container context
+                element_name = props.get("element_name", "Element")
+                available_tools = props.get("available_tools", [])
+                
+                container_line = f"[Context] {element_name}"
+                if available_tools:
+                    container_line += f" (tools available: {', '.join(available_tools)})"
+                return container_line
             
-            return "; ".join(attachment_descriptions) if attachment_descriptions else ""
+            elif props.get("text_content"):
+                # Generic text content
+                return f"[Content] {props['text_content']}"
+            
+            # Not a text-relevant node
+            return ""
             
         except Exception as e:
-            logger.error(f"Error processing attachment children for reflection: {e}", exc_info=True)
+            logger.error(f"Error formatting node for reflection: {e}", exc_info=True)
             return ""
     
+    async def _extract_node_attachments_single_pass(self, node: Dict[str, Any], seen_ids: set) -> List[Dict[str, Any]]:
+        """
+        NEW: Extract all attachments from a node and its children in a single efficient pass.
+        
+        Args:
+            node: VEIL node to extract attachments from
+            seen_ids: Set of attachment IDs already processed (for deduplication)
+            
+        Returns:
+            List of LiteLLM-compatible attachment dictionaries
+        """
+        try:
+            attachments = []
+            
+            # Check if this node itself is an attachment
+            if node.get("node_type") == "attachment_content_item":
+                attachment = await self._process_attachment_for_llm(node)
+                if attachment:
+                    attachment_id = node.get("properties", {}).get("attachment_id")
+                    if attachment_id and attachment_id not in seen_ids:
+                        seen_ids.add(attachment_id)
+                        attachments.append(attachment)
+                        logger.debug(f"Found direct attachment: {node.get('properties', {}).get('filename', 'unknown')}")
+            
+            # Recursively check children
+            children = node.get("children", [])
+            for child in children:
+                child_attachments = await self._extract_node_attachments_single_pass(child, seen_ids)
+                attachments.extend(child_attachments)
+            
+            return attachments
+            
+        except Exception as e:
+            logger.error(f"Error extracting node attachments: {e}", exc_info=True)
+            return []
+    
     async def _agent_reflect_on_experience(self, 
-                                         veil_content: str, 
+                                         text_content: str,
+                                         attachments: List[Dict[str, Any]],
                                          element_ids: List[str],
                                          compression_context: Optional[Dict[str, Any]]) -> str:
         """
         Have the agent reflect on its experience and create its own memory summary.
         
         ENHANCED: Now handles multimodal content - agent is aware of images and documents.
+        NEW: Uses existing memory context for better continuity in memory formation.
         This is the core of agent self-memorization - the agent decides what to remember.
         """
         try:
-            # NEW: Check if this content includes multimodal attachments
-            has_attachments = "Attachment content:" in veil_content or "attachments:" in veil_content
-            
             # Prepare context information
             element_context = ", ".join(element_ids) if len(element_ids) > 1 else element_ids[0]
             
@@ -274,12 +301,25 @@ class AgentMemoryCompressor(MemoryCompressor):
             # Compression reason
             compression_reason = compression_context.get("compression_reason", "memory management") if compression_context else "memory management"
             
-            # NEW: Enhanced reflection prompt for multimodal content
-            if has_attachments:
+            # NEW: Extract existing memory context for continuity
+            existing_memories = compression_context.get("existing_memory_context", []) if compression_context else []
+            memory_context_section = ""
+            
+            if existing_memories:
+                memory_context_section = f"""
+EXISTING MEMORIES FOR CONTEXT:
+Here are your previous memories about this conversation/element to help you understand the ongoing context:
+{chr(10).join([f"- {memory}" for memory in existing_memories])}
+
+"""
+                logger.debug(f"Agent {self.agent_id} reflecting with {len(existing_memories)} existing memory context")
+
+            # NEW: Enhanced reflection prompt for multimodal content with memory context
+            if attachments:
                 reflection_prompt = f"""You are an AI agent reflecting on your recent experience that included visual and document content. Look at this interaction and decide what you should remember about it for future reference.
 
-EXPERIENCE TO REFLECT ON:
-{veil_content}
+{memory_context_section}EXPERIENCE TO REFLECT ON:
+{text_content}
 
 CONTEXT:
 - This experience occurred in: {element_context}
@@ -301,15 +341,16 @@ MULTIMODAL CONTEXT:
 - Explain how the attachments connected to the conversation topic
 - Note any important visual or document information discussed
 
+{"MEMORY CONTINUITY:" + chr(10) + "Consider how this new experience relates to your existing memories above. Build upon that context rather than repeating it." + chr(10) if existing_memories else ""}
 Keep the summary brief but informative - this will be your memory of this multimodal experience.
 
 MEMORY SUMMARY:"""
             else:
-                # Standard text-only reflection prompt
+                # Standard text-only reflection prompt with memory context
                 reflection_prompt = f"""You are an AI agent reflecting on your recent experience. Look at this interaction and decide what you should remember about it for future reference.
 
-EXPERIENCE TO REFLECT ON:
-{veil_content}
+{memory_context_section}EXPERIENCE TO REFLECT ON:
+{text_content}
 
 CONTEXT:
 - This experience occurred in: {element_context}
@@ -322,6 +363,7 @@ Create a concise memory summary that captures what was important about this expe
 - Any important outcomes or decisions
 - Context that would be useful for future interactions
 
+{"MEMORY CONTINUITY:" + chr(10) + "Consider how this new experience relates to your existing memories above. Build upon that context rather than repeating it." + chr(10) if existing_memories else ""}
 Keep the summary brief but informative - this will be your memory of this experience.
 
 MEMORY SUMMARY:"""
@@ -329,21 +371,13 @@ MEMORY SUMMARY:"""
             # NEW: Create multimodal LLM message if attachments detected
             from llm.provider_interface import LLMMessage
             
-            if has_attachments:
-                # Extract actual multimodal content for the agent
-                multimodal_content = await self._extract_multimodal_content_for_agent(compression_context.get("raw_veil_nodes", []))
-                
-                if multimodal_content and multimodal_content.get("attachments"):
-                    # Create multimodal message structure
-                    reflection_message = LLMMessage("user", {
-                        "text": reflection_prompt,
-                        "attachments": multimodal_content["attachments"]
-                    })
-                    logger.info(f"Agent {self.agent_id} reflecting on multimodal content: {len(multimodal_content['attachments'])} attachments")
-                else:
-                    # Fallback to text-only if attachment extraction failed
-                    reflection_message = LLMMessage("user", reflection_prompt)
-                    logger.warning(f"Agent {self.agent_id} multimodal extraction failed, using text-only reflection")
+            if attachments:
+                # Create multimodal message structure
+                reflection_message = LLMMessage("user", {
+                    "text": reflection_prompt,
+                    "attachments": attachments
+                })
+                logger.info(f"Agent {self.agent_id} reflecting on multimodal content: {len(attachments)} attachments")
             else:
                 # Text-only reflection
                 reflection_message = LLMMessage("user", reflection_prompt)
@@ -354,28 +388,30 @@ MEMORY SUMMARY:"""
             if llm_response and llm_response.content:
                 agent_summary = llm_response.content.strip()
                 
-                # NEW: Log multimodal memory formation
-                if has_attachments:
-                    logger.info(f"Agent {self.agent_id} created multimodal memory: {agent_summary[:100]}...")
+                # NEW: Log multimodal memory formation with context awareness
+                if attachments:
+                    context_info = f" with {len(existing_memories)} memory context" if existing_memories else ""
+                    logger.info(f"Agent {self.agent_id} created multimodal memory{context_info}: {agent_summary[:100]}...")
                 else:
-                    logger.debug(f"Agent {self.agent_id} reflected: {agent_summary[:100]}...")
+                    context_info = f" with {len(existing_memories)} memory context" if existing_memories else ""
+                    logger.debug(f"Agent {self.agent_id} reflected{context_info}: {agent_summary[:100]}...")
                 
                 return agent_summary
             else:
                 logger.warning(f"LLM reflection failed for agent {self.agent_id}, using fallback")
-                return await self._create_fallback_summary(veil_content, element_ids, has_attachments)
+                return await self._create_fallback_summary(text_content, element_ids, len(attachments) > 0)
                 
         except Exception as e:
             logger.error(f"Error during agent reflection: {e}", exc_info=True)
-            return await self._create_fallback_summary(veil_content, element_ids, False)
+            return await self._create_fallback_summary(text_content, element_ids, False)
     
-    async def _create_fallback_summary(self, veil_content: str, element_ids: List[str], has_attachments: bool = False) -> str:
+    async def _create_fallback_summary(self, text_content: str, element_ids: List[str], has_attachments: bool = False) -> str:
         """
         Create a basic fallback summary when LLM reflection fails.
         
         ENHANCED: Now aware of multimodal content.
         """
-        lines = veil_content.split('\n')
+        lines = text_content.split('\n')
         message_lines = [line for line in lines if '] ' in line and ': ' in line]
         attachment_lines = [line for line in lines if 'Attachment content:' in line or 'attachments:' in line]
         
@@ -397,6 +433,9 @@ MEMORY SUMMARY:"""
         """Fallback compression when LLM is not available."""
         logger.info(f"Using fallback compression for {len(raw_veil_nodes)} nodes")
         
+        # OPTIMIZED: Use same single-pass approach for consistency
+        text_content, attachments = await self._parse_veil_content_and_attachments(raw_veil_nodes)
+        
         # Simple analysis
         message_count = 0
         participants = set()
@@ -409,20 +448,26 @@ MEMORY SUMMARY:"""
                 if sender:
                     participants.add(sender)
         
-        # Create basic summary
+        # Create basic summary with multimodal awareness
         if message_count > 0:
             if len(participants) <= 2:
                 summary = f"Conversation with {', '.join(participants)}: {message_count} messages"
             else:
                 summary = f"Group conversation: {message_count} messages"
+            
+            # Add attachment context to fallback
+            if attachments:
+                summary += f" (with {len(attachments)} attachments)"
         else:
             summary = f"Content from {', '.join(element_ids)}"
+            if attachments:
+                summary += f" with {len(attachments)} attachments"
         
         # Count tokens
         total_tokens = estimate_veil_tokens(raw_veil_nodes)
         memory_id = self._generate_memory_id(element_ids)
         
-        # Create memorized node
+        # Create memorized node with multimodal metadata
         memorized_node = {
             "veil_id": f"memorized_{memory_id}",
             "node_type": "memorized_content",
@@ -435,7 +480,9 @@ MEMORY SUMMARY:"""
                 "original_node_count": len(raw_veil_nodes),
                 "token_count": total_tokens,
                 "compression_timestamp": datetime.now().isoformat(),
-                "compressor_type": f"{self.__class__.__name__}_fallback"
+                "compressor_type": f"{self.__class__.__name__}_fallback",
+                "has_multimodal_content": len(attachments) > 0,  # NEW: Track multimodal in fallback too
+                "attachment_count": len(attachments)
             },
             "children": []
         }
@@ -443,13 +490,19 @@ MEMORY SUMMARY:"""
         # Store and track
         await self._store_memory_to_file(memory_id, {
             "memory_summary": summary,
-            "metadata": {"fallback": True, "agent_id": self.agent_id},
+            "metadata": {
+                "fallback": True, 
+                "agent_id": self.agent_id,
+                "has_multimodal_content": len(attachments) > 0,
+                "attachment_count": len(attachments)
+            },
             "memorized_node": memorized_node
         })
         
         self.add_correlation(element_ids, memory_id)
         
-        logger.info(f"Created fallback memory {memory_id}: {summary}")
+        multimodal_info = f" with {len(attachments)} attachments" if attachments else ""
+        logger.info(f"Created fallback memory {memory_id}: {summary}{multimodal_info}")
         return memorized_node
     
     # Storage methods remain the same
@@ -560,111 +613,6 @@ MEMORY SUMMARY:"""
             logger.error(f"Error in store_memory interface: {e}", exc_info=True)
             return False
 
-    async def _extract_multimodal_content_for_agent(self, raw_veil_nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        NEW: Extract actual multimodal content for the agent to analyze during reflection.
-        
-        OPTIMIZED: Efficiently searches through the provided VEIL nodes for attachment content,
-        using both direct node checking and recursive child searching.
-        
-        Args:
-            raw_veil_nodes: List of VEIL nodes to extract content from
-             
-        Returns:
-            Dictionary with 'attachments' key containing LiteLLM-compatible attachment data
-        """
-        try:
-            attachments = []
-            
-            # OPTIMIZED: First check if any nodes are directly attachment nodes
-            direct_attachment_nodes = [
-                node for node in raw_veil_nodes
-                if isinstance(node, dict) and node.get("node_type") == "attachment_content_item"
-            ]
-            
-            if direct_attachment_nodes:
-                logger.debug(f"Found {len(direct_attachment_nodes)} direct attachment nodes")
-                
-                for attachment_node in direct_attachment_nodes:
-                    # Direct attachment processing
-                    attachment_content = await self._process_attachment_for_llm(attachment_node)
-                    if attachment_content:
-                        attachments.append(attachment_content)
-                        props = attachment_node.get("properties", {})
-                        filename = props.get("filename", "unknown")
-                        logger.debug(f"Extracted direct attachment for agent: {filename}")
-            
-            # OPTIMIZED: Then recursively search for attachment children in all nodes
-            for node in raw_veil_nodes:
-                child_attachments = self._search_node_children_for_attachments(node)
-                for attachment_node in child_attachments:
-                    # Avoid duplicates (in case a node was both direct and child)
-                    attachment_id = attachment_node.get("properties", {}).get("attachment_id")
-                    
-                    # Check if we already processed this attachment
-                    already_processed = any(
-                        att.get("attachment_id") == attachment_id 
-                        for att in attachments 
-                        if isinstance(att, dict) and att.get("attachment_id")
-                    )
-                    
-                    if not already_processed:
-                        attachment_content = await self._process_attachment_for_llm(attachment_node)
-                        if attachment_content:
-                            # Add attachment_id for deduplication tracking
-                            if attachment_id:
-                                attachment_content["attachment_id"] = attachment_id
-                            attachments.append(attachment_content)
-                            props = attachment_node.get("properties", {})
-                            filename = props.get("filename", "unknown")
-                            logger.debug(f"Extracted child attachment for agent: {filename}")
-            
-            logger.info(f"Extracted {len(attachments)} multimodal attachments for agent reflection via optimized search")
-            
-            return {
-                "attachments": attachments
-            }
-            
-        except Exception as e:
-            logger.error(f"Error extracting multimodal content for agent: {e}", exc_info=True)
-            return {}
-    
-    def _search_node_children_for_attachments(self, node: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        NEW: Efficiently search through a node's children for attachment content.
-        
-        Args:
-            node: VEIL node to search through
-            
-        Returns:
-            List of attachment nodes found in children
-        """
-        try:
-            found_attachments = []
-            
-            if not isinstance(node, dict):
-                return found_attachments
-            
-            # Recursively search children
-            children = node.get("children", [])
-            for child in children:
-                if not isinstance(child, dict):
-                    continue
-                
-                # Check if this child is an attachment content item
-                if child.get("node_type") == "attachment_content_item":
-                    logger.debug(f"Found attachment child node for agent reflection: {child.get('veil_id')}")
-                    found_attachments.append(child)
-                
-                # Recursively search this child's children
-                found_attachments.extend(self._search_node_children_for_attachments(child))
-            
-            return found_attachments
-            
-        except Exception as e:
-            logger.error(f"Error searching node children for attachments: {e}", exc_info=True)
-            return []
-    
     async def _process_attachment_for_llm(self, attachment_node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
         NEW: Process an attachment VEIL node into LiteLLM-compatible format for agent analysis.

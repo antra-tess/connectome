@@ -271,7 +271,6 @@ class MessageActionHandler(Component):
                     "requesting_agent_id": requesting_agent_id
                 }
             }
-            
             try:
                 await self._outgoing_action_callback(action_request)
                 logger.info(f"[{self.owner.id}] Dispatched 'delete_message' action for ID '{message_external_id}' to adapter '{adapter_id}'.")

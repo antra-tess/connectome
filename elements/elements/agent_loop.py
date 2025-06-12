@@ -564,7 +564,6 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
             has_multimodal_content = isinstance(context_data, dict) and 'attachments' in context_data
             if has_multimodal_content:
                 logger.critical(f"CONTEXT DATA text {context_data.get('text')}")
-                logger.critical(f"CONTEXT DATA attachments {len(context_data.get('attachments'))}")
                 attachment_count = len(context_data.get('attachments', []))
                 text_length = len(context_data.get('text', ''))
                 logger.info(f"HUD returned multimodal content: {text_length} chars text + {attachment_count} attachments")
