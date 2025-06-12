@@ -56,6 +56,10 @@ class HostSettings(BaseSettings):
     # Logging Settings
     log_level: str = Field(default="INFO", description="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)")
     log_format: str = Field(default='%(asctime)s - %(name)s - %(levelname)s - %(message)s', description="Logging format string")
+    log_to_file: bool = Field(default=False, description="Enable logging to file with rotation")
+    log_file_path: str = Field(default="logs/connectome.log", description="Path to the log file (directory will be created)")
+    log_max_lines_per_file: int = Field(default=5000, description="Maximum lines per log file before rotation")
+    log_max_files: int = Field(default=10, description="Maximum number of log files to keep")
     
     # LLM Settings (will load from CONNECTOME_LLM_TYPE, CONNECTOME_LLM_DEFAULT_MODEL etc.)
     llm_provider: LLMConfig = Field(default_factory=LLMConfig)

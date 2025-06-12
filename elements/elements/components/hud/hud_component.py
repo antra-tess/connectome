@@ -1451,7 +1451,7 @@ class HUDComponent(Component):
             Rendered context (string or dict with multimodal content)
         """
         try:
-            logger.critical(f"Generating agent context via CompressionEngine unified pipeline...")
+            logger.debug(f"Generating agent context via CompressionEngine unified pipeline...")
             options = options or {}
             
             # Get required components
@@ -1459,7 +1459,7 @@ class HUDComponent(Component):
             veil_producer = self._get_space_veil_producer()
             
             if not compression_engine:
-                logger.critical(f"CompressionEngine not available, falling back to standard rendering")
+                logger.warning(f"CompressionEngine not available, falling back to standard rendering")
                 return await self.get_agent_context(options)
             
             if not veil_producer:

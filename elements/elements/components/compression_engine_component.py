@@ -845,7 +845,7 @@ class CompressionEngineComponent(Component):
             memory_tokens = self._calculate_memory_tokens(existing_memories)
             fresh_tokens = self._calculate_children_tokens(fresh_content)
             
-            logger.info(f"Focused element {element_id}: {fresh_tokens} fresh tokens, {memory_tokens} memory tokens (limits: {self.FOCUSED_FRESH_LIMIT} fresh, {self.FOCUSED_MEMORY_LIMIT} memory)")
+            logger.critical(f"Focused element {element_id}: {fresh_tokens} fresh tokens, {memory_tokens} memory tokens (limits: {self.FOCUSED_FRESH_LIMIT} fresh, {self.FOCUSED_MEMORY_LIMIT} memory)")
             
             # Check if we're within limits
             needs_fresh_compression = fresh_tokens > self.FOCUSED_FRESH_LIMIT
@@ -870,7 +870,7 @@ class CompressionEngineComponent(Component):
             if needs_fresh_compression:
                 excess_fresh = fresh_tokens - self.FOCUSED_FRESH_LIMIT
                 if excess_fresh >= self.MIN_COMPRESSION_BATCH:
-                    logger.info(f"Fresh content exceeds limit by {excess_fresh} tokens, applying continuous rolling compression")
+                    logger.critical(f"Fresh content exceeds limit by {excess_fresh} tokens, applying continuous rolling compression")
                     new_memories, preserved_content = await self._compress_excess_fresh_content(
                         element_id, element_name, available_tools, fresh_content
                     )

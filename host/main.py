@@ -38,8 +38,20 @@ from host.config import load_settings, HostSettings
 
 # ---------------
 
-def configure_logging(log_level: str = "CRITICAL", log_format: str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'):
-    """Configure logging with the specified level and format."""
+def configure_logging(log_level: str = "CRITICAL", log_format: str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
+                     log_to_file: bool = False, log_file_path: str = "logs/connectome.log", 
+                     max_lines_per_file: int = 5000, max_log_files: int = 10):
+    """
+    Configure logging with the specified level, format, and optional rolling file logging.
+    
+    Args:
+        log_level: Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        log_format: Log message format string
+        log_to_file: Whether to enable file logging
+        log_file_path: Path to log file (directory will be created if needed)
+        max_lines_per_file: Maximum lines per log file before rotation
+        max_log_files: Maximum number of log files to keep
+    """
     try:
         # Get numeric log level from string
         numeric_level = getattr(logging, log_level.upper())
@@ -48,16 +60,60 @@ def configure_logging(log_level: str = "CRITICAL", log_format: str = '%(asctime)
         root_logger = logging.getLogger()
         for handler in root_logger.handlers[:]:
             root_logger.removeHandler(handler)
-            
-        logging.basicConfig(level=numeric_level, format=log_format, force=True)
+        
+        # Create formatter
+        formatter = logging.Formatter(log_format)
+        
+        # Always add console handler
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(numeric_level)
+        console_handler.setFormatter(formatter)
+        root_logger.addHandler(console_handler)
+        
+        # Add file handler if requested
+        if log_to_file:
+            try:
+                import os
+                from logging.handlers import RotatingFileHandler
+                
+                # Create log directory if it doesn't exist
+                log_dir = os.path.dirname(log_file_path)
+                if log_dir and not os.path.exists(log_dir):
+                    os.makedirs(log_dir, exist_ok=True)
+                
+                # Calculate approximate file size limit based on lines
+                # Estimate ~100 characters per log line on average
+                estimated_chars_per_line = 100
+                max_bytes = max_lines_per_file * estimated_chars_per_line
+                
+                # Create rotating file handler
+                file_handler = RotatingFileHandler(
+                    filename=log_file_path,
+                    maxBytes=max_bytes,
+                    backupCount=max_log_files - 1,  # -1 because current file + backups = total
+                    encoding='utf-8'
+                )
+                file_handler.setLevel(numeric_level)
+                file_handler.setFormatter(formatter)
+                root_logger.addHandler(file_handler)
+                
+                print(f"✓ Rolling file logging enabled: {log_file_path} ({max_lines_per_file} lines/file, {max_log_files} files max)")
+                
+            except Exception as file_error:
+                print(f"⚠ Failed to setup file logging: {file_error}")
+                print("Continuing with console logging only...")
+        
+        # Set root logger level
+        root_logger.setLevel(numeric_level)
         
         # Update our logger reference
         global logger
         logger = logging.getLogger(__name__)
-        logger.info(f"Logging configured: level={log_level.upper()}, format='{log_format[:50]}...'")
+        logger.info(f"Logging configured: level={log_level.upper()}, console=✓, file={'✓' if log_to_file else '✗'}")
         
     except AttributeError:
         logger.error(f"Invalid log level: {log_level}. Using INFO instead.")
+        # Fallback configuration
         logging.basicConfig(level=logging.INFO, format=log_format, force=True)
 
 async def amain():
@@ -65,7 +121,14 @@ async def amain():
     settings = load_settings()
     
     # Configure logging with settings from configuration
-    configure_logging(log_level=settings.log_level, log_format=settings.log_format)
+    configure_logging(
+        log_level=settings.log_level, 
+        log_format=settings.log_format,
+        log_to_file=settings.log_to_file,
+        log_file_path=settings.log_file_path,
+        max_lines_per_file=settings.log_max_lines_per_file,
+        max_log_files=settings.log_max_files
+    )
     
     # Get the SpaceRegistry instance and initialize its storage FIRST
     space_registry = SpaceRegistry.get_instance()
