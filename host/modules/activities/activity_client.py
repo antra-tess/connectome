@@ -36,6 +36,11 @@ SOCKET_RECONNECTION_DELAY = 5
 SOCKET_TIMEOUT = 30  # seconds
 PENDING_REQUEST_TIMEOUT_SECONDS = 300  # 5 minutes
 
+# NEW: Enhanced timeouts for robustness
+EMIT_TIMEOUT_SECONDS = 30          # Allow 30s for emit (agent thinking time)
+AGENT_RESPONSE_GRACE_PERIOD = 45   # Extra grace for slow agent responses
+CONNECTION_HEALTH_CHECK_INTERVAL = 60  # Check connection health every minute
+
 class ActivityClient:
     """
     Pure thin I/O layer for WebSocket communication with external adapters.
@@ -61,6 +66,10 @@ class ActivityClient:
         self._idle_threshold = 300  # Consider connection idle after 5 minutes
         self._last_activity: Dict[str, float] = {}  # adapter_id -> timestamp of last activity
         self._keepalive_tasks: Dict[str, asyncio.Task] = {}  # adapter_id -> keepalive task
+        
+        # NEW: Connection health tracking
+        self._connection_health_tasks: Dict[str, asyncio.Task] = {}  # adapter_id -> health check task
+        self._successful_operations: Dict[str, int] = {}  # Track successful operations to reset timeout counters
         
         self._load_adapter_configs(adapter_api_configs)
         logger.info(f"ActivityClient initialized with {len(self.adapters)} adapter API configs.")
@@ -301,6 +310,9 @@ class ActivityClient:
                 
                 logger.info(f"ActivityClient routing success for {pending_request_info.get('action_type')} (req_id: {internal_request_id}) to ExternalEventRouter")
                 self.host_event_loop.enqueue_incoming_event(success_event, {})
+                
+                # NEW: Track successful response to improve connection health assessment
+                self._record_successful_operation(adapter_id)
 
             # --- SIMPLIFIED Handler for Generic Failure Responses ---
             @client.on("request_failed")
@@ -524,18 +536,44 @@ class ActivityClient:
             
             # Enhanced emit with timeout and retry logic
             try:
-                # Use shorter timeout for emit to detect connection issues faster
+                # NEW: Use longer timeout for emit to accommodate agent thinking time
                 await asyncio.wait_for(
                     client.emit("bot_response", adapter_payload),
-                    timeout=10.0  # 10 second timeout for emit operation
+                    timeout=EMIT_TIMEOUT_SECONDS  # Increased from 10s to 30s
                 )
                 logger.info(f"Successfully dispatched {internal_action_type} to adapter '{target_adapter_id}' (req_id: {internal_request_id})")
+                
+                # NEW: Track successful operation to reset timeout counters
+                self._record_successful_operation(target_adapter_id)
+                
             except asyncio.TimeoutError:
-                # Emit timed out - connection may be stuck
-                logger.error(f"Emit timeout for {internal_action_type} to adapter '{target_adapter_id}' - connection may be stuck")
-                # Mark adapter as disconnected to trigger reconnection
-                self.adapters[target_adapter_id]["connected"] = False
-                raise ConnectionError(f"Emit operation timed out - connection to adapter '{target_adapter_id}' may be stuck")
+                # ENHANCED: More nuanced timeout handling
+                logger.warning(f"Emit timeout for {internal_action_type} to adapter '{target_adapter_id}' after {EMIT_TIMEOUT_SECONDS}s")
+                
+                # Check if this is a pattern (multiple timeouts) or isolated incident
+                timeout_count = getattr(self, f'_timeout_count_{target_adapter_id}', 0) + 1
+                setattr(self, f'_timeout_count_{target_adapter_id}', timeout_count)
+                
+                # NEW: Check recent success history to determine if this is truly a connection issue
+                recent_successes = self._successful_operations.get(target_adapter_id, 0)
+                
+                if timeout_count >= 3 and recent_successes < 2:
+                    # Multiple timeouts with few recent successes suggest real connection issue
+                    logger.error(f"Multiple emit timeouts ({timeout_count}) with low success rate for adapter '{target_adapter_id}' - marking as disconnected")
+                    self.adapters[target_adapter_id]["connected"] = False
+                    raise ConnectionError(f"Multiple emit timeouts - connection to adapter '{target_adapter_id}' unstable")
+                elif timeout_count >= 5:
+                    # Hard limit: too many timeouts regardless of successes
+                    logger.error(f"Excessive emit timeouts ({timeout_count}) for adapter '{target_adapter_id}' - marking as disconnected")
+                    self.adapters[target_adapter_id]["connected"] = False
+                    raise ConnectionError(f"Excessive emit timeouts - connection to adapter '{target_adapter_id}' unstable")
+                else:
+                    # Be more tolerant if we've had recent successes
+                    tolerance_reason = f"recent successes: {recent_successes}" if recent_successes > 0 else "within tolerance"
+                    logger.info(f"Emit timeout ({timeout_count}) for adapter '{target_adapter_id}' - continuing ({tolerance_reason})")
+                    # Don't raise ConnectionError immediately, let the pending request timeout handle it
+                    logger.info(f"Dispatched {internal_action_type} to adapter '{target_adapter_id}' (req_id: {internal_request_id}) - timeout tolerance applied")
+                    
             except (socketio.exceptions.DisconnectedError, socketio.exceptions.ConnectionError) as se:
                 # SocketIO specific connection errors
                 logger.error(f"SocketIO connection error during emit to adapter '{target_adapter_id}': {se}")
@@ -668,6 +706,14 @@ class ActivityClient:
         self.adapters.clear()
         self._last_activity.clear()
         self._keepalive_tasks.clear()
+        
+        # NEW: Clean up connection health tracking
+        self._successful_operations.clear()
+        # Clear timeout counters
+        for attr_name in list(vars(self).keys()):
+            if attr_name.startswith('_timeout_count_'):
+                delattr(self, attr_name)
+                
         logger.info("All adapter API connections closed.")
 
     async def _attempt_reconnect(self, adapter_id: str, max_attempts: int = 3, delay: float = 2.0):
@@ -845,3 +891,20 @@ class ActivityClient:
         except Exception as refresh_error:
             logger.error(f"Error during connection refresh for adapter '{adapter_id}': {refresh_error}")
             return False 
+
+    def _record_successful_operation(self, adapter_id: str):
+        """Record a successful operation for an adapter to reset timeout counters."""
+        if adapter_id in self._successful_operations:
+            self._successful_operations[adapter_id] += 1
+        else:
+            self._successful_operations[adapter_id] = 1
+            
+        # Reset timeout counter if we have enough recent successes
+        if self._successful_operations[adapter_id] >= 3:
+            if hasattr(self, f'_timeout_count_{adapter_id}'):
+                old_count = getattr(self, f'_timeout_count_{adapter_id}', 0)
+                if old_count > 0:
+                    logger.info(f"Resetting timeout counter for adapter '{adapter_id}' after {self._successful_operations[adapter_id]} successful operations")
+                setattr(self, f'_timeout_count_{adapter_id}', 0)
+                # Reset success counter to prevent it from growing indefinitely
+                self._successful_operations[adapter_id] = 0 
