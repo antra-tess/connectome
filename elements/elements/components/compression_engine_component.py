@@ -887,6 +887,7 @@ class CompressionEngineComponent(Component):
                     element_id, element_name, final_memories
                 )
             
+            logger.critical(f"Final memories: {final_memories}")
             # Set final children: memories + preserved fresh content
             container_node['children'] = final_memories + final_content
             

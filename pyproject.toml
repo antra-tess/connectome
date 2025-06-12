@@ -21,6 +21,7 @@ dependencies = [
     "anthropic",
     "openai",
     "python-dotenv",
+    "psutil",
 ]
 
 [project.optional-dependencies]
@@ -33,4 +34,6 @@ dev = [
 include = ["elements*", "host*", "llm*", "storage*"]
 
 [project.scripts]
-connectome = "host.main:main" 
+connectome = "host.main:main"
+connectome-shutdown = "host.shutdown:main"
+connectome-status = "host.status:main" 

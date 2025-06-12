@@ -132,8 +132,34 @@ class FileStorage(StorageInterface):
             if create_backup and self.create_backups and file_path.exists():
                 await self._create_backup(file_path)
             
-            # Write the file
-            json_str = json.dumps(data, indent=2 if self.pretty_print_json else None, default=str)
+            # ENHANCED: Safe JSON serialization to prevent corruption
+            def safe_serializer(obj):
+                """Safe JSON serializer that handles non-serializable objects properly."""
+                if hasattr(obj, 'isoformat'):  # datetime objects
+                    return obj.isoformat()
+                elif isinstance(obj, set):  # sets to lists
+                    return list(obj)
+                elif hasattr(obj, '__dict__'):  # complex objects to dict
+                    return obj.__dict__
+                else:
+                    # Convert to string as last resort, but log warning
+                    self.logger.warning(f"Converting non-serializable object to string: {type(obj)} - {obj}")
+                    return str(obj)
+            
+            # Write the file with safe serialization
+            try:
+                json_str = json.dumps(data, indent=2 if self.pretty_print_json else None, default=safe_serializer, ensure_ascii=False)
+            except (TypeError, ValueError) as json_error:
+                self.logger.error(f"JSON serialization failed for {file_path}: {json_error}")
+                return False
+            
+            # Validate JSON before writing (prevent corruption)
+            try:
+                json.loads(json_str)  # Parse to verify validity
+            except json.JSONDecodeError as validate_error:
+                self.logger.error(f"Generated invalid JSON for {file_path}: {validate_error}")
+                return False
+            
             async with aiofiles.open(file_path, 'w', encoding='utf-8') as f:
                 await f.write(json_str)
             
