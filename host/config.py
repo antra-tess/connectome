@@ -64,6 +64,10 @@ class HostSettings(BaseSettings):
     # LLM Settings (will load from CONNECTOME_LLM_TYPE, CONNECTOME_LLM_DEFAULT_MODEL etc.)
     llm_provider: LLMConfig = Field(default_factory=LLMConfig)
 
+    llm_type: str = Field(default="litellm", description="Type of LLM provider (e.g., \'litellm\')")
+    llm_default_model: str = Field(default="gpt-4", description="Default model name")
+    llm_api_key: Optional[str] = Field(default=None, description="API Key for the LLM service (e.g., OpenAI)")
+
     # Activity Client Adapters - Expects a JSON string in CONNECTOME_ACTIVITY_ADAPTERS_JSON
     activity_client_adapter_configs_json: str = Field(default='[{"id": "discord_adapter_1", "url": "http://localhost:5001", "auth_token": null}]', alias="ACTIVITY_ADAPTERS_JSON", description="JSON string representing a list of ActivityAdapterConfig objects")
     

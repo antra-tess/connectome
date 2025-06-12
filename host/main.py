@@ -147,15 +147,15 @@ async def amain():
 
     # Initialize LLM provider using factory and proper config structure
     logger.info("Initializing LLM provider...")
-    if not settings.llm_provider.api_key:
+    if not settings.llm_api_key:
         logger.error("LLM API key not set. Please set CONNECTOME_LLM_API_KEY in your .env file.")
         return
         
     try:
         # Convert LLMConfig to dict for factory
-        llm_config_dict = settings.llm_provider.model_dump(exclude_none=True)
+        llm_config_dict = {"type": settings.llm_type, "default_model": settings.llm_default_model, "api_key": settings.llm_api_key}
         llm_provider = LLMProviderFactory.create_from_config(llm_config_dict)
-        logger.info(f"LLM Provider created: {settings.llm_provider.type} with model {settings.llm_provider.default_model}")
+        logger.info(f"LLM Provider created: {settings.llm_type} with model {settings.llm_default_model}")
     except Exception as e:
         logger.error(f"Failed to create LLM provider: {e}", exc_info=True)
         return
