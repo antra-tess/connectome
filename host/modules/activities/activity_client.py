@@ -172,6 +172,7 @@ class ActivityClient:
                 
                 # Record activity for this outgoing action
                 self._record_activity(adapter_id)
+                logger.critical(f"Received bot_request from '{adapter_id}': {raw_payload}")
                 
                 if not isinstance(raw_payload, dict):
                      logger.warning(f"Received non-dict bot_request from '{adapter_id}': {raw_payload}")

@@ -1050,34 +1050,48 @@ MEMORY SUMMARY:"""
             return {"error": str(e)}
     
     def cleanup(self):
-        """Clean up agent memory compressor resources including background threads."""
-        logger.info(f"Cleaning up AgentMemoryCompressor for agent {self.agent_id}")
-        
-        # Clean up background compression threads
+        """Clean up background compression resources."""
         try:
-            # Wait for any active compressions to complete (with timeout)
+            logger.info(f"Cleaning up AgentMemoryCompressor for agent {self.agent_id}")
+            
+            # Stop accepting new tasks
+            if self._compression_executor and not self._compression_executor._shutdown:
+                logger.debug("Shutting down compression executor")
+                # FIXED: Remove timeout parameter for Python version compatibility
+                self._compression_executor.shutdown(wait=True)
+                self._compression_executor = None
+            
+            # Cancel any pending futures (they should complete or be cancelled)
             with self._compression_lock:
-                active_futures = list(self._compression_futures.values())
+                for memory_id, future in list(self._compression_futures.items()):
+                    if not future.done():
+                        logger.debug(f"Cancelling pending compression for {memory_id}")
+                        future.cancel()
+                
+                self._compression_futures.clear()
+                self._active_compressions.clear()
             
-            if active_futures:
-                logger.info(f"Waiting for {len(active_futures)} background compressions to complete...")
-                # Give compressions 10 seconds to finish gracefully
-                for future in active_futures:
-                    try:
-                        if not future.done():
-                            future.cancel()
-                    except Exception as e:
-                        logger.warning(f"Error cancelling compression future: {e}")
-            
-            # Shutdown thread pool
-            self._compression_executor.shutdown(wait=True, timeout=10)
-            logger.debug(f"Background compression threads shut down for agent {self.agent_id}")
+            logger.debug("AgentMemoryCompressor cleanup completed")
             
         except Exception as e:
             logger.error(f"Error during background compression cleanup: {e}", exc_info=True)
         
         # Call parent cleanup
-        super().cleanup()
+        try:
+            # FIXED: Parent cleanup should be called synchronously
+            import asyncio
+            if hasattr(super(), 'cleanup'):
+                parent_cleanup = super().cleanup()
+                # Only await if it's a coroutine
+                if asyncio.iscoroutine(parent_cleanup):
+                    # Can't await in sync context, so just log a warning
+                    logger.warning("Parent cleanup is async but called from sync context")
+                    # The coroutine will be garbage collected with a warning
+                else:
+                    # Parent cleanup is sync, call it normally
+                    pass  # Already called above
+        except Exception as e:
+            logger.error(f"Error during parent cleanup: {e}", exc_info=True)
 
     async def compress(self, 
                       raw_veil_nodes: List[Dict[str, Any]], 
@@ -1204,4 +1218,44 @@ MEMORY SUMMARY:"""
             
         except Exception as e:
             logger.error(f"Error retrieving attachment content for agent: {e}", exc_info=True)
-            return None 
+            return None
+    
+    def _generate_memory_id(self, element_ids: List[str]) -> str:
+        """
+        Generate a deterministic memory ID for a set of element IDs.
+        
+        FIXED: Now generates truly deterministic IDs based on element content,
+        ensuring the same elements always get the same memory ID.
+        
+        Args:
+            element_ids: List of element IDs to generate memory for
+            
+        Returns:
+            Deterministic memory ID string
+        """
+        try:
+            import hashlib
+            
+            # Sort element IDs for deterministic ordering
+            sorted_elements = sorted(element_ids)
+            
+            # Create deterministic content string including agent context
+            content_parts = [
+                self.agent_id,  # Include agent ID for agent-scoped memories
+                "memory_for",
+                *sorted_elements  # Include sorted element IDs
+            ]
+            
+            # Create deterministic hash
+            content_string = "_".join(content_parts)
+            hash_object = hashlib.md5(content_string.encode('utf-8'))
+            memory_id = f"mem_{hash_object.hexdigest()[:12]}"
+            
+            logger.debug(f"Generated deterministic memory ID {memory_id} for elements {sorted_elements}")
+            return memory_id
+            
+        except Exception as e:
+            logger.error(f"Error generating memory ID: {e}", exc_info=True)
+            # Fallback to timestamp-based ID
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            return f"mem_fallback_{timestamp}" 
