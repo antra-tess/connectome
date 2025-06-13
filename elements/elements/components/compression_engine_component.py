@@ -804,15 +804,8 @@ class CompressionEngineComponent(Component):
         """
         Apply focused compression with lax limits for focused elements.
         
-        ENHANCED Phase 2: Now implements true rolling compression!
+        NEW: Enhanced with background compression support for better performance.
         For focused elements: 50k fresh content + 20k memories = 70k total
-        
-        Rolling compression strategy:
-        1. Separate existing memories from fresh content
-        2. Check if we exceed token limits 
-        3. If fresh content > 50k: compress oldest fresh content into memories
-        4. If memories > 20k: recompress oldest memories into higher-level summaries
-        5. This creates a rolling window preserving recent content
         """
         try:
             if not children:
@@ -845,7 +838,7 @@ class CompressionEngineComponent(Component):
             memory_tokens = self._calculate_memory_tokens(existing_memories)
             fresh_tokens = self._calculate_children_tokens(fresh_content)
             
-            logger.critical(f"Focused element {element_id}: {fresh_tokens} fresh tokens, {memory_tokens} memory tokens (limits: {self.FOCUSED_FRESH_LIMIT} fresh, {self.FOCUSED_MEMORY_LIMIT} memory)")
+            logger.debug(f"Focused element {element_id}: {fresh_tokens} fresh tokens, {memory_tokens} memory tokens (limits: {self.FOCUSED_FRESH_LIMIT} fresh, {self.FOCUSED_MEMORY_LIMIT} memory)")
             
             # Check if we're within limits
             needs_fresh_compression = fresh_tokens > self.FOCUSED_FRESH_LIMIT
@@ -862,16 +855,16 @@ class CompressionEngineComponent(Component):
                     container_node['properties']['tools_available_despite_preservation'] = True
                 return
             
-            # ENHANCED: Continuous rolling compression approach
+            # ENHANCED: Continuous rolling compression approach with background support
             final_memories = existing_memories.copy()
             final_content = fresh_content.copy()
 
-            # Step 1: Apply continuous fresh content compression
+            # Step 1: Apply continuous fresh content compression (with background support)
             if needs_fresh_compression:
                 excess_fresh = fresh_tokens - self.FOCUSED_FRESH_LIMIT
                 if excess_fresh >= self.MIN_COMPRESSION_BATCH:
-                    logger.critical(f"Fresh content exceeds limit by {excess_fresh} tokens, applying continuous rolling compression")
-                    new_memories, preserved_content = await self._compress_excess_fresh_content(
+                    logger.info(f"Fresh content exceeds limit by {excess_fresh} tokens, applying continuous rolling compression with background support")
+                    new_memories, preserved_content = await self._compress_excess_fresh_content_async(
                         element_id, element_name, available_tools, fresh_content
                     )
                     final_memories.extend(new_memories)
@@ -879,7 +872,7 @@ class CompressionEngineComponent(Component):
                 else:
                     logger.debug(f"Fresh content excess ({excess_fresh}) below minimum batch, preserving")
 
-            # Step 2: Apply continuous memory recompression
+            # Step 2: Apply continuous memory recompression (can be background for non-critical)
             current_memory_tokens = self._calculate_memory_tokens(final_memories)
             if current_memory_tokens > self.FOCUSED_MEMORY_LIMIT:
                 logger.info(f"Memory content exceeds limit by {current_memory_tokens - self.FOCUSED_MEMORY_LIMIT} tokens, applying continuous recompression")
@@ -887,7 +880,6 @@ class CompressionEngineComponent(Component):
                     element_id, element_name, final_memories
                 )
             
-            logger.critical(f"Final memories: {final_memories}")
             # Set final children: memories + preserved fresh content
             container_node['children'] = final_memories + final_content
             
@@ -903,11 +895,27 @@ class CompressionEngineComponent(Component):
             
         except Exception as e:
             logger.error(f"Error applying focused compression: {e}", exc_info=True)
-            # Fallback to simple compression
+            # Fallback to simple compression with background support
             if self._memory_compressor:
-                memory_summary, compression_approach = await self._create_new_agent_memory(
-                    element_id, element_name, available_tools, children, is_focused=True
-                )
+                try:
+                    # Use asynchronous compression for fallback too
+                    result_node = await self._memory_compressor.get_memory_or_fallback(
+                        element_ids=[element_id],
+                        raw_veil_nodes=children,
+                        token_limit=self.FOCUSED_FRESH_LIMIT + self.FOCUSED_MEMORY_LIMIT  # Full focused limit
+                    )
+                    
+                    if result_node:
+                        result_props = result_node.get("properties", {})
+                        memory_summary = result_props.get("memory_summary", f"Rolling compression failed: {len(children)} items from {element_name}")
+                        compression_approach = "rolling_compression_fallback_async"
+                    else:
+                        memory_summary = f"Rolling compression failed: {len(children)} items from {element_name}"
+                        compression_approach = "rolling_compression_fallback"
+                except Exception as fallback_error:
+                    logger.error(f"Async fallback also failed: {fallback_error}", exc_info=True)
+                    memory_summary = f"Rolling compression failed: {len(children)} items from {element_name}"
+                    compression_approach = "rolling_compression_fallback"
             else:
                 memory_summary = f"Rolling compression failed: {len(children)} items from {element_name}"
                 compression_approach = "rolling_compression_fallback"
@@ -932,7 +940,8 @@ class CompressionEngineComponent(Component):
         """
         Apply unfocused compression with strict limits for unfocused elements.
         
-        For unfocused elements: 4k total (everything compressed)
+        NEW: Now uses background compression with intelligent fallbacks to prevent main thread blocking.
+        For unfocused elements: 4k total (everything compressed or trimmed fresh content)
         """
         try:
             if not children:
@@ -941,46 +950,75 @@ class CompressionEngineComponent(Component):
                 compression_approach = "empty_container_unfocused"
                 logger.debug(f"Empty unfocused container {element_id}: no children to compress")
             elif self._memory_compressor:
-                # NEW: Just-in-time content change detection for unfocused elements
-                existing_memory_id = self._memory_compressor.get_memory_for_elements([element_id])
+                # NEW: Use get_memory_or_fallback for asynchronous compression strategy
+                logger.debug(f"Using asynchronous compression strategy for unfocused {element_id} with {len(children)} children")
                 
-                if existing_memory_id:
-                    # Check if content has changed since last compression
-                    content_changed = await self._has_content_changed_since_compression(
-                        element_id, existing_memory_id, children
-                    )
+                # Get memory or trimmed fresh content (non-blocking)
+                result_node = await self._memory_compressor.get_memory_or_fallback(
+                    element_ids=[element_id],
+                    raw_veil_nodes=children,
+                    token_limit=self.UNFOCUSED_TOTAL_LIMIT  # 4k tokens for unfocused
+                )
+                
+                if result_node:
+                    # Check what type of result we got
+                    node_type = result_node.get("node_type", "")
+                    result_props = result_node.get("properties", {})
                     
-                    if content_changed:
-                        logger.info(f"Content changed for unfocused {element_id}, recompressing memory {existing_memory_id}")
-                        # Invalidate and recompress
-                        self._memory_compressor.invalidate_memory(existing_memory_id)
-                        memory_summary, compression_approach = await self._create_new_agent_memory(
-                            element_id, element_name, available_tools, children, is_recompression=True, is_focused=False
-                        )
-                    else:
-                        # Use existing valid memory
-                        logger.debug(f"Content unchanged for unfocused {element_id}, using existing memory")
-                        existing_memory = await self._memory_compressor.load_memory(existing_memory_id)
-                        if existing_memory and existing_memory.get("memorized_node"):
-                            memory_summary = existing_memory["memorized_node"]["properties"].get("memory_summary", "Memory load failed")
-                            compression_approach = "existing_agent_memory_unfocused"
+                    if node_type == "memorized_content":
+                        # We got a completed memory
+                        memory_summary = result_props.get("memory_summary", "Memory content")
+                        compression_approach = "agent_memory_compressor_unfocused_async"
+                        logger.debug(f"Using completed memory for unfocused {element_id}")
+                    
+                    elif node_type in ["fresh_content", "trimmed_fresh_content"]:
+                        # We got fresh content fallback (compression running in background)
+                        is_trimmed = result_props.get("is_trimmed", False)
+                        trimmed_count = result_props.get("trimmed_node_count", len(children))
+                        original_count = result_props.get("original_node_count", len(children))
+                        
+                        if is_trimmed:
+                            memory_summary = f"Recent {trimmed_count} of {original_count} items (compression in progress)"
+                            compression_approach = "trimmed_fresh_content_unfocused_async"
+                            logger.debug(f"Using trimmed fresh content for unfocused {element_id}: {trimmed_count}/{original_count} items")
                         else:
-                            # Fallback if memory load failed
-                            memory_summary = await self._generate_content_summary(children, element_id)
-                            compression_approach = "memory_load_fallback_unfocused"
+                            memory_summary = f"All {len(children)} recent items (compression in progress)"
+                            compression_approach = "fresh_content_unfocused_async"
+                            logger.debug(f"Using full fresh content for unfocused {element_id}")
+                        
+                        # For fresh content, we need to replace the container children with the result
+                        container_node['children'] = result_node.get("children", children)
+                        
+                        # Ensure tool information is preserved
+                        if available_tools:
+                            container_node['properties']['available_tools'] = available_tools
+                            container_node['properties']['tools_available_despite_compression'] = True
+                        
+                        logger.debug(f"Applied fresh content fallback to unfocused container {element_id}")
+                        return  # Early return - content already set
+                    
+                    elif node_type == "compression_placeholder":
+                        # We got a placeholder (compression starting)
+                        memory_summary = result_props.get("memory_summary", "⏳ Processing conversation memory...")
+                        compression_approach = "compression_placeholder_unfocused_async"
+                        logger.debug(f"Using compression placeholder for unfocused {element_id}")
+                    
+                    else:
+                        # Unknown result type, extract summary
+                        memory_summary = result_props.get("memory_summary", f"Content from {element_id}")
+                        compression_approach = f"unknown_result_type_{node_type}_unfocused"
+                        logger.warning(f"Unknown result type {node_type} for unfocused {element_id}")
                 else:
-                    # Create new memory - first time compressing this content
-                    logger.info(f"Creating new AgentMemoryCompressor memory for unfocused container {element_id} with {len(children)} children")
-                    memory_summary, compression_approach = await self._create_new_agent_memory(
-                        element_id, element_name, available_tools, children, is_recompression=False, is_focused=False
-                    )
+                    # No result from memory compressor
+                    memory_summary = f"Content from {element_id} (compression failed)"
+                    compression_approach = "memory_compressor_failed_unfocused"
             else:
                 # Fallback to simple summary if AgentMemoryCompressor not available
                 logger.debug(f"AgentMemoryCompressor not available, using simple summary for unfocused {element_id}")
                 memory_summary = await self._generate_content_summary(children, element_id)
                 compression_approach = "simple_summary_fallback_unfocused"
             
-            # Create content memory node (same structure as before but marked as unfocused)
+            # Create content memory node (for memory results and placeholders)
             memory_node = {
                 "veil_id": f"compressed_{element_id}_{self.id}",
                 "node_type": "content_memory",
@@ -992,8 +1030,9 @@ class CompressionEngineComponent(Component):
                     "original_child_count": len(children),
                     "compression_timestamp": datetime.now().isoformat(),
                     "compression_approach": compression_approach,
-                    "agent_reflected": compression_approach in ["agent_memory_compressor_unfocused", "agent_memory_recompressor_unfocused", "existing_agent_memory_unfocused"],
-                    "is_focused": False  # NEW: Mark as unfocused compression
+                    "agent_reflected": compression_approach.startswith("agent_memory"),
+                    "is_focused": False,  # Mark as unfocused compression
+                    "is_async_compression": "async" in compression_approach  # NEW: Track async compression
                 },
                 "children": []
             }
@@ -1336,23 +1375,13 @@ class CompressionEngineComponent(Component):
         
         return memories, content
 
-    async def _compress_excess_fresh_content(self, element_id: str, element_name: str, available_tools: List[str], 
-                                           fresh_content: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    async def _compress_excess_fresh_content_async(self, element_id: str, element_name: str, available_tools: List[str], 
+                                                  fresh_content: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
-        ENHANCED Phase 2: Continuous rolling compression with token-based chunking.
+        NEW: Enhanced version of fresh content compression with background processing support.
         
-        NEW APPROACH: Instead of waiting for large excess and compressing big batches,
-        we continuously compress 4k token chunks whenever we exceed limits.
-        This maintains more stable context size and better compression quality.
-        
-        Args:
-            element_id: ID of element being compressed
-            element_name: Name of element for context
-            available_tools: Available tools for this element
-            fresh_content: List of fresh (non-memory) VEIL nodes
-            
-        Returns:
-            Tuple of (new_memories, preserved_fresh_content)
+        This version can use background compression for non-critical chunks while maintaining
+        responsive performance for focused elements.
         """
         try:
             if not fresh_content:
@@ -1366,7 +1395,7 @@ class CompressionEngineComponent(Component):
                 logger.debug(f"Excess tokens ({excess_tokens}) below minimum batch size ({self.MIN_COMPRESSION_BATCH})")
                 return [], fresh_content
             
-            logger.info(f"Continuous rolling compression: {excess_tokens} excess tokens from {element_id}")
+            logger.info(f"Continuous rolling compression with async support: {excess_tokens} excess tokens from {element_id}")
             
             new_memories = []
             remaining_content = fresh_content.copy()
@@ -1387,12 +1416,12 @@ class CompressionEngineComponent(Component):
                     logger.warning(f"Cannot find valid token boundary for {element_id}")
                     break
                 
-                # Compress this chunk
+                # Compress this chunk with background support
                 chunk_to_compress = remaining_content[:chunk_boundary]
                 remaining_content = remaining_content[chunk_boundary:]
                 
-                # Create memory from this chunk
-                chunk_memory = await self._create_token_based_memory_chunk(
+                # Create memory from this chunk (can be async for non-critical chunks)
+                chunk_memory = await self._create_token_based_memory_chunk_async(
                     chunk_to_compress, element_id, element_name, available_tools, len(new_memories)
                 )
                 
@@ -1414,294 +1443,62 @@ class CompressionEngineComponent(Component):
             return new_memories, remaining_content
             
         except Exception as e:
-            logger.error(f"Error in continuous rolling compression: {e}", exc_info=True)
+            logger.error(f"Error in async continuous rolling compression: {e}", exc_info=True)
             # Fallback: preserve everything
             return [], fresh_content
 
-    def _find_token_based_boundary(self, children: List[Dict[str, Any]], chunk_tokens: int) -> int:
+    async def _create_token_based_memory_chunk_async(self, content_to_compress: List[Dict[str, Any]], element_id: str, 
+                                                    element_name: str, available_tools: List[str], chunk_index: int) -> Dict[str, Any]:
         """
-        Find where to split content for rolling compression, respecting conversation boundaries.
+        NEW: Enhanced version of memory chunk creation with background compression support.
         
-        ENHANCED: Now respects message boundaries and conversation flow for better compression quality.
-        
-        Strategy:
-        1. Never split individual messages
-        2. Prefer natural conversation breaks (time gaps, topic changes)
-        3. Respect message groupings by same sender
-        4. Fall back to message boundaries if needed
-        
-        Args:
-            children: List of fresh content nodes (should be in chronological order)
-            chunk_tokens: Number of tokens we need to remove
-            
-        Returns:
-            Index where to split (content[0:boundary] gets compressed, content[boundary:] preserved)
-        """
-        try:
-            if not children or chunk_tokens <= 0:
-                return 0
-            
-            # If chunk_tokens is larger than all content, compress most but leave some
-            total_tokens = self._calculate_children_tokens(children)
-            if chunk_tokens >= total_tokens:
-                # Leave at least 25% of content
-                min_preserve = max(1, len(children) // 4)
-                max_boundary = len(children) - min_preserve
-                logger.debug(f"Chunk size ({chunk_tokens}) >= total ({total_tokens}), using max boundary {max_boundary}")
-                return max_boundary
-            
-            tokens_accumulated = 0
-            best_boundary = 0
-            last_conversation_break = 0
-            
-            # Analyze message flow to find natural boundaries
-            for i, content_item in enumerate(children):
-                item_tokens = self._calculate_children_tokens([content_item])
-                tokens_accumulated += item_tokens
-                
-                # Always update boundary to complete messages (never split mid-message)
-                boundary_candidate = i + 1
-                
-                # Check if this is a natural conversation break
-                is_conversation_break = self._is_natural_conversation_break(
-                    children, i, content_item
-                )
-                
-                if is_conversation_break:
-                    last_conversation_break = boundary_candidate
-                    logger.debug(f"Found conversation break at index {i} ({tokens_accumulated} tokens)")
-                
-                # If we've accumulated enough tokens, find the best stopping point
-                if tokens_accumulated >= chunk_tokens:
-                    # Prefer conversation breaks if we found one recently
-                    conversation_break_distance = boundary_candidate - last_conversation_break
-                    
-                    if last_conversation_break > 0 and conversation_break_distance <= 5:
-                        # Use conversation break if it's within 5 messages of target (reduced from 10)
-                        best_boundary = last_conversation_break
-                        logger.debug(f"Using conversation break boundary at {best_boundary} (distance: {conversation_break_distance})")
-                    else:
-                        # Use current message boundary (complete the current message)
-                        best_boundary = boundary_candidate
-                        logger.debug(f"Using message boundary at {best_boundary}")
-                    
-                    break
-            
-            # If we didn't find enough tokens, use what we have but respect limits
-            if best_boundary == 0 and len(children) > 0:
-                # Ensure we don't compress everything (leave at least 25% of content)
-                min_preserve = max(1, len(children) // 4)
-                best_boundary = min(len(children) - min_preserve, len(children) - 1)
-                logger.debug(f"Insufficient tokens for target, using fallback boundary {best_boundary}")
-            
-            # Final safety check - ensure we don't compress everything
-            min_preserve = max(1, len(children) // 4)
-            max_compress = len(children) - min_preserve
-            best_boundary = min(best_boundary, max_compress)
-            
-            final_tokens = self._calculate_children_tokens(children[:best_boundary])
-            logger.debug(f"Smart boundary: compress {best_boundary}/{len(children)} messages ({final_tokens} tokens)")
-            
-            return best_boundary
-            
-        except Exception as e:
-            logger.error(f"Error finding smart token-based boundary: {e}", exc_info=True)
-            # Fallback: compress half, ensuring message boundaries
-            return len(children) // 2
-
-    def _is_natural_conversation_break(self, children: List[Dict[str, Any]], current_index: int, 
-                                     current_item: Dict[str, Any]) -> bool:
-        """
-        Determine if there's a natural conversation break at this point.
-        
-        Natural breaks include:
-        - Time gaps between messages (>1 hour)
-        - Topic changes (different keywords/context)
-        - Sender changes after long messages
-        - Attachment boundaries (before/after attachments)
-        
-        Args:
-            children: Full list of content items
-            current_index: Index of current item being evaluated
-            current_item: The current content item
-            
-        Returns:
-            True if this is a good place for a conversation break
-        """
-        try:
-            props = current_item.get("properties", {})
-            content_nature = props.get("content_nature", "")
-            
-            # Only analyze chat messages for conversation breaks
-            if content_nature != "chat_message":
-                return False
-            
-            # Time-based breaks: look for gaps >1 hour
-            time_break = self._check_time_gap_break(children, current_index)
-            if time_break:
-                return True
-            
-            # Sender-based breaks: new speaker after substantial content
-            sender_break = self._check_sender_change_break(children, current_index)
-            if sender_break:
-                return True
-            
-            # Attachment boundaries: before/after attachments
-            attachment_break = self._check_attachment_boundary_break(children, current_index)
-            if attachment_break:
-                return True
-            
-            return False
-            
-        except Exception as e:
-            logger.debug(f"Error checking conversation break: {e}")
-            return False
-
-    def _check_time_gap_break(self, children: List[Dict[str, Any]], current_index: int) -> bool:
-        """Check for significant time gaps between messages."""
-        try:
-            if current_index == 0:
-                return True  # Beginning is always a good break
-            
-            current_props = children[current_index].get("properties", {})
-            prev_props = children[current_index - 1].get("properties", {})
-            
-            current_time = current_props.get("timestamp_iso")
-            prev_time = prev_props.get("timestamp_iso")
-            
-            if not current_time or not prev_time:
-                return False
-            
-            # Parse timestamps and check for gaps
-            from datetime import datetime, timedelta
-            
-            try:
-                if isinstance(current_time, str):
-                    current_dt = datetime.fromisoformat(current_time.replace('Z', '+00:00'))
-                else:
-                    current_dt = datetime.fromtimestamp(current_time)
-                
-                if isinstance(prev_time, str):
-                    prev_dt = datetime.fromisoformat(prev_time.replace('Z', '+00:00'))
-                else:
-                    prev_dt = datetime.fromtimestamp(prev_time)
-                
-                time_gap = current_dt - prev_dt
-                
-                # Consider >1 hour as a conversation break
-                if time_gap > timedelta(hours=1):
-                    logger.debug(f"Time gap break: {time_gap} between messages")
-                    return True
-                    
-            except (ValueError, TypeError):
-                pass  # Invalid timestamp format
-            
-            return False
-            
-        except Exception as e:
-            logger.debug(f"Error checking time gap: {e}")
-            return False
-
-    def _check_sender_change_break(self, children: List[Dict[str, Any]], current_index: int) -> bool:
-        """Check for sender changes after substantial content blocks."""
-        try:
-            if current_index == 0:
-                return True  # First message is always a break
-            
-            current_props = children[current_index].get("properties", {})
-            current_sender = current_props.get("sender_name", "")
-            
-            # Check if sender actually changed
-            prev_props = children[current_index - 1].get("properties", {})
-            prev_sender = prev_props.get("sender_name", "")
-            
-            if current_sender == prev_sender:
-                return False  # Same sender, not a break
-            
-            # Look back to see how much content the previous sender had
-            consecutive_messages = 0
-            total_chars = 0
-            
-            for i in range(current_index - 1, -1, -1):
-                check_props = children[i].get("properties", {})
-                check_sender = check_props.get("sender_name", "")
-                
-                if check_sender != prev_sender:
-                    break
-                
-                consecutive_messages += 1
-                total_chars += len(check_props.get("text_content", ""))
-            
-            # Consider it a break only if the previous sender had substantial content:
-            # - 3+ consecutive messages OR
-            # - >500 characters of content
-            if consecutive_messages >= 3 or total_chars > 500:
-                logger.debug(f"Sender change break: {prev_sender} → {current_sender} after {consecutive_messages} messages ({total_chars} chars)")
-                return True
-            
-            return False
-            
-        except Exception as e:
-            logger.debug(f"Error checking sender change: {e}")
-            return False
-
-    def _check_attachment_boundary_break(self, children: List[Dict[str, Any]], current_index: int) -> bool:
-        """Check for attachment boundaries (before/after attachments)."""
-        try:
-            current_props = children[current_index].get("properties", {})
-            current_attachments = current_props.get("attachment_metadata", [])
-            
-            # Current message has attachments - check if previous didn't
-            if current_attachments and current_index > 0:
-                prev_props = children[current_index - 1].get("properties", {})
-                prev_attachments = prev_props.get("attachment_metadata", [])
-                
-                if not prev_attachments:
-                    logger.debug(f"Attachment boundary break: message {current_index} introduces attachments")
-                    return True
-            
-            # Previous message had attachments - check if current doesn't
-            if not current_attachments and current_index > 0:
-                prev_props = children[current_index - 1].get("properties", {})
-                prev_attachments = prev_props.get("attachment_metadata", [])
-                
-                if prev_attachments:
-                    logger.debug(f"Attachment boundary break: message {current_index} ends attachment sequence")
-                    return True
-            
-            return False
-            
-        except Exception as e:
-            logger.debug(f"Error checking attachment boundary: {e}")
-            return False
-
-    async def _create_token_based_memory_chunk(self, content_to_compress: List[Dict[str, Any]], element_id: str, 
-                                              element_name: str, available_tools: List[str], chunk_index: int) -> Dict[str, Any]:
-        """
-        Create a memory chunk from content that needs to be compressed.
-        
-        Strategy: Break large content into optimal-sized chunks for better memory formation.
-        Each chunk should be meaningful and not exceed our memory token limits.
-        
-        Args:
-            content_to_compress: Content nodes to compress into a memory
-            element_id: ID of element for context
-            element_name: Name of element for context
-            available_tools: Available tools for context
-            chunk_index: Index of this chunk
-            
-        Returns:
-            Single memory VEIL node
+        For focused elements, we can use background compression for older chunks
+        while keeping recent chunks responsive.
         """
         try:
             if not content_to_compress:
                 return None
             
-            # For now, create one memory per reasonable chunk
-            # Future enhancement: intelligently group related content
-            chunk_size = min(10, len(content_to_compress))  # Max 10 items per memory
+            # Determine if this chunk should use background compression
+            # For focused elements, we can afford some background processing for older chunks
+            use_background = chunk_index > 0  # First chunk synchronous, others can be background
             
-            # Create memory for this chunk using AgentMemoryCompressor
+            if self._memory_compressor and use_background:
+                # Use the new async compression strategy
+                chunk_element_id = f"{element_id}_chunk_{chunk_index}"
+                
+                result_node = await self._memory_compressor.get_memory_or_fallback(
+                    element_ids=[chunk_element_id],
+                    raw_veil_nodes=content_to_compress,
+                    token_limit=self.COMPRESSION_CHUNK_SIZE
+                )
+                
+                if result_node:
+                    # Convert result to memory node format
+                    result_props = result_node.get("properties", {})
+                    memory_summary = result_props.get("memory_summary", f"Memory chunk {chunk_index + 1}: {len(content_to_compress)} items from {element_name}")
+                    
+                    memory_node = {
+                        "veil_id": f"rolling_memory_{element_id}_{chunk_index}_{self.id}",
+                        "node_type": "content_memory",
+                        "properties": {
+                            "structural_role": "compressed_content",
+                            "content_nature": "content_memory",
+                            "original_element_id": element_id,
+                            "memory_summary": memory_summary,
+                            "original_child_count": len(content_to_compress),
+                            "compression_timestamp": datetime.now().isoformat(),
+                            "compression_approach": "rolling_compression_async",
+                            "is_focused": True,
+                            "is_rolling_memory": True,
+                            "chunk_index": chunk_index,
+                            "is_async_compression": True
+                        },
+                        "children": []
+                    }
+                    return memory_node
+            
+            # Fallback to synchronous compression or simple summary
             if self._memory_compressor:
                 memory_summary, compression_approach = await self._create_new_agent_memory(
                     f"{element_id}_chunk_{chunk_index}", element_name, available_tools, content_to_compress, 
@@ -1725,7 +1522,7 @@ class CompressionEngineComponent(Component):
                     "compression_timestamp": datetime.now().isoformat(),
                     "compression_approach": compression_approach,
                     "is_focused": True,
-                    "is_rolling_memory": True,  # Mark as rolling compression result
+                    "is_rolling_memory": True,
                     "chunk_index": chunk_index
                 },
                 "children": []
@@ -1734,7 +1531,7 @@ class CompressionEngineComponent(Component):
             return memory_node
             
         except Exception as e:
-            logger.error(f"Error creating token-based memory chunk: {e}", exc_info=True)
+            logger.error(f"Error creating async token-based memory chunk: {e}", exc_info=True)
             return None
 
     async def _recompress_excess_memories(self, element_id: str, element_name: str, 
@@ -2018,3 +1815,334 @@ class CompressionEngineComponent(Component):
             
             # Rough estimate: 4 characters per token
             return total_chars // 4 
+
+    def _create_trimmed_fresh_content(self, 
+                                    raw_veil_nodes: List[Dict[str, Any]], 
+                                    element_ids: List[str], 
+                                    token_limit: int) -> Dict[str, Any]:
+        """
+        NEW: Create a trimmed version of fresh content that fits within token limits.
+        
+        This provides immediate context while compression runs in background.
+        """
+        try:
+            if not raw_veil_nodes:
+                return self._create_compression_placeholder("empty", element_ids, [])
+            
+            # Calculate total tokens
+            total_tokens = estimate_veil_tokens(raw_veil_nodes)
+            
+            if total_tokens <= token_limit:
+                # Content fits within limit, return as-is but mark as fresh
+                return {
+                    "veil_id": f"fresh_content_{element_ids[0] if element_ids else 'unknown'}",
+                    "node_type": "fresh_content",
+                    "properties": {
+                        "structural_role": "container",
+                        "content_nature": "fresh_content",
+                        "element_id": element_ids[0] if element_ids else "unknown",
+                        "is_fresh_content": True,
+                        "total_tokens": total_tokens,
+                        "token_limit": token_limit
+                    },
+                    "children": raw_veil_nodes
+                }
+            
+            # Content exceeds limit, trim to most recent content
+            trimmed_nodes = []
+            current_tokens = 0
+            
+            # Process nodes in reverse order (newest first)
+            for node in reversed(raw_veil_nodes):
+                node_tokens = estimate_veil_tokens([node])
+                if current_tokens + node_tokens <= token_limit:
+                    trimmed_nodes.insert(0, node)  # Insert at beginning to maintain order
+                    current_tokens += node_tokens
+                else:
+                    break
+            
+            if not trimmed_nodes:
+                # Even single node exceeds limit, take the newest one anyway
+                trimmed_nodes = [raw_veil_nodes[-1]]
+                current_tokens = estimate_veil_tokens(trimmed_nodes)
+            
+            logger.debug(f"Trimmed content: {len(raw_veil_nodes)} → {len(trimmed_nodes)} nodes, {total_tokens} → {current_tokens} tokens")
+            
+            return {
+                "veil_id": f"trimmed_fresh_{element_ids[0] if element_ids else 'unknown'}",
+                "node_type": "trimmed_fresh_content",
+                "properties": {
+                    "structural_role": "container",
+                    "content_nature": "trimmed_fresh_content",
+                    "element_id": element_ids[0] if element_ids else "unknown",
+                    "is_fresh_content": True,
+                    "is_trimmed": True,
+                    "total_tokens": current_tokens,
+                    "token_limit": token_limit,
+                    "original_node_count": len(raw_veil_nodes),
+                    "trimmed_node_count": len(trimmed_nodes),
+                    "trimming_note": f"Showing {len(trimmed_nodes)} most recent items (compression in progress)"
+                },
+                "children": trimmed_nodes
+            }
+            
+        except Exception as e:
+            logger.error(f"Error creating trimmed fresh content: {e}", exc_info=True)
+            return self._create_compression_placeholder("trimming_error", element_ids, raw_veil_nodes)
+
+    def _find_token_based_boundary(self, children: List[Dict[str, Any]], chunk_tokens: int) -> int:
+        """
+        Find where to split content for rolling compression, respecting conversation boundaries.
+        
+        ENHANCED: Now respects message boundaries and conversation flow for better compression quality.
+        
+        Strategy:
+        1. Never split individual messages
+        2. Prefer natural conversation breaks (time gaps, topic changes)
+        3. Respect message groupings by same sender
+        4. Fall back to message boundaries if needed
+        
+        Args:
+            children: List of fresh content nodes (should be in chronological order)
+            chunk_tokens: Number of tokens we need to remove
+            
+        Returns:
+            Index where to split (content[0:boundary] gets compressed, content[boundary:] preserved)
+        """
+        try:
+            if not children or chunk_tokens <= 0:
+                return 0
+            
+            # If chunk_tokens is larger than all content, compress most but leave some
+            total_tokens = self._calculate_children_tokens(children)
+            if chunk_tokens >= total_tokens:
+                # Leave at least 25% of content
+                min_preserve = max(1, len(children) // 4)
+                max_boundary = len(children) - min_preserve
+                logger.debug(f"Chunk size ({chunk_tokens}) >= total ({total_tokens}), using max boundary {max_boundary}")
+                return max_boundary
+            
+            tokens_accumulated = 0
+            best_boundary = 0
+            last_conversation_break = 0
+            
+            # Analyze message flow to find natural boundaries
+            for i, content_item in enumerate(children):
+                item_tokens = self._calculate_children_tokens([content_item])
+                tokens_accumulated += item_tokens
+                
+                # Always update boundary to complete messages (never split mid-message)
+                boundary_candidate = i + 1
+                
+                # Check if this is a natural conversation break
+                is_conversation_break = self._is_natural_conversation_break(
+                    children, i, content_item
+                )
+                
+                if is_conversation_break:
+                    last_conversation_break = boundary_candidate
+                    logger.debug(f"Found conversation break at index {i} ({tokens_accumulated} tokens)")
+                
+                # If we've accumulated enough tokens, find the best stopping point
+                if tokens_accumulated >= chunk_tokens:
+                    # Prefer conversation breaks if we found one recently
+                    conversation_break_distance = boundary_candidate - last_conversation_break
+                    
+                    if last_conversation_break > 0 and conversation_break_distance <= 5:
+                        # Use conversation break if it's within 5 messages of target (reduced from 10)
+                        best_boundary = last_conversation_break
+                        logger.debug(f"Using conversation break boundary at {best_boundary} (distance: {conversation_break_distance})")
+                    else:
+                        # Use current message boundary (complete the current message)
+                        best_boundary = boundary_candidate
+                        logger.debug(f"Using message boundary at {best_boundary}")
+                    
+                    break
+            
+            # If we didn't find enough tokens, use what we have but respect limits
+            if best_boundary == 0 and len(children) > 0:
+                # Ensure we don't compress everything (leave at least 25% of content)
+                min_preserve = max(1, len(children) // 4)
+                best_boundary = min(len(children) - min_preserve, len(children) - 1)
+                logger.debug(f"Insufficient tokens for target, using fallback boundary {best_boundary}")
+            
+            # Final safety check - ensure we don't compress everything
+            min_preserve = max(1, len(children) // 4)
+            max_compress = len(children) - min_preserve
+            best_boundary = min(best_boundary, max_compress)
+            
+            final_tokens = self._calculate_children_tokens(children[:best_boundary])
+            logger.debug(f"Smart boundary: compress {best_boundary}/{len(children)} messages ({final_tokens} tokens)")
+            
+            return best_boundary
+            
+        except Exception as e:
+            logger.error(f"Error finding smart token-based boundary: {e}", exc_info=True)
+            # Fallback: compress half, ensuring message boundaries
+            return len(children) // 2
+
+    def _is_natural_conversation_break(self, children: List[Dict[str, Any]], current_index: int, 
+                                     current_item: Dict[str, Any]) -> bool:
+        """
+        Determine if there's a natural conversation break at this point.
+        
+        Natural breaks include:
+        - Time gaps between messages (>1 hour)
+        - Topic changes (different keywords/context)
+        - Sender changes after long messages
+        - Attachment boundaries (before/after attachments)
+        
+        Args:
+            children: Full list of content items
+            current_index: Index of current item being evaluated
+            current_item: The current content item
+            
+        Returns:
+            True if this is a good place for a conversation break
+        """
+        try:
+            props = current_item.get("properties", {})
+            content_nature = props.get("content_nature", "")
+            
+            # Only analyze chat messages for conversation breaks
+            if content_nature != "chat_message":
+                return False
+            
+            # Time-based breaks: look for gaps >1 hour
+            time_break = self._check_time_gap_break(children, current_index)
+            if time_break:
+                return True
+            
+            # Sender-based breaks: new speaker after substantial content
+            sender_break = self._check_sender_change_break(children, current_index)
+            if sender_break:
+                return True
+            
+            # Attachment boundaries: before/after attachments
+            attachment_break = self._check_attachment_boundary_break(children, current_index)
+            if attachment_break:
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.debug(f"Error checking conversation break: {e}")
+            return False
+
+    def _check_time_gap_break(self, children: List[Dict[str, Any]], current_index: int) -> bool:
+        """Check for significant time gaps between messages."""
+        try:
+            if current_index == 0:
+                return True  # Beginning is always a good break
+            
+            current_props = children[current_index].get("properties", {})
+            prev_props = children[current_index - 1].get("properties", {})
+            
+            current_time = current_props.get("timestamp_iso")
+            prev_time = prev_props.get("timestamp_iso")
+            
+            if not current_time or not prev_time:
+                return False
+            
+            # Parse timestamps and check for gaps
+            from datetime import datetime, timedelta
+            
+            try:
+                if isinstance(current_time, str):
+                    current_dt = datetime.fromisoformat(current_time.replace('Z', '+00:00'))
+                else:
+                    current_dt = datetime.fromtimestamp(current_time)
+                
+                if isinstance(prev_time, str):
+                    prev_dt = datetime.fromisoformat(prev_time.replace('Z', '+00:00'))
+                else:
+                    prev_dt = datetime.fromtimestamp(prev_time)
+                
+                time_gap = current_dt - prev_dt
+                
+                # Consider >1 hour as a conversation break
+                if time_gap > timedelta(hours=1):
+                    logger.debug(f"Time gap break: {time_gap} between messages")
+                    return True
+                    
+            except (ValueError, TypeError):
+                pass  # Invalid timestamp format
+            
+            return False
+            
+        except Exception as e:
+            logger.debug(f"Error checking time gap: {e}")
+            return False
+
+    def _check_sender_change_break(self, children: List[Dict[str, Any]], current_index: int) -> bool:
+        """Check for sender changes after substantial content blocks."""
+        try:
+            if current_index == 0:
+                return True  # First message is always a break
+            
+            current_props = children[current_index].get("properties", {})
+            current_sender = current_props.get("sender_name", "")
+            
+            # Check if sender actually changed
+            prev_props = children[current_index - 1].get("properties", {})
+            prev_sender = prev_props.get("sender_name", "")
+            
+            if current_sender == prev_sender:
+                return False  # Same sender, not a break
+            
+            # Look back to see how much content the previous sender had
+            consecutive_messages = 0
+            total_chars = 0
+            
+            for i in range(current_index - 1, -1, -1):
+                check_props = children[i].get("properties", {})
+                check_sender = check_props.get("sender_name", "")
+                
+                if check_sender != prev_sender:
+                    break
+                
+                consecutive_messages += 1
+                total_chars += len(check_props.get("text_content", ""))
+            
+            # Consider it a break only if the previous sender had substantial content:
+            # - 3+ consecutive messages OR
+            # - >500 characters of content
+            if consecutive_messages >= 3 or total_chars > 500:
+                logger.debug(f"Sender change break: {prev_sender} → {current_sender} after {consecutive_messages} messages ({total_chars} chars)")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.debug(f"Error checking sender change: {e}")
+            return False
+
+    def _check_attachment_boundary_break(self, children: List[Dict[str, Any]], current_index: int) -> bool:
+        """Check for attachment boundaries (before/after attachments)."""
+        try:
+            current_props = children[current_index].get("properties", {})
+            current_attachments = current_props.get("attachment_metadata", [])
+            
+            # Current message has attachments - check if previous didn't
+            if current_attachments and current_index > 0:
+                prev_props = children[current_index - 1].get("properties", {})
+                prev_attachments = prev_props.get("attachment_metadata", [])
+                
+                if not prev_attachments:
+                    logger.debug(f"Attachment boundary break: message {current_index} introduces attachments")
+                    return True
+            
+            # Previous message had attachments - check if current doesn't
+            if not current_attachments and current_index > 0:
+                prev_props = children[current_index - 1].get("properties", {})
+                prev_attachments = prev_props.get("attachment_metadata", [])
+                
+                if prev_attachments:
+                    logger.debug(f"Attachment boundary break: message {current_index} ends attachment sequence")
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            logger.debug(f"Error checking attachment boundary: {e}")
+            return False 

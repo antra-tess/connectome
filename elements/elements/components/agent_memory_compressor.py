@@ -3,6 +3,8 @@ AgentMemoryCompressor - Concrete Implementation
 
 A concrete implementation of MemoryCompressor designed for agent memory management.
 Features agent self-memorization via LLM reflection, file-based storage, and intelligent summarization.
+
+ENHANCED: Now supports asynchronous background compression to prevent main thread blocking.
 """
 
 import asyncio
@@ -10,7 +12,10 @@ import logging
 import json
 import os
 import aiofiles
-from typing import Dict, List, Any, Optional
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Any, Optional, Set
 from datetime import datetime
 
 from .memory_compressor_interface import MemoryCompressor, estimate_veil_tokens
@@ -26,6 +31,8 @@ class AgentMemoryCompressor(MemoryCompressor):
     - Agent decides what to remember from its perspective
     - File-based persistent storage with agent scoping
     - Intelligent, adaptive memory formation
+    - NEW: Asynchronous background compression to prevent main thread blocking
+    - NEW: Intelligent fallbacks when compression is still in progress
     """
     
     def __init__(self, agent_id: str, token_limit: int = 4000, storage_base_path: str = "storage_data/memory_storage", llm_provider=None):
@@ -47,7 +54,13 @@ class AgentMemoryCompressor(MemoryCompressor):
         # Ensure storage directory exists
         os.makedirs(agent_storage_path, exist_ok=True)
         
-        logger.info(f"AgentMemoryCompressor initialized for agent {agent_id}")
+        # NEW: Background compression tracking
+        self._compression_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix=f"MemComp_{agent_id}")
+        self._active_compressions: Set[str] = set()  # Memory IDs currently being compressed
+        self._compression_futures: Dict[str, asyncio.Future] = {}  # Future objects for tracking
+        self._compression_lock = threading.Lock()  # Thread-safe access to tracking structures
+        
+        logger.info(f"AgentMemoryCompressor initialized for agent {agent_id} with background compression")
     
     def set_llm_provider(self, llm_provider):
         """Set the LLM provider for agent reflection."""
@@ -61,7 +74,155 @@ class AgentMemoryCompressor(MemoryCompressor):
         """
         Compress VEIL nodes using agent self-memorization.
         
-        The agent reflects on the experience and creates its own memory summary.
+        NEW: This now supports both synchronous and asynchronous compression modes.
+        If immediate compression is needed, it runs synchronously.
+        If background compression is preferred, it starts the process and returns a placeholder.
+        """
+        try:
+            # Generate memory ID first to check for existing memories
+            memory_id = self._generate_memory_id(element_ids)
+            
+            # Check if we already have a memory for these elements
+            existing_memory = await self.load_memory(memory_id)
+            if existing_memory and existing_memory.get("memorized_node"):
+                logger.debug(f"Using existing memory {memory_id} for elements {element_ids}")
+                return existing_memory["memorized_node"]
+            
+            # Check if compression is already in progress
+            with self._compression_lock:
+                if memory_id in self._active_compressions:
+                    logger.debug(f"Compression already in progress for {memory_id}, returning placeholder")
+                    return self._create_compression_placeholder(memory_id, element_ids, raw_veil_nodes)
+            
+            # Determine compression mode based on context
+            use_background = compression_context.get("use_background_compression", True) if compression_context else True
+            is_urgent = compression_context.get("is_urgent", False) if compression_context else False
+            
+            if use_background and not is_urgent:
+                # Start background compression
+                return await self._start_background_compression(memory_id, raw_veil_nodes, element_ids, compression_context)
+            else:
+                # Run synchronous compression
+                logger.info(f"Running synchronous compression for {memory_id} (urgent={is_urgent})")
+                return await self._compress_synchronously(raw_veil_nodes, element_ids, compression_context)
+                
+        except Exception as e:
+            logger.error(f"Error in agent memory compression: {e}", exc_info=True)
+            # Fallback to basic compression
+            return await self._fallback_compression(raw_veil_nodes, element_ids, compression_context)
+    
+    async def _start_background_compression(self, 
+                                          memory_id: str,
+                                          raw_veil_nodes: List[Dict[str, Any]], 
+                                          element_ids: List[str],
+                                          compression_context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        NEW: Start background compression and return a placeholder immediately.
+        
+        This prevents main thread blocking during compression while ensuring
+        the rendering system has something to work with.
+        """
+        try:
+            # Mark compression as active
+            with self._compression_lock:
+                self._active_compressions.add(memory_id)
+            
+            # Create placeholder for immediate use
+            placeholder = self._create_compression_placeholder(memory_id, element_ids, raw_veil_nodes)
+            
+            # Start background compression task
+            compression_task = asyncio.create_task(
+                self._compress_in_background(memory_id, raw_veil_nodes, element_ids, compression_context)
+            )
+            
+            # Track the future
+            with self._compression_lock:
+                self._compression_futures[memory_id] = compression_task
+            
+            logger.info(f"Started background compression for {memory_id}, returning placeholder")
+            return placeholder
+            
+        except Exception as e:
+            # Clean up tracking on error
+            with self._compression_lock:
+                self._active_compressions.discard(memory_id)
+                self._compression_futures.pop(memory_id, None)
+            logger.error(f"Error starting background compression: {e}", exc_info=True)
+            # Fallback to synchronous
+            return await self._compress_synchronously(raw_veil_nodes, element_ids, compression_context)
+    
+    async def _compress_in_background(self, 
+                                    memory_id: str,
+                                    raw_veil_nodes: List[Dict[str, Any]], 
+                                    element_ids: List[str],
+                                    compression_context: Optional[Dict[str, Any]]) -> None:
+        """
+        NEW: Execute compression in a background thread to avoid blocking main thread.
+        
+        This runs the actual LLM-based compression asynchronously and stores the result.
+        """
+        try:
+            start_time = time.time()
+            logger.info(f"Background compression started for {memory_id}")
+            
+            # Run compression in thread pool to avoid blocking
+            loop = asyncio.get_event_loop()
+            memorized_node = await loop.run_in_executor(
+                self._compression_executor,
+                self._run_compression_in_thread,
+                raw_veil_nodes, element_ids, compression_context
+            )
+            
+            if memorized_node:
+                # Store the completed memory
+                memory_data = {
+                    "memory_summary": memorized_node["properties"]["memory_summary"],
+                    "metadata": memorized_node["properties"].get("compression_metadata", {}),
+                    "memorized_node": memorized_node
+                }
+                
+                await self._store_memory_to_file(memory_id, memory_data)
+                
+                # Update correlations
+                self.add_correlation(element_ids, memory_id)
+                
+                elapsed = time.time() - start_time
+                logger.info(f"Background compression completed for {memory_id} in {elapsed:.1f}s")
+            else:
+                logger.warning(f"Background compression failed for {memory_id}")
+            
+        except Exception as e:
+            logger.error(f"Error in background compression for {memory_id}: {e}", exc_info=True)
+        finally:
+            # Clean up tracking
+            with self._compression_lock:
+                self._active_compressions.discard(memory_id)
+                self._compression_futures.pop(memory_id, None)
+    
+    def _run_compression_in_thread(self, 
+                                 raw_veil_nodes: List[Dict[str, Any]], 
+                                 element_ids: List[str],
+                                 compression_context: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """
+        NEW: Thread-safe wrapper for running compression synchronously in background thread.
+        
+        This isolates the LLM calls and heavy processing from the main async event loop.
+        """
+        try:
+            # Run synchronous version of compression logic
+            return asyncio.run(self._compress_synchronously(raw_veil_nodes, element_ids, compression_context))
+        except Exception as e:
+            logger.error(f"Error in thread compression: {e}", exc_info=True)
+            return None
+    
+    async def _compress_synchronously(self, 
+                                    raw_veil_nodes: List[Dict[str, Any]], 
+                                    element_ids: List[str],
+                                    compression_context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        NEW: Synchronous compression method (extracted from original compress_nodes).
+        
+        This contains the original compression logic for cases where immediate results are needed.
         """
         try:
             if not self.llm_provider:
@@ -95,8 +256,8 @@ class AgentMemoryCompressor(MemoryCompressor):
                 "compressor_type": self.__class__.__name__,
                 "compression_context": compression_context or {},
                 "content_fingerprint": compression_context.get("content_fingerprint") if compression_context else None,
-                "has_multimodal_content": len(attachments) > 0,  # NEW: Structural detection
-                "attachment_count": len(attachments)  # NEW: Track attachment count
+                "has_multimodal_content": len(attachments) > 0,
+                "attachment_count": len(attachments)
             }
             
             # Generate memory ID
@@ -138,10 +299,318 @@ class AgentMemoryCompressor(MemoryCompressor):
             return memorized_node
             
         except Exception as e:
-            logger.error(f"Error in agent memory compression: {e}", exc_info=True)
+            logger.error(f"Error in synchronous agent memory compression: {e}", exc_info=True)
             # Fallback to basic compression
             return await self._fallback_compression(raw_veil_nodes, element_ids, compression_context)
     
+    def _create_compression_placeholder(self, 
+                                      memory_id: str, 
+                                      element_ids: List[str], 
+                                      raw_veil_nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        NEW: Create a placeholder memory node while compression is in progress.
+        
+        This provides a fallback representation that can be used immediately
+        while the actual compression runs in the background.
+        """
+        try:
+            # Count tokens for placeholder metadata
+            total_tokens = estimate_veil_tokens(raw_veil_nodes)
+            
+            # Create intelligent fallback summary
+            placeholder_summary = self._create_quick_fallback_summary(raw_veil_nodes, element_ids)
+            
+            # Create placeholder node
+            placeholder_node = {
+                "veil_id": f"placeholder_{memory_id}",
+                "node_type": "compression_placeholder",
+                "properties": {
+                    "structural_role": "compressed_content",
+                    "content_nature": "compression_placeholder",
+                    "memory_id": memory_id,
+                    "memory_summary": f"⏳ {placeholder_summary}",
+                    "original_element_ids": element_ids,
+                    "original_node_count": len(raw_veil_nodes),
+                    "token_count": total_tokens,
+                    "compression_timestamp": datetime.now().isoformat(),
+                    "compressor_type": f"{self.__class__.__name__}_placeholder",
+                    "is_placeholder": True,
+                    "compression_status": "in_progress"
+                },
+                "children": []
+            }
+            
+            logger.debug(f"Created compression placeholder for {memory_id}: {placeholder_summary}")
+            return placeholder_node
+            
+        except Exception as e:
+            logger.error(f"Error creating compression placeholder: {e}", exc_info=True)
+            # Ultra-simple fallback
+            return {
+                "veil_id": f"error_placeholder_{memory_id}",
+                "node_type": "compression_placeholder",
+                "properties": {
+                    "memory_summary": "⏳ Processing conversation memory...",
+                    "is_placeholder": True,
+                    "compression_status": "in_progress"
+                },
+                "children": []
+            }
+    
+    def _create_quick_fallback_summary(self, raw_veil_nodes: List[Dict[str, Any]], element_ids: List[str]) -> str:
+        """
+        NEW: Create a fast, lightweight summary for placeholder use.
+        
+        This provides immediate context without expensive LLM calls.
+        """
+        try:
+            message_count = 0
+            participants = set()
+            has_attachments = False
+            
+            for node in raw_veil_nodes:
+                props = node.get("properties", {})
+                if props.get("content_nature") == "chat_message":
+                    message_count += 1
+                    sender = props.get("sender_name")
+                    if sender:
+                        participants.add(sender)
+                    
+                    # Check for attachments
+                    if props.get("attachment_metadata"):
+                        has_attachments = True
+                
+                # Also check for attachment content nodes
+                if node.get("node_type") == "attachment_content_item":
+                    has_attachments = True
+            
+            # Build quick summary
+            if message_count > 0:
+                if len(participants) <= 2:
+                    summary = f"Conversation with {', '.join(list(participants)[:2])}: {message_count} messages"
+                else:
+                    summary = f"Group conversation ({len(participants)} participants): {message_count} messages"
+                
+                if has_attachments:
+                    summary += " (with attachments)"
+            else:
+                summary = f"Content from {', '.join(element_ids)}"
+                if has_attachments:
+                    summary += " with attachments"
+            
+            return summary
+            
+        except Exception as e:
+            logger.error(f"Error creating quick fallback summary: {e}", exc_info=True)
+            return f"Content from {', '.join(element_ids)}"
+    
+    async def check_compression_status(self, memory_id: str) -> Dict[str, Any]:
+        """
+        NEW: Check the status of a background compression.
+        
+        Returns status information including whether compression is complete,
+        in progress, or failed.
+        """
+        try:
+            # Check if memory file exists (compression complete)
+            existing_memory = await self.load_memory(memory_id)
+            if existing_memory:
+                return {
+                    "status": "complete",
+                    "memory_available": True,
+                    "memory_id": memory_id
+                }
+            
+            # Check if compression is in progress
+            with self._compression_lock:
+                if memory_id in self._active_compressions:
+                    future = self._compression_futures.get(memory_id)
+                    if future and not future.done():
+                        return {
+                            "status": "in_progress",
+                            "memory_available": False,
+                            "memory_id": memory_id
+                        }
+                    elif future and future.done():
+                        # Compression finished, check result
+                        try:
+                            future.result()  # This will raise if there was an exception
+                            return {
+                                "status": "complete",
+                                "memory_available": True,
+                                "memory_id": memory_id
+                            }
+                        except Exception as e:
+                            logger.error(f"Background compression failed for {memory_id}: {e}")
+                            return {
+                                "status": "failed",
+                                "memory_available": False,
+                                "memory_id": memory_id,
+                                "error": str(e)
+                            }
+            
+            # No compression in progress and no memory file
+            return {
+                "status": "not_started",
+                "memory_available": False,
+                "memory_id": memory_id
+            }
+            
+        except Exception as e:
+            logger.error(f"Error checking compression status for {memory_id}: {e}", exc_info=True)
+            return {
+                "status": "error",
+                "memory_available": False,
+                "memory_id": memory_id,
+                "error": str(e)
+            }
+    
+    async def get_memory_or_fallback(self, 
+                                   element_ids: List[str], 
+                                   raw_veil_nodes: Optional[List[Dict[str, Any]]] = None,
+                                   token_limit: int = 4000) -> Dict[str, Any]:
+        """
+        NEW: Get compressed memory if available, otherwise return intelligently trimmed content.
+        
+        This is the key method for the new compression strategy:
+        1. Check for existing memory
+        2. If no memory and compression not started, start background compression
+        3. Return either memory or trimmed fresh content based on availability
+        
+        Args:
+            element_ids: List of element IDs to get memory for
+            raw_veil_nodes: Fresh content to use as fallback (if provided)
+            token_limit: Token limit for fresh content fallback
+            
+        Returns:
+            Either compressed memory node or trimmed fresh content node
+        """
+        try:
+            memory_id = self._generate_memory_id(element_ids)
+            
+            # First priority: Check for existing complete memory
+            existing_memory = await self.load_memory(memory_id)
+            if existing_memory and existing_memory.get("memorized_node"):
+                logger.debug(f"Using existing memory for elements {element_ids}")
+                return existing_memory["memorized_node"]
+            
+            # Second priority: Check compression status
+            status = await self.check_compression_status(memory_id)
+            
+            if status["status"] == "complete" and status["memory_available"]:
+                # Memory just became available
+                memory = await self.load_memory(memory_id)
+                if memory and memory.get("memorized_node"):
+                    logger.debug(f"Using newly available memory for elements {element_ids}")
+                    return memory["memorized_node"]
+            
+            # Third priority: Use fresh content fallback
+            if raw_veil_nodes:
+                logger.debug(f"Using fresh content fallback for elements {element_ids} (status: {status['status']})")
+                
+                # Start background compression if not already started
+                if status["status"] == "not_started":
+                    # Start background compression for next time
+                    asyncio.create_task(self._start_background_compression(
+                        memory_id, raw_veil_nodes, element_ids, 
+                        {"use_background_compression": True, "is_urgent": False}
+                    ))
+                    logger.debug(f"Started background compression for future use: {memory_id}")
+                
+                # Return trimmed fresh content
+                return self._create_trimmed_fresh_content(raw_veil_nodes, element_ids, token_limit)
+            
+            # Last resort: Create placeholder
+            logger.warning(f"No memory or fresh content available for elements {element_ids}")
+            return self._create_compression_placeholder(memory_id, element_ids, [])
+            
+        except Exception as e:
+            logger.error(f"Error in get_memory_or_fallback: {e}", exc_info=True)
+            # Ultra-fallback
+            return {
+                "veil_id": f"error_fallback_{element_ids[0] if element_ids else 'unknown'}",
+                "node_type": "error_fallback",
+                "properties": {
+                    "memory_summary": f"Error retrieving memory for {', '.join(element_ids)}",
+                    "is_error": True
+                },
+                "children": []
+            }
+    
+    def _create_trimmed_fresh_content(self, 
+                                    raw_veil_nodes: List[Dict[str, Any]], 
+                                    element_ids: List[str], 
+                                    token_limit: int) -> Dict[str, Any]:
+        """
+        NEW: Create a trimmed version of fresh content that fits within token limits.
+        
+        This provides immediate context while compression runs in background.
+        """
+        try:
+            if not raw_veil_nodes:
+                return self._create_compression_placeholder("empty", element_ids, [])
+            
+            # Calculate total tokens
+            total_tokens = estimate_veil_tokens(raw_veil_nodes)
+            
+            if total_tokens <= token_limit:
+                # Content fits within limit, return as-is but mark as fresh
+                return {
+                    "veil_id": f"fresh_content_{element_ids[0] if element_ids else 'unknown'}",
+                    "node_type": "fresh_content",
+                    "properties": {
+                        "structural_role": "container",
+                        "content_nature": "fresh_content",
+                        "element_id": element_ids[0] if element_ids else "unknown",
+                        "is_fresh_content": True,
+                        "total_tokens": total_tokens,
+                        "token_limit": token_limit
+                    },
+                    "children": raw_veil_nodes
+                }
+            
+            # Content exceeds limit, trim to most recent content
+            trimmed_nodes = []
+            current_tokens = 0
+            
+            # Process nodes in reverse order (newest first)
+            for node in reversed(raw_veil_nodes):
+                node_tokens = estimate_veil_tokens([node])
+                if current_tokens + node_tokens <= token_limit:
+                    trimmed_nodes.insert(0, node)  # Insert at beginning to maintain order
+                    current_tokens += node_tokens
+                else:
+                    break
+            
+            if not trimmed_nodes:
+                # Even single node exceeds limit, take the newest one anyway
+                trimmed_nodes = [raw_veil_nodes[-1]]
+                current_tokens = estimate_veil_tokens(trimmed_nodes)
+            
+            logger.debug(f"Trimmed content: {len(raw_veil_nodes)} → {len(trimmed_nodes)} nodes, {total_tokens} → {current_tokens} tokens")
+            
+            return {
+                "veil_id": f"trimmed_fresh_{element_ids[0] if element_ids else 'unknown'}",
+                "node_type": "trimmed_fresh_content",
+                "properties": {
+                    "structural_role": "container",
+                    "content_nature": "trimmed_fresh_content",
+                    "element_id": element_ids[0] if element_ids else "unknown",
+                    "is_fresh_content": True,
+                    "is_trimmed": True,
+                    "total_tokens": current_tokens,
+                    "token_limit": token_limit,
+                    "original_node_count": len(raw_veil_nodes),
+                    "trimmed_node_count": len(trimmed_nodes),
+                    "trimming_note": f"Showing {len(trimmed_nodes)} most recent items (compression in progress)"
+                },
+                "children": trimmed_nodes
+            }
+            
+        except Exception as e:
+            logger.error(f"Error creating trimmed fresh content: {e}", exc_info=True)
+            return self._create_compression_placeholder("trimming_error", element_ids, raw_veil_nodes)
+
     async def _parse_veil_content_and_attachments(self, raw_veil_nodes: List[Dict[str, Any]]) -> tuple[str, List[Dict[str, Any]]]:
         """
         NEW: Single-pass parsing of VEIL nodes to extract both text content and attachments.
@@ -581,10 +1050,35 @@ MEMORY SUMMARY:"""
             return {"error": str(e)}
     
     def cleanup(self):
-        """Clean up agent memory compressor resources."""
+        """Clean up agent memory compressor resources including background threads."""
         logger.info(f"Cleaning up AgentMemoryCompressor for agent {self.agent_id}")
+        
+        # Clean up background compression threads
+        try:
+            # Wait for any active compressions to complete (with timeout)
+            with self._compression_lock:
+                active_futures = list(self._compression_futures.values())
+            
+            if active_futures:
+                logger.info(f"Waiting for {len(active_futures)} background compressions to complete...")
+                # Give compressions 10 seconds to finish gracefully
+                for future in active_futures:
+                    try:
+                        if not future.done():
+                            future.cancel()
+                    except Exception as e:
+                        logger.warning(f"Error cancelling compression future: {e}")
+            
+            # Shutdown thread pool
+            self._compression_executor.shutdown(wait=True, timeout=10)
+            logger.debug(f"Background compression threads shut down for agent {self.agent_id}")
+            
+        except Exception as e:
+            logger.error(f"Error during background compression cleanup: {e}", exc_info=True)
+        
+        # Call parent cleanup
         super().cleanup()
-    
+
     async def compress(self, 
                       raw_veil_nodes: List[Dict[str, Any]], 
                       element_ids: List[str],

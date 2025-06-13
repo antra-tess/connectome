@@ -1323,6 +1323,44 @@ class HUDComponent(Component):
         
         return output
 
+    def _render_fresh_content(self, node: Dict[str, Any], attention: Dict[str, Any], options: Dict[str, Any], indent_str: str, node_info: str) -> str:
+        """NEW: Renders fresh content nodes from async compression fallback."""
+        props = node.get("properties", {})
+        element_id = props.get("element_id", "unknown")
+        total_tokens = props.get("total_tokens", 0)
+        token_limit = props.get("token_limit", 0)
+        is_trimmed = props.get("is_trimmed", False)
+        
+        if is_trimmed:
+            trimmed_count = props.get("trimmed_node_count", 0)
+            original_count = props.get("original_node_count", 0)
+            trimming_note = props.get("trimming_note", "Content trimmed")
+            
+            output = f"{indent_str}[{element_id}] {trimming_note}\n"
+            output += f"{indent_str}  (Showing {trimmed_count} of {original_count} items, {total_tokens}/{token_limit} tokens)\n"
+        else:
+            output = f"{indent_str}[{element_id}] Fresh content (compression in progress)\n"
+            output += f"{indent_str}  ({total_tokens} tokens, within {token_limit} limit)\n"
+        
+        # Children will be rendered normally by the main dispatcher
+        return output
+
+    def _render_compression_placeholder(self, node: Dict[str, Any], attention: Dict[str, Any], options: Dict[str, Any], indent_str: str, node_info: str) -> str:
+        """NEW: Renders compression placeholder nodes while compression is in progress."""
+        props = node.get("properties", {})
+        memory_summary = props.get("memory_summary", "⏳ Processing conversation memory...")
+        compression_status = props.get("compression_status", "in_progress")
+        original_count = props.get("original_node_count", 0)
+        
+        output = f"{indent_str}<compression_placeholder>{memory_summary}</compression_placeholder>\n"
+        
+        # Add status information in verbose mode
+        use_verbose_tags = options.get("render_style") == "verbose_tags"
+        if use_verbose_tags and original_count > 0:
+            output += f"{indent_str}  (Compressing {original_count} items in background, status: {compression_status})\n"
+        
+        return output
+
     # --- Main Recursive Renderer (Dispatcher) --- 
 
     def _render_veil_node_to_string(self, node: Dict[str, Any], attention: Dict[str, Any], options: Dict[str, Any], indent: int = 0) -> str:
@@ -1371,6 +1409,10 @@ class HUDComponent(Component):
              render_func = self._render_content_memory
         elif node_type == "memorized_content": # NEW: Memorized content from MemoryCompressor
              render_func = self._render_memorized_content
+        elif node_type in ["fresh_content", "trimmed_fresh_content"]: # NEW: Fresh content fallback from async compression
+             render_func = self._render_fresh_content
+        elif node_type == "compression_placeholder": # NEW: Compression placeholder from async compression
+             render_func = self._render_compression_placeholder
         elif structural_role == "container" or node_type == "message_list_container": # Treat message list container like other containers
              render_func = self._render_container
         # Add more dispatch rules here...
