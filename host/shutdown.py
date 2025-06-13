@@ -32,7 +32,7 @@ def find_connectome_processes() -> List[dict]:
                 cmdline = proc.info['cmdline']
                 if cmdline and any('connectome' in arg.lower() or 'host.main' in arg for arg in cmdline):
                     # Filter out this shutdown command itself
-                    if 'shutdown.py' not in ' '.join(cmdline) and 'connectome-shutdown' not in ' '.join(cmdline):
+                    if 'shutdown.py' not in ' '.join(cmdline) and 'connectome-shutdown' not in ' '.join(cmdline) and 'connectome-adapters' not in ' '.join(cmdline):
                         connectome_processes.append({
                             'pid': proc.info['pid'],
                             'name': proc.info['name'],
