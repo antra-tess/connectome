@@ -3,6 +3,13 @@ from typing import List, Optional, Dict, Any
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
+# Initialize OpenTelemetry tracing
+try:
+    import host.observability
+except ImportError:
+    # Handle case where observability dependencies might not be installed
+    pass
+
 logger = logging.getLogger(__name__)
 
 # Environment variable prefix (optional but good practice)
@@ -64,16 +71,17 @@ class HostSettings(BaseSettings):
     # LLM Settings (will load from CONNECTOME_LLM_TYPE, CONNECTOME_LLM_DEFAULT_MODEL etc.)
     llm_provider: LLMConfig = Field(default_factory=LLMConfig)
 
-    llm_type: str = Field(default="litellm", description="Type of LLM provider (e.g., \'litellm\')")
-    llm_default_model: str = Field(default="gpt-4", description="Default model name")
-    llm_api_key: Optional[str] = Field(default=None, description="API Key for the LLM service (e.g., OpenAI)")
+    llm_type: str = Field(default="litellm", alias="CONNECTOME_LLM_TYPE", description="Type of LLM provider (e.g., \'litellm\')")
+    llm_default_model: str = Field(default="gpt-4", alias="CONNECTOME_LLM_DEFAULT_MODEL", description="Default model name")
+    llm_api_key: Optional[str] = Field(default=None, alias="CONNECTOME_LLM_API_KEY", description="API Key for the LLM service (e.g., OpenAI)")
 
     # Activity Client Adapters - Expects a JSON string in CONNECTOME_ACTIVITY_ADAPTERS_JSON
-    activity_client_adapter_configs_json: str = Field(default='[{"id": "discord_adapter_1", "url": "http://localhost:5001", "auth_token": null}]', alias="ACTIVITY_ADAPTERS_JSON", description="JSON string representing a list of ActivityAdapterConfig objects")
+    activity_client_adapter_configs_json: str = Field(default='[{"id": "discord_adapter_1", "url": "http://localhost:5001", "auth_token": null}]', alias="CONNECTOME_ACTIVITY_ADAPTERS_JSON", description="JSON string representing a list of ActivityAdapterConfig objects")
     
     # Agents - Expects a JSON string in CONNECTOME_AGENTS_JSON
     agents_json: str = Field(
-        alias="AGENTS_JSON",
+        default='[{"agent_id": "demo_agent", "name": "Demo Agent", "description": "A demonstration agent", "agent_loop_component_type_name": "SimpleRequestResponseLoopComponent", "platform_aliases": {"discord_adapter_1": "DemoBot"}, "handles_direct_messages_from_adapter_ids": ["discord_adapter_1"]}]',
+        alias="CONNECTOME_AGENTS_JSON",
         description="JSON string representing a list of AgentConfig objects"
     )
 
@@ -84,8 +92,10 @@ class HostSettings(BaseSettings):
     # Pydantic Settings Configuration
     model_config = SettingsConfigDict(
         env_file='.env',        # Load from .env file
+        env_file_encoding='utf-8',  # Specify encoding
         env_prefix=ENV_PREFIX,  # Prefix for environment variables
-        extra='ignore'          # Ignore extra fields found in env
+        extra='ignore',         # Ignore extra fields found in env
+        case_sensitive=False    # Make environment variable names case insensitive
     )
 
     def __init__(self, **data: Any):
@@ -108,10 +118,42 @@ class HostSettings(BaseSettings):
 
 # Helper function to load settings
 def load_settings() -> HostSettings:
+    import os
     logger.info(f"Loading host configuration from .env file and environment variables (prefix: \'{ENV_PREFIX}\')...")
+    logger.info(f"Current working directory: {os.getcwd()}")
+    logger.info(f".env file exists: {os.path.exists('.env')}")
+    
+    # Try to manually load .env file first
+    try:
+        from dotenv import load_dotenv
+        env_loaded = load_dotenv('.env', override=True)
+        logger.info(f"Manual .env loading result: {env_loaded}")
+    except Exception as e:
+        logger.warning(f"Failed to manually load .env file: {e}")
+    
+    # Debug: Check if any CONNECTOME_ environment variables are set
+    connectome_vars = {k: v for k, v in os.environ.items() if k.startswith('CONNECTOME_')}
+    logger.info(f"Found {len(connectome_vars)} CONNECTOME_ environment variables: {list(connectome_vars.keys())}")
+    
+    # Debug: Show a few values if they exist
+    if connectome_vars:
+        for k, v in list(connectome_vars.items())[:3]:  # Show first 3
+            logger.info(f"  {k} = {v[:50]}..." if len(str(v)) > 50 else f"  {k} = {v}")
+        
+        # Debug: Show the specific variables we care about
+        logger.info(f"CONNECTOME_ACTIVITY_ADAPTERS_JSON = {connectome_vars.get('CONNECTOME_ACTIVITY_ADAPTERS_JSON', 'NOT_FOUND')}")
+        logger.info(f"CONNECTOME_AGENTS_JSON = {connectome_vars.get('CONNECTOME_AGENTS_JSON', 'NOT_FOUND')}")
+        logger.info(f"CONNECTOME_LLM_API_KEY = {connectome_vars.get('CONNECTOME_LLM_API_KEY', 'NOT_FOUND')[:20]}..." if connectome_vars.get('CONNECTOME_LLM_API_KEY') else f"CONNECTOME_LLM_API_KEY = NOT_FOUND")
+    
     try:
         settings = HostSettings()
         logger.info("Host configuration loaded successfully.")
+        
+        # Debug: Log the actual values loaded
+        logger.info(f"Activity adapters JSON: {settings.activity_client_adapter_configs_json}")
+        logger.info(f"Agents JSON: {settings.agents_json}")
+        logger.info(f"LLM API Key loaded: {'YES' if settings.llm_api_key else 'NO'} (length: {len(settings.llm_api_key) if settings.llm_api_key else 0})")
+        
         # Log loaded adapter and agent counts
         logger.info(f"Found {len(settings.activity_client_adapter_configs)} activity adapter configs.")
         logger.info(f"Found {len(settings.agents)} agent configs.")

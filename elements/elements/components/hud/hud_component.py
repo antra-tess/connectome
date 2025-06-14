@@ -2,6 +2,7 @@ import logging
 from typing import Dict, Any, Optional, List, TYPE_CHECKING, Union
 from datetime import datetime, timezone
 import copy
+import json
 
 from ..base_component import Component
 # Needs access to the SpaceVeilProducer on the owner (InnerSpace)
@@ -13,11 +14,15 @@ from ...utils.prefix_generator import create_short_element_prefix
 # May need access to GlobalAttentionComponent for filtering
 # from ..attention.global_attention_component import GlobalAttentionComponent
 
+from opentelemetry import trace
+from host.observability import get_tracer
+
 if TYPE_CHECKING:
     # May need LLM provider for summarization/rendering assistance
     from llm.provider_interface import LLMProviderInterface
 
 logger = logging.getLogger(__name__)
+tracer = get_tracer(__name__)
 
 @register_component
 class HUDComponent(Component):
@@ -1188,7 +1193,7 @@ class HUDComponent(Component):
                 att_type = att_meta.get('attachment_type', 'unknown')
                 # Check if content is available (from a child VEIL_ATTACHMENT_CONTENT_NODE_TYPE)
                 # This requires the main renderer to pass child info or MessageListVeilProducer to flatten it.
-                # For now, we just display metadata. The main renderer will handle child content nodes.
+                # For now, we'll just display metadata. The main renderer will handle child content nodes.
                 output += f"{indent_str}  [Attachment: {filename} (Type: {att_type})]"
                 # If we knew content was available here, we could add: (Content Available)
                 output += "\n"
@@ -1492,65 +1497,77 @@ class HUDComponent(Component):
         Returns:
             Rendered context (string or dict with multimodal content)
         """
-        try:
-            logger.debug(f"Generating agent context via CompressionEngine unified pipeline...")
-            options = options or {}
-            
-            # Get required components
-            compression_engine = self.get_sibling_component("CompressionEngineComponent")
-            veil_producer = self._get_space_veil_producer()
-            
-            if not compression_engine:
-                logger.warning(f"CompressionEngine not available, falling back to standard rendering")
-                return await self.get_agent_context(options)
-            
-            if not veil_producer:
-                logger.error(f"SpaceVeilProducer not available, cannot generate context")
-                return "Error: Could not retrieve internal state."
-            
-            # Get full VEIL from SpaceVeilProducer
-            full_veil = veil_producer.get_full_veil()
-            if not full_veil:
-                logger.warning(f"Empty VEIL from SpaceVeilProducer")
-                return "Current context is empty."
-            
-            # Get memory data if needed
-            memory_data = None
-            focus_context = options.get('focus_context')
-            include_memory = options.get('include_memory', True)
-            
-            if include_memory:
-                memory_data = await compression_engine.get_memory_data()
-                logger.debug(f"Retrieved memory data for VEIL processing")
-            
-            # Process VEIL through CompressionEngine
-            processed_veil = await compression_engine.process_veil_with_compression(
-                full_veil=full_veil,
-                focus_context=focus_context,
-                memory_data=memory_data
-            )
-            
-            # Set render style
-            if 'render_style' not in options:
-                options['render_style'] = 'verbose_tags'
-            
-            # Render the processed VEIL using standard HUD rendering
-            attention_requests = {}  # Could integrate attention system here if needed
-            context_string = self._render_veil_node_to_string(processed_veil, attention_requests, options, indent=0)
-            
-            # FIXED: Auto-detect live multimodal content (consistent with get_agent_context)
-            focus_element_id = focus_context.get('focus_element_id') if focus_context else None
-            if focus_element_id:
-                # OPTIMIZED: Single-pass detection and extraction instead of separate operations
-                return await self._detect_and_extract_multimodal_content(context_string, options, focus_element_id)
-            else:
-                logger.info(f"Generated context via CompressionEngine pipeline: {len(context_string)} chars (text-only)")
-                return context_string
+        with tracer.start_as_current_span("hud.render_context_pipeline") as span:
+            try:
+                logger.debug(f"Generating agent context via CompressionEngine unified pipeline...")
+                options = options or {}
+                span.set_attribute("hud.render.options", json.dumps(options, default=str))
+
+                # Get required components
+                compression_engine = self.get_sibling_component("CompressionEngineComponent")
+                veil_producer = self._get_space_veil_producer()
                 
-        except Exception as e:
-            logger.error(f"Error in unified CompressionEngine pipeline: {e}", exc_info=True)
-            # Fallback to standard rendering
-            return await self.get_agent_context(options)
+                if not compression_engine:
+                    logger.warning(f"CompressionEngine not available, falling back to standard rendering")
+                    span.set_attribute("hud.render.fallback", "no_compression_engine")
+                    return await self.get_agent_context(options)
+                
+                if not veil_producer:
+                    logger.error(f"SpaceVeilProducer not available, cannot generate context")
+                    span.set_status(trace.Status(trace.StatusCode.ERROR, "SpaceVeilProducer not found"))
+                    return "Error: Could not retrieve internal state."
+                
+                # Get full VEIL from SpaceVeilProducer
+                full_veil = veil_producer.get_full_veil()
+                if not full_veil:
+                    logger.warning(f"Empty VEIL from SpaceVeilProducer")
+                    span.set_attribute("hud.render.status", "empty_veil")
+                    return "Current context is empty."
+                
+                # Get memory data if needed
+                memory_data = None
+                focus_context = options.get('focus_context')
+                include_memory = options.get('include_memory', True)
+                
+                if include_memory:
+                    memory_data = await compression_engine.get_memory_data()
+                    logger.debug(f"Retrieved memory data for VEIL processing")
+                
+                # Process VEIL through CompressionEngine
+                processed_veil = await compression_engine.process_veil_with_compression(
+                    full_veil=full_veil,
+                    focus_context=focus_context,
+                    memory_data=memory_data
+                )
+                span.add_event("Processed VEIL", attributes={"veil.processed.json": json.dumps(processed_veil, default=str)})
+
+                # Set render style
+                if 'render_style' not in options:
+                    options['render_style'] = 'verbose_tags'
+                
+                # Render the processed VEIL using standard HUD rendering
+                attention_requests = {}  # Could integrate attention system here if needed
+                context_string = self._render_veil_node_to_string(processed_veil, attention_requests, options, indent=0)
+                span.set_attribute("hud.render.output_char_length", len(context_string))
+                
+                # FIXED: Auto-detect live multimodal content (consistent with get_agent_context)
+                focus_element_id = focus_context.get('focus_element_id') if focus_context else None
+                if focus_element_id:
+                    # OPTIMIZED: Single-pass detection and extraction instead of separate operations
+                    final_context = await self._detect_and_extract_multimodal_content(context_string, options, focus_element_id)
+                    span.set_attribute("hud.render.multimodal", True)
+                    return final_context
+                else:
+                    logger.info(f"Generated context via CompressionEngine pipeline: {len(context_string)} chars (text-only)")
+                    span.set_attribute("hud.render.multimodal", False)
+                    return context_string
+                    
+            except Exception as e:
+                logger.error(f"Error in unified CompressionEngine pipeline: {e}", exc_info=True)
+                span.record_exception(e)
+                span.set_status(trace.Status(trace.StatusCode.ERROR, "HUD rendering failed"))
+                # Fallback to standard rendering
+                return await self.get_agent_context(options)
 
     async def process_llm_response(self, llm_response_text: str) -> List[Dict[str, Any]]:
         """

@@ -662,12 +662,12 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                             "result": {"error": str(e)}
                         })
 
-            # --- Process Text Response (if no tool calls) ---
-            if agent_response_text and not agent_tool_calls:
-                logger.debug("No tool calls. Processing text response via HUD...")
+            # --- Process Text Response (always, regardless of tool calls) ---
+            if agent_response_text:
+                logger.debug(f"Processing text response ({len(agent_tool_calls)} tool calls also present)...")
                 
-                # NEW: Smart chat fallback - if agent has text but no tools, send to activating chat
-                # This keeps conversations flowing when agent forgets to call send_message tool
+                # NEW: Smart chat fallback - if agent has text, try to send to activating chat
+                # This keeps conversations flowing even when agent uses other tools
                 fallback_sent = await self._try_smart_chat_fallback(agent_response_text, focus_context)
                 
                 if not fallback_sent:

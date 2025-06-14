@@ -13,6 +13,7 @@ from ..tool_provider import ToolParameter # Import the new ToolParameter type
 # Assuming MessageListComponent is used for context, but not strictly required by handler itself
 from .message_list import MessageListComponent 
 from elements.component_registry import register_component
+from opentelemetry import propagate
 
 if TYPE_CHECKING:
     # from ...base import BaseElement # Removed from here
@@ -551,9 +552,13 @@ class MessageActionHandler(Component):
                 logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] get_message_attachment_content_tool: _get_message_context failed for fetching attachment.")
                 return {"success": False, "error": "Failed to determine adapter/conversation context for fetching attachment."}
 
+            # Generate internal request ID for tracking like send_message does
+            internal_request_id = f"fetch_att_req_{self.owner.id}_{uuid.uuid4().hex[:12]}"
+            
             logger.info(f"[{self.owner.id}] Attachment content for '{attachment_id}' not cached. Initiating fetch from URL: {attachment_url}")
             
             action_payload = {
+                "internal_request_id": internal_request_id,
                 "adapter_id": adapter_id,
                 "conversation_id": conversation_id, # Context for where the original message was
                 "message_external_id": message_external_id, # Original message ID
@@ -751,9 +756,13 @@ class MessageActionHandler(Component):
         
         adapter_id = context_adapter_id # Assign to original variable name
         
+        # Generate internal request ID for tracking like send_message does
+        internal_request_id = f"fetch_req_{self.owner.id if self.owner else 'unknown'}_{uuid.uuid4().hex[:12]}"
+        
         logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] Preparing fetch_history action for adapter '{adapter_id}', conv '{conversation_id}'.")
         
         payload = {
+            "internal_request_id": internal_request_id,
             "adapter_id": adapter_id,
             "conversation_id": conversation_id, # This is the external_id
             "before_timestamp_ms": before_ms, 
@@ -798,9 +807,13 @@ class MessageActionHandler(Component):
         if not adapter_id or not actual_conversation_id:
             return { "success": False, "error": f"Could not determine adapter_id ({adapter_id}) or conversation_id ({actual_conversation_id}) for getting attachment."}
 
+        # Generate internal request ID for tracking like send_message does
+        internal_request_id = f"attach_req_{self.owner.id if self.owner else 'unknown'}_{uuid.uuid4().hex[:12]}"
+        
         logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] Preparing get_attachment action for adapter '{adapter_id}', conv '{actual_conversation_id}', attachment '{attachment_id}'.")
 
         payload = {
+            "internal_request_id": internal_request_id,
             "adapter_id": adapter_id,
             "conversation_id": actual_conversation_id,
             "attachment_id": attachment_id,
@@ -822,6 +835,12 @@ class MessageActionHandler(Component):
             "action_type": action_type, # This is the type ActivityClient expects
             "payload": payload
         }
+        
+        # Inject the current trace context to be propagated across the event loop
+        carrier = {}
+        propagate.inject(carrier)
+        action_request["telemetry_context"] = carrier
+        
         try:
             await self._outgoing_action_callback(action_request)
             logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] Dispatched '{action_type}' to ActivityClient with payload: {payload}")
