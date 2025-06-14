@@ -18,9 +18,13 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Any, Optional, Set
 from datetime import datetime
 
+from opentelemetry import trace
+from host.observability import get_tracer
+
 from .memory_compressor_interface import MemoryCompressor, estimate_veil_tokens
 
 logger = logging.getLogger(__name__)
+tracer = get_tracer(__name__)
 
 class AgentMemoryCompressor(MemoryCompressor):
     """
@@ -161,43 +165,56 @@ class AgentMemoryCompressor(MemoryCompressor):
         
         This runs the actual LLM-based compression asynchronously and stores the result.
         """
-        try:
-            start_time = time.time()
-            logger.info(f"Background compression started for {memory_id}")
-            
-            # Run compression in thread pool to avoid blocking
-            loop = asyncio.get_event_loop()
-            memorized_node = await loop.run_in_executor(
-                self._compression_executor,
-                self._run_compression_in_thread,
-                raw_veil_nodes, element_ids, compression_context
-            )
-            
-            if memorized_node:
-                # Store the completed memory
-                memory_data = {
-                    "memory_summary": memorized_node["properties"]["memory_summary"],
-                    "metadata": memorized_node["properties"].get("compression_metadata", {}),
-                    "memorized_node": memorized_node
-                }
+        with tracer.start_as_current_span("agent_memory.compress_background", attributes={
+            "memory.id": memory_id,
+            "memory.element_ids": ",".join(element_ids),
+            "agent.id": self.agent_id
+        }) as span:
+            try:
+                start_time = time.time()
+                logger.info(f"Background compression started for {memory_id}")
+                span.add_event("Background compression started", attributes={
+                    "compression.context": json.dumps(compression_context, default=str)
+                })
+
+                # Run compression in thread pool to avoid blocking
+                loop = asyncio.get_event_loop()
+                memorized_node = await loop.run_in_executor(
+                    self._compression_executor,
+                    self._run_compression_in_thread,
+                    raw_veil_nodes, element_ids, compression_context
+                )
                 
-                await self._store_memory_to_file(memory_id, memory_data)
+                if memorized_node:
+                    # Store the completed memory
+                    memory_data = {
+                        "memory_summary": memorized_node["properties"]["memory_summary"],
+                        "metadata": memorized_node["properties"].get("compression_metadata", {}),
+                        "memorized_node": memorized_node
+                    }
+                    
+                    await self._store_memory_to_file(memory_id, memory_data)
+                    
+                    # Update correlations
+                    self.add_correlation(element_ids, memory_id)
+                    
+                    elapsed = time.time() - start_time
+                    logger.info(f"Background compression completed for {memory_id} in {elapsed:.1f}s")
+                    span.set_attribute("compression.duration_sec", elapsed)
+                    span.set_status(trace.Status(trace.StatusCode.OK))
+                else:
+                    logger.warning(f"Background compression failed for {memory_id}")
+                    span.set_status(trace.Status(trace.StatusCode.ERROR, "Compression returned no node"))
                 
-                # Update correlations
-                self.add_correlation(element_ids, memory_id)
-                
-                elapsed = time.time() - start_time
-                logger.info(f"Background compression completed for {memory_id} in {elapsed:.1f}s")
-            else:
-                logger.warning(f"Background compression failed for {memory_id}")
-            
-        except Exception as e:
-            logger.error(f"Error in background compression for {memory_id}: {e}", exc_info=True)
-        finally:
-            # Clean up tracking
-            with self._compression_lock:
-                self._active_compressions.discard(memory_id)
-                self._compression_futures.pop(memory_id, None)
+            except Exception as e:
+                logger.error(f"Error in background compression for {memory_id}: {e}", exc_info=True)
+                span.record_exception(e)
+                span.set_status(trace.Status(trace.StatusCode.ERROR, "Background compression failed"))
+            finally:
+                # Clean up tracking
+                with self._compression_lock:
+                    self._active_compressions.discard(memory_id)
+                    self._compression_futures.pop(memory_id, None)
     
     def _run_compression_in_thread(self, 
                                  raw_veil_nodes: List[Dict[str, Any]], 

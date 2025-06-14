@@ -8,6 +8,8 @@ import json
 import logging
 from typing import Dict, Any, List, Optional, Union
 
+from opentelemetry import trace
+
 try:
     import litellm
     from litellm import completion
@@ -23,7 +25,10 @@ from llm.provider_interface import (
     LLMResponse
 )
 
+from host.observability import get_tracer
+
 logger = logging.getLogger(__name__)
+tracer = get_tracer(__name__)
 
 
 class LiteLLMProvider(LLMProvider):
@@ -74,63 +79,103 @@ class LiteLLMProvider(LLMProvider):
         Returns:
             A response from the LLM
         """
-        self.logger.info(f"Generating completion with model: {model or self.default_model}")
-        
-        # Format messages for LiteLLM
-        litellm_messages = self._format_messages(messages)
-        
-        # Format tools if provided
-        litellm_functions = None
-        if tools:
-            self.logger.debug(f"Formatting {len(tools)} tools for LiteLLM")
-            litellm_functions = []
-            for tool in tools:
-                try:
-                    # Validate tool first
-                    validation_issues = validate_llm_tool_definition(tool)
-                    if validation_issues:
-                        self.logger.error(f"Tool '{getattr(tool, 'name', 'UNKNOWN')}' validation failed: {'; '.join(validation_issues)}")
-                        continue
-                    
-                    formatted_tool = self.format_tool_for_provider(tool)
-                    litellm_functions.append(formatted_tool)
-                    self.logger.debug(f"Successfully formatted tool: {tool.name}")
-                except Exception as e:
-                    self.logger.error(f"Error formatting tool '{getattr(tool, 'name', 'UNKNOWN')}': {e}")
-                    continue
+        model_to_use = model or self.default_model
+        with tracer.start_as_current_span("litellm.complete", attributes={
+            "llm.model": model_to_use,
+            "llm.prompt.message_count": len(messages),
+            "llm.provider": "litellm"
+        }) as span:
+            self.logger.info(f"Generating completion with model: {model_to_use}")
             
-            self.logger.debug(f"Formatted {len(litellm_functions)} tools successfully")
-            if self.logger.isEnabledFor(logging.DEBUG):
-                # Only stringify tools for debug if debug logging is enabled
-                self.logger.debug(f"LiteLLM tool definitions: {json.dumps(litellm_functions, indent=2)}")
-        
-        # Prepare parameters
-        params = {
-            "model": model or self.default_model,
-            "messages": litellm_messages,
-        }
-        
-        # Add optional parameters if provided
-        if temperature is not None:
-            params["temperature"] = temperature
-        if max_tokens is not None:
-            params["max_tokens"] = max_tokens
-        if litellm_functions:
-            params["tools"] = litellm_functions
-        
-        # Add any additional kwargs
-        params.update(kwargs)
-        
-        try:
-            # Call LiteLLM
-            response = completion(**params)
-            return self.parse_response(response)
-        except Exception as e:
-            self.logger.error(f"Error generating completion: {e}")
-            return LLMResponse(
-                content=f"Error: {str(e)}",
-                finish_reason="error"
-            )
+            # Format messages for LiteLLM
+            litellm_messages = self._format_messages(messages)
+            
+            # Format tools if provided
+            litellm_functions = None
+            if tools:
+                self.logger.debug(f"Formatting {len(tools)} tools for LiteLLM")
+                litellm_functions = []
+                for tool in tools:
+                    try:
+                        # Validate tool first
+                        validation_issues = validate_llm_tool_definition(tool)
+                        if validation_issues:
+                            self.logger.error(f"Tool '{getattr(tool, 'name', 'UNKNOWN')}' validation failed: {'; '.join(validation_issues)}")
+                            continue
+                        
+                        formatted_tool = self.format_tool_for_provider(tool)
+                        litellm_functions.append(formatted_tool)
+                        self.logger.debug(f"Successfully formatted tool: {tool.name}")
+                    except Exception as e:
+                        self.logger.error(f"Error formatting tool '{getattr(tool, 'name', 'UNKNOWN')}': {e}")
+                        continue
+                
+                self.logger.debug(f"Formatted {len(litellm_functions)} tools successfully")
+                if self.logger.isEnabledFor(logging.DEBUG):
+                    # Only stringify tools for debug if debug logging is enabled
+                    self.logger.debug(f"LiteLLM tool definitions: {json.dumps(litellm_functions, indent=2)}")
+            
+            # Prepare parameters
+            params = {
+                "model": model_to_use,
+                "messages": litellm_messages,
+            }
+            
+            # Add optional parameters if provided
+            if temperature is not None:
+                params["temperature"] = temperature
+            if max_tokens is not None:
+                params["max_tokens"] = max_tokens
+            if litellm_functions:
+                params["tools"] = litellm_functions
+            
+            # Add any additional kwargs
+            params.update(kwargs)
+            
+            try:
+                # Add request data to the span
+                span.add_event(
+                    "LLM Request", 
+                    attributes={"llm.request.body": json.dumps(params, default=str)}
+                )
+
+                # Call LiteLLM
+                response = completion(**params)
+                parsed_response = self.parse_response(response)
+
+                # Add response data to the span
+                response_log_data = {
+                    "content": parsed_response.content,
+                    "tool_calls": [tc.__dict__ for tc in parsed_response.tool_calls],
+                    "finish_reason": parsed_response.finish_reason,
+                    "usage": parsed_response.usage,
+                }
+                span.add_event(
+                    "LLM Response",
+                    attributes={"llm.response.body": json.dumps(response_log_data, default=str)}
+                )
+                
+                # Add response attributes to the span
+                if parsed_response.usage:
+                    span.set_attribute("llm.usage.prompt_tokens", parsed_response.usage.get("prompt_tokens", 0))
+                    span.set_attribute("llm.usage.completion_tokens", parsed_response.usage.get("completion_tokens", 0))
+                    span.set_attribute("llm.usage.total_tokens", parsed_response.usage.get("total_tokens", 0))
+                
+                span.set_attribute("llm.finish_reason", parsed_response.finish_reason or "unknown")
+                if parsed_response.tool_calls:
+                    span.set_attribute("llm.tool_calls_count", len(parsed_response.tool_calls))
+
+                span.set_status(trace.Status(trace.StatusCode.OK))
+                return parsed_response
+
+            except Exception as e:
+                self.logger.error(f"Error generating completion: {e}")
+                span.record_exception(e)
+                span.set_status(trace.Status(trace.StatusCode.ERROR, f"LLM completion failed: {e}"))
+                return LLMResponse(
+                    content=f"Error: {str(e)}",
+                    finish_reason="error"
+                )
     
     def format_tool_for_provider(self, tool: LLMToolDefinition) -> Dict[str, Any]:
         """

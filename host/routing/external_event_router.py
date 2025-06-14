@@ -8,6 +8,10 @@ import logging
 import time # For timestamps if not provided by adapter
 from typing import Dict, Any, Optional, Callable, List # Added List
 import uuid
+from opentelemetry import trace
+import json
+
+from host.observability import get_tracer
 
 # Assuming elements.elements.space.Space is the base class for SharedSpace
 # and elements.elements.inner_space.InnerSpace inherits from it.
@@ -29,6 +33,9 @@ CONNECTOME_MESSAGE_SEND_CONFIRMED = "connectome_message_send_confirmed"
 CONNECTOME_MESSAGE_SEND_FAILED = "connectome_message_send_failed"
 
 logger = logging.getLogger(__name__)
+
+# Initialize the tracer for this module
+tracer = get_tracer(__name__)
 
 class ExternalEventRouter:
     """
@@ -96,89 +103,106 @@ class ExternalEventRouter:
         """
         Retrieves the agent_id associated with a given adapter_name.
         """
+        logger.debug(f"Looking for agent with adapter_name: '{adapter_name}'")
         for agent_config in self.agent_configs:
+            logger.debug(f"Checking agent '{agent_config.agent_id}' with platform_aliases: {agent_config.platform_aliases}")
             if adapter_name in agent_config.platform_aliases.values():
+                logger.info(f"Found agent '{agent_config.agent_id}' for adapter_name '{adapter_name}'")
                 return agent_config.agent_id
+        logger.warning(f"No agent found for adapter_name '{adapter_name}'. Available aliases: {[list(ac.platform_aliases.values()) for ac in self.agent_configs]}")
         return None
 
     async def route_external_event(self, event_data_from_activity_client: Dict[str, Any], original_timeline_context: Dict[str, Any]):
         """
         Main entry point for processing an event received from the HostEventLoop,
         originating from ActivityClient.
-
-        Args:
-            event_data_from_activity_client: The event dictionary enqueued by ActivityClient.
-                                             Expected structure:
-                                             {
-                                                 "source_adapter_id": "adapter_x",
-                                                 "adapter_type": "zulip",  # NEW: adapter type
-                                                 "payload": {
-                                                     "event_type_from_adapter": "message_received",
-                                                     "adapter_data": { ... raw data ... }
-                                                 }
-                                             }
-            original_timeline_context: The timeline_context passed by HostEventLoop. 
-                                       (Currently unused here, context built per-space).
         """
-        if not isinstance(event_data_from_activity_client, dict):
-            logger.error(f"ExternalEventRouter received non-dict event_data: {type(event_data_from_activity_client)}")
-            return
+        source_adapter_id = event_data_from_activity_client.get("source_adapter_id", "unknown_adapter")
+        payload = event_data_from_activity_client.get("payload", {})
+        event_type_from_adapter = payload.get("event_type_from_adapter", "unknown_event_type")
 
-        source_adapter_id = event_data_from_activity_client.get("source_adapter_id")
-        adapter_type = event_data_from_activity_client.get("adapter_type")  # NEW: Extract adapter_type
-        # The payload is now nested one level deeper
-        payload = event_data_from_activity_client.get("payload") 
+        with tracer.start_as_current_span("route_external_event", attributes={
+            "event.type": event_type_from_adapter,
+            "adapter.id": source_adapter_id,
+        }) as span:
+            # Add critical routing information to the span attributes
+            adapter_data = payload.get("adapter_data", {})
+            span.set_attribute("routing.is_dm", adapter_data.get("is_direct_message", False))
+            span.set_attribute("routing.mentions", adapter_data.get("mentions", []))
 
-        if not source_adapter_id or not isinstance(payload, dict):
-            logger.error(f"Event from ActivityClient missing 'source_adapter_id' or valid 'payload' dict: {event_data_from_activity_client}")
-            return
+            span.add_event("Processing external event", attributes={"event.data": str(event_data_from_activity_client)})
+            
+            if not isinstance(event_data_from_activity_client, dict):
+                logger.error(f"ExternalEventRouter received non-dict event_data: {type(event_data_from_activity_client)}")
+                span.set_attribute("routing.error", "Non-dict event data")
+                span.set_status(trace.Status(trace.StatusCode.ERROR, "Invalid event data format"))
+                return
 
-        # Extract the raw event type and data from the nested payload
-        event_type_from_adapter = payload.get("event_type_from_adapter")
-        adapter_data = payload.get("adapter_data")
+            adapter_type = event_data_from_activity_client.get("adapter_type")  # NEW: Extract adapter_type
+            
+            if not source_adapter_id or not isinstance(payload, dict):
+                logger.error(f"Event from ActivityClient missing 'source_adapter_id' or valid 'payload' dict: {event_data_from_activity_client}")
+                span.set_attribute("routing.error", "Missing source_adapter_id or payload")
+                span.set_status(trace.Status(trace.StatusCode.ERROR, "Invalid event structure"))
+                return
+            
+            adapter_data = payload.get("adapter_data")
 
-        adapter_name = adapter_data.get("adapter_name")
-        agent_id = self._get_agent_id_by_alias(adapter_name)
-        adapter_data["recipient_connectome_agent_id"] = agent_id
+            adapter_name = adapter_data.get("adapter_name")
+            agent_id = self._get_agent_id_by_alias(adapter_name)
+            adapter_data["recipient_connectome_agent_id"] = agent_id
 
-        if not event_type_from_adapter or not isinstance(adapter_data, dict):
-            logger.error(f"Event payload missing 'event_type_from_adapter' or valid 'adapter_data' dict: {payload}")
-            return
+            if not event_type_from_adapter or not isinstance(adapter_data, dict):
+                logger.error(f"Event payload missing 'event_type_from_adapter' or valid 'adapter_data' dict: {payload}")
+                span.set_attribute("routing.error", "Missing event_type_from_adapter or adapter_data")
+                span.set_status(trace.Status(trace.StatusCode.ERROR, "Invalid payload structure"))
+                return
 
-        logger.debug(f"ExternalEventRouter routing event: Adapter='{source_adapter_id}', Type='{event_type_from_adapter}', AdapterData='{adapter_data}'")
-        # --- Routing Logic based on event_type_from_adapter ---
-        if event_type_from_adapter == "message_received":
-            await self._handle_direct_message(source_adapter_id, adapter_data, adapter_type)
-        elif event_type_from_adapter == "message_updated":
-            await self._handle_message_updated(source_adapter_id, adapter_data)
-        elif event_type_from_adapter == "message_deleted":
-            await self._handle_message_deleted(source_adapter_id, adapter_data)
-        elif event_type_from_adapter == "reaction_added":
-            await self._handle_reaction_added(source_adapter_id, adapter_data)
-        elif event_type_from_adapter == "reaction_removed":
-            await self._handle_reaction_removed(source_adapter_id, adapter_data)
-        elif event_type_from_adapter == "conversation_started":
-             await self._handle_conversation_started(source_adapter_id, adapter_data)
-        elif event_type_from_adapter == "connectome_history_received":
-            await self._handle_history_received(source_adapter_id, payload.get("conversation_id"), payload.get("messages", []), adapter_data)
-        elif event_type_from_adapter == "connectome_attachment_received":
-            await self._handle_attachment_received(source_adapter_id, payload.get("conversation_id"), payload)
-        elif event_type_from_adapter == "connectome_attachment_data_received":
-            await self._handle_attachment_data_received(source_adapter_id, adapter_data)
-        # --- NEW: Handle Generic Action Confirmations/Failures ---
-        elif event_type_from_adapter == "adapter_action_success": # Generic success for any action
-            await self._handle_action_success_ack(source_adapter_id, adapter_data)
-        elif event_type_from_adapter == "adapter_action_failure": # Generic failure for any action
-            await self._handle_action_failure_ack(source_adapter_id, adapter_data)
-        # --- DEPRECATED: Keep old handlers for backward compatibility ---
-        elif event_type_from_adapter == "adapter_send_success_ack": # Legacy - redirect to generic handler
-            logger.warning(f"Received legacy 'adapter_send_success_ack' event. Redirecting to generic handler.")
-            await self._handle_action_success_ack(source_adapter_id, adapter_data)
-        elif event_type_from_adapter == "adapter_send_failure_ack": # Legacy - redirect to generic handler
-            logger.warning(f"Received legacy 'adapter_send_failure_ack' event. Redirecting to generic handler.")
-            await self._handle_action_failure_ack(source_adapter_id, adapter_data)
-        else:
-            logger.warning(f"ExternalEventRouter: Unhandled event type '{event_type_from_adapter}' from adapter '{source_adapter_id}'. Data: {adapter_data}")
+            logger.debug(f"ExternalEventRouter routing event: Adapter='{source_adapter_id}', Type='{event_type_from_adapter}', AdapterData='{adapter_data}'")
+            span.add_event("Routing logic started")
+            
+            try:
+                # --- Routing Logic based on event_type_from_adapter ---
+                if event_type_from_adapter == "message_received":
+                    await self._handle_direct_message(source_adapter_id, adapter_data, adapter_type)
+                elif event_type_from_adapter == "message_updated":
+                    await self._handle_message_updated(source_adapter_id, adapter_data)
+                elif event_type_from_adapter == "message_deleted":
+                    await self._handle_message_deleted(source_adapter_id, adapter_data)
+                elif event_type_from_adapter == "reaction_added":
+                    await self._handle_reaction_added(source_adapter_id, adapter_data)
+                elif event_type_from_adapter == "reaction_removed":
+                    await self._handle_reaction_removed(source_adapter_id, adapter_data)
+                elif event_type_from_adapter == "conversation_started":
+                    await self._handle_conversation_started(source_adapter_id, adapter_data)
+                elif event_type_from_adapter == "connectome_history_received":
+                    await self._handle_history_received(source_adapter_id, payload.get("conversation_id"), payload.get("messages", []), adapter_data)
+                elif event_type_from_adapter == "connectome_attachment_received":
+                    await self._handle_attachment_received(source_adapter_id, payload.get("conversation_id"), payload)
+                elif event_type_from_adapter == "connectome_attachment_data_received":
+                    await self._handle_attachment_data_received(source_adapter_id, adapter_data)
+                # --- NEW: Handle Generic Action Confirmations/Failures ---
+                elif event_type_from_adapter == "adapter_action_success": # Generic success for any action
+                    await self._handle_action_success_ack(source_adapter_id, adapter_data)
+                elif event_type_from_adapter == "adapter_action_failure": # Generic failure for any action
+                    await self._handle_action_failure_ack(source_adapter_id, adapter_data)
+                # --- DEPRECATED: Keep old handlers for backward compatibility ---
+                elif event_type_from_adapter == "adapter_send_success_ack": # Legacy - redirect to generic handler
+                    logger.warning(f"Received legacy 'adapter_send_success_ack' event. Redirecting to generic handler.")
+                    await self._handle_action_success_ack(source_adapter_id, adapter_data)
+                elif event_type_from_adapter == "adapter_send_failure_ack": # Legacy - redirect to generic handler
+                    logger.warning(f"Received legacy 'adapter_send_failure_ack' event. Redirecting to generic handler.")
+                    await self._handle_action_failure_ack(source_adapter_id, adapter_data)
+                else:
+                    logger.warning(f"ExternalEventRouter: Unhandled event type '{event_type_from_adapter}' from adapter '{source_adapter_id}'. Data: {adapter_data}")
+                    span.set_attribute("routing.status", "unhandled_event_type")
+                
+                span.set_status(trace.Status(trace.StatusCode.OK))
+            
+            except Exception as e:
+                logger.error(f"Error during event routing for type '{event_type_from_adapter}': {e}", exc_info=True)
+                span.record_exception(e)
+                span.set_status(trace.Status(trace.StatusCode.ERROR, f"Routing failed: {e}"))
 
     # TEMPORARY: DEPRECATED: This method is part of the old SharedSpace routing logic.
     def _is_direct_message(self, adapter_data: Dict[str, Any]) -> bool:

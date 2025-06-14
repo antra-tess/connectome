@@ -41,3 +41,11 @@ aiosqlite>=0.21.0
 
 # For future MongoDB storage backend (example)
 # motor>=3.0.0
+
+# For development and testing
+pytest-cov
+respx
+uvicorn
+
+# OpenTelemetry for Tracing
+opentelemetry-distro
