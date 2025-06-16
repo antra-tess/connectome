@@ -174,8 +174,8 @@ class ExternalEventRouter:
                     await self._handle_reaction_removed(source_adapter_id, adapter_data)
                 elif event_type_from_adapter == "conversation_started":
                     await self._handle_conversation_started(source_adapter_id, adapter_data)
-                elif event_type_from_adapter == "connectome_history_received":
-                    await self._handle_history_received(source_adapter_id, payload.get("conversation_id"), payload.get("messages", []), adapter_data)
+                elif event_type_from_adapter == "history_fetched":  # NEW: Bulk history processing
+                    await self._handle_history_fetched(source_adapter_id, adapter_data)
                 elif event_type_from_adapter == "connectome_attachment_received":
                     await self._handle_attachment_received(source_adapter_id, payload.get("conversation_id"), payload)
                 elif event_type_from_adapter == "connectome_attachment_data_received":
@@ -907,126 +907,124 @@ class ExternalEventRouter:
 
         logger.info(f"Processing conversation_started for agent '{recipient_agent_id}' InnerSpace '{target_inner_space.id}' with {len(history)} history messages...")
 
-        # --- Process History for the Target InnerSpace ---
-        timeline_context = await self._construct_timeline_context_for_space(target_inner_space)
-        processed_count = 0
-        error_count = 0
+        # NEW: Route via bulk processing path only (remove legacy processing)
+        if history:
+            await self._process_bulk_history(
+                source_adapter_id=source_adapter_id,
+                conversation_id=conversation_id,
+                history_messages=history,
+                is_dm=is_dm,
+                recipient_agent_id=recipient_agent_id,
+                target_inner_space=target_inner_space,
+                original_adapter_data=adapter_data,
+                source_event_type="conversation_started"
+            )
+        else:
+            logger.info(f"No history to process for conversation_started: {conversation_id}")
 
-        for message_dict in history:
-            if not isinstance(message_dict, dict):
-                logger.warning(f"Skipping invalid history item (not a dict) in '{conversation_id}': {message_dict}")
-                error_count += 1
-                continue
-                
-            try:
-                # Construct the standard message_received payload from the history item
-                sender_info = message_dict.get('sender', {})
-                history_message_payload = {
-                    "source_adapter_id": source_adapter_id,
-                    "timestamp": message_dict.get("timestamp", time.time()),
-                    "sender_external_id": sender_info.get("user_id"),
-                    "sender_display_name": sender_info.get("display_name", "Unknown Sender"),
-                    "text": message_dict.get("text"),
-                    "is_dm": is_dm,
-                    "mentions": message_dict.get("mentions", []), 
-                    "original_message_id_external": message_dict.get("message_id"),
-                    "external_conversation_id": conversation_id,
-                    "original_adapter_data": message_dict, # Store original history item
-                    "attachments": message_dict.get("attachments", []),
-                    # NEW: Add recipient context for InnerSpace routing (same as _handle_direct_message)
-                    "recipient_connectome_agent_id": recipient_agent_id,
-                    "external_channel_id": conversation_id if not is_dm else None,  # Only for channel messages
-                }
-
-                connectome_history_event = {
-                    "event_type": "historical_message_received", # Use historical event type to prevent activation
-                    "event_id": f"history_{conversation_id}_{message_dict.get('message_id', processed_count)}_{recipient_agent_id}",
-                    "source_adapter_id": source_adapter_id,
-                    "external_conversation_id": conversation_id,
-                    "target_element_id": self._generate_target_element_id(source_adapter_id, conversation_id, is_dm, target_inner_space),  # NEW: Use generated ID
-                    "is_replayable": True,  # Historical messages should be replayed for state restoration
-                    "payload": history_message_payload
-                }
-                
-                # Receive the historical event onto the InnerSpace's timeline
-                target_inner_space.receive_event(connectome_history_event, timeline_context)
-                processed_count += 1
-
-            except Exception as e:
-                logger.error(f"Error processing history message for agent '{recipient_agent_id}' in '{conversation_id}': {e}. Message data: {message_dict}", exc_info=True)
-                error_count += 1
+    # --- NEW HANDLER for Bulk History Processing ---
+    async def _handle_history_fetched(self, source_adapter_id: str, adapter_data: Dict[str, Any]):
+        """
+        Handles the new 'history_fetched' event for bulk history processing.
+        Routes history data to ChatManagerComponent for efficient bulk processing and reconciliation.
         
-        logger.info(f"Finished processing conversation_started history for agent '{recipient_agent_id}' in '{conversation_id}'. Processed: {processed_count}, Errors: {error_count}")
-
-    # --- NEW HANDLER for History Response --- 
-    async def _handle_history_received(self, source_adapter_id: str, conversation_id: str, messages: List[Dict[str, Any]], adapter_data: Dict[str, Any]):
+        Args:
+            source_adapter_id: The adapter that sent the history
+            adapter_data: Contains conversation_id, history list, and routing info
         """
-        Handles the internally routed 'connectome_history_received' event.
-        Uses unified agent-based routing for consistency with all message events.
-        """
-        logger.info(f"Handling 'connectome_history_received' event for conv '{conversation_id}' from {source_adapter_id} with {len(messages)} messages.")
-
-        # Extract recipient agent ID like _handle_direct_message does
-        adapter_name = adapter_data.get("adapter_name")
-        agent_id = self._get_agent_id_by_alias(adapter_name)
-        adapter_data["recipient_connectome_agent_id"] = agent_id
-
-        # Use unified InnerSpace routing
-        target_inner_space = await self._find_target_inner_space_for_agent(adapter_data)
-        if not target_inner_space:
-            logger.error(f"Failed to find target InnerSpace for history received for conv '{conversation_id}'. History cannot be processed.")
+        conversation_id = adapter_data.get("conversation_id")
+        history = adapter_data.get("history", [])
+        is_dm = adapter_data.get("is_direct_message", False)
+        
+        logger.info(f"Handling 'history_fetched' event from {source_adapter_id} for conversation '{conversation_id}' with {len(history)} messages")
+        
+        # Extract recipient agent ID using same logic as other handlers
+        recipient_agent_id = adapter_data.get("recipient_connectome_agent_id")
+        if not recipient_agent_id:
+            logger.error(f"history_fetched event from adapter '{source_adapter_id}' missing 'recipient_connectome_agent_id' in adapter_data. Cannot route.")
             return
 
-        logger.info(f"Found target InnerSpace '{target_inner_space.id}'. Processing {len(messages)} history messages...")
+        if not conversation_id:
+            logger.error("history_fetched event missing 'conversation_id'. Cannot process.")
+            return
+            
+        if not isinstance(history, list):
+            logger.error(f"history_fetched event for '{conversation_id}' missing 'history' list or it's not a list. Cannot process history.")
+            history = []
 
-        # Process History for the Target InnerSpace
-        timeline_context = await self._construct_timeline_context_for_space(target_inner_space)
-        processed_count = 0
-        error_count = 0
+        # Get the target InnerSpace for the agent
+        target_inner_space = self.space_registry.get_inner_space_for_agent(recipient_agent_id)
+        if not target_inner_space:
+            logger.error(f"Could not route history_fetched: InnerSpace for agent_id '{recipient_agent_id}' not found.")
+            return
 
-        # Determine if context is DM based on adapter_data
-        is_dm_context = adapter_data.get("is_direct_message", False)
+        logger.info(f"Processing history_fetched for agent '{recipient_agent_id}' InnerSpace '{target_inner_space.id}' - routing via bulk processing...")
 
-        for message_dict in messages:
-            if not isinstance(message_dict, dict):
-                logger.warning(f"Skipping invalid history item (not a dict) in '{conversation_id}': {message_dict}")
-                error_count += 1
-                continue
-                
-            try:
-                # Construct the standard message_received payload from the history item
-                sender_info = message_dict.get('sender', {})
-                history_message_payload = {
-                    "source_adapter_id": source_adapter_id, 
-                    "timestamp": message_dict.get("timestamp", time.time()),
-                    "sender_external_id": sender_info.get("user_id"),
-                    "sender_display_name": sender_info.get("display_name", "Unknown Sender"),
-                    "text": message_dict.get("text"),
-                    "is_dm": is_dm_context,
-                    "mentions": message_dict.get("mentions", []), 
-                    "original_message_id_external": message_dict.get("message_id"),
-                    "external_conversation_id": conversation_id, 
-                    "original_adapter_data": message_dict,
-                    "attachments": message_dict.get("attachments", []),
-                }
+        # NEW: Route via bulk processing path only (remove legacy processing)
+        await self._process_bulk_history(
+            source_adapter_id=source_adapter_id,
+            conversation_id=conversation_id,
+            history_messages=history,
+            is_dm=is_dm,
+            recipient_agent_id=recipient_agent_id,
+            target_inner_space=target_inner_space,
+            original_adapter_data=adapter_data,
+            source_event_type="history_fetched"
+        )
 
-                connectome_history_event = {
-                    "source_adapter_id": source_adapter_id,
-                    "conversation_id": conversation_id,
-                    "event_type": "historical_message_received",
-                    "target_element_id": self._generate_target_element_id(source_adapter_id, conversation_id, is_dm_context, target_inner_space),
-                    "is_replayable": True,  # Historical messages should be replayed for state restoration
-                    "payload": history_message_payload
-                }
-                
-                target_inner_space.receive_event(connectome_history_event, timeline_context)
-                processed_count += 1
-
-            except Exception as e:
-                logger.error(f"Error processing history message for '{conversation_id}': {e}. Message data: {message_dict}", exc_info=True)
-                error_count += 1
+    async def _process_bulk_history(self, 
+                                   source_adapter_id: str,
+                                   conversation_id: str, 
+                                   history_messages: List[Dict[str, Any]],
+                                   is_dm: bool,
+                                   recipient_agent_id: str,
+                                   target_inner_space: 'InnerSpace',
+                                   original_adapter_data: Dict[str, Any],
+                                   source_event_type: str) -> None:
+        """
+        Shared helper method for processing bulk history from both conversation_started and history_fetched events.
+        Routes history directly to ChatManagerComponent for efficient bulk processing and reconciliation.
         
-        logger.info(f"Finished processing history for '{conversation_id}'. Processed: {processed_count}, Errors: {error_count}")
+        Args:
+            source_adapter_id: The adapter that sent the history
+            conversation_id: The conversation/channel ID
+            history_messages: List of message dictionaries
+            is_dm: Whether this is a direct message conversation
+            recipient_agent_id: The agent that should receive this history
+            target_inner_space: The InnerSpace to route events to
+            original_adapter_data: The original adapter data for context
+            source_event_type: The original event type that triggered this ("conversation_started" or "history_fetched")
+        """
+        logger.info(f"Processing bulk history via shared helper: {len(history_messages)} messages from {source_event_type}")
+        
+        # Create bulk history event for ChatManagerComponent to handle
+        timeline_context = await self._construct_timeline_context_for_space(target_inner_space)
+        
+        bulk_history_event = {
+            "event_type": "bulk_history_fetched",
+            "event_id": f"bulk_history_{conversation_id}_{recipient_agent_id}_{int(time.time()*1000)}",
+            "source_adapter_id": source_adapter_id,
+            "external_conversation_id": conversation_id,
+            "target_element_id": self._generate_target_element_id(source_adapter_id, conversation_id, is_dm, target_inner_space),
+            "is_replayable": True,  # Bulk history should be replayed for state restoration
+            "payload": {
+                "source_adapter_id": source_adapter_id,
+                "external_conversation_id": conversation_id,
+                "is_dm": is_dm,
+                "history_messages": history_messages,  # Full history list
+                "recipient_connectome_agent_id": recipient_agent_id,
+                "total_message_count": len(history_messages),
+                "timestamp": time.time(),
+                "original_adapter_data": original_adapter_data,  # Keep full adapter data for context
+                "source_event_type": source_event_type  # Track which event triggered this
+            }
+        }
+        
+        try:
+            target_inner_space.receive_event(bulk_history_event, timeline_context)
+            logger.info(f"Successfully routed bulk history with {len(history_messages)} messages from {source_event_type} to InnerSpace '{target_inner_space.id}'")
+        except Exception as e:
+            logger.error(f"Error routing bulk history event from {source_event_type} to InnerSpace '{target_inner_space.id}': {e}", exc_info=True)
 
     # --- NEW HANDLER for Attachment Data --- 
     async def _handle_attachment_received(self, source_adapter_id: str, conversation_id: str, attachment_event_payload: Dict[str, Any]):
