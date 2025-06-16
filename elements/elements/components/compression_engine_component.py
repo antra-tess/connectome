@@ -10,6 +10,9 @@ from datetime import datetime
 import json
 import asyncio
 
+from opentelemetry import trace
+from host.observability import get_tracer
+
 from .base_component import Component
 from elements.component_registry import register_component
 
@@ -23,6 +26,7 @@ if TYPE_CHECKING:
     from elements.elements.inner_space import InnerSpace
 
 logger = logging.getLogger(__name__)
+tracer = get_tracer(__name__)
 
 
 @register_component
@@ -581,27 +585,42 @@ class CompressionEngineComponent(Component):
         Returns:
             Processed VEIL ready for unified HUD rendering
         """
-        try:
-            if not full_veil:
-                logger.warning(f"CompressionEngine received empty VEIL for processing")
+        focus_element_id = focus_context.get('focus_element_id') if focus_context else None
+        
+        with tracer.start_as_current_span("compression_engine.process_veil", attributes={
+            "veil.focus_element_id": focus_element_id or "none",
+            "veil.has_memory_data": bool(memory_data)
+        }) as span:
+            try:
+                # Add the full VEIL snapshot as a span event
+                # We use an event because the VEIL can be very large
+                span.add_event(
+                    "VEIL Snapshot", 
+                    attributes={"veil.snapshot.json": json.dumps(full_veil, default=str)}
+                )
+
+                if not full_veil:
+                    logger.warning(f"CompressionEngine received empty VEIL for processing")
+                    span.set_attribute("veil.status", "empty_veil")
+                    return full_veil
+                
+                if focus_element_id:
+                    logger.info(f"Processing VEIL with compression, focusing on element: {focus_element_id}")
+                    processed_veil = await self._process_focused_veil(full_veil, focus_element_id, memory_data)
+                else:
+                    logger.info(f"Processing VEIL with compression, no focus (full context)")
+                    processed_veil = await self._process_full_veil_with_memory(full_veil, memory_data)
+                
+                logger.debug(f"VEIL processing complete: preserved structure with compression applied")
+                span.set_status(trace.Status(trace.StatusCode.OK))
+                return processed_veil
+                
+            except Exception as e:
+                logger.error(f"Error processing VEIL with compression: {e}", exc_info=True)
+                span.record_exception(e)
+                span.set_status(trace.Status(trace.StatusCode.ERROR, "VEIL processing failed"))
+                # Fallback to original VEIL
                 return full_veil
-            
-            focus_element_id = focus_context.get('focus_element_id') if focus_context else None
-            
-            if focus_element_id:
-                logger.info(f"Processing VEIL with compression, focusing on element: {focus_element_id}")
-                processed_veil = await self._process_focused_veil(full_veil, focus_element_id, memory_data)
-            else:
-                logger.info(f"Processing VEIL with compression, no focus (full context)")
-                processed_veil = await self._process_full_veil_with_memory(full_veil, memory_data)
-            
-            logger.debug(f"VEIL processing complete: preserved structure with compression applied")
-            return processed_veil
-            
-        except Exception as e:
-            logger.error(f"Error processing VEIL with compression: {e}", exc_info=True)
-            # Fallback to original VEIL
-            return full_veil
 
     async def _process_focused_veil(self, 
                                   full_veil: Dict[str, Any], 

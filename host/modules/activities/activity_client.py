@@ -22,11 +22,17 @@ import asyncio
 import json
 from typing import Dict, Any, List, Optional, Callable
 import time # Added for timestamp
+from opentelemetry import trace, propagate, context
 
 import socketio # Using python-socketio
 
+from host.observability import get_tracer
+
 # Event Loop for queuing incoming events
 from host.event_loop import HostEventLoop 
+
+# Initialize the tracer for this module
+tracer = get_tracer(__name__)
 
 logger = logging.getLogger(__name__)
 
@@ -170,53 +176,52 @@ class ActivityClient:
             async def handle_bot_request(raw_payload: Dict[str, Any]):
                 """Handles incoming events (structured as per user spec) from the adapter API."""
                 
-                # Record activity for this outgoing action
-                self._record_activity(adapter_id)
-                logger.critical(f"Received bot_request from '{adapter_id}': {raw_payload}")
-                
-                if not isinstance(raw_payload, dict):
-                     logger.warning(f"Received non-dict bot_request from '{adapter_id}': {raw_payload}")
-                     return
-                
-                # Extract core fields from the raw payload
-                raw_event_type = raw_payload.get('event_type')
-                raw_data = raw_payload.get('data')
-                # adapter_type = raw_payload.get('adapter_type') # Could store/use this if needed
+                # This is the start of a new trace for an unsolicited incoming event.
+                with tracer.start_as_current_span("activity_client.handle_bot_request") as span:
+                    # Record activity for this outgoing action
+                    self._record_activity(adapter_id)
+                    logger.critical(f"Received bot_request from '{adapter_id}': {raw_payload}")
+                    
+                    if not isinstance(raw_payload, dict):
+                        logger.warning(f"Received non-dict bot_request from '{adapter_id}': {raw_payload}")
+                        span.set_attribute("event.error", "Non-dict payload")
+                        return
+                    
+                    # Extract core fields from the raw payload
+                    raw_event_type = raw_payload.get('event_type', 'unknown')
+                    span.set_attribute("adapter.event_type", raw_event_type)
+                    raw_data = raw_payload.get('data')
+                    
+                    if not raw_event_type or not isinstance(raw_data, dict):
+                        logger.warning(f"Received bot_request from '{adapter_id}' missing 'event_type' or valid 'data': {raw_payload}")
+                        span.set_attribute("event.error", "Missing event_type or data")
+                        return
 
-                if not raw_event_type or not isinstance(raw_data, dict):
-                     logger.warning(f"Received bot_request from '{adapter_id}' missing 'event_type' or valid 'data': {raw_payload}")
-                     return
+                    source_adapter_id_from_data = raw_data.get('adapter_name')
+                    if not source_adapter_id_from_data:
+                        logger.warning(f"Received bot_request data from '{adapter_id}' missing 'adapter_name': {raw_data}")
+                        source_adapter_id_from_data = adapter_id 
+                        
+                    if source_adapter_id_from_data != adapter_id:
+                        logger.warning(f"Adapter name '{source_adapter_id_from_data}' in bot_request data does not match connection ID '{adapter_id}'. Using data value.")
 
-                # Extract the adapter ID (which is adapter_name in the raw data)
-                # Use the connection's adapter_id as fallback/confirmation?
-                # For now, trust the data payload.
-                source_adapter_id_from_data = raw_data.get('adapter_name')
-                if not source_adapter_id_from_data:
-                     logger.warning(f"Received bot_request data from '{adapter_id}' missing 'adapter_name': {raw_data}")
-                     # Use the connection's adapter_id as fallback?
-                     source_adapter_id_from_data = adapter_id 
-                     # Maybe return an error?
-                     
-                # Log if the adapter_name in data doesn't match the connection ID - indicates potential issue
-                if source_adapter_id_from_data != adapter_id:
-                     logger.warning(f"Adapter name '{source_adapter_id_from_data}' in bot_request data does not match connection ID '{adapter_id}'. Using data value.")
-
-                logger.debug(f"Received bot_request from '{adapter_id}': Type={raw_event_type}. Enqueuing...")
-                
-                # Construct the event structure expected by HostEventLoop/ExternalEventRouter
-                event_to_enqueue = {
-                    # Set the reliable source ID from the connection
-                    "source_adapter_id": adapter_id, 
-                    # Pass the raw event type and data payload for the router to interpret
-                    "payload": {
-                         "event_type_from_adapter": raw_event_type, # e.g., "message_received", "message_updated"
-                         "adapter_data": raw_data # The entire 'data' dict from the raw payload
+                    logger.debug(f"Received bot_request from '{adapter_id}': Type={raw_event_type}. Enqueuing...")
+                    
+                    event_to_enqueue = {
+                        "source_adapter_id": adapter_id, 
+                        "payload": {
+                            "event_type_from_adapter": raw_event_type,
+                            "adapter_data": raw_data
+                        }
                     }
-                }
-                
-                # Enqueue the event onto the main loop
-                # Pass an empty dict for timeline_context initially.
-                self.host_event_loop.enqueue_incoming_event(event_to_enqueue, {})
+                    
+                    # Inject telemetry context for propagation across the event loop
+                    carrier = {}
+                    propagate.inject(carrier)
+                    event_to_enqueue["telemetry_context"] = carrier
+                    span.add_event("Injecting new trace context into carrier for event loop")
+                    
+                    self.host_event_loop.enqueue_incoming_event(event_to_enqueue, {})
                 
             # --- Handler for Incoming History Response --- 
             # REMOVED @client.on("history_response") handler
@@ -288,32 +293,47 @@ class ActivityClient:
                     logger.warning(f"Received request_success for internal_request_id '{internal_request_id}' from '{adapter_id}', but no matching pending request found.")
                     return
                 
-                # Create minimal generic success event for ExternalEventRouter to process
-                success_event = {
-                    "source_adapter_id": adapter_id,
-                    "adapter_type": "unknown",  # We don't track this at I/O level
-                    "payload": {
-                        "event_type_from_adapter": "adapter_action_success",
-                        "adapter_data": {
-                            # Pass through essential correlation data
-                            "internal_request_id": internal_request_id,
-                            "target_element_id_for_confirmation": pending_request_info.get("target_element_id_for_confirmation"),
-                            "action_type": pending_request_info.get("action_type"),
-                            "conversation_id": pending_request_info.get("conversation_id"),  # NEW: Pass through conversation_id for routing
-                            "adapter_request_id": adapter_request_id,
-                            # Pass through raw adapter response for ExternalEventRouter to process
-                            "raw_adapter_response": raw_payload,
-                            "adapter_response_data": data,
-                            "confirmed_timestamp": data.get("timestamp", time.time())
+                # Extract the parent trace context to continue the trace from the specific outgoing action
+                parent_carrier = pending_request_info.get("telemetry_context", {})
+                parent_ctx = propagate.extract(parent_carrier)
+                
+                with tracer.start_as_current_span("activity_client.handle_request_success", context=parent_ctx) as span:
+                    span.set_attribute("adapter.request_id", adapter_request_id)
+                    span.set_attribute("adapter.internal_request_id", internal_request_id)
+                    
+                    # Create minimal generic success event for ExternalEventRouter to process
+                    success_event = {
+                        "source_adapter_id": adapter_id,
+                        "adapter_type": "unknown",  # We don't track this at I/O level
+                        "payload": {
+                            "event_type_from_adapter": "adapter_action_success",
+                            "adapter_data": {
+                                # Pass through essential correlation data
+                                "internal_request_id": internal_request_id,
+                                "target_element_id_for_confirmation": pending_request_info.get("target_element_id_for_confirmation"),
+                                "action_type": pending_request_info.get("action_type"),
+                                "conversation_id": pending_request_info.get("conversation_id"),  # NEW: Pass through conversation_id for routing
+                                "adapter_request_id": adapter_request_id,
+                                # Pass through raw adapter response for ExternalEventRouter to process
+                                "raw_adapter_response": raw_payload,
+                                "adapter_response_data": data,
+                                "confirmed_timestamp": data.get("timestamp", time.time())
+                            }
                         }
                     }
-                }
-                
-                logger.info(f"ActivityClient routing success for {pending_request_info.get('action_type')} (req_id: {internal_request_id}) to ExternalEventRouter")
-                self.host_event_loop.enqueue_incoming_event(success_event, {})
-                
-                # NEW: Track successful response to improve connection health assessment
-                self._record_successful_operation(adapter_id)
+                    
+                    # Inject this continued trace's context for downstream processing
+                    carrier = {}
+                    propagate.inject(carrier)
+                    success_event["telemetry_context"] = carrier
+                    span.add_event("Injecting continued trace context into carrier for event loop")
+                    
+                    logger.info(f"ActivityClient routing success for {pending_request_info.get('action_type')} (req_id: {internal_request_id}) to ExternalEventRouter")
+                    # Note: We are no longer propagating context to the event loop from here
+                    self.host_event_loop.enqueue_incoming_event(success_event, {})
+                    
+                    # NEW: Track successful response to improve connection health assessment
+                    self._record_successful_operation(adapter_id)
 
             # --- SIMPLIFIED Handler for Generic Failure Responses ---
             @client.on("request_failed")
@@ -329,7 +349,7 @@ class ActivityClient:
                     
                 adapter_request_id = raw_payload.get('request_id')
                 internal_request_id = raw_payload.get('internal_request_id')  # FIXED: Use internal_request_id for correlation
-                data = raw_payload.get('data', {})
+                data = raw_payload.get('data') or {}  # Ensure data is always a dict, not None
 
                 logger.debug(f"ActivityClient (thin I/O) received request_failed from '{adapter_id}'. Internal Request ID: {internal_request_id}")
 
@@ -344,39 +364,55 @@ class ActivityClient:
                     logger.warning(f"Received request_failed for internal_request_id '{internal_request_id}' from '{adapter_id}', but no matching pending request found.")
                     return
                 
-                # Extract comprehensive error information from adapter response
-                error_message = (
-                    data.get('message') or 
-                    data.get('error') or 
-                    raw_payload.get('error') or 
-                    raw_payload.get('message') or 
-                    "Unknown error from adapter"
-                )
-                
-                # Create minimal generic failure event for ExternalEventRouter to process
-                failure_event = {
-                    "source_adapter_id": adapter_id,
-                    "adapter_type": "unknown",  # We don't track this at I/O level
-                    "payload": {
-                        "event_type_from_adapter": "adapter_action_failure",
-                        "adapter_data": {
-                            # Pass through essential correlation data
-                            "internal_request_id": internal_request_id,
-                            "target_element_id_for_confirmation": pending_request_info.get("target_element_id_for_confirmation"),
-                            "action_type": pending_request_info.get("action_type"),
-                            "conversation_id": pending_request_info.get("conversation_id"),  # NEW: Pass through conversation_id for routing
-                            "adapter_request_id": adapter_request_id,
-                            # Pass through raw adapter response for ExternalEventRouter to process
-                            "raw_adapter_response": raw_payload,
-                            "adapter_response_data": data,
-                            "error_message": error_message,
-                            "failed_timestamp": data.get("timestamp", time.time())
+                # Extract the parent trace context to continue the trace
+                parent_carrier = pending_request_info.get("telemetry_context", {})
+                parent_ctx = propagate.extract(parent_carrier)
+
+                with tracer.start_as_current_span("activity_client.handle_request_failure", context=parent_ctx) as span:
+                    span.set_attribute("adapter.request_id", adapter_request_id)
+                    span.set_attribute("adapter.internal_request_id", internal_request_id)
+
+                    # Extract comprehensive error information from adapter response
+                    error_message = (
+                        data.get('message') or 
+                        data.get('error') or 
+                        raw_payload.get('error') or 
+                        raw_payload.get('message') or 
+                        "Unknown error from adapter"
+                    )
+                    span.set_attribute("error.message", error_message)
+                    
+                    # Create minimal generic failure event for ExternalEventRouter to process
+                    failure_event = {
+                        "source_adapter_id": adapter_id,
+                        "adapter_type": "unknown",  # We don't track this at I/O level
+                        "payload": {
+                            "event_type_from_adapter": "adapter_action_failure",
+                            "adapter_data": {
+                                # Pass through essential correlation data
+                                "internal_request_id": internal_request_id,
+                                "target_element_id_for_confirmation": pending_request_info.get("target_element_id_for_confirmation"),
+                                "action_type": pending_request_info.get("action_type"),
+                                "conversation_id": pending_request_info.get("conversation_id"),  # NEW: Pass through conversation_id for routing
+                                "adapter_request_id": adapter_request_id,
+                                # Pass through raw adapter response for ExternalEventRouter to process
+                                "raw_adapter_response": raw_payload,
+                                "adapter_response_data": data,
+                                "error_message": error_message,
+                                "failed_timestamp": data.get("timestamp", time.time())
+                            }
                         }
                     }
-                }
-                
-                logger.info(f"ActivityClient routing failure for {pending_request_info.get('action_type')} (req_id: {internal_request_id}) to ExternalEventRouter")
-                self.host_event_loop.enqueue_incoming_event(failure_event, {})
+                    
+                    # Inject this continued trace's context for downstream processing
+                    carrier = {}
+                    propagate.inject(carrier)
+                    failure_event["telemetry_context"] = carrier
+                    span.add_event("Injecting continued trace context into carrier for event loop")
+                    
+                    logger.info(f"ActivityClient routing failure for {pending_request_info.get('action_type')} (req_id: {internal_request_id}) to ExternalEventRouter")
+                    # Note: We are no longer propagating context to the event loop from here
+                    self.host_event_loop.enqueue_incoming_event(failure_event, {})
 
             # --- Handler for Incoming Attachment Data (separate from message events) ---
             # Placeholder - assuming adapter sends attachment data via a specific event
@@ -411,204 +447,222 @@ class ActivityClient:
         This method focuses purely on adapter communication.
         """
         payload = action.get("payload", {})
-        
-        # Extract required fields from payload
         target_adapter_id = payload.get("adapter_id")
         internal_action_type = payload.get("action_type")
-        internal_request_id = payload.get("internal_request_id")
-        requesting_element_id = payload.get("requesting_element_id")
-        
-        # Basic validation
-        if not target_adapter_id:
-            logger.error(f"Cannot dispatch action: Missing 'adapter_id' in payload")
-            return
-        if not internal_action_type:
-            logger.error(f"Cannot dispatch action: Missing 'action_type' in payload")
-            return
-            
-        logger.info(f"ActivityClient dispatching {internal_action_type} to adapter '{target_adapter_id}'")
-            
-        # Check if adapter is connected
-        if target_adapter_id not in self.adapters:
-            logger.error(f"Adapter '{target_adapter_id}' not found in connected clients")
-            return
-        if not self.adapters[target_adapter_id]["connected"]:
-            logger.error(f"Adapter '{target_adapter_id}' is not connected")
-            return
 
-        client = self.adapters[target_adapter_id]["client"]
-        
-        try:
-            # NEW: Check for idle connection and proactively refresh if needed
-            current_time = time.time()
-            last_activity = self._last_activity.get(target_adapter_id, 0)
-            idle_duration = current_time - last_activity
+        with tracer.start_as_current_span("activity_client.handle_outgoing_action", attributes={
+            "adapter.id": target_adapter_id,
+            "action.type": internal_action_type
+        }) as span:
+            # Extract required fields from payload
+            internal_request_id = payload.get("internal_request_id")
+            requesting_element_id = payload.get("requesting_element_id")
             
-            if idle_duration > self._idle_threshold:
-                logger.warning(f"Adapter '{target_adapter_id}' has been idle for {idle_duration:.1f}s (threshold: {self._idle_threshold}s). Proactively refreshing connection before send.")
+            # Basic validation
+            if not target_adapter_id:
+                logger.error(f"Cannot dispatch action: Missing 'adapter_id' in payload")
+                span.set_status(trace.Status(trace.StatusCode.ERROR, "Missing adapter_id"))
+                return
+            if not internal_action_type:
+                logger.error(f"Cannot dispatch action: Missing 'action_type' in payload")
+                span.set_status(trace.Status(trace.StatusCode.ERROR, "Missing action_type"))
+                return
                 
-                # Attempt to refresh the connection proactively
-                refresh_success = await self._refresh_idle_connection(target_adapter_id)
-                if not refresh_success:
-                    logger.error(f"Failed to refresh idle connection for adapter '{target_adapter_id}'")
-                    if internal_request_id:
-                        self._pending_io_requests.pop(internal_request_id, None)
-                        self._emit_connection_failure_event(target_adapter_id, internal_action_type, internal_request_id, requesting_element_id, "Failed to refresh idle connection")
-                    return
-            
-            # Record activity for this outgoing action
-            self._record_activity(target_adapter_id)
-            
-            # Store minimal pending request for correlation tracking (action-agnostic)
-            if internal_request_id:
-                # ENHANCED: Include conversation_id for routing confirmations back to correct chat
-                conversation_id = payload.get("conversation_id")  # Extract from payload for routing
+            logger.info(f"ActivityClient dispatching {internal_action_type} to adapter '{target_adapter_id}'")
+            span.add_event("Dispatching action")
                 
-                # MINIMAL: Only store what's needed for I/O correlation + routing
-                self._pending_io_requests[internal_request_id] = {
-                    "adapter_id": target_adapter_id,
-                    "action_type": internal_action_type,  # Basic categorization only
-                    "target_element_id_for_confirmation": requesting_element_id,
-                    "conversation_id": conversation_id,  # NEW: Store for routing confirmations
-                    "request_time": time.monotonic()
-                    # NOTE: No action-specific data stored - ExternalEventRouter handles that
-                }
-                logger.debug(f"Registered pending request {internal_request_id} for {internal_action_type} (thin I/O tracking)")
-
-            # Create adapter payload in the structure the adapter expects
-            # Based on working format: { "event_type": "send_message", "internal_request_id": "...", "data": {...} }
-            data_payload = payload.copy()
-            data_payload.pop("action_type", None)  # Remove internal Connectome field
-            data_payload.pop("requesting_element_id", None)  # Remove internal Connectome field
-            # Keep internal_request_id in data_payload for adapter tracking
-            
-            adapter_payload = {
-                "event_type": internal_action_type,  # Adapter needs this to know operation type
-                "internal_request_id": internal_request_id,  # Top-level for response correlation
-                "data": data_payload  # Nested data structure as adapter expects
-            }
-            
-            # Enhanced connection health checks before emit
-            if not hasattr(client, 'connected') or not client.connected:
-                raise ConnectionError(f"SocketIO client for adapter '{target_adapter_id}' reports not connected (client.connected = {getattr(client, 'connected', 'N/A')})")
-            
-            # NEW: Comprehensive queue and connection state validation
-            connection_issues = []
-            
-            # Check engine.io connection state if available
-            if hasattr(client, 'eio') and client.eio:
-                if hasattr(client.eio, 'state') and client.eio.state != 'connected':
-                    connection_issues.append(f"Engine.IO state is '{client.eio.state}', not 'connected'")
-                
-                # Check packet queue state more thoroughly
-                if hasattr(client.eio, 'queue'):
-                    if hasattr(client.eio.queue, 'empty') and client.eio.queue.empty():
-                        connection_issues.append("Engine.IO packet queue is empty")
-                    elif hasattr(client.eio.queue, 'qsize') and client.eio.queue.qsize() == 0:
-                        connection_issues.append("Engine.IO packet queue size is 0")
-                    
-                # Check if transport is available and healthy
-                if hasattr(client.eio, 'transport') and client.eio.transport:
-                    if hasattr(client.eio.transport, 'state') and client.eio.transport.state != 'open':
-                        connection_issues.append(f"Transport state is '{client.eio.transport.state}', not 'open'")
-                else:
-                    connection_issues.append("Engine.IO transport is missing or None")
-            
-            # If we detected connection issues, attempt proactive refresh
-            if connection_issues:
-                logger.warning(f"Detected connection issues for adapter '{target_adapter_id}': {'; '.join(connection_issues)}. Attempting connection refresh.")
-                
-                # Try to refresh the connection
-                refresh_success = await self._refresh_idle_connection(target_adapter_id, force=True)
-                if not refresh_success:
-                    error_msg = f"Connection validation failed and refresh unsuccessful: {'; '.join(connection_issues)}"
-                    raise ConnectionError(error_msg)
-                
-                # Update client reference after refresh
-                client = self.adapters[target_adapter_id]["client"]
-                logger.info(f"Connection refreshed successfully for adapter '{target_adapter_id}', proceeding with emit")
-            
-            # Double-check our connection tracking
+            # Check if adapter is connected
+            if target_adapter_id not in self.adapters:
+                logger.error(f"Adapter '{target_adapter_id}' not found in connected clients")
+                span.set_status(trace.Status(trace.StatusCode.ERROR, "Adapter not found"))
+                return
             if not self.adapters[target_adapter_id]["connected"]:
-                logger.warning(f"Our connection tracking shows adapter '{target_adapter_id}' as disconnected, but proceeding with emit attempt")
-            
-            # Dispatch to adapter using generic event emit
-            logger.debug(f"Emitting {internal_action_type} to adapter '{target_adapter_id}': {adapter_payload}")
-            
-            # Enhanced emit with timeout and retry logic
-            try:
-                # NEW: Use longer timeout for emit to accommodate agent thinking time
-                await asyncio.wait_for(
-                    client.emit("bot_response", adapter_payload),
-                    timeout=EMIT_TIMEOUT_SECONDS  # Increased from 10s to 30s
-                )
-                logger.info(f"Successfully dispatched {internal_action_type} to adapter '{target_adapter_id}' (req_id: {internal_request_id})")
-                
-                # NEW: Track successful operation to reset timeout counters
-                self._record_successful_operation(target_adapter_id)
-                
-            except asyncio.TimeoutError:
-                # ENHANCED: More nuanced timeout handling
-                logger.warning(f"Emit timeout for {internal_action_type} to adapter '{target_adapter_id}' after {EMIT_TIMEOUT_SECONDS}s")
-                
-                # Check if this is a pattern (multiple timeouts) or isolated incident
-                timeout_count = getattr(self, f'_timeout_count_{target_adapter_id}', 0) + 1
-                setattr(self, f'_timeout_count_{target_adapter_id}', timeout_count)
-                
-                # NEW: Check recent success history to determine if this is truly a connection issue
-                recent_successes = self._successful_operations.get(target_adapter_id, 0)
-                
-                if timeout_count >= 3 and recent_successes < 2:
-                    # Multiple timeouts with few recent successes suggest real connection issue
-                    logger.error(f"Multiple emit timeouts ({timeout_count}) with low success rate for adapter '{target_adapter_id}' - marking as disconnected")
-                    self.adapters[target_adapter_id]["connected"] = False
-                    raise ConnectionError(f"Multiple emit timeouts - connection to adapter '{target_adapter_id}' unstable")
-                elif timeout_count >= 5:
-                    # Hard limit: too many timeouts regardless of successes
-                    logger.error(f"Excessive emit timeouts ({timeout_count}) for adapter '{target_adapter_id}' - marking as disconnected")
-                    self.adapters[target_adapter_id]["connected"] = False
-                    raise ConnectionError(f"Excessive emit timeouts - connection to adapter '{target_adapter_id}' unstable")
-                else:
-                    # Be more tolerant if we've had recent successes
-                    tolerance_reason = f"recent successes: {recent_successes}" if recent_successes > 0 else "within tolerance"
-                    logger.info(f"Emit timeout ({timeout_count}) for adapter '{target_adapter_id}' - continuing ({tolerance_reason})")
-                    # Don't raise ConnectionError immediately, let the pending request timeout handle it
-                    logger.info(f"Dispatched {internal_action_type} to adapter '{target_adapter_id}' (req_id: {internal_request_id}) - timeout tolerance applied")
-                    
-            except (socketio.exceptions.DisconnectedError, socketio.exceptions.ConnectionError) as se:
-                # SocketIO specific connection errors
-                logger.error(f"SocketIO connection error during emit to adapter '{target_adapter_id}': {se}")
-                self.adapters[target_adapter_id]["connected"] = False
-                raise ConnectionError(f"SocketIO connection lost during emit: {se}")
-            except Exception as emit_error:
-                # Check if it's a packet queue error or similar low-level issue
-                error_str = str(emit_error).lower()
-                if 'packet queue' in error_str or 'queue is empty' in error_str:
-                    logger.error(f"Packet queue error for adapter '{target_adapter_id}': {emit_error}")
-                    # Mark adapter as disconnected to trigger reconnection
-                    self.adapters[target_adapter_id]["connected"] = False
-                    raise ConnectionError(f"Packet queue error - connection to adapter '{target_adapter_id}' unstable: {emit_error}")
-                else:
-                    # Re-raise other emit errors
-                    raise emit_error
+                logger.error(f"Adapter '{target_adapter_id}' is not connected")
+                span.set_status(trace.Status(trace.StatusCode.ERROR, "Adapter not connected"))
+                return
 
-        except ConnectionError as ce:
-            logger.error(f"Connection error dispatching {internal_action_type} to adapter '{target_adapter_id}': {ce}")
-            # Mark adapter as disconnected and clean up
-            self.adapters[target_adapter_id]["connected"] = False
-            if internal_request_id:
-                self._pending_io_requests.pop(internal_request_id, None)
-                self._emit_connection_failure_event(target_adapter_id, internal_action_type, internal_request_id, requesting_element_id, str(ce))
+            client = self.adapters[target_adapter_id]["client"]
             
-            # Try to reconnect if it's a connection stability issue
-            logger.info(f"Attempting to reconnect to adapter '{target_adapter_id}' after connection error...")
-            asyncio.create_task(self._attempt_reconnect(target_adapter_id))
-            
-        except Exception as e:
-            logger.error(f"Error dispatching {internal_action_type} to adapter '{target_adapter_id}': {e}", exc_info=True)
-            # Remove from pending if it was added, as it didn't reach adapter successfully
-            if internal_request_id:
-                self._pending_io_requests.pop(internal_request_id, None)
+            try:
+                # NEW: Check for idle connection and proactively refresh if needed
+                current_time = time.time()
+                last_activity = self._last_activity.get(target_adapter_id, 0)
+                idle_duration = current_time - last_activity
+                
+                if idle_duration > self._idle_threshold:
+                    logger.warning(f"Adapter '{target_adapter_id}' has been idle for {idle_duration:.1f}s (threshold: {self._idle_threshold}s). Proactively refreshing connection before send.")
+                    
+                    # Attempt to refresh the connection proactively
+                    refresh_success = await self._refresh_idle_connection(target_adapter_id)
+                    if not refresh_success:
+                        logger.error(f"Failed to refresh idle connection for adapter '{target_adapter_id}'")
+                        if internal_request_id:
+                            self._pending_io_requests.pop(internal_request_id, None)
+                            self._emit_connection_failure_event(target_adapter_id, internal_action_type, internal_request_id, requesting_element_id, "Failed to refresh idle connection")
+                        return
+                
+                # Record activity for this outgoing action
+                self._record_activity(target_adapter_id)
+                
+                # Store minimal pending request for correlation tracking (action-agnostic)
+                if internal_request_id:
+                    # ENHANCED: Include conversation_id for routing confirmations back to correct chat
+                    conversation_id = payload.get("conversation_id")  # Extract from payload for routing
+                    
+                    # Manually capture and store the trace context for this specific request
+                    carrier = {}
+                    propagate.inject(carrier)
+                    
+                    # MINIMAL: Only store what's needed for I/O correlation + routing
+                    self._pending_io_requests[internal_request_id] = {
+                        "adapter_id": target_adapter_id,
+                        "action_type": internal_action_type,  # Basic categorization only
+                        "target_element_id_for_confirmation": requesting_element_id,
+                        "conversation_id": conversation_id,  # NEW: Store for routing confirmations
+                        "request_time": time.monotonic(),
+                        "telemetry_context": carrier # Store the context
+                    }
+                    logger.debug(f"Registered pending request {internal_request_id} for {internal_action_type} (thin I/O tracking)")
+
+                # Create adapter payload in the structure the adapter expects
+                # Based on working format: { "event_type": "send_message", "internal_request_id": "...", "data": {...} }
+                data_payload = payload.copy()
+                data_payload.pop("action_type", None)  # Remove internal Connectome field
+                data_payload.pop("requesting_element_id", None)  # Remove internal Connectome field
+                # Keep internal_request_id in data_payload for adapter tracking
+                
+                adapter_payload = {
+                    "event_type": internal_action_type,  # Adapter needs this to know operation type
+                    "internal_request_id": internal_request_id,  # Top-level for response correlation
+                    "data": data_payload  # Nested data structure as adapter expects
+                }
+                
+                # Enhanced connection health checks before emit
+                if not hasattr(client, 'connected') or not client.connected:
+                    raise ConnectionError(f"SocketIO client for adapter '{target_adapter_id}' reports not connected (client.connected = {getattr(client, 'connected', 'N/A')})")
+                
+                # NEW: Comprehensive queue and connection state validation
+                connection_issues = []
+                
+                # Check engine.io connection state if available
+                if hasattr(client, 'eio') and client.eio:
+                    if hasattr(client.eio, 'state') and client.eio.state != 'connected':
+                        connection_issues.append(f"Engine.IO state is '{client.eio.state}', not 'connected'")
+                    
+                    # Check packet queue state more thoroughly
+                    if hasattr(client.eio, 'queue'):
+                        if hasattr(client.eio.queue, 'empty') and client.eio.queue.empty():
+                            connection_issues.append("Engine.IO packet queue is empty")
+                        elif hasattr(client.eio.queue, 'qsize') and client.eio.queue.qsize() == 0:
+                            connection_issues.append("Engine.IO packet queue size is 0")
+                        
+                        # Check if transport is available and healthy
+                        if hasattr(client.eio, 'transport') and client.eio.transport:
+                            if hasattr(client.eio.transport, 'state') and client.eio.transport.state != 'open':
+                                connection_issues.append(f"Transport state is '{client.eio.transport.state}', not 'open'")
+                        else:
+                            connection_issues.append("Engine.IO transport is missing or None")
+                
+                # If we detected connection issues, attempt proactive refresh
+                if connection_issues:
+                    logger.warning(f"Detected connection issues for adapter '{target_adapter_id}': {'; '.join(connection_issues)}. Attempting connection refresh.")
+                    
+                    # Try to refresh the connection
+                    refresh_success = await self._refresh_idle_connection(target_adapter_id, force=True)
+                    if not refresh_success:
+                        error_msg = f"Connection validation failed and refresh unsuccessful: {'; '.join(connection_issues)}"
+                        raise ConnectionError(error_msg)
+                    
+                    # Update client reference after refresh
+                    client = self.adapters[target_adapter_id]["client"]
+                    logger.info(f"Connection refreshed successfully for adapter '{target_adapter_id}', proceeding with emit")
+                
+                # Double-check our connection tracking
+                if not self.adapters[target_adapter_id]["connected"]:
+                    logger.warning(f"Our connection tracking shows adapter '{target_adapter_id}' as disconnected, but proceeding with emit attempt")
+                
+                # Dispatch to adapter using generic event emit
+                logger.debug(f"Emitting {internal_action_type} to adapter '{target_adapter_id}': {adapter_payload}")
+                span.add_event("Emitting to adapter")
+                
+                # Enhanced emit with timeout and retry logic
+                try:
+                    # NEW: Use longer timeout for emit to accommodate agent thinking time
+                    await asyncio.wait_for(
+                        client.emit("bot_response", adapter_payload),
+                        timeout=EMIT_TIMEOUT_SECONDS  # Increased from 10s to 30s
+                    )
+                    logger.info(f"Successfully dispatched {internal_action_type} to adapter '{target_adapter_id}' (req_id: {internal_request_id})")
+                    span.set_status(trace.Status(trace.StatusCode.OK))
+                    
+                    # NEW: Track successful operation to reset timeout counters
+                    self._record_successful_operation(target_adapter_id)
+                except asyncio.TimeoutError:
+                    # ENHANCED: More nuanced timeout handling
+                    logger.warning(f"Emit timeout for {internal_action_type} to adapter '{target_adapter_id}' after {EMIT_TIMEOUT_SECONDS}s")
+                    
+                    # Check if this is a pattern (multiple timeouts) or isolated incident
+                    timeout_count = getattr(self, f'_timeout_count_{target_adapter_id}', 0) + 1
+                    setattr(self, f'_timeout_count_{target_adapter_id}', timeout_count)
+                    
+                    # NEW: Check recent success history to determine if this is truly a connection issue
+                    recent_successes = self._successful_operations.get(target_adapter_id, 0)
+                    
+                    if timeout_count >= 3 and recent_successes < 2:
+                        # Multiple timeouts with few recent successes suggest real connection issue
+                        logger.error(f"Multiple emit timeouts ({timeout_count}) with low success rate for adapter '{target_adapter_id}' - marking as disconnected")
+                        self.adapters[target_adapter_id]["connected"] = False
+                        raise ConnectionError(f"Multiple emit timeouts - connection to adapter '{target_adapter_id}' unstable")
+                    elif timeout_count >= 5:
+                        # Hard limit: too many timeouts regardless of successes
+                        logger.error(f"Excessive emit timeouts ({timeout_count}) for adapter '{target_adapter_id}' - marking as disconnected")
+                        self.adapters[target_adapter_id]["connected"] = False
+                        raise ConnectionError(f"Excessive emit timeouts - connection to adapter '{target_adapter_id}' unstable")
+                    else:
+                        # Be more tolerant if we've had recent successes
+                        tolerance_reason = f"recent successes: {recent_successes}" if recent_successes > 0 else "within tolerance"
+                        logger.info(f"Emit timeout ({timeout_count}) for adapter '{target_adapter_id}' - continuing ({tolerance_reason})")
+                        # Don't raise ConnectionError immediately, let the pending request timeout handle it
+                        logger.info(f"Dispatched {internal_action_type} to adapter '{target_adapter_id}' (req_id: {internal_request_id}) - timeout tolerance applied")
+                    
+                except (socketio.exceptions.DisconnectedError, socketio.exceptions.ConnectionError) as se:
+                    # SocketIO specific connection errors
+                    logger.error(f"SocketIO connection error during emit to adapter '{target_adapter_id}': {se}")
+                    self.adapters[target_adapter_id]["connected"] = False
+                    raise ConnectionError(f"SocketIO connection lost during emit: {se}")
+                except Exception as emit_error:
+                    # Check if it's a packet queue error or similar low-level issue
+                    error_str = str(emit_error).lower()
+                    if 'packet queue' in error_str or 'queue is empty' in error_str:
+                        logger.error(f"Packet queue error for adapter '{target_adapter_id}': {emit_error}")
+                        # Mark adapter as disconnected to trigger reconnection
+                        self.adapters[target_adapter_id]["connected"] = False
+                        raise ConnectionError(f"Packet queue error - connection to adapter '{target_adapter_id}' unstable: {emit_error}")
+                    else:
+                        # Re-raise other emit errors
+                        raise emit_error
+
+            except ConnectionError as ce:
+                logger.error(f"Connection error dispatching {internal_action_type} to adapter '{target_adapter_id}': {ce}")
+                span.record_exception(ce)
+                span.set_status(trace.Status(trace.StatusCode.ERROR, "ConnectionError"))
+                # Mark adapter as disconnected and clean up
+                self.adapters[target_adapter_id]["connected"] = False
+                if internal_request_id:
+                    self._pending_io_requests.pop(internal_request_id, None)
+                    self._emit_connection_failure_event(target_adapter_id, internal_action_type, internal_request_id, requesting_element_id, str(ce))
+                
+                # Try to reconnect if it's a connection stability issue
+                logger.info(f"Attempting to reconnect to adapter '{target_adapter_id}' after connection error...")
+                asyncio.create_task(self._attempt_reconnect(target_adapter_id))
+                
+            except Exception as e:
+                logger.error(f"Error dispatching {internal_action_type} to adapter '{target_adapter_id}': {e}", exc_info=True)
+                span.record_exception(e)
+                span.set_status(trace.Status(trace.StatusCode.ERROR, "Dispatch error"))
+                # Remove from pending if it was added, as it didn't reach adapter successfully
+                if internal_request_id:
+                    self._pending_io_requests.pop(internal_request_id, None)
                 # Enqueue an immediate failure event to be routed back via ExternalEventRouter
                 logger.info(f"Emit failed for {internal_action_type} (req_id: {internal_request_id}). Enqueuing immediate failure event.")
                 failure_event = {

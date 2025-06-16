@@ -129,6 +129,13 @@ async def amain():
         max_lines_per_file=settings.log_max_lines_per_file,
         max_log_files=settings.log_max_files
     )
+
+    # --- Scan for all components FIRST ---
+    # This ensures the COMPONENT_REGISTRY is populated before any other
+    # module needs to look up a component type by name.
+    logger.info("Scanning for all registered components...")
+    scan_and_load_components()
+    logger.info(f"Component scan complete. Registry contains: {list(COMPONENT_REGISTRY.keys())}")
     
     # Get the SpaceRegistry instance and initialize its storage FIRST
     space_registry = SpaceRegistry.get_instance()
@@ -193,11 +200,6 @@ async def amain():
     # NEW: Set ActivityClient reference in ExternalEventRouter for outgoing action dispatch
     external_event_router.set_activity_client(activity_client)
     logger.info("ExternalEventRouter configured with ActivityClient reference for action preprocessing")
-    
-    # Load registered agent loops dynamically
-    logger.info("Scanning for registered components...")
-    scan_and_load_components()
-    logger.info(f"Available agent loop component types: {list(COMPONENT_REGISTRY.keys())}")
     
     # After component scanning, we can validate agent configurations
     logger.info("Processing agent configurations...")
