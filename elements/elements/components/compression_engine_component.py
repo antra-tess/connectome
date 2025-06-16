@@ -52,6 +52,7 @@ class CompressionEngineComponent(Component):
     COMPRESSION_CHUNK_SIZE = 4000    # 4k tokens per compression chunk (instead of 10 items)
     MIN_COMPRESSION_BATCH = COMPRESSION_CHUNK_SIZE     # Minimum excess before triggering compression (avoid micro-compressions)
     UNFOCUSED_TOTAL_LIMIT = 4000     # 4k tokens total for unfocused elements (unchanged)
+    MIN_COMPRESSION_THRESHOLD = 1000 # 1k tokens minimum before triggering any compression (avoid compressing small content)
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -805,6 +806,16 @@ class CompressionEngineComponent(Component):
             element_name = props.get('element_name', element_id)
             available_tools = props.get('available_tools', [])
             children = container_node.get('children', [])
+            
+            # NEW: 1k token threshold check - don't compress small content
+            total_tokens = self._calculate_children_tokens(children)
+            if total_tokens < self.MIN_COMPRESSION_THRESHOLD:
+                logger.debug(f"Container {element_id} has {total_tokens} tokens (<{self.MIN_COMPRESSION_THRESHOLD} threshold), preserving full content")
+                # Keep children as-is, just ensure tool metadata is preserved
+                if available_tools:
+                    container_node['properties']['available_tools'] = available_tools
+                    container_node['properties']['tools_available_despite_preservation'] = True
+                return
             
             # NEW: Determine if this element is focused
             is_focused = (element_id == focus_element_id)

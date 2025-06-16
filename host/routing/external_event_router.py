@@ -121,6 +121,7 @@ class ExternalEventRouter:
         payload = event_data_from_activity_client.get("payload", {})
         event_type_from_adapter = payload.get("event_type_from_adapter", "unknown_event_type")
 
+
         with tracer.start_as_current_span("route_external_event", attributes={
             "event.type": event_type_from_adapter,
             "adapter.id": source_adapter_id,
@@ -145,8 +146,6 @@ class ExternalEventRouter:
                 span.set_attribute("routing.error", "Missing source_adapter_id or payload")
                 span.set_status(trace.Status(trace.StatusCode.ERROR, "Invalid event structure"))
                 return
-            
-            adapter_data = payload.get("adapter_data")
 
             adapter_name = adapter_data.get("adapter_name")
             agent_id = self._get_agent_id_by_alias(adapter_name)
