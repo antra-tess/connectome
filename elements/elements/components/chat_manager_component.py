@@ -1,6 +1,7 @@
 import logging
 from typing import Dict, Any, Optional, TYPE_CHECKING, List
 from datetime import datetime
+import time
 
 from .base_component import Component
 from elements.component_registry import register_component
@@ -205,6 +206,10 @@ class ChatManagerComponent(Component):
             is_replay_mode = timeline_context.get('replay_mode', False)
             if is_replay_mode:
                 return self._handle_state_restoration(event_payload_from_space)
+
+        # NEW: Handle bulk history fetched event
+        if connectome_event_type == "bulk_history_fetched":
+            return self._handle_bulk_history_fetched(event_payload_from_space, timeline_context)
 
         # NEW: Handle message events (including replay events)
         if connectome_event_type in ["message_received", "historical_message_received", "agent_message_confirmed",
@@ -412,4 +417,90 @@ class ChatManagerComponent(Component):
                 
         except Exception as e:
             logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Error during state restoration: {e}", exc_info=True)
+            return False 
+
+    def _handle_bulk_history_fetched(self, event_payload: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
+        """
+        Handles bulk history fetched events for efficient bulk processing and reconciliation.
+        
+        Args:
+            event_payload: The bulk_history_fetched event payload
+            timeline_context: Timeline context for the event
+            
+        Returns:
+            True if handled successfully, False otherwise
+        """
+        from ..inner_space import InnerSpace
+        try:
+            # Extract bulk history data
+            history_messages = event_payload.get("payload", {}).get("history_messages", [])
+            source_adapter_id = event_payload.get("source_adapter_id")
+            external_conversation_id = event_payload.get("external_conversation_id")
+            is_dm = event_payload.get("payload", {}).get("is_dm", False)
+            total_message_count = event_payload.get("payload", {}).get("total_message_count", len(history_messages))
+            
+            logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Processing bulk history: {total_message_count} messages for conversation '{external_conversation_id}'")
+            
+            if not source_adapter_id or not external_conversation_id:
+                logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Bulk history event missing required fields. Event: {event_payload}")
+                return False
+            
+            if not isinstance(self.owner, InnerSpace):
+                logger.error(f"[{self.COMPONENT_TYPE}] Bulk history processing only supported on InnerSpace owners.")
+                return False
+            
+            # For bulk history, we need to find or create the target chat element first
+            # Use the first message for sender information if available
+            sender_external_id = external_conversation_id  # Default fallback
+            sender_display_name = "Unknown"
+            
+            if history_messages and isinstance(history_messages[0], dict):
+                first_msg_sender = history_messages[0].get('sender', {})
+                if first_msg_sender:
+                    sender_external_id = first_msg_sender.get("user_id", external_conversation_id)
+                    sender_display_name = first_msg_sender.get("display_name", "Unknown")
+            
+            # Ensure the chat element exists for bulk processing
+            target_chat_element, mount_id = self._ensure_chat_element(
+                source_adapter_id,
+                external_conversation_id,
+                sender_external_id,
+                sender_display_name,
+                is_dm=is_dm
+            )
+            
+            if not target_chat_element:
+                logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Could not ensure chat element for bulk history processing. Conversation: {external_conversation_id}")
+                return False
+            # Create a bulk history event for the MessageListComponent to handle
+            bulk_event_for_message_list = {
+                "event_type": "bulk_history_received",  # Different event type for MessageListComponent
+                "event_id": f"bulk_msg_list_{external_conversation_id}_{int(time.time()*1000)}",
+                "source_adapter_id": source_adapter_id,
+                "external_conversation_id": external_conversation_id,
+                "target_element_id": target_chat_element.id,
+                "is_replayable": True,
+                "payload": {
+                    "event_type": "bulk_history_received",
+                    "source_adapter_id": source_adapter_id,
+                    "external_conversation_id": external_conversation_id,
+                    "is_dm": is_dm,
+                    "history_messages": history_messages,
+                    "total_message_count": total_message_count,
+                    "timestamp": time.time(),
+                    "bulk_processing": True  # Flag to indicate bulk processing mode
+                }
+            }
+            
+            # Route the bulk event to the chat element
+            if hasattr(target_chat_element, 'receive_event'):
+                target_chat_element.receive_event(bulk_event_for_message_list, timeline_context)
+                logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Successfully routed bulk history to MessageListComponent")
+                return True
+            else:
+                logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Chat element '{target_chat_element.id}' does not support receive_event")
+                return False
+                
+        except Exception as e:
+            logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Error processing bulk history: {e}", exc_info=True)
             return False 

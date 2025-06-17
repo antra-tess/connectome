@@ -37,9 +37,9 @@ tracer = get_tracer(__name__)
 logger = logging.getLogger(__name__)
 
 # Example config defaults (move to config loading later)
-SOCKET_RECONNECTION_ATTEMPTS = 3
+SOCKET_RECONNECTION_ATTEMPTS = 5
 SOCKET_RECONNECTION_DELAY = 5
-SOCKET_TIMEOUT = 30  # seconds
+SOCKET_TIMEOUT = 60  # seconds
 PENDING_REQUEST_TIMEOUT_SECONDS = 300  # 5 minutes
 
 # NEW: Enhanced timeouts for robustness
@@ -138,7 +138,7 @@ class ActivityClient:
                 reconnection=True,
                 reconnection_attempts=SOCKET_RECONNECTION_ATTEMPTS,
                 reconnection_delay=SOCKET_RECONNECTION_DELAY,
-                request_timeout=SOCKET_TIMEOUT
+                request_timeout=SOCKET_TIMEOUT,
             )
             self.adapters[adapter_id]["client"] = client
             self.adapters[adapter_id]["connected"] = False # Assume disconnected until confirmed
@@ -180,7 +180,6 @@ class ActivityClient:
                 with tracer.start_as_current_span("activity_client.handle_bot_request") as span:
                     # Record activity for this outgoing action
                     self._record_activity(adapter_id)
-                    logger.critical(f"Received bot_request from '{adapter_id}': {raw_payload}")
                     
                     if not isinstance(raw_payload, dict):
                         logger.warning(f"Received non-dict bot_request from '{adapter_id}': {raw_payload}")
