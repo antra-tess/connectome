@@ -180,7 +180,6 @@ class ActivityClient:
                 with tracer.start_as_current_span("activity_client.handle_bot_request") as span:
                     # Record activity for this outgoing action
                     self._record_activity(adapter_id)
-                    logger.critical(f"Received bot_request from '{adapter_id}': {raw_payload}")
                     
                     if not isinstance(raw_payload, dict):
                         logger.warning(f"Received non-dict bot_request from '{adapter_id}': {raw_payload}")

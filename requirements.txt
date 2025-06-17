@@ -1,7 +1,7 @@
 # Core dependencies
-python-socketio>=5.10.0                        # For Socket.IO client and server
+python-socketio[aiohttp]==5.11.1
+aiohttp==3.9.3
 python-dotenv>=1.0.0                           # For environment variable management
-aiohttp>=3.9.0                                 # Async HTTP client/server
 pydantic>=2.0.0                                # Data validation
 pydantic-settings>=2.0.0                       # Settings management with Pydantic
 asyncio>=3.4.3                                 # Asynchronous I/O

@@ -31,6 +31,7 @@ class MessageListComponent(Component):
     HANDLED_EVENT_TYPES = [
         "message_received",                   # Unified handler for DMs/Channel messages
         "historical_message_received",        # NEW: For conversation history without activation
+        "bulk_history_received",             # NEW: For bulk history processing from ChatManagerComponent
         "agent_message_confirmed",            # NEW: For confirmed agent outgoing messages (replay)
         "connectome_message_deleted",         # Use Connectome-defined types for delete/edit
         "connectome_message_updated",         # Use Connectome-defined types for delete/edit
@@ -38,7 +39,7 @@ class MessageListComponent(Component):
         "connectome_reaction_removed",        # For handling removed reactions
         "attachment_content_available",       # NEW: For when fetched attachment content arrives
         "connectome_action_success",          # NEW: Generic action success (replaces specific events)
-        "connectome_action_failure"           # NEW: Generic action failure (replaces specific events)
+        "connectome_action_failure",           # NEW: Generic action failure (replaces specific events)
     ]
 
     def initialize(self, max_messages: Optional[int] = None, **kwargs) -> None:
@@ -64,7 +65,7 @@ class MessageListComponent(Component):
         event_type = event_payload.get('event_type')    # Space puts event_type inside payload
         
         # Check if this is a replay event to avoid activation during startup
-        is_replay_mode = timeline_context.get('replay_mode', False)
+        is_replay_mode = timeline_context.get('replay_mode', False)    
 
         if event_type in self.HANDLED_EVENT_TYPES:
             logger.debug(f"[{self.owner.id}] MessageListComponent handling event: {event_type} (replay: {is_replay_mode})")
@@ -78,6 +79,9 @@ class MessageListComponent(Component):
             elif event_type == "historical_message_received":
                 # Handle historical messages the same way but don't trigger activation
                 self._handle_new_message(actual_content_payload)
+            elif event_type == "bulk_history_received":
+                # Handle bulk history processing
+                self._handle_bulk_history_received(event_payload, timeline_context)
             elif event_type == "connectome_message_deleted": 
                 self._handle_delete_message(actual_content_payload)
             elif event_type == "connectome_message_updated":
@@ -1509,3 +1513,565 @@ class MessageListComponent(Component):
             self.restore_message_from_pending_state(affected_message_id, action_type.replace('_message', '').replace('_reaction', ''))
         
         return True
+
+    def _handle_bulk_history_received(self, bulk_history_content: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
+        """
+        Handles bulk history processing with sophisticated reconciliation logic.
+        
+        NEW: Uses the reconciliation engine to properly handle:
+        - Empty MessageList scenarios
+        - Overlap detection and processing  
+        - Edit reconciliation (history has higher order-of-truth)
+        - Deletion reconciliation (missing from history = deleted)
+        - Gap detection and system message management
+        
+        Args:
+            bulk_history_content: The bulk history payload containing history_messages
+            timeline_context: Timeline context for the event
+            
+        Returns:
+            True if handled successfully, False otherwise
+        """
+        try:
+            history_messages = bulk_history_content.get("history_messages", [])
+            source_adapter_id = bulk_history_content.get("source_adapter_id")
+            external_conversation_id = bulk_history_content.get("external_conversation_id")
+            is_dm = bulk_history_content.get("is_dm", False)
+            is_replay_mode = timeline_context.get('replay_mode', False)
+            
+            logger.info(f"[{self.owner.id}] Processing bulk history with reconciliation: {len(history_messages)} messages from {source_adapter_id}")
+            
+            if not history_messages:
+                logger.info(f"[{self.owner.id}] No history messages to process")
+                return True
+            
+            # NEW: Use the sophisticated reconciliation engine
+            reconciliation_results = self._reconcile_history_with_existing_messages(history_messages, source_adapter_id)
+            
+            # Log detailed reconciliation results
+            logger.info(f"[{self.owner.id}] Bulk history reconciliation complete:")
+            logger.info(f"  - Processed: {reconciliation_results['processed_count']} messages")
+            logger.info(f"  - Added: {reconciliation_results['added_count']} new messages")
+            logger.info(f"  - Edited: {reconciliation_results['edited_count']} messages") 
+            logger.info(f"  - Deleted: {reconciliation_results['deleted_count']} messages")
+            logger.info(f"  - Gap markers added: {reconciliation_results['gap_messages_added']}")
+            logger.info(f"  - Gap markers removed: {reconciliation_results['gap_messages_removed']}")
+            logger.info(f"  - Total messages now: {len(self._state.get('_messages', []))}")
+            
+            # Log any errors that occurred during reconciliation
+            if reconciliation_results['errors']:
+                logger.warning(f"[{self.owner.id}] Reconciliation errors: {reconciliation_results['errors']}")
+            
+            # Emit VEIL delta after bulk processing (only during normal operation, not replay)
+            if not is_replay_mode:
+                veil_producer = self.get_sibling_component("MessageListVeilProducer")
+                if veil_producer:
+                    veil_producer.emit_delta()
+                    logger.debug(f"[{self.owner.id}] Emitted VEIL delta after bulk history reconciliation")
+            else:
+                # During replay, provide summary of restoration
+                total_changes = (reconciliation_results['added_count'] + 
+                               reconciliation_results['edited_count'] + 
+                               reconciliation_results['deleted_count'])
+                logger.info(f"[{self.owner.id}] REPLAY: Reconciled {total_changes} changes from bulk history "
+                           f"({len(self._state.get('_messages', []))} total messages)")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"[{self.owner.id}] Error in bulk history reconciliation: {e}", exc_info=True)
+            return False
+
+    # --- NEW: History Reconciliation Helper Methods ---
+    def _get_message_timestamp_range(self) -> Optional[Dict[str, float]]:
+        """
+        Get the timestamp range of messages in the current MessageList.
+        
+        Returns:
+            Dict with 'min' and 'max' timestamps, or None if no messages
+        """
+        messages = self._state.get('_messages', [])
+        if not messages:
+            return None
+            
+        timestamps = [msg.get('timestamp') for msg in messages if msg.get('timestamp')]
+        if not timestamps:
+            return None
+            
+        return {
+            'min': min(timestamps),
+            'max': max(timestamps)
+        }
+    
+    def _get_history_timestamp_range(self, history_messages: List[Dict[str, Any]]) -> Optional[Dict[str, float]]:
+        """
+        Get the timestamp range of messages in the history batch.
+        
+        Args:
+            history_messages: List of history message dictionaries
+            
+        Returns:
+            Dict with 'min' and 'max' timestamps, or None if no messages
+        """
+        if not history_messages:
+            return None
+            
+        timestamps = [msg.get('timestamp') for msg in history_messages if msg.get('timestamp')]
+        if not timestamps:
+            return None
+            
+        return {
+            'min': min(timestamps),
+            'max': max(timestamps)
+        }
+    
+    def _detect_history_overlap(self, history_messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Detect overlap type between history batch and existing MessageList.
+        
+        Args:
+            history_messages: List of history message dictionaries
+            
+        Returns:
+            Dict containing overlap analysis:
+            - overlap_type: 'no_existing', 'no_overlap_earlier', 'no_overlap_later', 'has_overlap'
+            - messagelist_range: timestamp range of existing messages
+            - history_range: timestamp range of history messages
+            - gap_info: information about gaps if applicable
+        """
+        messagelist_range = self._get_message_timestamp_range()
+        history_range = self._get_history_timestamp_range(history_messages)
+        
+        if not messagelist_range:
+            return {
+                'overlap_type': 'no_existing',
+                'messagelist_range': None,
+                'history_range': history_range,
+                'gap_info': None
+            }
+            
+        if not history_range:
+            return {
+                'overlap_type': 'no_history',
+                'messagelist_range': messagelist_range,
+                'history_range': None,
+                'gap_info': None
+            }
+        
+        # Check for no overlap scenarios
+        if history_range['max'] < messagelist_range['min']:
+            # History is entirely earlier than existing messages
+            return {
+                'overlap_type': 'no_overlap_earlier',
+                'messagelist_range': messagelist_range,
+                'history_range': history_range,
+                'gap_info': {
+                    'gap_start': history_range['max'],
+                    'gap_end': messagelist_range['min'],
+                    'gap_type': 'between_history_and_existing'
+                }
+            }
+        elif history_range['min'] > messagelist_range['max']:
+            # History is entirely later than existing messages
+            return {
+                'overlap_type': 'no_overlap_later',
+                'messagelist_range': messagelist_range,
+                'history_range': history_range,
+                'gap_info': {
+                    'gap_start': messagelist_range['max'],
+                    'gap_end': history_range['min'],
+                    'gap_type': 'between_existing_and_history'
+                }
+            }
+        else:
+            # There is some overlap
+            return {
+                'overlap_type': 'has_overlap',
+                'messagelist_range': messagelist_range,
+                'history_range': history_range,
+                'gap_info': None
+            }
+    
+    def _create_system_gap_message(self, gap_start: float, gap_end: float, gap_type: str) -> Dict[str, Any]:
+        """
+        Create a system message indicating missing messages in a time range.
+        
+        Args:
+            gap_start: Start timestamp of the gap
+            gap_end: End timestamp of the gap
+            gap_type: Type of gap for context
+            
+        Returns:
+            MessageType dictionary for the system gap message
+        """
+        import datetime
+        
+        # Format timestamps for display
+        start_time = datetime.datetime.fromtimestamp(gap_start).strftime('%Y-%m-%d %H:%M:%S')
+        end_time = datetime.datetime.fromtimestamp(gap_end).strftime('%Y-%m-%d %H:%M:%S')
+        
+        gap_duration = gap_end - gap_start
+        if gap_duration < 3600:  # Less than 1 hour
+            duration_text = f"{int(gap_duration / 60)} minutes"
+        elif gap_duration < 86400:  # Less than 1 day
+            duration_text = f"{gap_duration / 3600:.1f} hours"
+        else:
+            duration_text = f"{gap_duration / 86400:.1f} days"
+        
+        internal_message_id = f"gap_msg_{int(gap_start)}_{int(gap_end)}"
+        gap_timestamp = (gap_start + gap_end) / 2  # Middle of gap
+        
+        gap_message = {
+            'internal_id': internal_message_id,
+            'timestamp': gap_timestamp,
+            'sender_id': 'SYSTEM',
+            'sender_name': 'SYSTEM',
+            'text': f"📭 Messages from {start_time} to {end_time} are not available ({duration_text} gap)",
+            'original_external_id': None,  # System messages don't have external IDs
+            'adapter_id': None,
+            'is_edited': False,
+            'reactions': {},
+            'read_by': [],
+            'attachments': [],
+            'status': 'system_gap_marker',
+            'internal_request_id': None,
+            'error_details': None,
+            'message_source': 'system_generated',
+            'gap_start': gap_start,
+            'gap_end': gap_end,
+            'gap_type': gap_type
+        }
+        
+        logger.info(f"[{self.owner.id}] Created system gap message for {duration_text} gap from {start_time} to {end_time}")
+        return gap_message
+    
+    def _remove_existing_gap_messages(self, overlap_range_start: float, overlap_range_end: float) -> int:
+        """
+        Remove existing gap messages that are now filled by new history.
+        
+        Args:
+            overlap_range_start: Start of the range now covered by history
+            overlap_range_end: End of the range now covered by history
+            
+        Returns:
+            Number of gap messages removed
+        """
+        messages_to_remove = []
+        
+        for idx, msg in enumerate(self._state['_messages']):
+            if (msg.get('status') == 'system_gap_marker' and 
+                msg.get('message_source') == 'system_generated'):
+                
+                gap_start = msg.get('gap_start', 0)
+                gap_end = msg.get('gap_end', 0)
+                
+                # Check if this gap is now covered by the new history
+                if (gap_start >= overlap_range_start and gap_end <= overlap_range_end):
+                    messages_to_remove.append(idx)
+                    logger.info(f"[{self.owner.id}] Removing gap message {msg.get('internal_id')} - gap now filled by history")
+        
+        # Remove messages in reverse order to maintain indices
+        for idx in reversed(messages_to_remove):
+            removed_msg = self._state['_messages'].pop(idx)
+            if removed_msg.get('internal_id') in self._state.get('_message_map', {}):
+                del self._state['_message_map'][removed_msg['internal_id']]
+        
+        # Rebuild message map if we removed any messages
+        if messages_to_remove:
+            self._rebuild_message_map()
+            
+        return len(messages_to_remove)
+
+    def _reconcile_history_with_existing_messages(self, history_messages: List[Dict[str, Any]], source_adapter_id: str) -> Dict[str, Any]:
+        """
+        Main reconciliation engine that applies history messages against existing MessageList.
+        Implements the sophisticated reconciliation rules with higher order-of-truth for history.
+        
+        Args:
+            history_messages: List of history message dictionaries from adapter
+            source_adapter_id: ID of the adapter providing the history
+            
+        Returns:
+            Dict with reconciliation results:
+            - processed_count: number of messages processed
+            - added_count: number of new messages added
+            - edited_count: number of messages edited
+            - deleted_count: number of messages deleted
+            - gap_messages_added: number of gap markers added
+            - gap_messages_removed: number of gap markers removed
+        """
+        results = {
+            'processed_count': 0,
+            'added_count': 0,
+            'edited_count': 0,
+            'deleted_count': 0,
+            'gap_messages_added': 0,
+            'gap_messages_removed': 0,
+            'errors': []
+        }
+        
+        if not history_messages:
+            logger.info(f"[{self.owner.id}] No history messages to reconcile")
+            return results
+        
+        # Step 1: Analyze overlap between history and existing messages
+        overlap_analysis = self._detect_history_overlap(history_messages)
+        overlap_type = overlap_analysis['overlap_type']
+        
+        logger.info(f"[{self.owner.id}] History reconciliation: {overlap_type}, {len(history_messages)} history messages")
+        
+        # Step 2: Handle different overlap scenarios
+        if overlap_type == 'no_existing':
+            # MessageList is empty - apply all history as-is
+            logger.info(f"[{self.owner.id}] Empty MessageList - applying all {len(history_messages)} history messages")
+            for message_dict in history_messages:
+                if self._apply_history_message_as_new(message_dict, source_adapter_id):
+                    results['added_count'] += 1
+                else:
+                    results['errors'].append(f"Failed to add history message: {message_dict.get('message_id', 'unknown')}")
+                results['processed_count'] += 1
+                
+        elif overlap_type == 'no_history':
+            # No history provided - nothing to reconcile
+            logger.info(f"[{self.owner.id}] No history messages provided")
+            
+        elif overlap_type in ['no_overlap_earlier', 'no_overlap_later']:
+            # No overlap - add gap message and process all history
+            gap_info = overlap_analysis['gap_info']
+            
+            # Create and add gap message
+            gap_message = self._create_system_gap_message(
+                gap_info['gap_start'], 
+                gap_info['gap_end'], 
+                gap_info['gap_type']
+            )
+            self._add_message_to_list(gap_message)
+            results['gap_messages_added'] = 1
+            
+            # Add all history messages
+            for message_dict in history_messages:
+                if self._apply_history_message_as_new(message_dict, source_adapter_id):
+                    results['added_count'] += 1
+                else:
+                    results['errors'].append(f"Failed to add history message: {message_dict.get('message_id', 'unknown')}")
+                results['processed_count'] += 1
+                
+        elif overlap_type == 'has_overlap':
+            # Complex case - need to reconcile overlapping messages
+            
+            # Step 2a: Remove gap messages that are now filled
+            history_range = overlap_analysis['history_range']
+            removed_gaps = self._remove_existing_gap_messages(history_range['min'], history_range['max'])
+            results['gap_messages_removed'] = removed_gaps
+            
+            # Step 2b: Create maps for efficient lookup
+            existing_messages_by_external_id = {}
+            for msg in self._state['_messages']:
+                external_id = msg.get('original_external_id')
+                if external_id:
+                    existing_messages_by_external_id[external_id] = msg
+            
+            history_messages_by_external_id = {}
+            for hist_msg in history_messages:
+                external_id = hist_msg.get('message_id')
+                if external_id:
+                    history_messages_by_external_id[external_id] = hist_msg
+            
+            # Step 2c: Process history messages (add/edit)
+            for message_dict in history_messages:
+                external_id = message_dict.get('message_id')
+                if not external_id:
+                    # Skip messages without external ID - can't reconcile
+                    results['errors'].append("Skipping history message without external ID")
+                    results['processed_count'] += 1
+                    continue
+                
+                existing_msg = existing_messages_by_external_id.get(external_id)
+                if existing_msg:
+                    # Message exists in both - check for edits
+                    if self._should_apply_history_edit(existing_msg, message_dict):
+                        if self._apply_history_edit(existing_msg, message_dict):
+                            results['edited_count'] += 1
+                        else:
+                            results['errors'].append(f"Failed to edit message: {external_id}")
+                else:
+                    # Message in history but not in MessageList - add it
+                    if self._apply_history_message_as_new(message_dict, source_adapter_id):
+                        results['added_count'] += 1
+                    else:
+                        results['errors'].append(f"Failed to add history message: {external_id}")
+                
+                results['processed_count'] += 1
+            
+            # Step 2d: Find messages to delete (in MessageList but not in history, within overlap range)
+            for msg in list(self._state['_messages']):  # Copy list to allow modification
+                external_id = msg.get('original_external_id')
+                if not external_id:
+                    if self._apply_history_deletion(msg):
+                        results['deleted_count'] += 1
+                    else:
+                        results['errors'].append(f"Failed to delete message: {external_id}")
+                    continue
+                    
+                msg_timestamp = msg.get('timestamp')
+                if not msg_timestamp:
+                    continue
+                    
+                # Check if this message is within the history range but not in history
+                if (history_range['min'] <= msg_timestamp <= history_range['max'] and 
+                    external_id not in history_messages_by_external_id):
+                    
+                    # This message should be deleted (exists in MessageList but not in history)
+                    if self._apply_history_deletion(msg):
+                        results['deleted_count'] += 1
+                    else:
+                        results['errors'].append(f"Failed to delete message: {external_id}")
+        
+        # Step 3: Sort messages by timestamp to maintain chronological order
+        self._sort_messages_by_timestamp()
+        
+        logger.info(f"[{self.owner.id}] History reconciliation complete: "
+                   f"{results['added_count']} added, {results['edited_count']} edited, "
+                   f"{results['deleted_count']} deleted, {results['gap_messages_added']} gaps added, "
+                   f"{results['gap_messages_removed']} gaps removed, {len(results['errors'])} errors")
+        
+        return results
+    
+    def _apply_history_message_as_new(self, message_dict: Dict[str, Any], source_adapter_id: str) -> bool:
+        """
+        Apply a history message as a new message in the MessageList.
+        
+        Args:
+            message_dict: History message dictionary
+            source_adapter_id: Source adapter ID
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            sender_info = message_dict.get('sender', {})
+            
+            message_payload = {
+                "source_adapter_id": source_adapter_id,
+                "timestamp": message_dict.get("timestamp", time.time()),
+                "sender_external_id": sender_info.get("user_id"),
+                "sender_display_name": sender_info.get("display_name", "Unknown Sender"),
+                "text": message_dict.get("text"),
+                "original_message_id_external": message_dict.get("message_id"),
+                "mentions": message_dict.get("mentions", []),
+                "attachments": message_dict.get("attachments", [])
+            }
+            
+            return self._handle_new_message(message_payload)
+            
+        except Exception as e:
+            logger.error(f"[{self.owner.id}] Error applying history message as new: {e}", exc_info=True)
+            return False
+    
+    def _should_apply_history_edit(self, existing_msg: Dict[str, Any], history_msg: Dict[str, Any]) -> bool:
+        """
+        Determine if a history message represents an edit that should be applied.
+        
+        Args:
+            existing_msg: Existing message in MessageList
+            history_msg: History message from adapter
+            
+        Returns:
+            True if edit should be applied, False otherwise
+        """
+        # Check if history message indicates it was edited
+        history_edited = (history_msg.get('is_edited', False) or 
+                         history_msg.get('edited_timestamp') is not None)
+        
+        if not history_edited:
+            return False
+        
+        # Check if text content differs
+        existing_text = existing_msg.get('text', '')
+        history_text = history_msg.get('text', '')
+        
+        if existing_text != history_text:
+            logger.debug(f"[{self.owner.id}] Edit detected for message {history_msg.get('message_id')}: text differs")
+            return True
+        
+        return False
+    
+    def _apply_history_edit(self, existing_msg: Dict[str, Any], history_msg: Dict[str, Any]) -> bool:
+        """
+        Apply an edit from history to an existing message.
+        
+        Args:
+            existing_msg: Existing message in MessageList
+            history_msg: History message with edit information
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            edit_content = {
+                'original_message_id_external': history_msg.get('message_id'),
+                'new_text': history_msg.get('text'),
+                'timestamp': history_msg.get('edited_timestamp') or history_msg.get('timestamp', time.time())
+            }
+            
+            logger.info(f"[{self.owner.id}] Applying history edit to message {history_msg.get('message_id')}")
+            return self._handle_edit_message(edit_content)
+            
+        except Exception as e:
+            logger.error(f"[{self.owner.id}] Error applying history edit: {e}", exc_info=True)
+            return False
+    
+    def _apply_history_deletion(self, existing_msg: Dict[str, Any]) -> bool:
+        """
+        Apply a deletion for a message that exists in MessageList but not in history.
+        
+        Args:
+            existing_msg: Message that should be deleted
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            delete_content = {
+                'original_message_id_external': existing_msg.get('original_external_id'),
+                'timestamp': time.time()
+            }
+            
+            logger.info(f"[{self.owner.id}] Applying history deletion to message {existing_msg.get('original_external_id')}")
+            return self._handle_delete_message(delete_content)
+            
+        except Exception as e:
+            logger.error(f"[{self.owner.id}] Error applying history deletion: {e}", exc_info=True)
+            return False
+    
+    def _add_message_to_list(self, message: Dict[str, Any]) -> bool:
+        """
+        Add a message directly to the MessageList (used for system messages).
+        
+        Args:
+            message: Message dictionary to add
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            self._state['_messages'].append(message)
+            internal_id = message.get('internal_id')
+            if internal_id:
+                self._state['_message_map'][internal_id] = len(self._state['_messages']) - 1
+            return True
+        except Exception as e:
+            logger.error(f"[{self.owner.id}] Error adding message to list: {e}", exc_info=True)
+            return False
+    
+    def _sort_messages_by_timestamp(self) -> None:
+        """
+        Sort all messages in the MessageList by timestamp to maintain chronological order.
+        Rebuilds the message map after sorting.
+        """
+        try:
+            self._state['_messages'].sort(key=lambda msg: msg.get('timestamp', 0))
+            self._rebuild_message_map()
+            logger.debug(f"[{self.owner.id}] Sorted {len(self._state['_messages'])} messages by timestamp")
+        except Exception as e:
+            logger.error(f"[{self.owner.id}] Error sorting messages by timestamp: {e}", exc_info=True)
