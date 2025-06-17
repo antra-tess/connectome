@@ -431,14 +431,13 @@ class ChatManagerComponent(Component):
             True if handled successfully, False otherwise
         """
         from ..inner_space import InnerSpace
-        
         try:
             # Extract bulk history data
-            history_messages = event_payload.get("history_messages", [])
+            history_messages = event_payload.get("payload", {}).get("history_messages", [])
             source_adapter_id = event_payload.get("source_adapter_id")
             external_conversation_id = event_payload.get("external_conversation_id")
-            is_dm = event_payload.get("is_dm", False)
-            total_message_count = event_payload.get("total_message_count", len(history_messages))
+            is_dm = event_payload.get("payload", {}).get("is_dm", False)
+            total_message_count = event_payload.get("payload", {}).get("total_message_count", len(history_messages))
             
             logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Processing bulk history: {total_message_count} messages for conversation '{external_conversation_id}'")
             
@@ -473,9 +472,6 @@ class ChatManagerComponent(Component):
             if not target_chat_element:
                 logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Could not ensure chat element for bulk history processing. Conversation: {external_conversation_id}")
                 return False
-            
-            logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Routing bulk history to chat element '{target_chat_element.id}' with {len(history_messages)} messages")
-            
             # Create a bulk history event for the MessageListComponent to handle
             bulk_event_for_message_list = {
                 "event_type": "bulk_history_received",  # Different event type for MessageListComponent
@@ -485,6 +481,7 @@ class ChatManagerComponent(Component):
                 "target_element_id": target_chat_element.id,
                 "is_replayable": True,
                 "payload": {
+                    "event_type": "bulk_history_received",
                     "source_adapter_id": source_adapter_id,
                     "external_conversation_id": external_conversation_id,
                     "is_dm": is_dm,

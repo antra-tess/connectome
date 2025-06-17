@@ -39,7 +39,7 @@ class MessageListComponent(Component):
         "connectome_reaction_removed",        # For handling removed reactions
         "attachment_content_available",       # NEW: For when fetched attachment content arrives
         "connectome_action_success",          # NEW: Generic action success (replaces specific events)
-        "connectome_action_failure"           # NEW: Generic action failure (replaces specific events)
+        "connectome_action_failure",           # NEW: Generic action failure (replaces specific events)
     ]
 
     def initialize(self, max_messages: Optional[int] = None, **kwargs) -> None:
@@ -65,7 +65,7 @@ class MessageListComponent(Component):
         event_type = event_payload.get('event_type')    # Space puts event_type inside payload
         
         # Check if this is a replay event to avoid activation during startup
-        is_replay_mode = timeline_context.get('replay_mode', False)
+        is_replay_mode = timeline_context.get('replay_mode', False)    
 
         if event_type in self.HANDLED_EVENT_TYPES:
             logger.debug(f"[{self.owner.id}] MessageListComponent handling event: {event_type} (replay: {is_replay_mode})")
@@ -81,7 +81,7 @@ class MessageListComponent(Component):
                 self._handle_new_message(actual_content_payload)
             elif event_type == "bulk_history_received":
                 # Handle bulk history processing
-                self._handle_bulk_history_received(actual_content_payload, timeline_context)
+                self._handle_bulk_history_received(event_payload, timeline_context)
             elif event_type == "connectome_message_deleted": 
                 self._handle_delete_message(actual_content_payload)
             elif event_type == "connectome_message_updated":
@@ -1907,7 +1907,10 @@ class MessageListComponent(Component):
             for msg in list(self._state['_messages']):  # Copy list to allow modification
                 external_id = msg.get('original_external_id')
                 if not external_id:
-                    # Messages without external_id are either pending or system messages - preserve them
+                    if self._apply_history_deletion(msg):
+                        results['deleted_count'] += 1
+                    else:
+                        results['errors'].append(f"Failed to delete message: {external_id}")
                     continue
                     
                 msg_timestamp = msg.get('timestamp')

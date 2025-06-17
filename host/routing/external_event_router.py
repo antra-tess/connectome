@@ -999,7 +999,6 @@ class ExternalEventRouter:
         
         # Create bulk history event for ChatManagerComponent to handle
         timeline_context = await self._construct_timeline_context_for_space(target_inner_space)
-        
         bulk_history_event = {
             "event_type": "bulk_history_fetched",
             "event_id": f"bulk_history_{conversation_id}_{recipient_agent_id}_{int(time.time()*1000)}",
