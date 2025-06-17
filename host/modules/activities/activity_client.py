@@ -37,12 +37,10 @@ tracer = get_tracer(__name__)
 logger = logging.getLogger(__name__)
 
 # Example config defaults (move to config loading later)
-SOCKET_RECONNECTION_ATTEMPTS = 3
+SOCKET_RECONNECTION_ATTEMPTS = 5
 SOCKET_RECONNECTION_DELAY = 5
-SOCKET_TIMEOUT = 30  # seconds
+SOCKET_TIMEOUT = 60  # seconds
 PENDING_REQUEST_TIMEOUT_SECONDS = 300  # 5 minutes
-PING_INTERVAL = 65
-PING_TIMEOUT = 60
 
 # NEW: Enhanced timeouts for robustness
 EMIT_TIMEOUT_SECONDS = 30          # Allow 30s for emit (agent thinking time)
@@ -141,8 +139,6 @@ class ActivityClient:
                 reconnection_attempts=SOCKET_RECONNECTION_ATTEMPTS,
                 reconnection_delay=SOCKET_RECONNECTION_DELAY,
                 request_timeout=SOCKET_TIMEOUT,
-                ping_interval=PING_INTERVAL,
-                ping_timeout=PING_TIMEOUT
             )
             self.adapters[adapter_id]["client"] = client
             self.adapters[adapter_id]["connected"] = False # Assume disconnected until confirmed
