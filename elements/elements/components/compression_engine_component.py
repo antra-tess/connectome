@@ -54,6 +54,12 @@ class CompressionEngineComponent(Component):
     UNFOCUSED_TOTAL_LIMIT = 4000     # 4k tokens total for unfocused elements (unchanged)
     MIN_COMPRESSION_THRESHOLD = 1000 # 1k tokens minimum before triggering any compression (avoid compressing small content)
     
+    # PHASE 2: NEW - Updated Constants for 8-Chunk Architecture
+    FOCUSED_CHUNK_LIMIT = 8                  # 8 chunks = 32k fresh content 
+    FOCUSED_MEMORY_LIMIT = 4000              # 1 chunk of memories (keep existing)
+    UNFOCUSED_FRESH_LIMIT = 4000             # 1 chunk fresh content
+    UNFOCUSED_MEMORY_LIMIT = 4000            # 1 chunk memories (keep existing)
+    
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         
@@ -70,7 +76,11 @@ class CompressionEngineComponent(Component):
         self._storage = None
         self._storage_initialized = False
         
-        logger.info(f"CompressionEngineComponent initialized ({self.id}) - ready for AgentMemoryCompressor integration")
+        # PHASE 2A: NEW - Dual-stream chunk tracking infrastructure
+        self._element_chunks: Dict[str, Dict[str, Any]] = {}
+        # Structure: {element_id: {"n_chunks": [...], "m_chunks": [...], "last_update": datetime, "total_tokens": int}}
+        
+        logger.info(f"CompressionEngineComponent initialized ({self.id}) - ready for AgentMemoryCompressor integration and dual-stream processing")
     
     def _on_initialize(self) -> bool:
         """Initialize the compression engine after being attached to InnerSpace."""
@@ -789,12 +799,12 @@ class CompressionEngineComponent(Component):
         """
         Compress a container's children using AgentMemoryCompressor for agent-driven memory formation.
         
-        ENHANCED: Now implements focus-aware compression with different limits:
-        - Focused elements: 50k fresh + 20k memories (70k total)
-        - Unfocused elements: 4k total (strict compression)
+        PHASE 2: ENHANCED with dual-stream architecture:
+        - Uses continuous chunking instead of reactive compression
+        - Maintains N-stream (messages) and M-stream (memories) in parallel
+        - Renders based on focus state: 8-chunk window for focused, memory + current for unfocused
         
-        Phase 3: This uses the agent's LLM-based reflection instead of simple content counting.
-        NEW: Uses just-in-time content change detection via flat VEIL cache comparison.
+        NEW: Scratchpad exclusion, focus-aware stream selection, and 8-chunk boundaries.
         
         Args:
             container_node: The container node to compress
@@ -807,6 +817,15 @@ class CompressionEngineComponent(Component):
             available_tools = props.get('available_tools', [])
             children = container_node.get('children', [])
             
+            # PHASE 1: NEW - Scratchpad exclusion check BEFORE any compression
+            if self._is_scratchpad_container(container_node):
+                logger.debug(f"Skipping compression for scratchpad container: {element_id}")
+                # Preserve scratchpad completely, just ensure tool metadata is preserved
+                if available_tools:
+                    container_node['properties']['available_tools'] = available_tools
+                    container_node['properties']['tools_available_despite_scratchpad_exclusion'] = True
+                return  # Early exit - no compression for scratchpads
+            
             # NEW: 1k token threshold check - don't compress small content
             total_tokens = self._calculate_children_tokens(children)
             if total_tokens < self.MIN_COMPRESSION_THRESHOLD:
@@ -817,18 +836,101 @@ class CompressionEngineComponent(Component):
                     container_node['properties']['tools_available_despite_preservation'] = True
                 return
             
-            # NEW: Determine if this element is focused
+            # PHASE 2: NEW - Use dual-stream architecture instead of old compression logic
+            logger.debug(f"Using dual-stream processing for element {element_id}")
+            
+            # Get or create chunk structure for this element
+            chunks = await self._get_or_create_element_chunks(element_id, children)
+            
+            # Determine if this element is focused
             is_focused = (element_id == focus_element_id)
             
-            if is_focused:
-                logger.debug(f"Applying focused compression for element {element_id}")
-                await self._apply_focused_compression(container_node, element_id, children, element_name, available_tools)
-            else:
-                logger.debug(f"Applying unfocused compression for element {element_id}")
-                await self._apply_unfocused_compression(container_node, element_id, children, element_name, available_tools)
+            # Select which stream to render based on focus state
+            selected_nodes = await self._select_rendering_stream(element_id, is_focused, chunks)
+            
+            # Update container children with selected stream
+            container_node['children'] = selected_nodes
+            
+            # Ensure tool information is preserved
+            if available_tools:
+                container_node['properties']['available_tools'] = available_tools
+                container_node['properties']['tools_available_despite_dual_stream'] = True
+                container_node['properties']['dual_stream_focus_state'] = "focused" if is_focused else "unfocused"
+                container_node['properties']['dual_stream_info'] = {
+                    "n_chunks": len(chunks.get("n_chunks", [])),
+                    "m_chunks": len(chunks.get("m_chunks", [])),
+                    "total_tokens": chunks.get("total_tokens", 0),
+                    "rendered_nodes": len(selected_nodes)
+                }
+            
+            logger.info(f"Dual-stream processing complete for {element_id}: {is_focused and 'focused' or 'unfocused'} rendering with {len(selected_nodes)} nodes")
                 
         except Exception as e:
-            logger.error(f"Error compressing container children: {e}", exc_info=True)
+            logger.error(f"Error in dual-stream container processing: {e}", exc_info=True)
+            # Fallback to original children to ensure system keeps working
+            # This maintains backward compatibility during the transition
+            logger.warning(f"Falling back to original children for {element_id}")
+            
+            # Ensure tool information is preserved even in fallback
+            if available_tools:
+                container_node['properties']['available_tools'] = available_tools
+                container_node['properties']['tools_available_despite_fallback'] = True
+
+    def _is_scratchpad_container(self, container_node: Dict[str, Any]) -> bool:
+        """
+        PHASE 1: Detect scratchpad containers to exclude from compression.
+        
+        Uses multiple detection methods for reliability:
+        - Node type contains 'scratchpad'
+        - Content nature is 'scratchpad_summary'
+        - Element name contains 'scratchpad'
+        - Node type is 'scratchpad_summary_container'
+        
+        Args:
+            container_node: The container VEIL node to check
+            
+        Returns:
+            True if this is a scratchpad container that should be excluded from compression
+        """
+        try:
+            props = container_node.get('properties', {})
+            node_type = container_node.get('node_type', '')
+            content_nature = props.get('content_nature', '')
+            element_name = props.get('element_name', '')
+            structural_role = props.get('structural_role', '')
+            
+            # Multiple detection methods for reliability
+            
+            # Check node type for scratchpad indicators
+            if 'scratchpad' in node_type.lower():
+                logger.debug(f"Scratchpad detected via node_type: {node_type}")
+                return True
+            
+            # Check content nature
+            if content_nature == 'scratchpad_summary':
+                logger.debug(f"Scratchpad detected via content_nature: {content_nature}")
+                return True
+            
+            # Check element name
+            if element_name and 'scratchpad' in element_name.lower():
+                logger.debug(f"Scratchpad detected via element_name: {element_name}")
+                return True
+            
+            # Check for specific scratchpad container types
+            if node_type in ['scratchpad_summary_container', 'scratchpad_container']:
+                logger.debug(f"Scratchpad detected via specific node_type: {node_type}")
+                return True
+            
+            # Check structural role
+            if structural_role == 'scratchpad_container':
+                logger.debug(f"Scratchpad detected via structural_role: {structural_role}")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.warning(f"Error detecting scratchpad container: {e}")
+            return False  # When in doubt, allow compression rather than break the system
 
     async def _apply_focused_compression(self, container_node: Dict[str, Any], element_id: str, children: List[Dict[str, Any]], element_name: str, available_tools: List[str]) -> None:
         """
@@ -1256,6 +1358,7 @@ class CompressionEngineComponent(Component):
         
         ENHANCED: Now supports focused vs unfocused compression context.
         NEW: Passes existing memory context directly from compression pipeline.
+        PHASE 3: Enhanced with full VEIL context for contextually aware memories.
         
         Returns:
             Tuple of (memory_summary, compression_approach)
@@ -1277,6 +1380,9 @@ class CompressionEngineComponent(Component):
             focus_type = "focused" if is_focused else "unfocused"
             action_type = "recompression" if is_recompression else "compression"
             
+            # PHASE 3: NEW - Get full VEIL context for enhanced memory creation using HUD rendering
+            full_veil_context = await self._get_hud_rendered_context(element_id, children)
+            
             compression_context = {
                 "element_id": element_id,
                 "element_name": element_name,
@@ -1288,14 +1394,16 @@ class CompressionEngineComponent(Component):
                 "focus_type": focus_type,  # NEW: Focus type label
                 # NEW: Direct memory context pass-through from compression pipeline
                 "existing_memory_context": existing_memory_summaries,
-                "existing_memory_count": len(existing_memories)
+                "existing_memory_count": len(existing_memories),
+                # PHASE 3: NEW - Full VEIL context for enhanced memories
+                "full_veil_context": full_veil_context
             }
             
-            # Pass only fresh content for compression, with existing memories as context
+            # Pass only fresh content for compression, with enhanced context
             memorized_veil_node = await self._memory_compressor.compress(
                 raw_veil_nodes=fresh_content,  # Only fresh content to compress
                 element_ids=element_ids,
-                compression_context=compression_context  # Existing memories included as context
+                compression_context=compression_context  # Enhanced with full VEIL context
             )
             
             if memorized_veil_node:
@@ -1303,13 +1411,14 @@ class CompressionEngineComponent(Component):
                 
                 # NEW: Generate focus-aware compression approach labels
                 if is_recompression:
-                    compression_approach = f"agent_memory_recompressor_{focus_type}"
+                    compression_approach = f"agent_memory_recompressor_{focus_type}_enhanced_context"
                 else:
-                    compression_approach = f"agent_memory_compressor_{focus_type}"
+                    compression_approach = f"agent_memory_compressor_{focus_type}_enhanced_context"
                 
                 action = "Recompressed" if is_recompression else "Agent reflected on"
+                context_info = " (with full VEIL context)" if full_veil_context else ""
                 memory_context_info = f" (with {len(existing_memory_summaries)} memory context)" if existing_memory_summaries else ""
-                logger.info(f"{action} {focus_type} container {element_id}: {memory_summary[:100]}...{memory_context_info}")
+                logger.info(f"{action} {focus_type} container {element_id}: {memory_summary[:100]}...{context_info}{memory_context_info}")
                 return memory_summary, compression_approach
             else:
                 raise Exception("AgentMemoryCompressor returned None")
@@ -2176,3 +2285,613 @@ class CompressionEngineComponent(Component):
         except Exception as e:
             logger.debug(f"Error checking attachment boundary: {e}")
             return False 
+
+    # PHASE 2A: NEW - Dual-Stream Chunk Management Methods
+
+    async def _get_or_create_element_chunks(self, element_id: str, children: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Get existing chunk structure or create from current children.
+        
+        This is the core method that maintains N-stream/M-stream separation for each element.
+        
+        Args:
+            element_id: ID of the element to track
+            children: Current VEIL children for this element
+            
+        Returns:
+            Dictionary with n_chunks, m_chunks, metadata
+        """
+        try:
+            if element_id not in self._element_chunks:
+                # Initialize chunk structure from current children
+                logger.debug(f"Initializing chunk structure for element {element_id}")
+                self._element_chunks[element_id] = await self._initialize_chunks_from_children(element_id, children)
+            else:
+                # Update existing chunks with any new content
+                await self._update_chunks_with_new_content(element_id, children)
+            
+            return self._element_chunks[element_id]
+            
+        except Exception as e:
+            logger.error(f"Error managing chunks for element {element_id}: {e}", exc_info=True)
+            # Fallback: create minimal structure
+            return {
+                "n_chunks": [],
+                "m_chunks": [],
+                "last_update": datetime.now(),
+                "total_tokens": 0,
+                "error": str(e)
+            }
+
+    async def _initialize_chunks_from_children(self, element_id: str, children: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Initialize N-stream and M-stream from current VEIL children.
+        
+        This analyzes current children to separate existing memories from fresh content,
+        then organizes everything into the dual-stream structure.
+        
+        Args:
+            element_id: ID of the element
+            children: Current VEIL children
+            
+        Returns:
+            Initialized chunk structure
+        """
+        try:
+            # Separate existing memories from fresh content
+            existing_memories, fresh_content = self._separate_memories_and_content(children)
+            
+            # Convert fresh content into N-chunks (4k token boundaries)
+            n_chunks = await self._content_to_n_chunks(fresh_content)
+            
+            # Convert existing memories into M-chunks
+            m_chunks = self._memories_to_m_chunks(existing_memories)
+            
+            # Calculate total tokens
+            total_tokens = sum(self._calculate_chunk_tokens(chunk) for chunk in n_chunks)
+            total_tokens += sum(self._calculate_chunk_tokens(chunk) for chunk in m_chunks)
+            
+            chunk_structure = {
+                "n_chunks": n_chunks,
+                "m_chunks": m_chunks,
+                "last_update": datetime.now(),
+                "total_tokens": total_tokens,
+                "initialization_source": "veil_children"
+            }
+            
+            logger.info(f"Initialized chunks for {element_id}: {len(n_chunks)} N-chunks, {len(m_chunks)} M-chunks, {total_tokens} tokens")
+            return chunk_structure
+            
+        except Exception as e:
+            logger.error(f"Error initializing chunks for {element_id}: {e}", exc_info=True)
+            return {
+                "n_chunks": [],
+                "m_chunks": [],
+                "last_update": datetime.now(),
+                "total_tokens": 0,
+                "initialization_error": str(e)
+            }
+
+    async def _update_chunks_with_new_content(self, element_id: str, children: List[Dict[str, Any]]) -> None:
+        """
+        Update existing chunk structure with new content.
+        
+        This detects new content and adds it to the appropriate stream,
+        triggering chunking and compression as needed.
+        
+        Args:
+            element_id: ID of the element
+            children: Current VEIL children (may include new content)
+        """
+        try:
+            current_structure = self._element_chunks[element_id]
+            
+            # Detect new content since last update
+            new_content = await self._detect_new_content(element_id, children)
+            
+            if not new_content:
+                logger.debug(f"No new content detected for element {element_id}")
+                return
+            
+            # Add new content to N-stream
+            current_structure["n_chunks"].extend(await self._content_to_n_chunks(new_content))
+            
+            # Check if we need to compress oldest N-chunks into M-chunks
+            await self._process_chunk_boundaries(element_id)
+            
+            # Update metadata
+            current_structure["last_update"] = datetime.now()
+            current_structure["total_tokens"] = self._calculate_total_chunk_tokens(current_structure)
+            
+            logger.debug(f"Updated chunks for {element_id}: {len(current_structure['n_chunks'])} N-chunks, {len(current_structure['m_chunks'])} M-chunks")
+            
+        except Exception as e:
+            logger.error(f"Error updating chunks for {element_id}: {e}", exc_info=True)
+
+    async def _content_to_n_chunks(self, content: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Convert VEIL content into N-chunks (4k token boundaries).
+        
+        Args:
+            content: List of VEIL content nodes
+            
+        Returns:
+            List of N-chunk structures
+        """
+        try:
+            if not content:
+                return []
+            
+            chunks = []
+            current_chunk = []
+            current_tokens = 0
+            
+            for content_item in content:
+                item_tokens = self._calculate_children_tokens([content_item])
+                
+                # Check if adding this item would exceed chunk limit
+                if current_tokens + item_tokens > self.COMPRESSION_CHUNK_SIZE and current_chunk:
+                    # Complete current chunk
+                    chunks.append({
+                        "chunk_type": "n_chunk",
+                        "content": current_chunk,
+                        "token_count": current_tokens,
+                        "chunk_index": len(chunks),
+                        "created_at": datetime.now(),
+                        "is_complete": True
+                    })
+                    
+                    # Start new chunk
+                    current_chunk = [content_item]
+                    current_tokens = item_tokens
+                else:
+                    # Add to current chunk
+                    current_chunk.append(content_item)
+                    current_tokens += item_tokens
+            
+            # Handle remaining content (possibly incomplete chunk)
+            if current_chunk:
+                chunks.append({
+                    "chunk_type": "n_chunk",
+                    "content": current_chunk,
+                    "token_count": current_tokens,
+                    "chunk_index": len(chunks),
+                    "created_at": datetime.now(),
+                    "is_complete": current_tokens >= self.COMPRESSION_CHUNK_SIZE
+                })
+            
+            logger.debug(f"Created {len(chunks)} N-chunks from {len(content)} content items")
+            return chunks
+            
+        except Exception as e:
+            logger.error(f"Error converting content to N-chunks: {e}", exc_info=True)
+            return []
+
+    def _memories_to_m_chunks(self, memories: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Convert existing memory nodes into M-chunks.
+        
+        Args:
+            memories: List of existing memory VEIL nodes
+            
+        Returns:
+            List of M-chunk structures
+        """
+        try:
+            m_chunks = []
+            
+            for i, memory in enumerate(memories):
+                m_chunk = {
+                    "chunk_type": "m_chunk",
+                    "memory_node": memory,
+                    "token_count": self._calculate_memory_tokens([memory]),
+                    "chunk_index": i,
+                    "created_at": datetime.now(),
+                    "is_complete": True  # Memories are always complete
+                }
+                m_chunks.append(m_chunk)
+            
+            logger.debug(f"Created {len(m_chunks)} M-chunks from {len(memories)} memory nodes")
+            return m_chunks
+            
+        except Exception as e:
+            logger.error(f"Error converting memories to M-chunks: {e}", exc_info=True)
+            return []
+
+    async def _process_chunk_boundaries(self, element_id: str) -> None:
+        """
+        Process chunk boundaries and trigger compression as needed.
+        
+        This implements the core dual-stream logic:
+        - When N-chunks complete (reach 4k), they are immediately compressed to M-chunks
+        - M-chunks are re-compressed when they exceed limits
+        - This ensures continuous background compression rather than reactive compression
+        
+        Args:
+            element_id: ID of the element to process
+        """
+        try:
+            chunk_structure = self._element_chunks[element_id]
+            n_chunks = chunk_structure["n_chunks"]
+            m_chunks = chunk_structure["m_chunks"]
+            
+            # CRITICAL: Immediate compression of complete N-chunks
+            complete_n_chunks = [chunk for chunk in n_chunks if chunk.get("is_complete", False)]
+            
+            if complete_n_chunks:
+                logger.info(f"Found {len(complete_n_chunks)} complete N-chunks for {element_id}, triggering immediate compression")
+                
+                # Compress complete N-chunks into M-chunks
+                for chunk in complete_n_chunks:
+                    try:
+                        # Extract content from N-chunk
+                        chunk_content = chunk.get("content", [])
+                        if not chunk_content:
+                            continue
+                        
+                        # Create memory from this complete chunk
+                        memory_summary, compression_approach = await self._create_new_agent_memory(
+                            element_id=f"{element_id}_chunk_{chunk.get('chunk_index', 0)}",
+                            element_name=f"element_{element_id}",
+                            available_tools=[],  # Will be preserved at container level
+                            children=chunk_content,
+                            is_recompression=False,
+                            is_focused=False  # Background compression, treat as unfocused
+                        )
+                        
+                        # Create new M-chunk from the compressed memory
+                        memory_node = {
+                            "veil_id": f"memory_{element_id}_{chunk.get('chunk_index', 0)}_{self.id}",
+                            "node_type": "content_memory",
+                            "properties": {
+                                "structural_role": "compressed_content",
+                                "content_nature": "content_memory",
+                                "original_element_id": element_id,
+                                "memory_summary": memory_summary,
+                                "original_child_count": len(chunk_content),
+                                "compression_timestamp": datetime.now().isoformat(),
+                                "compression_approach": compression_approach,
+                                "is_focused": False,
+                                "is_background_compression": True,
+                                "source_chunk_index": chunk.get('chunk_index', 0),
+                                "source_chunk_tokens": chunk.get('token_count', 0)
+                            },
+                            "children": []
+                        }
+                        
+                        # Add to M-chunks
+                        new_m_chunk = {
+                            "chunk_type": "m_chunk",
+                            "memory_node": memory_node,
+                            "token_count": self._calculate_memory_tokens([memory_node]),
+                            "chunk_index": len(m_chunks),
+                            "created_at": datetime.now(),
+                            "is_complete": True,
+                            "source_n_chunk_index": chunk.get('chunk_index', 0)
+                        }
+                        
+                        m_chunks.append(new_m_chunk)
+                        logger.debug(f"Compressed N-chunk {chunk.get('chunk_index', 0)} into M-chunk for {element_id}")
+                        
+                    except Exception as chunk_error:
+                        logger.error(f"Error compressing individual N-chunk for {element_id}: {chunk_error}", exc_info=True)
+                        continue
+                
+                # Remove compressed N-chunks from the list
+                # Keep incomplete N-chunks (current chunk being filled)
+                incomplete_n_chunks = [chunk for chunk in n_chunks if not chunk.get("is_complete", False)]
+                chunk_structure["n_chunks"] = incomplete_n_chunks
+                
+                logger.info(f"Immediate compression complete for {element_id}: compressed {len(complete_n_chunks)} N-chunks, {len(incomplete_n_chunks)} incomplete N-chunks remaining")
+            
+            # Check if M-chunks need re-compression (exceed 1-chunk limit)
+            total_memory_tokens = sum(chunk.get("token_count", 0) for chunk in m_chunks)
+            
+            if total_memory_tokens > self.COMPRESSION_CHUNK_SIZE:
+                logger.info(f"M-chunks exceed {self.COMPRESSION_CHUNK_SIZE} tokens for {element_id}, triggering re-compression")
+                # Re-compress M-chunks into single memory-of-memories
+                recompressed_memories = await self._recompress_m_chunks(element_id, m_chunks)
+                chunk_structure["m_chunks"] = recompressed_memories
+            
+            logger.debug(f"Processed chunk boundaries for {element_id}: {len(chunk_structure['n_chunks'])} N-chunks, {len(chunk_structure['m_chunks'])} M-chunks")
+            
+        except Exception as e:
+            logger.error(f"Error processing chunk boundaries for {element_id}: {e}", exc_info=True)
+
+    def _calculate_chunk_tokens(self, chunk: Dict[str, Any]) -> int:
+        """Calculate tokens in a chunk structure."""
+        try:
+            # Use stored token count if available
+            if "token_count" in chunk:
+                return chunk["token_count"]
+            
+            # Calculate based on chunk type
+            if chunk.get("chunk_type") == "n_chunk":
+                content = chunk.get("content", [])
+                return self._calculate_children_tokens(content)
+            elif chunk.get("chunk_type") == "m_chunk":
+                memory_node = chunk.get("memory_node", {})
+                return self._calculate_memory_tokens([memory_node])
+            
+            return 0
+            
+        except Exception as e:
+            logger.warning(f"Error calculating chunk tokens: {e}")
+            return 0
+
+    def _calculate_total_chunk_tokens(self, chunk_structure: Dict[str, Any]) -> int:
+        """Calculate total tokens across all chunks in a structure."""
+        try:
+            n_tokens = sum(self._calculate_chunk_tokens(chunk) for chunk in chunk_structure.get("n_chunks", []))
+            m_tokens = sum(self._calculate_chunk_tokens(chunk) for chunk in chunk_structure.get("m_chunks", []))
+            return n_tokens + m_tokens
+        except Exception as e:
+            logger.warning(f"Error calculating total chunk tokens: {e}")
+            return 0
+
+    async def _detect_new_content(self, element_id: str, children: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Detect new content since last update.
+        
+        This is a placeholder for more sophisticated content change detection.
+        For now, we'll use simple content fingerprinting.
+        
+        Args:
+            element_id: ID of the element
+            children: Current VEIL children
+            
+        Returns:
+            List of new content items
+        """
+        try:
+            # For Phase 2A, we'll implement simple detection
+            # TODO: In later phases, use content fingerprinting for efficient detection
+            
+            current_structure = self._element_chunks.get(element_id, {})
+            last_update = current_structure.get("last_update")
+            
+            if not last_update:
+                # First time, all content is new
+                return children
+            
+            # For now, return empty (no new content detection yet)
+            # This will be enhanced in Phase 2B
+            return []
+            
+        except Exception as e:
+            logger.error(f"Error detecting new content for {element_id}: {e}", exc_info=True)
+            return []
+
+    async def _recompress_m_chunks(self, element_id: str, m_chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Re-compress M-chunks when they exceed 1-chunk limit.
+        
+        Args:
+            element_id: ID of the element
+            m_chunks: List of M-chunks to re-compress
+            
+        Returns:
+            List with single re-compressed memory chunk
+        """
+        try:
+            if not m_chunks:
+                return []
+            
+            # Extract memory nodes from M-chunks
+            memory_nodes = [chunk.get("memory_node", {}) for chunk in m_chunks if chunk.get("memory_node")]
+            
+            if not memory_nodes:
+                return []
+            
+            # Use existing memory recompression logic
+            if self._memory_compressor:
+                # Create a summary memory of all the individual memories
+                summary_memory = await self._create_memory_summary(memory_nodes, element_id, f"element_{element_id}")
+                
+                # Convert back to M-chunk format
+                recompressed_chunk = {
+                    "chunk_type": "m_chunk",
+                    "memory_node": summary_memory,
+                    "token_count": self._calculate_memory_tokens([summary_memory]),
+                    "chunk_index": 0,
+                    "created_at": datetime.now(),
+                    "is_complete": True,
+                    "is_recompressed": True,
+                    "original_chunk_count": len(m_chunks)
+                }
+                
+                logger.info(f"Re-compressed {len(m_chunks)} M-chunks into 1 memory-of-memories for {element_id}")
+                return [recompressed_chunk]
+            else:
+                logger.warning(f"No memory compressor available for re-compression of {element_id}")
+                return m_chunks[:1]  # Keep only first memory as fallback
+                
+        except Exception as e:
+            logger.error(f"Error re-compressing M-chunks for {element_id}: {e}", exc_info=True)
+            return m_chunks[:1]  # Fallback to first memory
+
+    # PHASE 2B: NEW - Stream Selection Logic
+
+    async def _select_rendering_stream(self, element_id: str, is_focused: bool, chunks: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Select which stream to render based on focus state.
+        
+        This implements the core dual-stream rendering logic:
+        - Focused: Show last 8 N-chunks + memories for ALL non-rendered N-chunks  
+        - Unfocused: Show all memories + current N-chunk only
+        
+        Args:
+            element_id: ID of the element
+            is_focused: Whether this element is currently focused
+            chunks: Chunk structure with n_chunks and m_chunks
+            
+        Returns:
+            Flattened list of VEIL nodes ready for rendering
+        """
+        try:
+            n_chunks = chunks.get("n_chunks", [])
+            m_chunks = chunks.get("m_chunks", [])
+            
+            if is_focused:
+                logger.debug(f"Focused rendering for {element_id}: {len(n_chunks)} N-chunks, {len(m_chunks)} M-chunks")
+                
+                # Focused: Show last 8 N-chunks + memories for missing chunks
+                if len(n_chunks) <= 8:
+                    # All N-chunks fit, show all fresh content + no additional memories needed
+                    fresh_content = n_chunks
+                    memory_content = []
+                    logger.debug(f"All {len(n_chunks)} N-chunks fit in 8-chunk window")
+                else:
+                    # Show last 8 N-chunks + memories for earlier chunks
+                    fresh_content = n_chunks[-8:]  # Last 8 chunks as fresh
+                    non_rendered_count = len(n_chunks) - 8  # How many chunks not shown fresh
+                    memory_content = m_chunks[:non_rendered_count]  # Memories for missing chunks
+                    logger.debug(f"8-chunk window: showing last 8 of {len(n_chunks)} N-chunks + {len(memory_content)} memories for missing chunks")
+                
+                # Return: memories first, then fresh content (chronological order)
+                return await self._flatten_chunks_for_rendering(memory_content + fresh_content)
+                
+            else:
+                logger.debug(f"Unfocused rendering for {element_id}: {len(m_chunks)} M-chunks + current N-chunk")
+                
+                # Unfocused: Show all memories + current N-chunk only
+                current_chunk = n_chunks[-1:] if n_chunks else []
+                return await self._flatten_chunks_for_rendering(m_chunks + current_chunk)
+                
+        except Exception as e:
+            logger.error(f"Error selecting rendering stream for {element_id}: {e}", exc_info=True)
+            # Fallback: use original children unchanged
+            return []
+
+    async def _flatten_chunks_for_rendering(self, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Flatten chunk structures back into VEIL nodes for rendering.
+        
+        This converts N-chunks and M-chunks back into the VEIL node format
+        that the HUD rendering system expects.
+        
+        Args:
+            chunks: List of chunk structures (mix of N-chunks and M-chunks)
+            
+        Returns:
+            List of VEIL nodes ready for HUD rendering
+        """
+        try:
+            flattened_nodes = []
+            
+            for chunk in chunks:
+                chunk_type = chunk.get("chunk_type", "")
+                
+                if chunk_type == "n_chunk":
+                    # N-chunk: extract content nodes
+                    content = chunk.get("content", [])
+                    flattened_nodes.extend(content)
+                    
+                elif chunk_type == "m_chunk":
+                    # M-chunk: extract memory node
+                    memory_node = chunk.get("memory_node", {})
+                    if memory_node:
+                        flattened_nodes.append(memory_node)
+                        
+                else:
+                    logger.warning(f"Unknown chunk type: {chunk_type}")
+            
+            logger.debug(f"Flattened {len(chunks)} chunks into {len(flattened_nodes)} VEIL nodes")
+            return flattened_nodes
+            
+        except Exception as e:
+            logger.error(f"Error flattening chunks for rendering: {e}", exc_info=True)
+            return []
+
+    # PHASE 3: NEW - HUD-Deferred Context Generation for Enhanced Memory Creation
+
+    async def _get_hud_rendered_context(self, element_id: str, children: List[Dict[str, Any]]) -> Optional[str]:
+        """
+        PHASE 3: Get memorization context by calling HUD's specialized rendering method.
+        
+        This uses HUD's new render_memorization_context_veil method to get the full VEIL context
+        while excluding the specific content being memorized to avoid duplication.
+        
+        Args:
+            element_id: ID of the element being compressed
+            children: VEIL children being memorized (to exclude from context)
+            
+        Returns:
+            Rendered memorization context string from HUD, or None if HUD not available
+        """
+        try:
+            # Get HUD component and SpaceVeilProducer
+            hud_component = self._get_hud_component()
+            if not hud_component:
+                logger.debug(f"HUD component not available for memorization context generation for {element_id}")
+                return None
+            
+            # Get SpaceVeilProducer to obtain full VEIL
+            if not self.owner:
+                logger.debug(f"No owner InnerSpace available for VEIL access")
+                return None
+                
+            veil_producer = None
+            if hasattr(self.owner, '_components'):
+                for component in self.owner._components:
+                    if hasattr(component, 'COMPONENT_TYPE') and component.COMPONENT_TYPE == "SpaceVeilProducer":
+                        veil_producer = component
+                        break
+            
+            if not veil_producer:
+                logger.debug(f"SpaceVeilProducer not available for memorization context")
+                return None
+            
+            # Get full VEIL from SpaceVeilProducer
+            full_veil = veil_producer.get_full_veil()
+            if not full_veil:
+                logger.debug(f"Empty VEIL from SpaceVeilProducer")
+                return None
+            
+            # Use HUD's specialized memorization context rendering
+            memorization_context = await hud_component.render_memorization_context_veil(
+                full_veil=full_veil,
+                exclude_element_id=element_id,
+                exclude_content=children,  # Exclude the content being memorized
+                focus_element_id=None  # Could pass focus context if available
+            )
+            
+            if memorization_context:
+                logger.debug(f"Generated memorization context for {element_id}: {len(memorization_context)} characters")
+                return memorization_context
+            else:
+                logger.debug(f"HUD rendered empty memorization context for {element_id}")
+                return None
+                
+        except Exception as e:
+            logger.warning(f"Error getting memorization context for {element_id}: {e}")
+            return None
+
+    def _get_hud_component(self):
+        """
+        Get HUD component from owner InnerSpace to reuse its rendering infrastructure.
+        
+        Returns:
+            HUD component instance or None if not available
+        """
+        try:
+            if not self.owner:
+                return None
+                
+            # Look for HUD component in owner's components
+            if hasattr(self.owner, '_components'):
+                for component in self.owner._components:
+                    if hasattr(component, 'COMPONENT_TYPE') and component.COMPONENT_TYPE == "HUDComponent":
+                        return component
+            
+            # Alternative: check if owner has direct HUD access
+            if hasattr(self.owner, '_hud_component'):
+                return self.owner._hud_component
+            elif hasattr(self.owner, 'get_hud_component'):
+                return self.owner.get_hud_component()
+                
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Error accessing HUD component: {e}")
+            return None

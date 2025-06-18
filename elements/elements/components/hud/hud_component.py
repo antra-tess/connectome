@@ -1652,3 +1652,116 @@ class HUDComponent(Component):
     # Other potential methods:
     # - get_focused_context(element_id)
     # - get_context_summary()
+
+    # PHASE 3: NEW - Specialized Memorization Context Rendering
+
+    async def render_memorization_context_veil(self, 
+                                             full_veil: Dict[str, Any],
+                                             exclude_element_id: str,
+                                             exclude_content: List[Dict[str, Any]],
+                                             focus_element_id: Optional[str] = None) -> str:
+        """
+        PHASE 3: Render VEIL context for memorization with selective content exclusion.
+        
+        This creates the specialized context that shows the agent the full conversation state
+        while excluding the specific content being memorized to avoid duplication.
+        
+        The rendered output provides complete context so the agent understands:
+        - What other conversations/elements are active
+        - What has already been memorized (M-chunks)
+        - What the current conversation state is
+        - Available tools and context
+        
+        But EXCLUDES the specific N-chunk being memorized to avoid seeing it twice.
+        
+        Args:
+            full_veil: Complete VEIL structure from SpaceVeilProducer
+            exclude_element_id: ID of element where content is being memorized
+            exclude_content: Specific VEIL nodes to exclude from rendering
+            focus_element_id: Optional focus element for normal focused/unfocused logic
+            
+        Returns:
+            Rendered memorization context string
+        """
+        try:
+            logger.debug(f"Rendering memorization context: excluding content from {exclude_element_id}")
+            
+            # Create a deep copy of the VEIL for modification
+            import copy
+            context_veil = copy.deepcopy(full_veil)
+            
+            # Recursively find and modify the target element to exclude specific content
+            self._exclude_content_from_veil_element(context_veil, exclude_element_id, exclude_content)
+            
+            # Use standard rendering with special options
+            options = {
+                "render_style": "verbose_tags",
+                "memorization_context": True,
+                "excluded_element_id": exclude_element_id
+            }
+            
+            attention_requests = {}
+            
+            # Render the modified VEIL
+            context_string = self._render_veil_node_to_string(context_veil, attention_requests, options, indent=0)
+            
+            logger.debug(f"Rendered memorization context: {len(context_string)} characters")
+            return context_string
+            
+        except Exception as e:
+            logger.error(f"Error rendering memorization context: {e}", exc_info=True)
+            # Fallback: render full VEIL without exclusions
+            options = {"render_style": "verbose_tags"}
+            return self._render_veil_node_to_string(full_veil, {}, options, indent=0)
+
+    def _exclude_content_from_veil_element(self, 
+                                         veil_node: Dict[str, Any], 
+                                         target_element_id: str, 
+                                         exclude_content: List[Dict[str, Any]]) -> None:
+        """
+        Recursively find target element and exclude specific content from it.
+        
+        This modifies the VEIL in-place to remove the content being memorized
+        while preserving all other context.
+        
+        Args:
+            veil_node: Current VEIL node (modified in-place)
+            target_element_id: Element ID to find and modify
+            exclude_content: Content to exclude from that element
+        """
+        try:
+            # Check if this is the target element container
+            props = veil_node.get("properties", {})
+            element_id = props.get("element_id")
+            
+            if element_id == target_element_id:
+                logger.debug(f"Found target element {target_element_id}, excluding memorization content")
+                
+                # Remove the specific content being memorized from children
+                children = veil_node.get("children", [])
+                exclude_veil_ids = {node.get("veil_id") for node in exclude_content if node.get("veil_id")}
+                
+                # Filter out the excluded content
+                filtered_children = [
+                    child for child in children 
+                    if child.get("veil_id") not in exclude_veil_ids
+                ]
+                
+                # Update children
+                veil_node["children"] = filtered_children
+                
+                # Add a note about excluded content for context
+                if len(filtered_children) < len(children):
+                    excluded_count = len(children) - len(filtered_children)
+                    props["memorization_note"] = f"Excluding {excluded_count} items being memorized"
+                
+                logger.debug(f"Excluded {len(children) - len(filtered_children)} items from element {target_element_id}")
+                return
+            
+            # Recursively search children
+            children = veil_node.get("children", [])
+            for child in children:
+                self._exclude_content_from_veil_element(child, target_element_id, exclude_content)
+                
+        except Exception as e:
+            logger.error(f"Error excluding content from VEIL element: {e}", exc_info=True)

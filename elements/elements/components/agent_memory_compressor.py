@@ -773,6 +773,7 @@ class AgentMemoryCompressor(MemoryCompressor):
         
         ENHANCED: Now handles multimodal content - agent is aware of images and documents.
         NEW: Uses existing memory context for better continuity in memory formation.
+        PHASE 3: Enhanced with full VEIL context for contextually aware memories.
         This is the core of agent self-memorization - the agent decides what to remember.
         """
         try:
@@ -800,11 +801,26 @@ Here are your previous memories about this conversation/element to help you unde
 """
                 logger.debug(f"Agent {self.agent_id} reflecting with {len(existing_memories)} existing memory context")
 
-            # NEW: Enhanced reflection prompt for multimodal content with memory context
-            if attachments:
-                reflection_prompt = f"""You are an AI agent reflecting on your recent experience that included visual and document content. Look at this interaction and decide what you should remember about it for future reference.
+            # PHASE 3: NEW - Get full VEIL context from HUD for enhanced contextual awareness
+            veil_context_section = ""
+            full_veil_context = compression_context.get("full_veil_context") if compression_context else None
+            
+            if full_veil_context:
+                veil_context_section = f"""
+FULL CONTEXT FOR MEMORIZATION:
+Here's your complete context to understand what's happening around this conversation:
+<veil>
+{full_veil_context}
+</veil>
 
-{memory_context_section}EXPERIENCE TO REFLECT ON:
+"""
+                logger.debug(f"Agent {self.agent_id} reflecting with full VEIL context ({len(full_veil_context)} chars)")
+
+            # NEW: Enhanced reflection prompt for multimodal content with VEIL context
+            if attachments:
+                reflection_prompt = f"""You are an AI agent reflecting on your recent experience that included visual and document content. You have access to your complete conversation context to understand what you should remember.
+
+{memory_context_section}{veil_context_section}SPECIFIC CONTENT TO MEMORIZE:
 {text_content}
 
 CONTEXT:
@@ -812,14 +828,14 @@ CONTEXT:
 - Compression reason: {compression_reason}{focus_info}
 
 MULTIMODAL REFLECTION TASK:
-Create a concise memory summary that captures what was important about this experience from YOUR perspective as an AI agent. Since this interaction included attachments (images, documents, files), pay special attention to:
+Create a concise memory summary that captures what was important about this SPECIFIC CONTENT from YOUR perspective as an AI agent. Since this interaction included attachments (images, documents, files), pay special attention to:
 
 CONTENT ANALYSIS:
-- What happened that you should remember
-- Who was involved and their roles  
+- What happened in this specific content that you should remember
+- How this content relates to the broader conversation context shown above
 - What images/documents were shared and their relevance
 - How the visual/document content related to the conversation
-- Any important outcomes or decisions
+- Any important outcomes or decisions in this specific content
 - Context that would be useful for future interactions
 
 MULTIMODAL CONTEXT:
@@ -827,15 +843,15 @@ MULTIMODAL CONTEXT:
 - Explain how the attachments connected to the conversation topic
 - Note any important visual or document information discussed
 
-{"MEMORY CONTINUITY:" + chr(10) + "Consider how this new experience relates to your existing memories above. Build upon that context rather than repeating it." + chr(10) if existing_memories else ""}
-Keep the summary brief but informative - this will be your memory of this multimodal experience.
+{"MEMORY CONTINUITY:" + chr(10) + "Consider how this specific content relates to your existing memories and the broader context shown above. Build upon that context rather than repeating it." + chr(10) if existing_memories or veil_context_section else ""}
+Keep the summary brief but informative - this will be your memory of this specific multimodal experience.
 
 MEMORY SUMMARY:"""
             else:
-                # Standard text-only reflection prompt with memory context
-                reflection_prompt = f"""You are an AI agent reflecting on your recent experience. Look at this interaction and decide what you should remember about it for future reference.
+                # Standard text-only reflection prompt with VEIL context
+                reflection_prompt = f"""You are an AI agent reflecting on your recent experience. You have access to your complete conversation context to understand what you should remember.
 
-{memory_context_section}EXPERIENCE TO REFLECT ON:
+{memory_context_section}{veil_context_section}SPECIFIC CONTENT TO MEMORIZE:
 {text_content}
 
 CONTEXT:
@@ -843,14 +859,15 @@ CONTEXT:
 - Compression reason: {compression_reason}{focus_info}
 
 REFLECTION TASK:
-Create a concise memory summary that captures what was important about this experience from YOUR perspective as an AI agent. Focus on:
-- What happened that you should remember
+Create a concise memory summary that captures what was important about this SPECIFIC CONTENT from YOUR perspective as an AI agent. Focus on:
+- What happened in this specific content that you should remember
+- How this content relates to the broader conversation context shown above
 - Who was involved and their roles
-- Any important outcomes or decisions
+- Any important outcomes or decisions in this specific content
 - Context that would be useful for future interactions
 
-{"MEMORY CONTINUITY:" + chr(10) + "Consider how this new experience relates to your existing memories above. Build upon that context rather than repeating it." + chr(10) if existing_memories else ""}
-Keep the summary brief but informative - this will be your memory of this experience.
+{"MEMORY CONTINUITY:" + chr(10) + "Consider how this specific content relates to your existing memories and the broader context shown above. Build upon that context rather than repeating it." + chr(10) if existing_memories or veil_context_section else ""}
+Keep the summary brief but informative - this will be your memory of this specific experience.
 
 MEMORY SUMMARY:"""
 
@@ -863,10 +880,12 @@ MEMORY SUMMARY:"""
                     "text": reflection_prompt,
                     "attachments": attachments
                 })
-                logger.info(f"Agent {self.agent_id} reflecting on multimodal content: {len(attachments)} attachments")
+                context_info = "multimodal content with full VEIL context" if veil_context_section else "multimodal content"
+                logger.info(f"Agent {self.agent_id} reflecting on {context_info}: {len(attachments)} attachments")
             else:
                 # Text-only reflection
                 reflection_message = LLMMessage("user", reflection_prompt)
+                context_info = "content with full VEIL context" if veil_context_section else "content"
             
             # Get agent's reflection via LLM
             llm_response = self.llm_provider.complete(messages=[reflection_message], tools=None)
@@ -874,13 +893,17 @@ MEMORY SUMMARY:"""
             if llm_response and llm_response.content:
                 agent_summary = llm_response.content.strip()
                 
-                # NEW: Log multimodal memory formation with context awareness
+                # NEW: Log enhanced memory formation with VEIL context awareness
+                context_enhancement = ""
+                if veil_context_section:
+                    context_enhancement = " (enhanced with full VEIL context)"
+                if existing_memories:
+                    context_enhancement += f" with {len(existing_memories)} memory context"
+                
                 if attachments:
-                    context_info = f" with {len(existing_memories)} memory context" if existing_memories else ""
-                    logger.info(f"Agent {self.agent_id} created multimodal memory{context_info}: {agent_summary[:100]}...")
+                    logger.info(f"Agent {self.agent_id} created contextually aware multimodal memory{context_enhancement}: {agent_summary[:100]}...")
                 else:
-                    context_info = f" with {len(existing_memories)} memory context" if existing_memories else ""
-                    logger.debug(f"Agent {self.agent_id} reflected{context_info}: {agent_summary[:100]}...")
+                    logger.debug(f"Agent {self.agent_id} reflected{context_enhancement}: {agent_summary[:100]}...")
                 
                 return agent_summary
             else:
