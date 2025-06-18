@@ -1562,14 +1562,11 @@ class MessageListComponent(Component):
             if reconciliation_results['errors']:
                 logger.warning(f"[{self.owner.id}] Reconciliation errors: {reconciliation_results['errors']}")
             
-            # Emit VEIL delta after bulk processing (only during normal operation, not replay)
-            if not is_replay_mode:
-                veil_producer = self.get_sibling_component("MessageListVeilProducer")
-                if veil_producer:
-                    veil_producer.emit_delta()
-                    logger.debug(f"[{self.owner.id}] Emitted VEIL delta after bulk history reconciliation")
-            else:
-                # During replay, provide summary of restoration
+            # NOTE: VEIL delta emission is handled by handle_event() for all events uniformly
+            # No need to emit delta here to avoid double emission
+            
+            # During replay, provide summary of restoration
+            if is_replay_mode:
                 total_changes = (reconciliation_results['added_count'] + 
                                reconciliation_results['edited_count'] + 
                                reconciliation_results['deleted_count'])
@@ -1916,7 +1913,6 @@ class MessageListComponent(Component):
                 msg_timestamp = msg.get('timestamp')
                 if not msg_timestamp:
                     continue
-                    
                 # Check if this message is within the history range but not in history
                 if (history_range['min'] <= msg_timestamp <= history_range['max'] and 
                     external_id not in history_messages_by_external_id):
@@ -1980,21 +1976,7 @@ class MessageListComponent(Component):
             True if edit should be applied, False otherwise
         """
         # Check if history message indicates it was edited
-        history_edited = (history_msg.get('is_edited', False) or 
-                         history_msg.get('edited_timestamp') is not None)
-        
-        if not history_edited:
-            return False
-        
-        # Check if text content differs
-        existing_text = existing_msg.get('text', '')
-        history_text = history_msg.get('text', '')
-        
-        if existing_text != history_text:
-            logger.debug(f"[{self.owner.id}] Edit detected for message {history_msg.get('message_id')}: text differs")
-            return True
-        
-        return False
+        return (history_msg.get('edited', False) or history_msg.get('edit_timestamp') is not None)
     
     def _apply_history_edit(self, existing_msg: Dict[str, Any], history_msg: Dict[str, Any]) -> bool:
         """
@@ -2011,7 +1993,7 @@ class MessageListComponent(Component):
             edit_content = {
                 'original_message_id_external': history_msg.get('message_id'),
                 'new_text': history_msg.get('text'),
-                'timestamp': history_msg.get('edited_timestamp') or history_msg.get('timestamp', time.time())
+                'timestamp': history_msg.get('edit_timestamp') or history_msg.get('timestamp', time.time())
             }
             
             logger.info(f"[{self.owner.id}] Applying history edit to message {history_msg.get('message_id')}")
