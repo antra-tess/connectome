@@ -68,7 +68,7 @@ class ChatManagerComponent(Component):
                 # This tool is only relevant for InnerSpace context for initiating DMs
                 conv_id_to_use = external_conversation_id if external_conversation_id else user_external_id
                 dm_element, mount_id = self._ensure_dm_chat_element(
-                    adapter_id, 
+                    adapter_id,
                     conv_id_to_use, # This is the user_id for DMs
                     user_external_id, # The actual user being DM'd
                     user_display_name or user_external_id
@@ -77,7 +77,7 @@ class ChatManagerComponent(Component):
                     return {"success": True, "status": "ensured", "element_id": dm_element.id, "mount_id": mount_id}
                 else:
                     return {"success": False, "error": "Failed to ensure DM chat element."}
-            
+
             logger.info(f"DM tools registered for ChatManagerComponent on InnerSpace {self.owner.id}")
         else:
             logger.info(f"ChatManagerComponent on Space {self.owner.id} (not InnerSpace) will not register DM tools.")
@@ -85,7 +85,7 @@ class ChatManagerComponent(Component):
     def _generate_deterministic_element_id(self, adapter_id: str, conv_id: str, is_dm: bool) -> str:
         """
         Generate a deterministic element ID based on conversation parameters.
-        
+
         DEPRECATED: Use ElementIdGenerator.generate_chat_element_id() directly.
         This method is kept for backward compatibility.
         """
@@ -110,7 +110,7 @@ class ChatManagerComponent(Component):
 
         session_key = (adapter_id, conv_id)
         session_info = self._state["dm_sessions_map"].get(session_key)
-        
+
         if session_info:
             mounted_element = self.owner.get_mounted_element(session_info["mount_id"])
             if mounted_element and mounted_element.id == session_info["element_id"]:
@@ -122,7 +122,7 @@ class ChatManagerComponent(Component):
 
         # NEW: Check if deterministic element already exists (handles replay/restart scenarios)
         deterministic_element_id = self._generate_deterministic_element_id(adapter_id, conv_id, is_dm)
-        
+
         # First try to find by deterministic element ID in mounted elements
         if self.owner:
             for mount_id, element in self.owner.get_mounted_elements().items():
@@ -140,7 +140,7 @@ class ChatManagerComponent(Component):
         session_description = "DM" if is_dm else "Chat"
         element_name = f"{session_description} session ID {user_display_name_for_naming or user_ext_id_for_naming} ({adapter_id})"
         element_description = f"{session_description} session with {user_display_name_for_naming or user_ext_id_for_naming} on {adapter_id} (channel: {conv_id})"
-        
+
         # NEW: Use deterministic element ID instead of random UUID
         new_element_id = deterministic_element_id
         mount_id = new_element_id  # Use same ID for both (simplified approach)
@@ -152,12 +152,12 @@ class ChatManagerComponent(Component):
             "external_conversation_id": conv_id,  # Generic attribute instead of dm_external_conversation_id
             # Store recipient info for display/context but not as core attributes for tools
             "recipient_info": { # Info about the person/conversation for display
-                "external_user_id": user_ext_id_for_naming, 
+                "external_user_id": user_ext_id_for_naming,
                 "display_name": user_display_name_for_naming,
                 "is_dm": is_dm  # Store DM flag for context
             }
         }
-        
+
         creation_result = element_factory.handle_create_element_from_prefab(
             prefab_name=STANDARD_CHAT_INTERFACE_PREFAB_NAME,  # Use generic prefab
             element_id=new_element_id,
@@ -169,7 +169,7 @@ class ChatManagerComponent(Component):
             new_chat_element = creation_result['element']  # Renamed from new_dm_element
             actual_mount_id = creation_result.get('mount_id', mount_id)
             self._state["dm_sessions_map"][session_key] = {"element_id": new_chat_element.id, "mount_id": actual_mount_id}
-            
+
             # NEW: Record component state change for replay
             self._record_state_change("dm_session_created", {
                 "session_key": session_key,
@@ -181,7 +181,7 @@ class ChatManagerComponent(Component):
                 "user_display_name": user_display_name_for_naming,
                 "deterministic_id": deterministic_element_id  # Include for debugging
             })
-            
+
             logger.debug(f"Successfully created and mounted chat element '{new_chat_element.id}' (mounted as '{actual_mount_id}') for {session_key}.")
             return new_chat_element, actual_mount_id
         else:
@@ -197,7 +197,7 @@ class ChatManagerComponent(Component):
         """
         from ..inner_space import InnerSpace # For type checking owner
         from ..space import Space # For type checking owner
-        
+
         event_payload_from_space = event_node.get('payload', {})
         connectome_event_type = event_payload_from_space.get("event_type")
 
@@ -213,7 +213,7 @@ class ChatManagerComponent(Component):
 
         # NEW: Handle message events (including replay events)
         if connectome_event_type in ["message_received", "historical_message_received", "agent_message_confirmed",
-                                     "connectome_message_updated", "connectome_message_deleted", 
+                                     "connectome_message_updated", "connectome_message_deleted",
                                      "connectome_reaction_added", "connectome_reaction_removed",
                                      "attachment_content_available",
                                      "connectome_action_success", "connectome_action_failure"]:
@@ -228,22 +228,22 @@ class ChatManagerComponent(Component):
                 is_dm = inner_message_payload.get("is_dm", False)
                 source_adapter_id = event_payload_from_space.get("source_adapter_id")
                 external_conversation_id = event_payload_from_space.get("external_conversation_id")
-                
+
                 # For display purposes, get sender information
                 sender_display_name = inner_message_payload.get("sender_display_name", "Unknown")
                 sender_external_id = inner_message_payload.get("sender_external_id", external_conversation_id)
-                
+
             else:
                 # For update/delete/reaction events, extract conversation context from payload
                 source_adapter_id = inner_message_payload.get("source_adapter_id") or event_payload_from_space.get("source_adapter_id")
                 external_conversation_id = inner_message_payload.get("external_conversation_id") or event_payload_from_space.get("external_conversation_id")
-                
+
                 # FIXED: Extract real context from original_adapter_data instead of hardcoding defaults
                 original_adapter_data = inner_message_payload.get("original_adapter_data", {})
-                
+
                 # Extract the real is_dm flag and sender info from the original adapter event
                 is_dm = original_adapter_data.get("is_direct_message", False)  # Use real DM flag
-                
+
                 # Extract real sender information if available
                 sender_info = original_adapter_data.get('sender', {})
                 if sender_info:
@@ -253,19 +253,19 @@ class ChatManagerComponent(Component):
                     # Fallback for events without sender info (e.g., system deletions)
                     sender_display_name = "Unknown"
                     sender_external_id = external_conversation_id
-                    
+
                 logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Extracted context for {connectome_event_type}: is_dm={is_dm}, sender={sender_display_name}")
-                
+
             if not source_adapter_id or not external_conversation_id:
                 logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] '{connectome_event_type}' missing source_adapter_id or conversation_id in payload. Event: {event_payload_from_space}")
                 return False
 
             target_chat_element: Optional['BaseElement'] = None
-            
+
             if isinstance(self.owner, InnerSpace):
                 # UNIFIED: All message-related events use the same routing logic
                 # Use external_conversation_id as the primary key for finding the chat element
-                
+
                 if connectome_event_type in ["message_received", "historical_message_received", "agent_message_confirmed"]:
                     # For new messages, ensure the chat element exists (may create it)
                     target_chat_element, _ = self._ensure_chat_element(
@@ -279,7 +279,7 @@ class ChatManagerComponent(Component):
                     # For update/delete/reaction events, find existing chat element (don't create)
                     session_key = (source_adapter_id, external_conversation_id)
                     session_info = self._state["dm_sessions_map"].get(session_key)
-                    
+
                     if session_info:
                         mounted_element = self.owner.get_mounted_element(session_info["mount_id"])
                         if mounted_element and mounted_element.id == session_info["element_id"]:
@@ -287,11 +287,11 @@ class ChatManagerComponent(Component):
                             logger.debug(f"Found existing chat element {target_chat_element.id} for {connectome_event_type} on conversation {external_conversation_id}")
                         else:
                             logger.warning(f"Chat session for {session_key} in map but element not found/mismatched for {connectome_event_type}.")
-                    
+
                     if not target_chat_element:
                         logger.warning(f"No existing chat element found for {connectome_event_type} on conversation {external_conversation_id}. Event may be dropped.")
                         return False  # Don't process update/delete events without existing chat context
-                        
+
             else: # Should not happen if component is on a Space/InnerSpace
                 logger.error(f"[{self.COMPONENT_TYPE}] Owner is not InnerSpace or Space. Cannot process chat event.")
                 return False
@@ -305,7 +305,7 @@ class ChatManagerComponent(Component):
             else: # target_chat_element is None
                 logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Could not ensure or find target chat element. Message not forwarded for event: {event_node.get('id')}")
             return False # Indicate event not fully handled if forwarding failed
-            
+
         return False # Event not a message_received/historical_message_received/agent_message_confirmed, or not handled
 
     # Keep this method if ChatManager on InnerSpace needs to provide easy access to DM elements for other components.
@@ -322,7 +322,7 @@ class ChatManagerComponent(Component):
 
         session_key = (adapter_id, external_user_or_conv_id)
         session_info = self._state["dm_sessions_map"].get(session_key)
-        
+
         if session_info and self.owner:
             mounted_element = self.owner.get_mounted_element(session_info["mount_id"])
             if mounted_element and mounted_element.id == session_info["element_id"]:
@@ -331,19 +331,19 @@ class ChatManagerComponent(Component):
                 logger.warning(f"DM element for {session_key} (id: {session_info['element_id']}, mount: {session_info['mount_id']}) in map but not found/mismatched. Cleaning up.")
                 self._state["dm_sessions_map"].pop(session_key, None)
         return None
-        
+
 
     def _record_state_change(self, change_type: str, change_data: Dict[str, Any]) -> None:
         """
         Record a component state change to the owner's timeline for replay purposes.
-        
+
         Args:
             change_type: Type of state change (e.g., "dm_session_created")
             change_data: Data describing the state change
         """
         if not self.owner or not hasattr(self.owner, 'add_event_to_primary_timeline'):
             return
-            
+
         event_payload = {
             "event_type": "component_state_updated",
             "target_element_id": self.owner.id,
@@ -356,7 +356,7 @@ class ChatManagerComponent(Component):
                 "timestamp": f"{datetime.now().isoformat()}"
             }
         }
-        
+
         try:
             self.owner.add_event_to_primary_timeline(event_payload)
             logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Recorded state change: {change_type}")
@@ -366,10 +366,10 @@ class ChatManagerComponent(Component):
     def _handle_state_restoration(self, event_payload: Dict[str, Any]) -> bool:
         """
         Handle component state restoration during event replay.
-        
+
         Args:
             event_payload: The component_state_updated event payload
-            
+
         Returns:
             True if state restoration was successful, False otherwise
         """
@@ -379,28 +379,28 @@ class ChatManagerComponent(Component):
             component_type = event_data.get('component_type')
             change_type = event_data.get('change_type')
             change_data = event_data.get('change_data', {})
-            
+
             # Only handle events for this component
             if component_id != self.id or component_type != self.COMPONENT_TYPE:
                 logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Ignoring state restoration for different component: {component_id}")
                 return True  # Not an error, just not for us
-                
+
             logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] REPLAY: Restoring state - {change_type}")
-            
+
             if change_type == "dm_session_created":
                 # Restore DM session mapping
                 adapter_id = change_data.get('adapter_id')
                 conv_id = change_data.get('conv_id')
                 element_id = change_data.get('element_id')
                 mount_id = change_data.get('mount_id')
-                
+
                 if adapter_id and conv_id and element_id and mount_id:
                     session_key = (adapter_id, conv_id)
-                    
+
                     # Verify the element actually exists before restoring state
                     if self.owner and self.owner.get_mounted_element(mount_id):
                         self._state["dm_sessions_map"][session_key] = {
-                            "element_id": element_id, 
+                            "element_id": element_id,
                             "mount_id": mount_id
                         }
                         logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] ✓ Restored DM session mapping: {session_key} -> {element_id}")
@@ -414,19 +414,20 @@ class ChatManagerComponent(Component):
             else:
                 logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Unknown state change type for restoration: {change_type}")
                 return False
-                
+
         except Exception as e:
             logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Error during state restoration: {e}", exc_info=True)
-            return False 
+
+            return False
 
     def _handle_bulk_history_fetched(self, event_payload: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
         """
         Handles bulk history fetched events for efficient bulk processing and reconciliation.
-        
+
         Args:
             event_payload: The bulk_history_fetched event payload
             timeline_context: Timeline context for the event
-            
+
         Returns:
             True if handled successfully, False otherwise
         """
@@ -438,28 +439,28 @@ class ChatManagerComponent(Component):
             external_conversation_id = event_payload.get("external_conversation_id")
             is_dm = event_payload.get("payload", {}).get("is_dm", False)
             total_message_count = event_payload.get("payload", {}).get("total_message_count", len(history_messages))
-            
+
             logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Processing bulk history: {total_message_count} messages for conversation '{external_conversation_id}'")
-            
+
             if not source_adapter_id or not external_conversation_id:
                 logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Bulk history event missing required fields. Event: {event_payload}")
                 return False
-            
+
             if not isinstance(self.owner, InnerSpace):
                 logger.error(f"[{self.COMPONENT_TYPE}] Bulk history processing only supported on InnerSpace owners.")
                 return False
-            
+
             # For bulk history, we need to find or create the target chat element first
             # Use the first message for sender information if available
             sender_external_id = external_conversation_id  # Default fallback
             sender_display_name = "Unknown"
-            
+
             if history_messages and isinstance(history_messages[0], dict):
                 first_msg_sender = history_messages[0].get('sender', {})
                 if first_msg_sender:
                     sender_external_id = first_msg_sender.get("user_id", external_conversation_id)
                     sender_display_name = first_msg_sender.get("display_name", "Unknown")
-            
+
             # Ensure the chat element exists for bulk processing
             target_chat_element, mount_id = self._ensure_chat_element(
                 source_adapter_id,
@@ -468,7 +469,7 @@ class ChatManagerComponent(Component):
                 sender_display_name,
                 is_dm=is_dm
             )
-            
+
             if not target_chat_element:
                 logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Could not ensure chat element for bulk history processing. Conversation: {external_conversation_id}")
                 return False
@@ -491,7 +492,7 @@ class ChatManagerComponent(Component):
                     "bulk_processing": True  # Flag to indicate bulk processing mode
                 }
             }
-            
+
             # Route the bulk event to the chat element
             if hasattr(target_chat_element, 'receive_event'):
                 target_chat_element.receive_event(bulk_event_for_message_list, timeline_context)
@@ -500,7 +501,7 @@ class ChatManagerComponent(Component):
             else:
                 logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Chat element '{target_chat_element.id}' does not support receive_event")
                 return False
-                
+
         except Exception as e:
             logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Error processing bulk history: {e}", exc_info=True)
-            return False 
+            return False

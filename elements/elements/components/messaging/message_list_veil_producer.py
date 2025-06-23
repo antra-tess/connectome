@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional, List
 
 from ..base_component import VeilProducer
 # Assuming MessageListComponent is in the same directory
-from .message_list import MessageListComponent, MessageType 
+from .message_list import MessageListComponent, MessageType
 from elements.component_registry import register_component
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ class MessageListVeilProducer(VeilProducer):
     def _get_available_tools_for_element(self) -> List[str]:
         """Get list of available tool names for this element."""
         from ..tool_provider import ToolProviderComponent
-        
+
         tool_provider = self.get_sibling_component(ToolProviderComponent)
         if tool_provider:
             return tool_provider.list_tools()
@@ -71,14 +71,12 @@ class MessageListVeilProducer(VeilProducer):
         message_nodes = []
         current_message_ids = set()
 
-        
-
         for msg_data in messages:
             internal_id = msg_data.get('internal_id')
             if not internal_id: continue # Skip messages without internal ID
-            
+
             current_message_ids.add(internal_id)
-            
+
             # Basic VEIL node for a message
             # The VEIL_ATTACHMENT_METADATA_PROP will now carry attachments processed by MessageListComponent,
             # which may include inline 'content'.
@@ -103,15 +101,16 @@ class MessageListVeilProducer(VeilProducer):
                     # VEIL_ATTACHMENT_METADATA_PROP: processed_attachments_from_mlc # Store the rich attachment dicts
                     # Let's refine this: the VEIL_ATTACHMENT_METADATA_PROP should probably just be the metadata part,
                     # and the content part should lead to a child node if content exists.
+                    "error_details": msg_data.get('error_details', None),
                     VEIL_ATTACHMENT_METADATA_PROP: [
-                        {k: v for k, v in att.items() if k != 'content'} 
+                        {k: v for k, v in att.items() if k != 'content'}
                         for att in processed_attachments_from_mlc
                     ]
                 },
                 "children": [] # Initialize, may add attachment content nodes later
             }
 
-            # --- NEW: Create child nodes for attachments that have content --- 
+            # --- NEW: Create child nodes for attachments that have content ---
             for att_data_from_mlc in processed_attachments_from_mlc:
                 attachment_id = att_data_from_mlc.get('attachment_id')
                 if not attachment_id: continue
@@ -119,7 +118,7 @@ class MessageListVeilProducer(VeilProducer):
                 if att_data_from_mlc.get('content') is not None:
                     # Content is available (either was inline or fetched and stored by MessageListComponent)
                     attachment_content_node = {
-                        "veil_id": f"att_{attachment_id}_content_{internal_id}", 
+                        "veil_id": f"att_{attachment_id}_content_{internal_id}",
                         "node_type": VEIL_ATTACHMENT_CONTENT_NODE_TYPE,
                         "properties": {
                             "structural_role": "attachment_content",
@@ -160,10 +159,10 @@ class MessageListVeilProducer(VeilProducer):
             },
             "children": message_nodes
         }
-        
+
         # NEW: Add owner tracking to the root container
         self._add_owner_tracking(root_veil_node)
-        
+
         # Update state for delta calculation - message IDs are handled in signal_delta_produced_this_frame
         # self._state['_last_generated_veil_message_ids'] = current_message_ids
         # Properties of the root for its own update detection are also handled in signal_delta_produced_this_frame
@@ -182,11 +181,11 @@ class MessageListVeilProducer(VeilProducer):
 
         delta_operations = []
         list_root_veil_id = f"{self.owner.id}_message_list_root"
-        
+
         # Get current messages and their IDs
         current_messages = message_list_comp.get_messages()
         current_message_ids = {msg.get('internal_id') for msg in current_messages if msg.get('internal_id')}
-        
+
         # Prepare current properties for the list root node
         current_list_root_properties = {
             "structural_role": "container",
@@ -202,7 +201,7 @@ class MessageListVeilProducer(VeilProducer):
         # 1. Handle the list root node (add or update)
         if not self._state.get('_has_produced_list_root_add_before', False):
             logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Generating 'add_node' for list root '{list_root_veil_id}'.")
-            
+
             parent_veil_id_for_list_root = None
             if self.owner and hasattr(self.owner, 'get_parent_info'):
                 parent_info = self.owner.get_parent_info()
@@ -212,7 +211,7 @@ class MessageListVeilProducer(VeilProducer):
 
             add_node_op_for_root = {
                 "op": "add_node",
-                "node": { 
+                "node": {
                     "veil_id": list_root_veil_id,
                     "node_type": VEIL_CONTAINER_TYPE,
                     "properties": current_list_root_properties,
@@ -221,7 +220,7 @@ class MessageListVeilProducer(VeilProducer):
             }
             if parent_veil_id_for_list_root:
                 add_node_op_for_root["parent_id"] = parent_veil_id_for_list_root
-            
+
             delta_operations.append(add_node_op_for_root)
             # Flag will be set in signal_delta_produced_this_frame
         else:
@@ -234,10 +233,10 @@ class MessageListVeilProducer(VeilProducer):
                     "veil_id": list_root_veil_id,
                     "properties": current_list_root_properties
                 })
-        
+
         # 2. Detect added and removed messages
         last_message_ids = self._state.get('_last_generated_veil_message_ids', set())
-        
+
         # Detect added messages
         added_message_ids = current_message_ids - last_message_ids
         for msg_data in current_messages:
@@ -260,8 +259,9 @@ class MessageListVeilProducer(VeilProducer):
                     # NEW: Include reaction data for HUD rendering in deltas too
                     "reactions": msg_data.get('reactions', {}),  # Include full reaction dict {emoji: [user_ids]}
                     "message_status": msg_data.get('status', 'received'),  # Include message status for pending states
+                    "error_details": msg_data.get('error_details', None),
                     VEIL_ATTACHMENT_METADATA_PROP: [
-                        {k: v for k, v in att.items() if k != 'content'} 
+                        {k: v for k, v in att.items() if k != 'content'}
                         for att in processed_attachments_from_mlc
                     ]
                 }
@@ -272,7 +272,7 @@ class MessageListVeilProducer(VeilProducer):
                     if not attachment_id: continue
                     if att_data_from_mlc.get('content') is not None:
                         attachment_content_node = {
-                            "veil_id": f"att_{attachment_id}_content_{internal_id}", 
+                            "veil_id": f"att_{attachment_id}_content_{internal_id}",
                             "node_type": VEIL_ATTACHMENT_CONTENT_NODE_TYPE,
                             "properties": {
                                 "structural_role": "attachment_content",
@@ -286,7 +286,7 @@ class MessageListVeilProducer(VeilProducer):
                             }
                         }
                         message_children_nodes.append(attachment_content_node)
-                
+
                 delta_operations.append({
                     "op": "add_node",
                     "parent_id": list_root_veil_id,
@@ -305,7 +305,7 @@ class MessageListVeilProducer(VeilProducer):
                 "op": "remove_node",
                 "veil_id": removed_id # This implies removal from its parent (the list root)
             })
-            
+
         # TODO: Detect modified messages (property changes on existing messages)
         # common_message_ids = last_message_ids.intersection(current_message_ids)
         # for msg_id in common_message_ids:
@@ -319,7 +319,7 @@ class MessageListVeilProducer(VeilProducer):
             logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Calculated VEIL delta with {len(delta_operations)} operations (owner-tracked).")
         else:
             logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] No VEIL delta operations calculated.")
-        
+
         # --- Update State After Deltas are Determined ---
         list_root_veil_id = f"{self.owner.id}_message_list_root"
         # Update _has_produced_list_root_add_before
@@ -330,19 +330,19 @@ class MessageListVeilProducer(VeilProducer):
                    delta_op["node"].get("veil_id") == list_root_veil_id:
                     self._state['_has_produced_list_root_add_before'] = True
                     break
-        
+
         # Update baseline for the list root's properties (using current_list_root_properties from earlier in this method)
         self._state['_last_list_root_properties'] = current_list_root_properties
-        
+
         # Update baseline for message IDs (using current_message_ids from earlier in this method)
         self._state['_last_generated_veil_message_ids'] = current_message_ids
-        
+
         logger.debug(
             f"[{self.owner.id}/{self.COMPONENT_TYPE}] calculate_delta finished. Baseline updated. "
             f"List root props tracked. Message IDs: {len(current_message_ids)}. "
             f"Root add produced: {self._state.get('_has_produced_list_root_add_before', False)}"
         )
         # --- End State Update ---
-        
+
         return delta_operations
 
