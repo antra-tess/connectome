@@ -1236,37 +1236,35 @@ class ExternalEventRouter:
         elif action_type == "delete_message":
             clean_payload.update({
                 "conversation_id": conversation_id,
-                "message_external_id": payload.get("message_external_id")
+                "message_id": payload.get("message_external_id")
             })
 
         elif action_type == "edit_message":
             clean_payload.update({
                 "conversation_id": conversation_id,
-                "message_external_id": payload.get("message_external_id"),
-                "new_text": payload.get("new_text")
+                "message_id": payload.get("message_external_id"),
+                "text": payload.get("new_text")
             })
 
         elif action_type in ["add_reaction", "remove_reaction"]:
             clean_payload.update({
                 "conversation_id": conversation_id,
-                "message_external_id": payload.get("message_external_id"),
+                "message_id": payload.get("message_external_id"),
                 "emoji": payload.get("emoji")
             })
 
         elif action_type == "fetch_message_history":
             clean_payload.update({
                 "conversation_id": conversation_id,
-                "before_timestamp_ms": payload.get("before_timestamp_ms"),
-                "after_timestamp_ms": payload.get("after_timestamp_ms"),
+                "before": payload.get("before_timestamp_ms"),
+                "after": payload.get("after_timestamp_ms"),
                 "limit": payload.get("limit", 100)
             })
 
         elif action_type == "fetch_attachment_content":
             clean_payload.update({
                 "conversation_id": conversation_id,
-                "message_external_id": payload.get("message_external_id"),
-                "attachment_id": payload.get("attachment_id"),
-                "attachment_url": payload.get("attachment_url")
+                "attachment_id": payload.get("attachment_id")
             })
 
         else:
