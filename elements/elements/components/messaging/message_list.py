@@ -1512,7 +1512,7 @@ class MessageListComponent(Component):
         logger.warning(f"[{self.owner.id}] Message action '{action_type}' failed for req_id: {internal_req_id}. Error: {error_msg}")
 
         # Try to extract affected message ID for restoration
-        affected_message_id = adapter_response_data.get('message_id') or adapter_response_data.get('affected_message_id')
+        affected_message_id = adapter_response_data.get('affected_message_id')
         if affected_message_id:
             # Restore message from pending state since the action failed
             self.restore_message_from_pending_state(affected_message_id, action_type.replace('_message', '').replace('_reaction', ''))
