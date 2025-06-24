@@ -109,8 +109,8 @@ class MessageActionHandler(Component):
 
         fetch_history_params: List[ToolParameter] = [
             {"name": "conversation_id", "type": "string", "description": "The external ID of the conversation/channel to fetch history from.", "required": True},
-            {"name": "before_ms", "type": "integer", "description": "Fetch messages before this UTC timestamp in milliseconds. (Optional)", "required": False},
-            {"name": "after_ms", "type": "integer", "description": "Fetch messages after this UTC timestamp in milliseconds. (Optional)", "required": False},
+            {"name": "before", "type": "integer", "description": "Fetch messages before this UTC timestamp in seconds. For example, this param can be set to int(datetime.now().timestamp()). (Either this, or after param must be submitted)", "required": False},
+            {"name": "after", "type": "integer", "description": "Fetch messages after this UTC timestamp in seconds. (Either this, or before param must be submitted)", "required": False},
             {"name": "limit", "type": "integer", "description": "Maximum number of messages to fetch (e.g., 100). (Optional)", "required": False}
         ]
 
@@ -477,13 +477,13 @@ class MessageActionHandler(Component):
 
         # --- Register fetch_history Tool ---
         @tool_provider.register_tool(
-            name="fetch_message_history",
+            name="fetch_history",
             description="Fetches historical messages for a specific conversation from the adapter.",
             parameters_schema=fetch_history_params
         )
         async def fetch_history_tool(conversation_id: str, # Explicitly required by tool
-                                 before_ms: Optional[int] = None,
-                                 after_ms: Optional[int] = None,
+                                 before: Optional[int] = None,
+                                 after: Optional[int] = None,
                                  limit: Optional[int] = 100,
                                  calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             # This tool might be called by an agent loop that doesn't have a `calling_context`
@@ -491,8 +491,8 @@ class MessageActionHandler(Component):
             # The agent loop should ideally provide its own ID.
             return await self.handle_fetch_history(
                 conversation_id=conversation_id,
-                before_ms=before_ms,
-                after_ms=after_ms,
+                before=before,
+                after=after,
                 limit=limit,
                 calling_context=calling_context # Pass context through
             )
@@ -741,8 +741,8 @@ class MessageActionHandler(Component):
 
     async def handle_fetch_history(self,
                              conversation_id: str,
-                             before_ms: Optional[int] = None,
-                             after_ms: Optional[int] = None,
+                             before: Optional[int] = None,
+                             after: Optional[int] = None,
                              limit: Optional[int] = 100,
                              calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]: # Added Optional to calling_context
         """
@@ -750,8 +750,8 @@ class MessageActionHandler(Component):
 
         Args:
             conversation_id: The external ID of the conversation/channel.
-            before_ms: Fetch messages before this timestamp (milliseconds UTC).
-            after_ms: Fetch messages after this timestamp (milliseconds UTC).
+            before: Fetch messages before this timestamp (seconds UTC).
+            after: Fetch messages after this timestamp (seconds UTC).
             limit: Maximum number of messages to fetch.
             calling_context: Context from the loop component calling the tool.
 
@@ -776,14 +776,14 @@ class MessageActionHandler(Component):
             "internal_request_id": internal_request_id,
             "adapter_id": adapter_id,
             "conversation_id": conversation_id, # This is the external_id
-            "before_timestamp_ms": before_ms,
-            "after_timestamp_ms": after_ms,
+            "before_timestamp_ms": before,
+            "after_timestamp_ms": after,
             "limit": limit,
             "requesting_element_id": self.owner.id if self.owner else None,
             "calling_loop_id": calling_context.get('loop_component_id') # From AgentLoop
         }
 
-        return await self._dispatch_action("fetch_message_history", payload) # "fetch_message_history" is the ActivityClient action
+        return await self._dispatch_action("fetch_history", payload) # "fetch_history" is the ActivityClient action
 
     async def handle_get_attachment(self,
                               attachment_id: str,

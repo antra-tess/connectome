@@ -1253,7 +1253,7 @@ class ExternalEventRouter:
                 "emoji": payload.get("emoji")
             })
 
-        elif action_type == "fetch_message_history":
+        elif action_type == "fetch_history":
             clean_payload.update({
                 "conversation_id": conversation_id,
                 "before": payload.get("before_timestamp_ms"),
