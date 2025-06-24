@@ -156,7 +156,7 @@ class MessageActionHandler(Component):
                 logger.error(f"[{self.owner.id}] {error_msg}")
                 return {"success": False, "error": error_msg, "message_id": None}
 
-            internal_request_id = f"msg_req_{self.owner.id}_{uuid.uuid4().hex[:12]}"
+            internal_request_id = self._get_internal_request_id()
 
             # --- Standard dispatch using _outgoing_action_callback (e.g., for DMs or SharedSpace's chat_interface) ---
             if self._outgoing_action_callback is None:
@@ -265,6 +265,7 @@ class MessageActionHandler(Component):
                 "target_module": "ActivityClient",
                 "action_type": "delete_message",
                 "payload": {
+                    "internal_request_id": self._get_internal_request_id(),
                     "adapter_id": adapter_id,
                     "conversation_id": conversation_id,
                     "message_external_id": message_external_id,
@@ -277,13 +278,13 @@ class MessageActionHandler(Component):
                 logger.info(f"[{self.owner.id}] Dispatched 'delete_message' action for ID '{message_external_id}' to adapter '{adapter_id}'.")
                 return {"success": True, "status": "Delete request sent. Message marked as pending deletion in conversation.", "message_external_id": message_external_id}
             except Exception as e:
-                 # NEW: Restore message state if dispatch fails
-                 if msg_list_comp:
-                     msg_list_comp.restore_message_from_pending_state(message_external_id, "delete")
-                     if veil_producer:
-                         veil_producer.emit_delta()  # Update VEIL to show restore
-                 logger.error(f"[{self.owner.id}] Error dispatching delete_message action: {e}", exc_info=True)
-                 return {"success": False, "error": f"Error dispatching delete request: {e}"}
+                # NEW: Restore message state if dispatch fails
+                if msg_list_comp:
+                    msg_list_comp.restore_message_from_pending_state(message_external_id, "delete")
+                    if veil_producer:
+                        veil_producer.emit_delta()  # Update VEIL to show restore
+                logger.error(f"[{self.owner.id}] Error dispatching delete_message action: {e}", exc_info=True)
+                return {"success": False, "error": f"Error dispatching delete request: {e}"}
 
         # --- Register edit_message Tool ---
         @tool_provider.register_tool(
@@ -325,6 +326,7 @@ class MessageActionHandler(Component):
                 "target_module": "ActivityClient",
                 "action_type": "edit_message",
                 "payload": {
+                    "internal_request_id": self._get_internal_request_id(),
                     "adapter_id": adapter_id,
                     "conversation_id": conversation_id,
                     "message_external_id": message_external_id,
@@ -387,6 +389,7 @@ class MessageActionHandler(Component):
                 "target_module": "ActivityClient",
                 "action_type": "add_reaction",
                 "payload": {
+                    "internal_request_id": self._get_internal_request_id(),
                     "adapter_id": adapter_id,
                     "conversation_id": conversation_id,
                     "message_external_id": message_external_id,
@@ -401,13 +404,13 @@ class MessageActionHandler(Component):
                 logger.info(f"[{self.owner.id}] Dispatched 'add_reaction' ({emoji}) action for ID '{message_external_id}' to adapter '{adapter_id}'.")
                 return {"success": True, "status": f"Reaction '{emoji}' added to message in conversation.", "message_external_id": message_external_id}
             except Exception as e:
-                 # NEW: Restore message state if dispatch fails
-                 if msg_list_comp:
-                     msg_list_comp.restore_message_from_pending_state(message_external_id, "add_reaction")
-                     if veil_producer:
-                         veil_producer.emit_delta()  # Update VEIL to show restore
-                 logger.error(f"[{self.owner.id}] Error dispatching add_reaction action: {e}", exc_info=True)
-                 return {"success": False, "error": f"Error dispatching add reaction request: {e}"}
+                # NEW: Restore message state if dispatch fails
+                if msg_list_comp:
+                    msg_list_comp.restore_message_from_pending_state(message_external_id, "add_reaction")
+                    if veil_producer:
+                        veil_producer.emit_delta()  # Update VEIL to show restore
+                logger.error(f"[{self.owner.id}] Error dispatching add_reaction action: {e}", exc_info=True)
+                return {"success": False, "error": f"Error dispatching add reaction request: {e}"}
 
         # --- Register remove_reaction Tool ---
         @tool_provider.register_tool(
@@ -449,6 +452,7 @@ class MessageActionHandler(Component):
                 "target_module": "ActivityClient",
                 "action_type": "remove_reaction",
                 "payload": {
+                    "internal_request_id": self._get_internal_request_id(),
                     "adapter_id": adapter_id,
                     "conversation_id": conversation_id,
                     "message_external_id": message_external_id,
@@ -463,13 +467,13 @@ class MessageActionHandler(Component):
                 logger.info(f"[{self.owner.id}] Dispatched 'remove_reaction' ({emoji}) action for ID '{message_external_id}' to adapter '{adapter_id}'.")
                 return {"success": True, "status": f"Reaction '{emoji}' removed from message in conversation.", "message_external_id": message_external_id}
             except Exception as e:
-                 # NEW: Restore message state if dispatch fails
-                 if msg_list_comp:
-                     msg_list_comp.restore_message_from_pending_state(message_external_id, "remove_reaction")
-                     if veil_producer:
-                         veil_producer.emit_delta()  # Update VEIL to show restore
-                 logger.error(f"[{self.owner.id}] Error dispatching remove_reaction action: {e}", exc_info=True)
-                 return {"success": False, "error": f"Error dispatching remove reaction request: {e}"}
+                # NEW: Restore message state if dispatch fails
+                if msg_list_comp:
+                    msg_list_comp.restore_message_from_pending_state(message_external_id, "remove_reaction")
+                    if veil_producer:
+                        veil_producer.emit_delta()  # Update VEIL to show restore
+                logger.error(f"[{self.owner.id}] Error dispatching remove_reaction action: {e}", exc_info=True)
+                return {"success": False, "error": f"Error dispatching remove reaction request: {e}"}
 
         # --- Register fetch_history Tool ---
         @tool_provider.register_tool(
@@ -727,6 +731,13 @@ class MessageActionHandler(Component):
         logger.warning(f"[{self.owner.id if self.owner else 'Unknown'}] Could not determine requesting_agent_name through calling_context or InnerSpace hierarchy.")
         return None
 
+    def _get_internal_request_id(self) -> str:
+        """Builds an internal request id
+
+        Returns:
+            internal request ID
+        """
+        return f"msg_req_{self.owner.id if self.owner else 'unknown'}_{uuid.uuid4().hex[:12]}"
 
     async def handle_fetch_history(self,
                              conversation_id: str,
@@ -757,7 +768,7 @@ class MessageActionHandler(Component):
         adapter_id = context_adapter_id # Assign to original variable name
 
         # Generate internal request ID for tracking like send_message does
-        internal_request_id = f"fetch_req_{self.owner.id if self.owner else 'unknown'}_{uuid.uuid4().hex[:12]}"
+        internal_request_id = self._get_internal_request_id()
 
         logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] Preparing fetch_history action for adapter '{adapter_id}', conv '{conversation_id}'.")
 
