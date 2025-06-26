@@ -109,8 +109,8 @@ class MessageActionHandler(Component):
 
         fetch_history_params: List[ToolParameter] = [
             {"name": "conversation_id", "type": "string", "description": "The external ID of the conversation/channel to fetch history from.", "required": True},
-            {"name": "before_ms", "type": "integer", "description": "Fetch messages before this UTC timestamp in milliseconds. (Optional)", "required": False},
-            {"name": "after_ms", "type": "integer", "description": "Fetch messages after this UTC timestamp in milliseconds. (Optional)", "required": False},
+            {"name": "before", "type": "integer", "description": "Fetch messages before this UTC timestamp in seconds. For example, this param can be set to int(datetime.now().timestamp()). (Either this, or after param must be submitted)", "required": False},
+            {"name": "after", "type": "integer", "description": "Fetch messages after this UTC timestamp in seconds. (Either this, or before param must be submitted)", "required": False},
             {"name": "limit", "type": "integer", "description": "Maximum number of messages to fetch (e.g., 100). (Optional)", "required": False}
         ]
 
@@ -156,7 +156,7 @@ class MessageActionHandler(Component):
                 logger.error(f"[{self.owner.id}] {error_msg}")
                 return {"success": False, "error": error_msg, "message_id": None}
 
-            internal_request_id = f"msg_req_{self.owner.id}_{uuid.uuid4().hex[:12]}"
+            internal_request_id = self._get_internal_request_id()
 
             # --- Standard dispatch using _outgoing_action_callback (e.g., for DMs or SharedSpace's chat_interface) ---
             if self._outgoing_action_callback is None:
@@ -265,6 +265,7 @@ class MessageActionHandler(Component):
                 "target_module": "ActivityClient",
                 "action_type": "delete_message",
                 "payload": {
+                    "internal_request_id": self._get_internal_request_id(),
                     "adapter_id": adapter_id,
                     "conversation_id": conversation_id,
                     "message_external_id": message_external_id,
@@ -277,13 +278,13 @@ class MessageActionHandler(Component):
                 logger.info(f"[{self.owner.id}] Dispatched 'delete_message' action for ID '{message_external_id}' to adapter '{adapter_id}'.")
                 return {"success": True, "status": "Delete request sent. Message marked as pending deletion in conversation.", "message_external_id": message_external_id}
             except Exception as e:
-                 # NEW: Restore message state if dispatch fails
-                 if msg_list_comp:
-                     msg_list_comp.restore_message_from_pending_state(message_external_id, "delete")
-                     if veil_producer:
-                         veil_producer.emit_delta()  # Update VEIL to show restore
-                 logger.error(f"[{self.owner.id}] Error dispatching delete_message action: {e}", exc_info=True)
-                 return {"success": False, "error": f"Error dispatching delete request: {e}"}
+                # NEW: Restore message state if dispatch fails
+                if msg_list_comp:
+                    msg_list_comp.restore_message_from_pending_state(message_external_id, "delete")
+                    if veil_producer:
+                        veil_producer.emit_delta()  # Update VEIL to show restore
+                logger.error(f"[{self.owner.id}] Error dispatching delete_message action: {e}", exc_info=True)
+                return {"success": False, "error": f"Error dispatching delete request: {e}"}
 
         # --- Register edit_message Tool ---
         @tool_provider.register_tool(
@@ -325,6 +326,7 @@ class MessageActionHandler(Component):
                 "target_module": "ActivityClient",
                 "action_type": "edit_message",
                 "payload": {
+                    "internal_request_id": self._get_internal_request_id(),
                     "adapter_id": adapter_id,
                     "conversation_id": conversation_id,
                     "message_external_id": message_external_id,
@@ -387,6 +389,7 @@ class MessageActionHandler(Component):
                 "target_module": "ActivityClient",
                 "action_type": "add_reaction",
                 "payload": {
+                    "internal_request_id": self._get_internal_request_id(),
                     "adapter_id": adapter_id,
                     "conversation_id": conversation_id,
                     "message_external_id": message_external_id,
@@ -401,13 +404,13 @@ class MessageActionHandler(Component):
                 logger.info(f"[{self.owner.id}] Dispatched 'add_reaction' ({emoji}) action for ID '{message_external_id}' to adapter '{adapter_id}'.")
                 return {"success": True, "status": f"Reaction '{emoji}' added to message in conversation.", "message_external_id": message_external_id}
             except Exception as e:
-                 # NEW: Restore message state if dispatch fails
-                 if msg_list_comp:
-                     msg_list_comp.restore_message_from_pending_state(message_external_id, "add_reaction")
-                     if veil_producer:
-                         veil_producer.emit_delta()  # Update VEIL to show restore
-                 logger.error(f"[{self.owner.id}] Error dispatching add_reaction action: {e}", exc_info=True)
-                 return {"success": False, "error": f"Error dispatching add reaction request: {e}"}
+                # NEW: Restore message state if dispatch fails
+                if msg_list_comp:
+                    msg_list_comp.restore_message_from_pending_state(message_external_id, "add_reaction")
+                    if veil_producer:
+                        veil_producer.emit_delta()  # Update VEIL to show restore
+                logger.error(f"[{self.owner.id}] Error dispatching add_reaction action: {e}", exc_info=True)
+                return {"success": False, "error": f"Error dispatching add reaction request: {e}"}
 
         # --- Register remove_reaction Tool ---
         @tool_provider.register_tool(
@@ -449,6 +452,7 @@ class MessageActionHandler(Component):
                 "target_module": "ActivityClient",
                 "action_type": "remove_reaction",
                 "payload": {
+                    "internal_request_id": self._get_internal_request_id(),
                     "adapter_id": adapter_id,
                     "conversation_id": conversation_id,
                     "message_external_id": message_external_id,
@@ -463,23 +467,23 @@ class MessageActionHandler(Component):
                 logger.info(f"[{self.owner.id}] Dispatched 'remove_reaction' ({emoji}) action for ID '{message_external_id}' to adapter '{adapter_id}'.")
                 return {"success": True, "status": f"Reaction '{emoji}' removed from message in conversation.", "message_external_id": message_external_id}
             except Exception as e:
-                 # NEW: Restore message state if dispatch fails
-                 if msg_list_comp:
-                     msg_list_comp.restore_message_from_pending_state(message_external_id, "remove_reaction")
-                     if veil_producer:
-                         veil_producer.emit_delta()  # Update VEIL to show restore
-                 logger.error(f"[{self.owner.id}] Error dispatching remove_reaction action: {e}", exc_info=True)
-                 return {"success": False, "error": f"Error dispatching remove reaction request: {e}"}
+                # NEW: Restore message state if dispatch fails
+                if msg_list_comp:
+                    msg_list_comp.restore_message_from_pending_state(message_external_id, "remove_reaction")
+                    if veil_producer:
+                        veil_producer.emit_delta()  # Update VEIL to show restore
+                logger.error(f"[{self.owner.id}] Error dispatching remove_reaction action: {e}", exc_info=True)
+                return {"success": False, "error": f"Error dispatching remove reaction request: {e}"}
 
         # --- Register fetch_history Tool ---
         @tool_provider.register_tool(
-            name="fetch_message_history",
+            name="fetch_history",
             description="Fetches historical messages for a specific conversation from the adapter.",
             parameters_schema=fetch_history_params
         )
         async def fetch_history_tool(conversation_id: str, # Explicitly required by tool
-                                 before_ms: Optional[int] = None,
-                                 after_ms: Optional[int] = None,
+                                 before: Optional[int] = None,
+                                 after: Optional[int] = None,
                                  limit: Optional[int] = 100,
                                  calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             # This tool might be called by an agent loop that doesn't have a `calling_context`
@@ -487,8 +491,8 @@ class MessageActionHandler(Component):
             # The agent loop should ideally provide its own ID.
             return await self.handle_fetch_history(
                 conversation_id=conversation_id,
-                before_ms=before_ms,
-                after_ms=after_ms,
+                before=before,
+                after=after,
                 limit=limit,
                 calling_context=calling_context # Pass context through
             )
@@ -727,11 +731,18 @@ class MessageActionHandler(Component):
         logger.warning(f"[{self.owner.id if self.owner else 'Unknown'}] Could not determine requesting_agent_name through calling_context or InnerSpace hierarchy.")
         return None
 
+    def _get_internal_request_id(self) -> str:
+        """Builds an internal request id
+
+        Returns:
+            internal request ID
+        """
+        return f"msg_req_{self.owner.id if self.owner else 'unknown'}_{uuid.uuid4().hex[:12]}"
 
     async def handle_fetch_history(self,
                              conversation_id: str,
-                             before_ms: Optional[int] = None,
-                             after_ms: Optional[int] = None,
+                             before: Optional[int] = None,
+                             after: Optional[int] = None,
                              limit: Optional[int] = 100,
                              calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]: # Added Optional to calling_context
         """
@@ -739,8 +750,8 @@ class MessageActionHandler(Component):
 
         Args:
             conversation_id: The external ID of the conversation/channel.
-            before_ms: Fetch messages before this timestamp (milliseconds UTC).
-            after_ms: Fetch messages after this timestamp (milliseconds UTC).
+            before: Fetch messages before this timestamp (seconds UTC).
+            after: Fetch messages after this timestamp (seconds UTC).
             limit: Maximum number of messages to fetch.
             calling_context: Context from the loop component calling the tool.
 
@@ -757,7 +768,7 @@ class MessageActionHandler(Component):
         adapter_id = context_adapter_id # Assign to original variable name
 
         # Generate internal request ID for tracking like send_message does
-        internal_request_id = f"fetch_req_{self.owner.id if self.owner else 'unknown'}_{uuid.uuid4().hex[:12]}"
+        internal_request_id = self._get_internal_request_id()
 
         logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] Preparing fetch_history action for adapter '{adapter_id}', conv '{conversation_id}'.")
 
@@ -765,14 +776,14 @@ class MessageActionHandler(Component):
             "internal_request_id": internal_request_id,
             "adapter_id": adapter_id,
             "conversation_id": conversation_id, # This is the external_id
-            "before_timestamp_ms": before_ms,
-            "after_timestamp_ms": after_ms,
+            "before_timestamp_ms": before,
+            "after_timestamp_ms": after,
             "limit": limit,
             "requesting_element_id": self.owner.id if self.owner else None,
             "calling_loop_id": calling_context.get('loop_component_id') # From AgentLoop
         }
 
-        return await self._dispatch_action("fetch_message_history", payload) # "fetch_message_history" is the ActivityClient action
+        return await self._dispatch_action("fetch_history", payload) # "fetch_history" is the ActivityClient action
 
     async def handle_get_attachment(self,
                               attachment_id: str,

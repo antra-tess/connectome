@@ -65,9 +65,9 @@ class SpaceVeilProducer(VeilProducer):
             return None
 
         processed_nodes_this_call.add(root_node_id)
-        
+
         reconstructed_node = copy.deepcopy(original_node_data)
-        
+
         # Initialize children list for the reconstructed node.
         # This list will be populated by discovering children from the flat_cache.
         current_node_built_children = []
@@ -83,12 +83,12 @@ class SpaceVeilProducer(VeilProducer):
                 parent_id_in_props = potential_child_node_data_from_cache.get("properties", {}).get("parent_id")
                 # Fallback to parent_id as a direct key in the node data
                 parent_id_direct = potential_child_node_data_from_cache.get("parent_id")
-                
+
                 if parent_id_in_props:
                     parent_id_of_potential_child = parent_id_in_props
                 elif parent_id_direct:
                     parent_id_of_potential_child = parent_id_direct
-            
+
             if parent_id_of_potential_child == root_node_id:
                 # This potential_child_veil_id is a child of the current root_node_id.
                 # Recursively build this child.
@@ -99,14 +99,14 @@ class SpaceVeilProducer(VeilProducer):
                     owner_id_for_logging=owner_id_for_logging,
                     processed_nodes_this_call=processed_nodes_this_call
                 )
-                
+
                 if fully_built_child_node:
                     current_node_built_children.append(fully_built_child_node)
-        
+
         # Assign the discovered and built children to the reconstructed node.
         # Ensure 'children' is always a list, even if empty.
         reconstructed_node["children"] = current_node_built_children
-        
+
         processed_nodes_this_call.remove(root_node_id) # Backtrack for multiple branches from the same parent
         return reconstructed_node
 
@@ -122,7 +122,7 @@ class SpaceVeilProducer(VeilProducer):
         if not self.owner:
             logger.error(f"[{self.COMPONENT_TYPE}] Owner (Space) not set, cannot generate its full VEIL.")
             return None
-        
+
         owner_id = self.owner.id
         # Ensure owner has the _flat_veil_cache attribute
         if not hasattr(self.owner, '_flat_veil_cache'): # Corrected attribute name check
@@ -131,7 +131,7 @@ class SpaceVeilProducer(VeilProducer):
 
         space_flat_cache = self.owner._flat_veil_cache # Corrected attribute name usage
         space_root_veil_id = f"{owner_id}_space_root"
-        
+
         if not space_flat_cache or space_root_veil_id not in space_flat_cache:
             logger.warning(f"[{owner_id}/{self.COMPONENT_TYPE}] Space's flat cache is empty or root node '{space_root_veil_id}' missing. Cannot build full VEIL via get_full_veil.")
             # Return a minimal representation of the root if it's missing, or an error structure
@@ -150,7 +150,7 @@ class SpaceVeilProducer(VeilProducer):
             owner_id_for_logging=owner_id,
             processed_nodes_this_call=set() # Important: fresh set for each top-level call
         )
-        return full_veil    
+        return full_veil
 
     def calculate_delta(self) -> Optional[List[Dict[str, Any]]]:
         """
@@ -169,19 +169,19 @@ class SpaceVeilProducer(VeilProducer):
 
         # NEW: Check actual cache state, not just the flag
         # This prevents race conditions where cache gets cleared but flag says we already produced root
-        root_exists_in_cache = (hasattr(self.owner, '_flat_veil_cache') and 
-                               self.owner._flat_veil_cache and 
+        root_exists_in_cache = (hasattr(self.owner, '_flat_veil_cache') and
+                               self.owner._flat_veil_cache and
                                space_root_veil_id in self.owner._flat_veil_cache)
-        
+
         has_produced_flag = self._state.get('_has_produced_root_add_before', False)
-        
+
         # Generate add_node if either: never produced before OR root missing from cache
         if not has_produced_flag or not root_exists_in_cache:
             if not root_exists_in_cache:
                 logger.warning(f"[{owner_id}/{self.COMPONENT_TYPE}] Space root '{space_root_veil_id}' missing from cache, regenerating add_node operation (flag was: {has_produced_flag})")
             else:
                 logger.info(f"[{owner_id}/{self.COMPONENT_TYPE}] Generating initial 'add_node' for Space root '{space_root_veil_id}'.")
-            
+
             delta_operations.append({
                 "op": "add_node",
                 "node": {
@@ -201,7 +201,7 @@ class SpaceVeilProducer(VeilProducer):
                     "veil_id": space_root_veil_id,
                     "properties": current_space_props
                 })
-        
+
         # NEW: Add owner tracking to all delta operations
         if delta_operations:
             delta_operations = self._add_owner_tracking_to_delta_ops(delta_operations)
@@ -210,7 +210,7 @@ class SpaceVeilProducer(VeilProducer):
             logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] No delta operations for Space root this frame.")
 
         self._state['_last_space_properties'] = copy.deepcopy(current_space_props)
-        
+
         # Update the flag based on what we actually generated
         if not has_produced_flag:
             # Check if an add_node op for the root was actually generated
@@ -221,7 +221,7 @@ class SpaceVeilProducer(VeilProducer):
                     self._state['_has_produced_root_add_before'] = True
                     logger.info(f"[{owner_id}/{self.COMPONENT_TYPE}] Confirmed 'add_node' for Space root '{space_root_veil_id}' produced. Flag set.")
                     break
-        
+
         logger.debug(
             f"[{owner_id}/{self.COMPONENT_TYPE}] calculate_delta completed. "
             f"Root add produced flag: {self._state.get('_has_produced_root_add_before', False)}. "

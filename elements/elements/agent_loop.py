@@ -34,16 +34,16 @@ class BaseAgentLoopComponent(Component):
     Defines the interface for how the HostEventLoop triggers an agent's cognitive cycle.
     """
     COMPONENT_TYPE = "AgentLoopComponent"
-    
+
     # Events this component reacts to
     HANDLED_EVENT_TYPES = [
         "activation_call",  # Signals that the agent should consider running a cycle
     ]
-    
+
     # Define dependencies that InnerSpace should inject during instantiation.
     # Key: kwarg name for __init__; Value: attribute name on InnerSpace instance or 'self' for InnerSpace itself.
     INJECTED_DEPENDENCIES = {
-        'parent_inner_space': 'self' 
+        'parent_inner_space': 'self'
     }
 
     def __init__(self, parent_inner_space: 'InnerSpace', agent_loop_name: Optional[str] = None, **kwargs):
@@ -51,7 +51,7 @@ class BaseAgentLoopComponent(Component):
         if not parent_inner_space:
             raise ValueError("BaseAgentLoopComponent requires a parent_inner_space instance.")
         self.parent_inner_space: 'InnerSpace' = parent_inner_space
-        
+
         # Use agent_loop_name for logging if provided, otherwise use component ID or a default
         self.agent_loop_name = agent_loop_name or f"{self.COMPONENT_TYPE}_{self.id[:8]}"
 
@@ -75,85 +75,85 @@ class BaseAgentLoopComponent(Component):
         """
         Handles events for the AgentLoop component.
         Currently processes "activation_call" events to trigger agent cycles.
-        
+
         Args:
             event_node: The event node from the timeline
             timeline_context: The timeline context for the event
-            
+
         Returns:
             True if event was handled, False otherwise
         """
         event_payload = event_node.get('payload', {})
         event_type = event_payload.get('event_type')
-        
+
         if event_type not in self.HANDLED_EVENT_TYPES:
             return False
-        
+
         if event_type == "activation_call":
             activation_reason = event_payload.get('activation_reason', 'unknown')
             source_element_id = event_payload.get('source_element_id', 'unknown')
-            
+
             logger.info(f"[{self.agent_loop_name}] Received activation_call: reason='{activation_reason}', source='{source_element_id}'")
-            
+
             # Check if we should actually trigger a cycle based on our own logic
             should_activate = self._should_activate_for_reason(activation_reason, event_payload)
-            
+
             if should_activate:
                 logger.info(f"[{self.agent_loop_name}] Activating agent cycle due to: {activation_reason}")
-                
+
                 # Run the cycle asynchronously
                 asyncio.create_task(self._run_activation_cycle(activation_reason, event_payload))
             else:
                 logger.debug(f"[{self.agent_loop_name}] Skipping activation for reason: {activation_reason}")
-            
+
             return True
-        
+
         return False
-    
+
     def _should_activate_for_reason(self, activation_reason: str, event_payload: Dict[str, Any]) -> bool:
         """
         Decides whether to activate the agent loop for a given activation reason.
         Subclasses can override this for more sophisticated activation logic.
-        
+
         Args:
             activation_reason: The reason for activation (e.g., "direct_message_received")
             event_payload: The full event payload
-            
+
         Returns:
             True if the agent should activate, False otherwise
         """
         # For now, activate for all activation calls
         # Future enhancement: could check agent state, recent activity, specific conditions, etc.
         return True
-    
+
     async def _run_activation_cycle(self, activation_reason: str, event_payload: Dict[str, Any]) -> None:
         """
         Runs the agent cycle and calls on_frame_end afterwards.
-        
+
         Args:
             activation_reason: The reason for activation
             event_payload: The full event payload
         """
         try:
             logger.debug(f"[{self.agent_loop_name}] Starting activation cycle for reason: {activation_reason}")
-            
+
             # NEW: Extract focus context for targeted rendering
             focus_context = event_payload.get('focus_context', {})
             focus_element_id = focus_context.get('focus_element_id')
-            
+
             if focus_element_id:
                 logger.info(f"[{self.agent_loop_name}] Activation with focused context on element: {focus_element_id}")
-            
+
             # Run the actual agent cycle with focus context
             await self.trigger_cycle(focus_context=focus_context)
-            
+
             # Call on_frame_end to complete the frame
             if hasattr(self.parent_inner_space, 'on_frame_end') and callable(self.parent_inner_space.on_frame_end):
                 logger.debug(f"[{self.agent_loop_name}] Calling on_frame_end after cycle completion")
                 self.parent_inner_space.on_frame_end()
             else:
                 logger.warning(f"[{self.agent_loop_name}] parent_inner_space does not have callable on_frame_end method")
-                
+
         except Exception as e:
             logger.error(f"[{self.agent_loop_name}] Error during activation cycle: {e}", exc_info=True)
 
@@ -161,7 +161,7 @@ class BaseAgentLoopComponent(Component):
         """
         This method is called by the HostEventLoop to initiate one cognitive cycle
         for the agent. Subclasses must implement this.
-        
+
         Args:
             focus_context: Optional context for focused rendering on specific elements
         """
@@ -184,7 +184,7 @@ class BaseAgentLoopComponent(Component):
         if not hasattr(self, '_tool_provider'): # Check if attribute exists
              self._tool_provider = self.get_sibling_component(ToolProviderComponent)
         return self._tool_provider
-        
+
     def _get_outgoing_action_callback(self) -> Optional['OutgoingActionCallback']:
         if not self._outgoing_action_callback: # Should have been set in init via parent
             self._outgoing_action_callback = self.parent_inner_space._outgoing_action_callback
@@ -199,10 +199,10 @@ class BaseAgentLoopComponent(Component):
     def _create_short_element_prefix(self, element_id: str) -> str:
         """
         Create a short prefix for tool names from element ID using shared utility.
-        
+
         Args:
             element_id: Full element ID
-            
+
         Returns:
             Short prefix that matches ^[a-zA-Z0-9_-]+$
         """
@@ -218,22 +218,22 @@ class BaseAgentLoopComponent(Component):
             if tool_provider and tool_name in tool_provider.list_tools():
                 logger.debug(f"Found tool '{tool_name}' on element '{element.id}'")
                 return element.id
-        
+
         # Check InnerSpace itself
         inner_space_tool_provider = self.parent_inner_space.get_tool_provider()
         if inner_space_tool_provider and tool_name in inner_space_tool_provider.list_tools():
             logger.debug(f"Found tool '{tool_name}' on InnerSpace '{self.parent_inner_space.id}'")
             return self.parent_inner_space.id
-        
+
         return None
 
     def _resolve_prefix_to_element_id(self, prefix: str) -> Optional[str]:
         """
         Resolve a short prefix back to the full element ID using the registry.
-        
+
         Args:
             prefix: Short prefix like "smith_a1b2" or "uplink_2db3"
-            
+
         Returns:
             Full element ID like "dm_elem_discord_adapter_1_alice_smith_a1b2c3d4" or None if not found
         """
@@ -250,28 +250,28 @@ class BaseAgentLoopComponent(Component):
         """
         Aggregates tools from:
         1. The InnerSpace itself (via its ToolProviderComponent).
-        2. Mounted elements within the InnerSpace that have a ToolProviderComponent 
+        2. Mounted elements within the InnerSpace that have a ToolProviderComponent
            (e.g., DMManagerComponent providing DM tools, UplinkProxies providing remote tools).
         """
         aggregated_tools_list: List[LLMToolDefinition] = []
         seen_tool_names: Set[str] = set()  # Track tool names to avoid collisions
-        
+
         # DON'T clear the entire registry - preserve existing mappings
         # Only remove mappings for elements that no longer exist
         current_mounted_elements = self.parent_inner_space.get_mounted_elements()
         current_element_ids = set(element.id for element in current_mounted_elements.values())  # Use element.id, not mount keys
         current_element_ids.add(self.parent_inner_space.id)  # Include InnerSpace itself
-        
+
         # Remove stale mappings (for elements that no longer exist)
         stale_prefixes = []
         for prefix, element_id in self._prefix_to_element_id_registry.items():
             if element_id not in current_element_ids:
                 stale_prefixes.append(prefix)
-        
+
         for stale_prefix in stale_prefixes:
             del self._prefix_to_element_id_registry[stale_prefix]
             logger.debug(f"Removed stale prefix mapping: '{stale_prefix}'")
-        
+
         # 1. Tools from InnerSpace itself (e.g., tools for managing the agent, core tools)
         inner_space_tool_provider = self.parent_inner_space.get_tool_provider()
         if inner_space_tool_provider:
@@ -283,7 +283,7 @@ class BaseAgentLoopComponent(Component):
                     tool_def_obj = tool_def # Assume it is already LLMToolDefinition
                 aggregated_tools_list.append(tool_def_obj)
                 seen_tool_names.add(tool_def_obj.name)
-        
+
         # 2. Tools from mounted elements (including UplinkProxies, DM Dession elements, etc.)
         # This requires InnerSpace to have a way to get its mounted elements.
         # Assuming self.parent_inner_space.get_mounted_elements() exists.
@@ -291,7 +291,7 @@ class BaseAgentLoopComponent(Component):
         for mount_id, element in mounted_elements.items():
             # Create short prefix for this element to avoid tool name conflicts
             element_prefix = self._create_short_element_prefix(element.id)
-            
+
             # Register or update the prefix-to-element-ID mapping
             # Only log if it's a new mapping or changed
             if element_prefix not in self._prefix_to_element_id_registry:
@@ -300,30 +300,30 @@ class BaseAgentLoopComponent(Component):
             elif self._prefix_to_element_id_registry[element_prefix] != element.id:
                 logger.warning(f"Prefix collision: '{element_prefix}' was mapped to '{self._prefix_to_element_id_registry[element_prefix]}', now mapping to '{element.id}'")
                 self._prefix_to_element_id_registry[element_prefix] = element.id
-            
+
             # NEW: Check for UplinkRemoteToolProviderComponent specifically
             urtp_component = element.get_component_by_type(UplinkRemoteToolProviderComponent)
             if urtp_component:
                 # Force refresh tools to pick up any naming changes
                 logger.debug(f"Force refreshing remote tools for uplink {element.id}")
                 await urtp_component.force_refresh_tools()
-                
+
                 # This method is now async, so we await it
                 remote_tool_dicts = await urtp_component.get_llm_tool_definitions()
                 logger.debug(f"UplinkRemoteToolProvider for {element.id} returned {len(remote_tool_dicts)} tools")
-                
+
                 for tool_dict in remote_tool_dicts:
                     # urtp_component.get_tools_for_llm() returns List[Dict], convert to LLMToolDefinition
                     tool_def_obj = LLMToolDefinition(**tool_dict)
                     # Use lightweight prefixing to avoid Anthropic's 64-char limit
                     original_name = tool_def_obj.name
                     prefixed_name = f"{element_prefix}__{original_name}"
-                    
+
                     # Validate length and ensure uniqueness for Anthropic compatibility
                     final_name = self._ensure_unique_tool_name(prefixed_name, seen_tool_names, element_prefix, original_name)
                     tool_def_obj.name = final_name
                     seen_tool_names.add(final_name)
-                    
+
                     aggregated_tools_list.append(tool_def_obj)
                     continue
 
@@ -331,22 +331,22 @@ class BaseAgentLoopComponent(Component):
             if element_tool_provider:
                 logger.debug(f"Regular ToolProviderComponent for {element.id} found {len(element_tool_provider.get_llm_tool_definitions())} tools")
                 regular_tools = element_tool_provider.get_llm_tool_definitions()
-                
+
                 for tool_def in regular_tools:
                     if isinstance(tool_def, dict):
                         tool_def_obj = LLMToolDefinition(**tool_def)
                     else:
                         tool_def_obj = tool_def
-                    
+
                     # Use lightweight prefixing to prevent conflicts while staying under 64 chars
                     original_name = tool_def_obj.name
                     prefixed_name = f"{element_prefix}__{original_name}"
-                    
+
                     # Validate length and ensure uniqueness for Anthropic compatibility
                     final_name = self._ensure_unique_tool_name(prefixed_name, seen_tool_names, element_prefix, original_name)
                     tool_def_obj.name = final_name
                     seen_tool_names.add(final_name)
-                    
+
                     aggregated_tools_list.append(tool_def_obj)
 
         # No need for separate deduplication since we're tracking uniqueness during aggregation
@@ -358,25 +358,25 @@ class BaseAgentLoopComponent(Component):
     def _ensure_unique_tool_name(self, prefixed_name: str, seen_names: Set[str], element_prefix: str, original_name: str) -> str:
         """
         Ensure tool name is unique and under 64 characters.
-        
+
         Args:
             prefixed_name: Original prefixed name (prefix__tool_name)
             seen_names: Set of already used tool names
             element_prefix: The element prefix used
             original_name: The original tool name
-            
+
         Returns:
             A unique tool name under 64 characters
         """
         # If name is short enough and unique, use it as-is
         if len(prefixed_name) <= 64 and prefixed_name not in seen_names:
             return prefixed_name
-        
+
         # If too long, we need to truncate intelligently
         max_total_length = 64
         prefix_with_separator = f"{element_prefix}__"
         available_for_tool_name = max_total_length - len(prefix_with_separator) - 4  # Reserve 4 chars for uniqueness suffix
-        
+
         if available_for_tool_name < 8:  # If prefix is too long even for basic tool name
             logger.warning(f"Element prefix '{element_prefix}' too long for tool names. Using hash-based approach.")
             # Use a hash-based approach for the entire name
@@ -388,7 +388,7 @@ class BaseAgentLoopComponent(Component):
             # Truncate tool name but preserve some meaning
             truncated_tool_name = original_name[:available_for_tool_name]
             base_name = f"{element_prefix}__{truncated_tool_name}"
-        
+
         # Ensure uniqueness by adding a counter if needed
         final_name = base_name
         counter = 1
@@ -402,35 +402,35 @@ class BaseAgentLoopComponent(Component):
             else:
                 final_name = f"{base_name}{counter_suffix}"
             counter += 1
-        
+
         if final_name in seen_names:
             # Last resort: use hash
             import hashlib
             hash_obj = hashlib.md5(f"{element_prefix}__{original_name}_{counter}".encode())
             final_name = f"{element_prefix[:8]}_{hash_obj.hexdigest()[:8]}"
-        
+
         if len(prefixed_name) > 64:
             logger.warning(f"Tool name '{prefixed_name}' ({len(prefixed_name)} chars) truncated to '{final_name}' ({len(final_name)} chars)")
-        
+
         return final_name
 
     async def _try_smart_chat_fallback(self, agent_text: str, focus_context: Optional[Dict[str, Any]]) -> bool:
         """
         Smart fallback: if agent has text but no tool calls, try to send it to the activating chat.
-        
+
         This keeps conversations flowing when the agent forgets to use the send_message tool.
-        
+
         Args:
             agent_text: The agent's text response
             focus_context: Focus context from activation event
-            
+
         Returns:
             True if fallback message was sent successfully, False otherwise
         """
         try:
             # Get the source element that activated this loop
             target_element_id = None
-            
+
             if focus_context and focus_context.get('focus_element_id'):
                 target_element_id = focus_context.get('focus_element_id')
                 logger.debug(f"Smart chat fallback: Using focused element {target_element_id}")
@@ -450,39 +450,39 @@ class BaseAgentLoopComponent(Component):
                             logger.debug(f"Smart chat fallback: Found activation source {target_element_id}")
                 except Exception as e:
                     logger.debug(f"Could not get activation source from timeline: {e}")
-            
+
             if not target_element_id:
                 logger.debug(f"Smart chat fallback: No target element identified")
                 return False
-            
+
             # Check if target element exists and has send_message tool
             target_element = self.parent_inner_space.get_element_by_id(target_element_id)
             if not target_element:
                 logger.debug(f"Smart chat fallback: Target element {target_element_id} not found")
                 return False
-            
+
             # Look for send_message tool on the target element
             tool_provider = target_element.get_component_by_type(ToolProviderComponent)
             if not tool_provider:
                 logger.debug(f"Smart chat fallback: No ToolProvider on element {target_element_id}")
                 return False
-            
+
             available_tools = tool_provider.list_tools()
             send_message_tool = None
-            
+
             # Look for variations of send message tool
             for tool_name in available_tools:
                 if tool_name.lower() in ['send_message', 'send_msg', 'reply', 'send', 'message']:
                     send_message_tool = tool_name
                     break
-            
+
             if not send_message_tool:
                 logger.debug(f"Smart chat fallback: No send_message tool found on element {target_element_id}. Available: {available_tools}")
                 return False
-            
+
             # Execute the send_message tool with agent's text
             logger.info(f"Smart chat fallback: Sending agent response via {send_message_tool} to {target_element_id}")
-            
+
             calling_context = {"loop_component_id": self.id, "fallback_send": True}
             tool_result = await self.parent_inner_space.execute_action_on_element(
                 element_id=target_element_id,
@@ -490,10 +490,10 @@ class BaseAgentLoopComponent(Component):
                 parameters={"text": agent_text},
                 calling_context=calling_context
             )
-            
+
             logger.info(f"Smart chat fallback: Successfully sent message to {target_element_id} via {send_message_tool}")
             return True
-            
+
         except Exception as e:
             logger.warning(f"Smart chat fallback failed: {e}", exc_info=True)
             return False
@@ -508,7 +508,7 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
     3. Combines and sends to LLM with available tools
     4. Processes LLM response (tool calls + text)
     5. Stores complete reasoning chain back to CompressionEngine
-    
+
     This provides simple request-response behavior while maintaining full memory continuity.
     """
     COMPONENT_TYPE = "SimpleRequestResponseLoopComponent"
@@ -528,13 +528,12 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
         if not hud or not llm_provider:
             logger.error(f"{self.agent_loop_name} ({self.id}): Missing critical components (HUD, LLM). Aborting cycle.")
             return
-            
+
         if not compression_engine:
             logger.warning(f"{self.agent_loop_name} ({self.id}): CompressionEngine not available. Proceeding without memory.")
 
         try:
             # --- Get Context via Unified Pipeline or Fallback ---
-            
             if compression_engine and hasattr(hud, 'get_agent_context_via_compression_engine'):
                 # Use unified CompressionEngine pipeline
                 pipeline_options = {
@@ -552,10 +551,10 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                     render_options['focus_element_id'] = focus_context.get('focus_element_id')
                 else:
                     render_options['render_type'] = 'full'
-                
+
                 context_data = await hud.get_agent_context(options=render_options)
                 logger.info(f"Using direct HUD rendering (compression engine not available)")
-                
+
             if not context_data:
                 logger.warning(f"{self.agent_loop_name} ({self.id}): No context data received. Aborting cycle.")
                 return
@@ -572,11 +571,11 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                 # Context is text-only string
                 logger.debug(f"HUD returned text-only context: {len(str(context_data))} chars")
 
-            
+
             # --- Build Message for LLM (with multimodal support) ---
             user_message = create_multimodal_llm_message("user", context_data)
             messages = [user_message]
-            
+
             # Log message details
             if user_message.is_multimodal():
                 attachment_count = user_message.get_attachment_count()
@@ -590,7 +589,7 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
 
             # --- Send to LLM ---
             llm_response_obj = llm_provider.complete(messages=messages, tools=aggregated_tools)
-            
+
             if not llm_response_obj:
                 logger.warning(f"{self.agent_loop_name} ({self.id}): LLM returned no response. Aborting cycle.")
                 return
@@ -607,24 +606,24 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                 for tool_call in agent_tool_calls:
                     if not isinstance(tool_call, LLMToolCall):
                         continue
-                        
+
                     # Parse tool target and name
                     raw_tool_name = tool_call.tool_name
                     target_element_id = None
                     actual_tool_name = raw_tool_name
-                    
+
                     if "__" in raw_tool_name:
                         # Handle prefixed tools (e.g., "smith_a1b2__send_message")
                         parts = raw_tool_name.split("__", 1)
                         prefix = parts[0]
                         actual_tool_name = parts[1]
-                        
+
                         # Resolve the prefix to the full element ID
                         target_element_id = self._resolve_prefix_to_element_id(prefix)
                         if not target_element_id:
                             logger.error(f"Could not resolve tool prefix '{prefix}' to element ID. Skipping.")
                             continue
-                        
+
                         # Validate the target element exists
                         target_element = self.parent_inner_space.get_element_by_id(target_element_id)
                         if not target_element:
@@ -638,7 +637,7 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                             # Fallback to InnerSpace itself
                             target_element_id = self.parent_inner_space.id
                             logger.debug(f"No specific element found for tool '{actual_tool_name}', using InnerSpace")
-                    
+
                     # Execute tool
                     try:
                         calling_context = {"loop_component_id": self.id}
@@ -665,11 +664,11 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
             # --- Process Text Response (always, regardless of tool calls) ---
             if agent_response_text:
                 logger.debug(f"Processing text response ({len(agent_tool_calls)} tool calls also present)...")
-                
+
                 # NEW: Smart chat fallback - if agent has text, try to send to activating chat
                 # This keeps conversations flowing even when agent uses other tools
                 fallback_sent = await self._try_smart_chat_fallback(agent_response_text, focus_context)
-                
+
                 if not fallback_sent:
                     # Original HUD processing as fallback to the fallback
                     processed_actions = await hud.process_llm_response(agent_response_text)
@@ -678,9 +677,9 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                     for action_request in final_action_requests:
                          target_module = action_request.get("target_module")
                          if target_module and self._get_outgoing_action_callback():
-                              try: 
+                              try:
                                   await self._get_outgoing_action_callback()(action_request)
-                              except Exception as e: 
+                              except Exception as e:
                                   logger.error(f"Error dispatching final external action: {e}")
                     # REMOVED: Excessive timeline event recording - action dispatching creates its own events
 
@@ -692,7 +691,7 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                         render_approach = "unified_compression_pipeline"
                     else:
                         render_approach = "legacy_combined_rendering"
-                    
+
                     # Store reasoning chain with context summary instead of full redundant context
                     reasoning_chain_data = {
                         "render_approach_used": render_approach,  # NEW: Track which rendering approach was used
@@ -700,9 +699,9 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                         "agent_response": agent_response_text,
                         "tool_calls": [
                             {
-                                "tool_name": tc.tool_name if hasattr(tc, 'tool_name') else str(tc), 
+                                "tool_name": tc.tool_name if hasattr(tc, 'tool_name') else str(tc),
                                 "parameters": tc.parameters if hasattr(tc, 'parameters') else {}
-                            } 
+                            }
                             for tc in agent_tool_calls
                         ],
                         "tool_results": tool_results,
@@ -715,7 +714,7 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                             "used_unified_pipeline": render_approach == "unified_compression_pipeline"
                         }
                     }
-                    
+
                     # Instead of storing the full context, create a context summary
                     context_summary = f"{render_approach.replace('_', ' ').title()}"
                     if focus_context and focus_context.get('focus_element_id'):
@@ -725,10 +724,10 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                     if has_multimodal_content:
                         attachment_count = len(context_data.get('attachments', [])) if isinstance(context_data, dict) else 0
                         context_summary += f" (multimodal: {attachment_count} attachments)"
-                    
+
                     text_length = len(context_data.get('text', '')) if isinstance(context_data, dict) else len(str(context_data))
                     reasoning_chain_data["context_received"] = f"Agent processed {context_summary} ({text_length} chars)"
-                    
+
                     logger.info(f"Stored reasoning chain with {render_approach}" + (" (multimodal)" if has_multimodal_content else ""))
                 except Exception as store_err:
                     logger.error(f"Error storing reasoning chain: {store_err}", exc_info=True)
@@ -741,45 +740,45 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
 def create_multimodal_llm_message(role: str, context_data: Union[str, Dict[str, Any]], name: Optional[str] = None) -> LLMMessage:
     """
     Create an LLMMessage that supports multimodal content.
-    
+
     Args:
         role: Message role ("user", "assistant", "system")
         context_data: Either a string (text-only) or dict with 'text' and 'attachments' keys
                      (format automatically determined by HUD based on content)
         name: Optional name for the message
-        
+
     Returns:
         LLMMessage with appropriate content format
     """
     if isinstance(context_data, str):
         # Simple text message
         return LLMMessage(role=role, content=context_data, name=name)
-    
+
     elif isinstance(context_data, dict) and 'text' in context_data:
         # Multimodal message (HUD detected attachments and returned structured format)
         text_content = context_data['text']
         attachments = context_data.get('attachments', [])
-        
+
         if not attachments:
             # No attachments, just return text
             return LLMMessage(role=role, content=text_content, name=name)
-        
+
         # Build multimodal content list
         content_parts = []
-        
+
         # Add text part first
         if text_content.strip():
             content_parts.append({
                 "type": "text",
                 "text": text_content
             })
-        
+
         # Add attachment parts
         for attachment in attachments:
             if isinstance(attachment, dict):
                 content_parts.append(attachment)
         return LLMMessage(role=role, content=content_parts, name=name)
-    
+
     else:
         # Fallback to string representation
         return LLMMessage(role=role, content=str(context_data), name=name)
