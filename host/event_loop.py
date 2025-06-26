@@ -26,7 +26,7 @@ OutgoingActionCallback = Callable[[Dict[str, Any]], None]
 # --- Agent cycle constants removed - AgentLoop will self-trigger ---
 
 class HostEventLoop:
-    
+
     def __init__(self,
                  host_router: 'HostRouter',
                  activity_client: 'ActivityClient',
@@ -40,9 +40,9 @@ class HostEventLoop:
 
         self._incoming_event_queue: asyncio.Queue[Tuple[Dict[str, Any], Dict[str, Any]]] = asyncio.Queue()
         self._outgoing_action_queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
-        
+
         # --- Agent cycle tracking state removed - AgentLoop will self-trigger ---
-        
+
         logger.info("HostEventLoop initialized.")
 
     # --- Enqueue Methods (Unchanged) ---
@@ -72,22 +72,22 @@ class HostEventLoop:
         except Exception as e:
              logger.error(f"Error enqueuing outgoing action: {e}", exc_info=True)
              return {"success": False, "error": f"Error enqueuing action: {e}"}
-             
+
     # --- Agent cycle management removed - AgentLoop will self-trigger ---
-             
+
     async def _process_incoming_event_queue(self) -> None:
         """Processes incoming events and routes them via ExternalEventRouter."""
         try:
             while not self._incoming_event_queue.empty():
                 event_data, timeline_context = await self._incoming_event_queue.get()
-                
+
                 # Extract telemetry context if it exists and activate it
                 token = None
                 carrier = event_data.pop("telemetry_context", {})
                 if carrier:
                     ctx = propagate.extract(carrier)
                     token = context.attach(ctx)
-                
+
                 try:
                     event_type = event_data.get("event_type")
                     event_id = event_data.get("event_id", "unknown")
@@ -98,7 +98,7 @@ class HostEventLoop:
                         await self.external_event_router.route_external_event(event_data, timeline_context)
                     else: # For internal events without source_adapter_id, log warning
                         logger.warning(f"Internal event {event_id} received in HEL queue. Processing internal events not yet implemented.")
-                    
+
                 except Exception as e:
                     logger.error(f"Error processing event {event_id}: {e}", exc_info=True)
                 finally:
@@ -122,13 +122,13 @@ class HostEventLoop:
                 if carrier:
                     ctx = propagate.extract(carrier)
                     token = context.attach(ctx)
-                
+
                 try:
                     action_type = action_request.get("action_type")
                     target_module_name = action_request.get("target_module") # Use name for clarity
                     logger.debug(f"Processing outgoing action: Type='{action_type}', Target='{target_module_name}'")
-                    
-                    # --- Enhanced Routing Logic with ExternalEventRouter as Preprocessor --- 
+
+                    # --- Enhanced Routing Logic with ExternalEventRouter as Preprocessor ---
                     handler_called = False
                     if target_module_name == "ActivityClient":
                         # NEW: Route through ExternalEventRouter first for action-specific processing
@@ -144,10 +144,10 @@ class HostEventLoop:
                             else:
                                 logger.error(f"ActivityClient module does not have a callable 'handle_outgoing_action' method.")
                     # Add routing for other target modules here...
-                    
+
                     if not handler_called:
                         logger.warning(f"No handler found or registered for outgoing action target module: '{target_module_name}'")
-                
+
                 except Exception as e:
                     logger.error(f"Error processing outgoing action {action_request.get('action_type')}: {e}", exc_info=True)
                 finally:
@@ -156,29 +156,29 @@ class HostEventLoop:
                     self._outgoing_action_queue.task_done()
         except Exception as e:
             logger.exception("Exception during outgoing action queue processing.")
-            
-    # --- Main Loop --- 
+
+    # --- Main Loop ---
     async def run(self):
         """Runs the main event loop."""
         logger.info("Starting Host Event Loop...")
         self.running = True
-        
+
         while self.running:
             try:
                 # 1. Process incoming events and route them
                 await self._process_incoming_event_queue()
-                
-                # 2. Process outgoing actions 
+
+                # 2. Process outgoing actions
                 await self._process_outgoing_action_queue()
 
                 # Prevent busy-waiting
                 await asyncio.sleep(0.01) # Adjust sleep time as necessary
             except KeyboardInterrupt:
                  logger.info("Host Event Loop task cancelled.")
-                 self.running = False 
+                 self.running = False
             except Exception as e:
                  logger.exception("Exception in event loop iteration.")
-            
+
         logger.info("Host Event Loop finished.")
 
     def stop(self):
@@ -188,5 +188,5 @@ class HostEventLoop:
             logger.info("Stopping Host Event Loop...")
         else:
             logger.info("Host Event Loop already stopped or stopping.")
-            
+
     # --- Agent cycle helper methods removed - AgentLoop will self-trigger ---
