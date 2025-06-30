@@ -52,11 +52,64 @@ class HUDComponent(Component):
             logger.debug(f"HUDComponent using LLM provider: {self._llm_provider.__class__.__name__}")
 
     def _get_space_veil_producer(self) -> Optional[SpaceVeilProducer]:
-        """Helper to get the SpaceVeilProducer from the owning InnerSpace."""
+        """
+        Helper to get the SpaceVeilProducer from the owning InnerSpace.
+        
+        This is the primary way HUD should access VEIL data, ensuring consistency
+        with the centralized VEIL management architecture.
+        """
         if not self.owner:
             return None
         # Assuming SpaceVeilProducer is the primary/only VEIL producer on InnerSpace
         return self.get_sibling_component("SpaceVeilProducer")
+
+    def get_flat_veil_cache_via_producer(self) -> Dict[str, Any]:
+        """
+        NEW: Centralized method to get flat VEIL cache via SpaceVeilProducer.
+        
+        This ensures all HUD VEIL access goes through the centralized architecture
+        and provides a consistent access pattern.
+        
+        Returns:
+            Flat VEIL cache from SpaceVeilProducer, or empty dict if not available
+        """
+        try:
+            veil_producer = self._get_space_veil_producer()
+            if veil_producer:
+                return veil_producer.get_flat_veil_cache()
+            else:
+                logger.warning(f"[{self.owner.id if self.owner else 'Unknown'}] SpaceVeilProducer not available for flat cache access")
+                return {}
+        except Exception as e:
+            logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] Error getting flat VEIL cache via producer: {e}", exc_info=True)
+            return {}
+
+    async def get_temporal_veil_context(self, element_id: str, memory_formation_index: int) -> str:
+        """
+        NEW: Get temporal context for memory compression via SpaceVeilProducer.
+        
+        This provides a direct interface for HUD to request temporal context,
+        integrating seamlessly with the temporal memory recompression system.
+        
+        Args:
+            element_id: Element ID to exclude from temporal context
+            memory_formation_index: Delta index when memory was formed
+            
+        Returns:
+            Temporal context string for memory compression
+        """
+        try:
+            veil_producer = self._get_space_veil_producer()
+            if veil_producer:
+                return await veil_producer.render_temporal_context_for_compression(
+                    element_id, memory_formation_index
+                )
+            else:
+                logger.warning(f"[{self.owner.id if self.owner else 'Unknown'}] SpaceVeilProducer not available for temporal context")
+                return "Error: SpaceVeilProducer not available for temporal context"
+        except Exception as e:
+            logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] Error getting temporal context: {e}", exc_info=True)
+            return f"Error getting temporal context: {e}"
 
     # def _get_global_attention(self) -> Optional[GlobalAttentionComponent]:
     #     """Helper to get the GlobalAttentionComponent from the owning InnerSpace."""
@@ -767,22 +820,26 @@ class HUDComponent(Component):
         try:
             essential_parts = []
 
-            # Look for scratchpad or similar essential components
-            if hasattr(self.owner, '_flat_veil_cache'):
-                flat_cache = self.owner._flat_veil_cache
+            # FIXED: Get flat cache via SpaceVeilProducer instead of direct access
+            veil_producer = self._get_space_veil_producer()
+            if not veil_producer:
+                logger.warning(f"[{self.owner.id}] Cannot get essential components: SpaceVeilProducer not available")
+                return None
 
-                for veil_id, veil_node in flat_cache.items():
-                    node_props = veil_node.get('properties', {})
-                    node_type = veil_node.get('node_type', '')
-                    content_nature = node_props.get('content_nature', '')
+            flat_cache = veil_producer.get_flat_veil_cache()
 
-                    # Include scratchpad content
-                    if 'scratchpad' in node_type.lower() or 'scratchpad' in content_nature.lower():
-                        scratchpad_content = self._render_veil_node_to_string(veil_node, {}, options, indent=0)
-                        essential_parts.append(f"[SCRATCHPAD]\n{scratchpad_content}")
+            for veil_id, veil_node in flat_cache.items():
+                node_props = veil_node.get('properties', {})
+                node_type = veil_node.get('node_type', '')
+                content_nature = node_props.get('content_nature', '')
 
-                    # Include other essential components as needed
-                    # Could add agent status, important state, etc.
+                # Include scratchpad content
+                if 'scratchpad' in node_type.lower() or 'scratchpad' in content_nature.lower():
+                    scratchpad_content = self._render_veil_node_to_string(veil_node, {}, options, indent=0)
+                    essential_parts.append(f"[SCRATCHPAD]\n{scratchpad_content}")
+
+                # Include other essential components as needed
+                # Could add agent status, important state, etc.
 
             return "\n\n".join(essential_parts) if essential_parts else None
 
@@ -1003,6 +1060,11 @@ class HUDComponent(Component):
         content_nature = props.get("content_nature", "container")
         element_type = props.get("element_type", "Element")
 
+        # TEMPORAL EXCLUSION: Skip rendering this container if it's the excluded element
+        exclude_element_id = options.get("exclude_element_id")
+        if exclude_element_id and element_id == exclude_element_id:
+            return f"{indent_str}[EXCLUDED: {element_name} - content being memorized separately]\n"
+
         # NEW: Include tool targeting information
         available_tools = props.get("available_tools", [])
         tool_target_element_id = props.get("tool_target_element_id")
@@ -1055,6 +1117,11 @@ class HUDComponent(Component):
                 output += f"{indent_str}  (Content Nature: {content_nature})\n"
             if tool_target_element_id and tool_target_element_id != element_id:
                 output += f"{indent_str}  (Tool Target: {tool_target_element_id})\n"
+            
+            # TEMPORAL CONTEXT: Add temporal metadata if available
+            if options.get("temporal_context") and options.get("memory_formation_index") is not None:
+                formation_index = options.get("memory_formation_index")
+                output += f"{indent_str}  (Temporal: Formation Index {formation_index})\n"
 
         return output
 
@@ -1489,19 +1556,18 @@ class HUDComponent(Component):
 
     async def get_agent_context_via_compression_engine(self, options: Optional[Dict[str, Any]] = None) -> Union[str, Dict[str, Any]]:
         """
-        NEW: Generate agent context using CompressionEngine as VEIL processor for unified rendering.
+        Get agent context by routing through CompressionEngine for VEIL processing.
 
-        This creates the unified rendering pipeline where:
-        1. CompressionEngine processes full VEIL (compression + memory integration)
-        2. HUD renders the processed VEIL using standard rendering methods
-        3. All rendering logic is centralized in HUD, CompressionEngine handles preprocessing
+        NEW: This method can now optionally pass flat VEIL cache directly to CompressionEngine
+        instead of always reconstructing hierarchy through SpaceVeilProducer, reducing duplication.
 
         Args:
-            options: Rendering options including focus_context, memory integration, etc.
+            options: Rendering options including focus_context, include_memory, use_flat_cache
 
         Returns:
-            Rendered context (string or dict with multimodal content)
+            Processed agent context ready for rendering
         """
+        
         with tracer.start_as_current_span("hud.render_context_pipeline") as span:
             try:
                 logger.debug(f"Generating agent context via CompressionEngine unified pipeline...")
@@ -1510,68 +1576,116 @@ class HUDComponent(Component):
 
                 # Get required components
                 compression_engine = self.get_sibling_component("CompressionEngineComponent")
-                veil_producer = self._get_space_veil_producer()
 
                 if not compression_engine:
                     logger.warning(f"CompressionEngine not available, falling back to standard rendering")
                     span.set_attribute("hud.render.fallback", "no_compression_engine")
                     return await self.get_agent_context(options)
 
-                if not veil_producer:
-                    logger.error(f"SpaceVeilProducer not available, cannot generate context")
-                    span.set_status(trace.Status(trace.StatusCode.ERROR, "SpaceVeilProducer not found"))
-                    return "Error: Could not retrieve internal state."
-
-                # Get full VEIL from SpaceVeilProducer
-                full_veil = veil_producer.get_full_veil()
-                if not full_veil:
-                    logger.warning(f"Empty VEIL from SpaceVeilProducer")
-                    span.set_attribute("hud.render.status", "empty_veil")
-                    return "Current context is empty."
-
-                # Get memory data if needed
-                memory_data = None
-                focus_context = options.get('focus_context')
-                include_memory = options.get('include_memory', True)
-
-                if include_memory:
-                    memory_data = await compression_engine.get_memory_data()
-                    logger.debug(f"Retrieved memory data for VEIL processing")
-
-                # Process VEIL through CompressionEngine
-                processed_veil = await compression_engine.process_veil_with_compression(
-                    full_veil=full_veil,
-                    focus_context=focus_context,
-                    memory_data=memory_data
-                )
-                span.add_event("Processed VEIL", attributes={"veil.processed.json": json.dumps(processed_veil, default=str)})
-
-                # Set render style
-                if 'render_style' not in options:
-                    options['render_style'] = 'verbose_tags'
-
-                # Render the processed VEIL using standard HUD rendering
-                attention_requests = {}  # Could integrate attention system here if needed
-                context_string = self._render_veil_node_to_string(processed_veil, attention_requests, options, indent=0)
-                span.set_attribute("hud.render.output_char_length", len(context_string))
-
-                # FIXED: Auto-detect live multimodal content (consistent with get_agent_context)
-                focus_element_id = focus_context.get('focus_element_id') if focus_context else None
-                if focus_element_id:
-                    # OPTIMIZED: Single-pass detection and extraction instead of separate operations
-                    final_context = await self._detect_and_extract_multimodal_content(context_string, options, focus_element_id)
-                    span.set_attribute("hud.render.multimodal", True)
-                    return final_context
+                # NEW: Option to use flat VEIL cache directly
+                use_flat_cache = options.get('use_flat_cache', True)  # Default to True for efficiency
+                
+                if use_flat_cache:
+                    # FIXED: Get flat cache from SpaceVeilProducer instead of direct access
+                    veil_producer = self._get_space_veil_producer()
+                    if not veil_producer:
+                        logger.warning(f"SpaceVeilProducer not available, falling back to standard rendering")
+                        span.set_attribute("hud.render.fallback", "no_veil_producer")
+                        return await self.get_agent_context(options)
+                    
+                    flat_veil_cache = veil_producer.get_flat_veil_cache()
+                    if not flat_veil_cache:
+                        logger.warning(f"Empty flat VEIL cache from SpaceVeilProducer, falling back to standard rendering")
+                        span.set_attribute("hud.render.fallback", "empty_flat_cache")
+                        return await self.get_agent_context(options)
+                    
+                    # Use flat cache approach - more efficient, less duplication
+                    logger.debug(f"Using flat VEIL cache approach for CompressionEngine processing")
+                    span.set_attribute("hud.render.veil_source", "flat_cache")
+                    
+                    # Get memory data if needed
+                    memory_data = None
+                    include_memory = options.get('include_memory', True)
+                    if include_memory:
+                        memory_data = await compression_engine.get_memory_data()
+                        logger.debug(f"Retrieved memory data for flat cache VEIL processing")
+                    
+                    # Process flat VEIL cache through CompressionEngine
+                    focus_context = options.get('focus_context')
+                    processed_veil = await compression_engine.process_flat_veil_with_compression(
+                        flat_veil_cache=flat_veil_cache,
+                        focus_context=focus_context,
+                        memory_data=memory_data
+                    )
+                    
+                    if not processed_veil:
+                        logger.warning(f"CompressionEngine returned empty result from flat cache processing")
+                        span.set_attribute("hud.render.status", "empty_processed_veil")
+                        return "Current context is empty."
+                    
+                    # Render the processed flat cache
+                    context_string = await self._render_processed_flat_veil(processed_veil, options)
+                    
                 else:
-                    logger.info(f"Generated context via CompressionEngine pipeline: {len(context_string)} chars (text-only)")
-                    span.set_attribute("hud.render.multimodal", False)
-                    return context_string
+                    # Fallback to hierarchical VEIL approach
+                    logger.debug(f"Using hierarchical VEIL approach for CompressionEngine processing")
+                    span.set_attribute("hud.render.veil_source", "hierarchical")
+                    
+                    veil_producer = self._get_space_veil_producer()
+                    if not veil_producer:
+                        logger.error(f"SpaceVeilProducer not available, cannot generate context")
+                        span.set_status(trace.Status(trace.StatusCode.ERROR, "SpaceVeilProducer not found"))
+                        return "Error: Could not retrieve internal state."
+
+                    # Get full VEIL from SpaceVeilProducer
+                    full_veil = veil_producer.get_full_veil()
+                    if not full_veil:
+                        logger.warning(f"Empty VEIL from SpaceVeilProducer")
+                        span.set_attribute("hud.render.status", "empty_veil")
+                        return "Current context is empty."
+
+                    # Get memory data if needed
+                    memory_data = None
+                    focus_context = options.get('focus_context')
+                    include_memory = options.get('include_memory', True)
+
+                    if include_memory:
+                        memory_data = await compression_engine.get_memory_data()
+                        logger.debug(f"Retrieved memory data for VEIL processing")
+
+                    # Process hierarchical VEIL through CompressionEngine
+                    processed_veil = await compression_engine.process_veil_with_compression(
+                        full_veil=full_veil,
+                        focus_context=focus_context,
+                        memory_data=memory_data
+                    )
+
+                    if not processed_veil:
+                        logger.warning(f"CompressionEngine returned empty VEIL")
+                        span.set_attribute("hud.render.status", "empty_processed_veil")
+                        return "Current context is empty."
+
+                    # Render the processed hierarchical VEIL  
+                    context_string = self._render_veil_node_to_string(processed_veil, {}, options, indent=0)
+
+                # Add metadata
+                include_metadata = options.get('include_metadata', False)
+                if include_metadata:
+                    metadata = await self._get_rendering_metadata(options)
+                    context_string += f"\n\n<!-- Rendering Metadata -->\n{metadata}"
+
+                logger.info(f"Agent context generated via CompressionEngine: {len(context_string)} chars")
+                span.set_attribute("hud.render.output_length", len(context_string))
+                span.set_status(trace.Status(trace.StatusCode.OK))
+                return context_string
 
             except Exception as e:
-                logger.error(f"Error in unified CompressionEngine pipeline: {e}", exc_info=True)
+                logger.error(f"Error in CompressionEngine context pipeline: {e}", exc_info=True)
                 span.record_exception(e)
-                span.set_status(trace.Status(trace.StatusCode.ERROR, "HUD rendering failed"))
-                # Fallback to standard rendering
+                span.set_status(trace.Status(trace.StatusCode.ERROR, "Context pipeline failed"))
+                
+                # Fallback to standard context generation
+                logger.warning(f"Falling back to standard context generation due to error")
                 return await self.get_agent_context(options)
 
     async def process_llm_response(self, llm_response_text: str) -> List[Dict[str, Any]]:
@@ -1660,6 +1774,65 @@ class HUDComponent(Component):
 
     # PHASE 3: NEW - Specialized Memorization Context Rendering
 
+    async def render_temporal_veil_for_compression(self, 
+                                                 temporal_veil: Dict[str, Any],
+                                                 exclude_element_id: str,
+                                                 memory_formation_index: int) -> str:
+        """
+        NEW: Render temporal VEIL context for memory compression.
+        
+        This method is called by SpaceVeilProducer.render_temporal_context_for_compression()
+        to generate temporally consistent context for memory compression.
+        
+        The temporal_veil passed in has been reconstructed at the memory formation point
+        and then had future edits applied, providing the historically accurate context
+        with current appearance.
+        
+        Args:
+            temporal_veil: VEIL reconstructed at memory formation time with future edits applied
+            exclude_element_id: Element ID to exclude from rendering (avoid duplication)
+            memory_formation_index: Delta index when memory was formed
+            
+        Returns:
+            Rendered temporal context string for memory compression
+        """
+        try:
+            logger.debug(f"Rendering temporal VEIL for compression: excluding {exclude_element_id}, formation index {memory_formation_index}")
+            
+            # Use specialized rendering options for temporal context
+            options = {
+                "render_style": "verbose_tags",
+                "temporal_context": True,
+                "memory_formation_index": memory_formation_index,
+                "exclude_element_id": exclude_element_id
+            }
+            
+            # Add temporal context header
+            context_lines = []
+            context_lines.append("[TEMPORAL CONTEXT FOR MEMORY COMPRESSION]")
+            context_lines.append(f"Memory formation at delta index: {memory_formation_index}")
+            context_lines.append(f"Content reconstructed with historical accuracy + future edits applied")
+            context_lines.append(f"Excluding element: {exclude_element_id}")
+            context_lines.append("")
+            
+            # Render the temporal VEIL structure
+            attention_requests = {}
+            temporal_content = self._render_veil_node_to_string(temporal_veil, attention_requests, options, indent=0)
+            
+            context_lines.append(temporal_content)
+            context_lines.append("")
+            context_lines.append("[END TEMPORAL CONTEXT]")
+            
+            result = "\n".join(context_lines)
+            
+            logger.debug(f"Rendered temporal context: {len(result)} characters")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error rendering temporal VEIL for compression: {e}", exc_info=True)
+            # Fallback to basic rendering
+            return f"Error rendering temporal context: {e}"
+
     async def render_memorization_context_veil(self, 
                                              full_veil: Dict[str, Any],
                                              exclude_element_id: str,
@@ -1719,6 +1892,187 @@ class HUDComponent(Component):
             options = {"render_style": "verbose_tags"}
             return self._render_veil_node_to_string(full_veil, {}, options, indent=0)
 
+    async def render_memorization_context_with_flat_cache(self, 
+                                                        flat_veil_cache: Dict[str, Any],
+                                                        exclude_element_id: str,
+                                                        exclude_content: List[Dict[str, Any]],
+                                                        focus_element_id: Optional[str] = None) -> str:
+        """
+        NEW: Render memorization context using flat VEIL cache directly from Space.
+        
+        This eliminates the need for redundant VEIL hierarchy reconstruction and leverages
+        the existing Space flat cache infrastructure. It reconstructs the hierarchy as needed
+        and then applies exclusion logic for memorization context.
+        
+        Args:
+            flat_veil_cache: Flat VEIL cache from Space (already includes any edit deltas)
+            exclude_element_id: ID of element where content is being memorized
+            exclude_content: Specific VEIL nodes to exclude from rendering
+            focus_element_id: Optional focus element for normal focused/unfocused logic
+            
+        Returns:
+            Rendered memorization context string
+        """
+        try:
+            logger.debug(f"Rendering memorization context from flat cache: excluding content from {exclude_element_id}")
+            
+            # Reconstruct hierarchical VEIL from flat cache
+            hierarchical_veil = self._reconstruct_veil_hierarchy_from_flat_cache(flat_veil_cache)
+            if not hierarchical_veil:
+                logger.warning(f"Failed to reconstruct VEIL hierarchy from flat cache for memorization context")
+                return "Error: Could not reconstruct VEIL hierarchy for memorization context"
+            
+            # Use existing memorization context logic
+            return await self.render_memorization_context_veil(
+                full_veil=hierarchical_veil,
+                exclude_element_id=exclude_element_id,
+                exclude_content=exclude_content,
+                focus_element_id=focus_element_id
+            )
+            
+        except Exception as e:
+            logger.error(f"Error rendering memorization context from flat cache: {e}", exc_info=True)
+            return f"Error rendering memorization context: {e}"
+
+    def _reconstruct_veil_hierarchy_from_flat_cache(self, flat_cache: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        NEW: Reconstruct hierarchical VEIL structure from flat cache.
+        
+        This reuses the same hierarchy reconstruction logic that SpaceVeilProducer uses,
+        but can work directly with the flat cache without going through the producer.
+        
+        Args:
+            flat_cache: Flat VEIL cache from Space
+            
+        Returns:
+            Hierarchical VEIL structure, or None if reconstruction fails
+        """
+        try:
+            if not flat_cache:
+                logger.debug(f"Empty flat cache provided for hierarchy reconstruction")
+                return None
+            
+            # Find the space root node to start reconstruction
+            space_root_id = None
+            for veil_id, node_data in flat_cache.items():
+                if isinstance(node_data, dict):
+                    node_type = node_data.get("node_type", "")
+                    if node_type == "space_root":
+                        space_root_id = veil_id
+                        break
+            
+            if not space_root_id:
+                logger.warning(f"No space root node found in flat cache for hierarchy reconstruction")
+                # Try to find any root-like node
+                for veil_id, node_data in flat_cache.items():
+                    if isinstance(node_data, dict):
+                        props = node_data.get("properties", {})
+                        if props.get("structural_role") == "root":
+                            space_root_id = veil_id
+                            logger.debug(f"Using alternative root node: {space_root_id}")
+                            break
+                
+                if not space_root_id:
+                    logger.error(f"Cannot find any root node in flat cache for hierarchy reconstruction")
+                    return None
+            
+            # Use the same hierarchy reconstruction logic as SpaceVeilProducer
+            # We'll implement a simplified version here
+            hierarchical_veil = self._build_veil_hierarchy_from_flat_cache(
+                flat_cache=flat_cache,
+                root_node_id=space_root_id,
+                processed_nodes=set()
+            )
+            
+            if hierarchical_veil:
+                logger.debug(f"Successfully reconstructed VEIL hierarchy from flat cache starting at {space_root_id}")
+                return hierarchical_veil
+            else:
+                logger.warning(f"Failed to reconstruct VEIL hierarchy from root {space_root_id}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error reconstructing VEIL hierarchy from flat cache: {e}", exc_info=True)
+            return None
+
+    def _build_veil_hierarchy_from_flat_cache(self, 
+                                            flat_cache: Dict[str, Any],
+                                            root_node_id: str, 
+                                            processed_nodes: set) -> Optional[Dict[str, Any]]:
+        """
+        NEW: Recursively build hierarchical VEIL structure from flat cache.
+        
+        This mirrors the logic in SpaceVeilProducer.build_hierarchical_veil_from_flat_cache
+        but is implemented in HUD for direct flat cache processing.
+        
+        Args:
+            flat_cache: Flat VEIL cache
+            root_node_id: Current node to build hierarchy for
+            processed_nodes: Set of already processed nodes (cycle detection)
+            
+        Returns:
+            Hierarchical node structure or None if failed
+        """
+        try:
+            # Cycle detection
+            if root_node_id in processed_nodes:
+                logger.warning(f"Cycle detected in VEIL hierarchy reconstruction for node {root_node_id}")
+                return None
+            
+            # Get node data from flat cache
+            original_node_data = flat_cache.get(root_node_id)
+            if not original_node_data:
+                logger.warning(f"Node {root_node_id} not found in flat cache during hierarchy reconstruction")
+                return None
+            
+            processed_nodes.add(root_node_id)
+            
+            # Create deep copy of node data
+            import copy
+            reconstructed_node = copy.deepcopy(original_node_data)
+            
+            # Find and build children
+            children = []
+            for potential_child_id, child_node_data in flat_cache.items():
+                if potential_child_id == root_node_id:
+                    continue  # Node can't be its own child
+                
+                if not isinstance(child_node_data, dict):
+                    continue
+                
+                # Check if this node is a child of the current root
+                parent_id = None
+                child_props = child_node_data.get("properties", {})
+                if "parent_id" in child_props:
+                    parent_id = child_props["parent_id"]
+                elif "parent_id" in child_node_data:
+                    parent_id = child_node_data["parent_id"]
+                
+                if parent_id == root_node_id:
+                    # This is a child - recursively build its hierarchy
+                    child_hierarchy = self._build_veil_hierarchy_from_flat_cache(
+                        flat_cache=flat_cache,
+                        root_node_id=potential_child_id,
+                        processed_nodes=processed_nodes
+                    )
+                    
+                    if child_hierarchy:
+                        children.append(child_hierarchy)
+            
+            # Set children in reconstructed node
+            reconstructed_node["children"] = children
+            
+            # Remove from processed set for backtracking
+            processed_nodes.remove(root_node_id)
+            
+            return reconstructed_node
+            
+        except Exception as e:
+            logger.error(f"Error building hierarchy for node {root_node_id}: {e}", exc_info=True)
+            # Remove from processed set on error
+            processed_nodes.discard(root_node_id)
+            return None
+
     def _exclude_content_from_veil_element(self, 
                                          veil_node: Dict[str, Any], 
                                          target_element_id: str, 
@@ -1770,3 +2124,39 @@ class HUDComponent(Component):
                 
         except Exception as e:
             logger.error(f"Error excluding content from VEIL element: {e}", exc_info=True)
+
+    async def _render_processed_flat_veil(self, processed_flat_cache: Dict[str, Any], options: Dict[str, Any]) -> str:
+        """
+        NEW: Render processed flat VEIL cache from CompressionEngine.
+        
+        This reconstructs the hierarchy as needed for rendering and applies
+        the same rendering logic as the hierarchical approach.
+        
+        Args:
+            processed_flat_cache: Processed flat VEIL cache from CompressionEngine
+            options: Rendering options
+            
+        Returns:
+            Rendered context string
+        """
+        try:
+            # Reconstruct hierarchy from processed flat cache
+            hierarchical_veil = self._reconstruct_veil_hierarchy_from_flat_cache(processed_flat_cache)
+            if not hierarchical_veil:
+                logger.warning(f"Failed to reconstruct hierarchy from processed flat cache")
+                return "Error: Could not reconstruct VEIL hierarchy for rendering"
+            
+            # Set default render style if not specified
+            if 'render_style' not in options:
+                options['render_style'] = 'verbose_tags'
+            
+            # Render using standard hierarchical rendering
+            attention_requests = {}
+            context_string = self._render_veil_node_to_string(hierarchical_veil, attention_requests, options, indent=0)
+            
+            logger.debug(f"Rendered processed flat VEIL: {len(context_string)} characters")
+            return context_string
+            
+        except Exception as e:
+            logger.error(f"Error rendering processed flat VEIL: {e}", exc_info=True)
+            return f"Error rendering processed VEIL: {e}"

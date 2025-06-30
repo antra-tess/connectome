@@ -1,6 +1,7 @@
 import logging
 from typing import Dict, Any, Optional, List, Set
 import copy
+import time
 
 from ..base_component import VeilProducer
 from elements.component_registry import register_component
@@ -15,10 +16,11 @@ VEIL_SPACE_ROOT_TYPE = "space_root"
 @register_component
 class SpaceVeilProducer(VeilProducer):
     """
-    Generates VEIL deltas ONLY for the Space element's own root node.
-    It can also construct a full hierarchical VEIL from a flat cache if requested
-    (e.g., by its owner Space calling its get_full_veil method).
-    The Space element itself manages the canonical flat cache.
+    ENHANCED: Complete owner of all VEIL operations including:
+    - Flat VEIL cache management
+    - Delta history tracking
+    - Temporal state reconstruction
+    - VEIL rendering and context generation
     """
     COMPONENT_TYPE = "SpaceVeilProducer"
 
@@ -27,7 +29,326 @@ class SpaceVeilProducer(VeilProducer):
         super().initialize(**kwargs)
         self._state.setdefault('_last_space_properties', {})
         self._state.setdefault('_has_produced_root_add_before', False)
+        
+        # MOVED FROM SPACE: Complete VEIL state ownership
+        self._flat_veil_cache: Dict[str, Any] = {}
+        self._delta_history: List[Dict[str, Any]] = []  # Chronological delta storage
+        self._next_delta_index = 0
+        self._accumulated_deltas = []  # For frame-end dispatch
+        
         logger.debug(f"SpaceVeilProducer initialized for Element {self.owner.id if self.owner else 'Unknown'}")
+
+    async def receive_delta_operations(self, delta_operations: List[Dict[str, Any]]) -> None:
+        """
+        ENHANCED: Complete delta processing pipeline.
+        
+        This replaces both Space.receive_delta() and Space._apply_deltas_to_internal_cache()
+        """
+        if not isinstance(delta_operations, list) or not delta_operations:
+            logger.debug(f"[{self.owner.id if self.owner else 'Unknown'}] SpaceVeilProducer received no valid delta operations")
+            return
+
+        # Add operation timestamps and indices
+        timestamped_deltas = []
+        current_time = time.time()
+        
+        for delta in delta_operations:
+            # CRITICAL FIX: Deep copy to prevent data contamination
+            timestamped_delta = copy.deepcopy(delta)
+            timestamped_delta["operation_timestamp"] = current_time
+            timestamped_delta["operation_index"] = self._next_delta_index
+            timestamped_deltas.append(timestamped_delta)
+            self._next_delta_index += 1
+        
+        # CRITICAL FIX: Store deep copies in delta history for temporal reconstruction
+        self._delta_history.extend(copy.deepcopy(timestamped_deltas))
+        
+        # Apply to flat VEIL cache (moved from Space)
+        self._apply_deltas_to_flat_cache(timestamped_deltas)
+        
+        # Accumulate for frame-end dispatch
+        self._accumulated_deltas.extend(timestamped_deltas)
+        
+        logger.debug(f"[{self.owner.id if self.owner else 'Unknown'}] Processed {len(timestamped_deltas)} delta operations in SpaceVeilProducer")
+    
+    def _apply_deltas_to_flat_cache(self, deltas: List[Dict[str, Any]]) -> None:
+        """
+        MOVED FROM SPACE: Apply VEIL deltas to flat cache.
+        
+        This centralizes all flat cache management in SpaceVeilProducer.
+        """
+        try:
+            for delta in deltas:
+                op = delta.get("op")
+                
+                if op == "add_node":
+                    node = delta.get("node", {})
+                    veil_id = node.get("veil_id")
+                    if veil_id:
+                        # Ensure 'properties' dictionary exists in the node data
+                        if "properties" not in node or not isinstance(node.get("properties"), dict):
+                            node["properties"] = {}
+                        
+                        # If parent_id is provided at the top level of the delta op, inject it into node's properties
+                        top_level_parent_id = delta.get("parent_id")
+                        if top_level_parent_id:
+                            node["properties"]["parent_id"] = top_level_parent_id
+                            logger.debug(f"[{self.owner.id if self.owner else 'Unknown'}] Cache: Injecting parent_id '{top_level_parent_id}' into properties of node '{veil_id}' during add_node.")
+                        
+                        if "children" not in node or not isinstance(node.get("children"), list):
+                            node["children"] = []
+                        
+                        # CRITICAL FIX: Deep copy to prevent reference sharing and data contamination
+                        self._flat_veil_cache[veil_id] = copy.deepcopy(node)
+                        
+                elif op == "update_node":
+                    veil_id = delta.get("veil_id")
+                    if veil_id and veil_id in self._flat_veil_cache:
+                        # Ensure 'properties' dictionary exists in the cached node data
+                        if "properties" not in self._flat_veil_cache[veil_id] or \
+                           not isinstance(self._flat_veil_cache[veil_id].get("properties"), dict):
+                             self._flat_veil_cache[veil_id]["properties"] = {}
+
+                        # Apply property updates from the delta
+                        properties_to_update = delta.get("properties")
+                        if properties_to_update is not None:
+                            # CRITICAL FIX: Deep copy properties to prevent reference sharing
+                            self._flat_veil_cache[veil_id]["properties"].update(copy.deepcopy(properties_to_update))
+                        
+                        # If parent_id is provided at the top level of the update_node op, update it in node's properties
+                        top_level_parent_id = delta.get("parent_id")
+                        if top_level_parent_id:
+                            self._flat_veil_cache[veil_id]["properties"]["parent_id"] = top_level_parent_id
+                            logger.debug(f"[{self.owner.id if self.owner else 'Unknown'}] Cache: Injecting/updating parent_id '{top_level_parent_id}' into properties of node '{veil_id}' during update_node.")
+                        
+                elif op == "remove_node":
+                    veil_id = delta.get("veil_id")
+                    if veil_id and veil_id in self._flat_veil_cache:
+                        logger.debug(f"[{self.owner.id if self.owner else 'Unknown'}] Cache: Removing node {veil_id} from _flat_veil_cache.")
+                        del self._flat_veil_cache[veil_id]
+                        
+            logger.debug(f"Applied {len(deltas)} deltas to flat cache: {len(self._flat_veil_cache)} total nodes")
+            
+        except Exception as e:
+            logger.error(f"Error applying deltas to flat cache: {e}", exc_info=True)
+    
+    def get_flat_veil_cache(self) -> Dict[str, Any]:
+        """
+        NEW: Expose flat VEIL cache with proper encapsulation.
+        
+        Returns deep copy to prevent external modifications.
+        """
+        return copy.deepcopy(self._flat_veil_cache)
+
+    async def reconstruct_veil_state_at_delta_index(self, target_delta_index: int) -> Dict[str, Any]:
+        """
+        Reconstruct flat VEIL cache at specific point in timeline.
+        
+        Uses internal delta history for temporal reconstruction.
+        """
+        try:
+            # Get deltas up to target index from internal history
+            historical_deltas = [
+                delta for delta in self._delta_history 
+                if delta.get("operation_index", 0) <= target_delta_index
+            ]
+            
+            # Reconstruct state by applying deltas chronologically
+            reconstructed_cache = {}
+            for delta in historical_deltas:
+                reconstructed_cache = self._apply_delta_to_cache(reconstructed_cache, delta)
+            
+            logger.debug(f"Reconstructed VEIL state at delta {target_delta_index}: {len(reconstructed_cache)} nodes")
+            return reconstructed_cache
+            
+        except Exception as e:
+            logger.error(f"Error reconstructing VEIL state at delta {target_delta_index}: {e}", exc_info=True)
+            return {}
+
+    async def render_state_with_future_edits(self, 
+                                           base_state: Dict[str, Any], 
+                                           base_delta_index: int) -> Dict[str, Any]:
+        """
+        Apply edit/delete deltas that occurred after base_delta_index.
+        
+        Shows "how this moment in history looked after all edits".
+        """
+        try:
+            # Get all deltas after the base index from internal history
+            future_deltas = [
+                delta for delta in self._delta_history 
+                if delta.get("operation_index", 0) > base_delta_index
+            ]
+            
+            # Filter to only edit/delete operations affecting base state content
+            relevant_edits = self._filter_relevant_edit_deltas(future_deltas, base_state)
+            
+            # CRITICAL FIX: Deep copy base state to prevent contamination of original data
+            edited_state = copy.deepcopy(base_state)
+            for edit_delta in relevant_edits:
+                if edit_delta["op"] in ["update_node", "remove_node"]:
+                    edited_state = self._apply_delta_to_cache(edited_state, edit_delta)
+            
+            logger.debug(f"Applied {len(relevant_edits)} future edits to base state")
+            return edited_state
+            
+        except Exception as e:
+            logger.error(f"Error applying future edits: {e}", exc_info=True)
+            return base_state
+
+    def _apply_delta_to_cache(self, cache: Dict[str, Any], delta: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Apply a single delta operation to a cache.
+        
+        Used for both current state updates and temporal reconstruction.
+        """
+        try:
+            op = delta.get("op")
+            
+            if op == "add_node":
+                node = delta.get("node", {})
+                veil_id = node.get("veil_id")
+                if veil_id:
+                    # CRITICAL FIX: Deep copy to prevent reference sharing and data contamination
+                    cache[veil_id] = copy.deepcopy(node)
+                    
+            elif op == "update_node":
+                veil_id = delta.get("veil_id")
+                if veil_id and veil_id in cache:
+                    properties = delta.get("properties", {})
+                    if properties:
+                        existing_props = cache[veil_id].get("properties", {})
+                        # CRITICAL FIX: Deep copy properties to prevent reference sharing
+                        existing_props.update(copy.deepcopy(properties))
+                        
+            elif op == "remove_node":
+                veil_id = delta.get("veil_id")
+                if veil_id and veil_id in cache:
+                    del cache[veil_id]
+                    
+            return cache
+            
+        except Exception as e:
+            logger.error(f"Error applying delta to cache: {e}", exc_info=True)
+            return cache
+
+    def _filter_relevant_edit_deltas(self, deltas: List[Dict[str, Any]], base_state: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Filter deltas to only those that affect nodes in the base state.
+        
+        This ensures we only apply edits that are relevant to the content being reconstructed.
+        """
+        relevant_deltas = []
+        base_veil_ids = set(base_state.keys())
+        
+        for delta in deltas:
+            if delta.get("op") in ["update_node", "remove_node"]:
+                veil_id = delta.get("veil_id")
+                if veil_id in base_veil_ids:
+                    relevant_deltas.append(delta)
+        
+        return relevant_deltas
+
+    async def render_temporal_context_for_compression(self, 
+                                                    element_id: str, 
+                                                    memory_formation_index: int) -> str:
+        """
+        Render temporally consistent context for memory compression.
+        
+        This centralizes the complex temporal rendering logic in SpaceVeilProducer.
+        """
+        try:
+            # Step 1: Reconstruct historical state
+            historical_state = await self.reconstruct_veil_state_at_delta_index(memory_formation_index)
+            
+            # Step 2: Apply future edits for final appearance
+            final_appearance_state = await self.render_state_with_future_edits(
+                historical_state, memory_formation_index
+            )
+            
+            # Step 3: Build hierarchical VEIL from temporal state
+            temporal_veil = self.build_hierarchical_veil_from_flat_cache(
+                flat_cache=final_appearance_state,
+                root_node_id=f"{self.owner.id}_space_root",
+                owner_id_for_logging=self.owner.id,
+                processed_nodes_this_call=set()
+            )
+            
+            # Step 4: Use HUD to render temporal context
+            hud_component = self._get_hud_component()
+            if hud_component:
+                return await hud_component.render_temporal_veil_for_compression(
+                    temporal_veil=temporal_veil,
+                    exclude_element_id=element_id,
+                    memory_formation_index=memory_formation_index
+                )
+            else:
+                # Fallback rendering if HUD not available
+                return self._render_temporal_veil_fallback(temporal_veil, element_id)
+                
+        except Exception as e:
+            logger.error(f"Error rendering temporal context: {e}", exc_info=True)
+            return f"Error rendering temporal context: {e}"
+
+    def _get_hud_component(self):
+        """Get HUD component from owner Space for temporal rendering."""
+        if self.owner:
+            return self.owner.get_component('HUDComponent')
+        return None
+
+    def _render_temporal_veil_fallback(self, temporal_veil: Dict[str, Any], exclude_element_id: str) -> str:
+        """
+        Fallback rendering when HUD component is not available.
+        
+        Provides basic text representation of temporal VEIL state.
+        """
+        try:
+            if not temporal_veil:
+                return "No temporal context available"
+            
+            def render_node(node: Dict[str, Any], depth: int = 0) -> str:
+                indent = "  " * depth
+                props = node.get("properties", {})
+                node_type = node.get("node_type", "unknown")
+                veil_id = node.get("veil_id", "unknown")
+                
+                # Skip the excluded element
+                if props.get("element_id") == exclude_element_id:
+                    return ""
+                
+                # Basic node representation
+                result = f"{indent}{node_type}: {veil_id}\n"
+                
+                # Add key properties
+                if props.get("element_name"):
+                    result += f"{indent}  name: {props['element_name']}\n"
+                if props.get("text_content"):
+                    content = props['text_content'][:100] + "..." if len(props['text_content']) > 100 else props['text_content']
+                    result += f"{indent}  content: {content}\n"
+                
+                # Recursively render children
+                children = node.get("children", [])
+                for child in children:
+                    result += render_node(child, depth + 1)
+                
+                return result
+            
+            return render_node(temporal_veil)
+            
+        except Exception as e:
+            logger.error(f"Error in fallback temporal rendering: {e}", exc_info=True)
+            return f"Error in temporal rendering: {e}"
+
+    def get_accumulated_deltas(self) -> List[Dict[str, Any]]:
+        """
+        Get and clear accumulated deltas for frame-end dispatch.
+        
+        Returns:
+            List of accumulated deltas, clearing the internal accumulator
+        """
+        deltas = list(self._accumulated_deltas)
+        self._accumulated_deltas.clear()
+        return deltas
 
     def _get_current_space_properties(self) -> Dict[str, Any]:
         """Extracts properties of the Space element itself for its VEIL root node."""
@@ -124,16 +445,12 @@ class SpaceVeilProducer(VeilProducer):
             return None
 
         owner_id = self.owner.id
-        # Ensure owner has the _flat_veil_cache attribute
-        if not hasattr(self.owner, '_flat_veil_cache'): # Corrected attribute name check
-            logger.error(f"[{owner_id}/{self.COMPONENT_TYPE}] Owner Space is missing '_flat_veil_cache'. Cannot build VEIL.")
-            return None
-
-        space_flat_cache = self.owner._flat_veil_cache # Corrected attribute name usage
+        # Use SpaceVeilProducer's own flat cache instead of owner's
+        space_flat_cache = self._flat_veil_cache
         space_root_veil_id = f"{owner_id}_space_root"
 
         if not space_flat_cache or space_root_veil_id not in space_flat_cache:
-            logger.warning(f"[{owner_id}/{self.COMPONENT_TYPE}] Space's flat cache is empty or root node '{space_root_veil_id}' missing. Cannot build full VEIL via get_full_veil.")
+            logger.warning(f"[{owner_id}/{self.COMPONENT_TYPE}] SpaceVeilProducer's flat cache is empty or root node '{space_root_veil_id}' missing. Cannot build full VEIL via get_full_veil.")
             # Return a minimal representation of the root if it's missing, or an error structure
             return {
                 "veil_id": space_root_veil_id,
@@ -143,7 +460,7 @@ class SpaceVeilProducer(VeilProducer):
                 "status": "Error: Cache unavailable or root missing for producer's get_full_veil."
             }
 
-        logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] get_full_veil: Building hierarchical VEIL from owner's flat cache (root: '{space_root_veil_id}').")
+        logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] get_full_veil: Building hierarchical VEIL from SpaceVeilProducer's flat cache (root: '{space_root_veil_id}').")
         full_veil = self.build_hierarchical_veil_from_flat_cache(
             flat_cache=space_flat_cache,
             root_node_id=space_root_veil_id,
@@ -169,9 +486,7 @@ class SpaceVeilProducer(VeilProducer):
 
         # NEW: Check actual cache state, not just the flag
         # This prevents race conditions where cache gets cleared but flag says we already produced root
-        root_exists_in_cache = (hasattr(self.owner, '_flat_veil_cache') and
-                               self.owner._flat_veil_cache and
-                               space_root_veil_id in self.owner._flat_veil_cache)
+        root_exists_in_cache = (self._flat_veil_cache and space_root_veil_id in self._flat_veil_cache)
 
         has_produced_flag = self._state.get('_has_produced_root_add_before', False)
 

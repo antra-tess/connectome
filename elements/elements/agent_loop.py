@@ -562,12 +562,12 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
             # --- HUD automatically detects and returns appropriate format ---
             has_multimodal_content = isinstance(context_data, dict) and 'attachments' in context_data
             if has_multimodal_content:
-                # logger.critical(f"CONTEXT DATA text {context_data.get('text')}")
+                logger.critical(f"CONTEXT DATA text {context_data.get('text')}")
                 attachment_count = len(context_data.get('attachments', []))
                 text_length = len(context_data.get('text', ''))
                 logger.info(f"HUD returned multimodal content: {text_length} chars text + {attachment_count} attachments")
             else:
-                # logger.critical(f"CONTEXT DATA text {context_data}")
+                logger.critical(f"CONTEXT DATA text {context_data}")
                 # Context is text-only string
                 logger.debug(f"HUD returned text-only context: {len(str(context_data))} chars")
 
