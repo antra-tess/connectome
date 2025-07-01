@@ -9,6 +9,7 @@ from typing import Dict, Any, Optional, List, TYPE_CHECKING
 from datetime import datetime
 import json
 import asyncio
+import time
 
 from opentelemetry import trace
 from host.observability import get_tracer
@@ -22,6 +23,18 @@ from llm.provider_interface import LLMMessage
 
 # NEW: Import storage system
 from storage import create_storage_from_env, StorageInterface
+
+# NEW: Import cascade invalidation utilities
+from .utils.compression_utils import (
+    MemoryFormationRecord,
+    CascadeInvalidationTask, 
+    CascadeStatistics,
+    InvalidationState,
+    CascadeTimelineManager,
+    calculate_dependency_fingerprint,
+    find_earliest_formation_index,
+    group_memories_by_container
+)
 
 if TYPE_CHECKING:
     from elements.elements.inner_space import InnerSpace
@@ -78,7 +91,20 @@ class CompressionEngineComponent(Component):
         self._element_chunks: Dict[str, Dict[str, Any]] = {}
         # Structure: {element_id: {"n_chunks": [...], "m_chunks": [...], "last_update": datetime, "total_tokens": int}}
         
-        logger.info(f"CompressionEngineComponent initialized ({self.id}) - ready for AgentMemoryCompressor integration and dual-stream processing")
+        # NEW: CASCADE INVALIDATION INFRASTRUCTURE
+        self._cascade_timeline_manager = CascadeTimelineManager()
+        self._cascade_invalidation_queue: asyncio.Queue[CascadeInvalidationTask] = asyncio.Queue()
+        self._cascade_stats = CascadeStatistics()
+        
+        # Background cascade processing
+        self._cascade_processor_task: Optional[asyncio.Task] = None
+        self._cascade_processing_enabled: bool = True
+        self._max_concurrent_recompressions: int = 3
+        
+        # Memory persistence with cascade data
+        self._cascade_timeline_file: str = ""  # Will be set during initialization
+        
+        logger.info(f"CompressionEngineComponent initialized ({self.id}) - ready for AgentMemoryCompressor integration, dual-stream processing, and cascade invalidation")
     
     def _on_initialize(self) -> bool:
         """Initialize the compression engine after being attached to InnerSpace."""
@@ -106,6 +132,9 @@ class CompressionEngineComponent(Component):
 
                     # NEW: Phase 3 - Initialize AgentMemoryCompressor with LLM access
                     await self._initialize_memory_compressor()
+
+                    # NEW: Initialize cascade invalidation system
+                    await self._initialize_cascade_system()
 
                     logger.info(f"CompressionEngine async initialization complete for {self._agent_name}")
                 except Exception as e:
@@ -255,9 +284,539 @@ class CompressionEngineComponent(Component):
             logger.warning(f"Error accessing LLM provider: {e}")
             return None
 
+    async def _initialize_cascade_system(self) -> bool:
+        """Initialize the cascade invalidation system."""
+        try:
+            # Set up cascade timeline persistence file
+            if self._storage_initialized and self._conversation_id:
+                self._cascade_timeline_file = f"{self._conversation_id}_cascade_timeline.json"
+                
+                # Load existing cascade timeline if available
+                await self._load_cascade_timeline_from_storage()
+                
+                # Start background cascade processor
+                await self._start_cascade_processor()
+                
+                logger.info(f"Cascade invalidation system initialized for {self._agent_name}")
+                return True
+            else:
+                logger.warning(f"Cannot initialize cascade system - storage not ready")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error initializing cascade system: {e}", exc_info=True)
+            return False
+
+    async def _start_cascade_processor(self) -> None:
+        """Start the background cascade invalidation processor."""
+        try:
+            if self._cascade_processor_task is not None:
+                logger.warning("Cascade processor already running")
+                return
+            
+            loop = asyncio.get_running_loop()
+            self._cascade_processor_task = loop.create_task(self._cascade_invalidation_processor())
+            logger.info("Started cascade invalidation background processor")
+            
+        except RuntimeError:
+            logger.info("No event loop running, cascade processor will start when needed")
+        except Exception as e:
+            logger.error(f"Error starting cascade processor: {e}", exc_info=True)
+
+    async def _cascade_invalidation_processor(self) -> None:
+        """
+        Background processor for cascade invalidation tasks.
+        
+        This runs continuously to process cascade invalidation in the background.
+        """
+        logger.info("Cascade invalidation processor started")
+        
+        try:
+            while self._cascade_processing_enabled:
+                try:
+                    # Wait for cascade tasks with timeout
+                    task = await asyncio.wait_for(
+                        self._cascade_invalidation_queue.get(), 
+                        timeout=5.0
+                    )
+                    
+                    # Process the cascade task
+                    start_time = time.time()
+                    await self._process_cascade_task(task)
+                    processing_time = time.time() - start_time
+                    
+                    # Update statistics
+                    self._cascade_stats.update_processing_time(processing_time)
+                    
+                    # Mark task as done
+                    self._cascade_invalidation_queue.task_done()
+                    
+                except asyncio.TimeoutError:
+                    # Normal timeout, continue processing
+                    continue
+                except Exception as e:
+                    logger.error(f"Error in cascade processor: {e}", exc_info=True)
+                    self._cascade_stats.cascade_errors += 1
+                    
+                    # Add delay to prevent rapid error loops
+                    await asyncio.sleep(1.0)
+        
+        except asyncio.CancelledError:
+            logger.info("Cascade invalidation processor cancelled")
+        except Exception as e:
+            logger.error(f"Fatal error in cascade processor: {e}", exc_info=True)
+        finally:
+            logger.info("Cascade invalidation processor stopped")
+
+    async def _process_cascade_task(self, task: CascadeInvalidationTask) -> None:
+        """
+        Process a single cascade invalidation task.
+        
+        This finds all dependent memories and invalidates them across containers.
+        """
+        try:
+            logger.info(f"Processing cascade task: {len(task.trigger_memory_ids)} trigger memories, "
+                       f"starting from index {task.cascade_start_index}")
+            
+            # STEP 1: Find all memories that depend on the invalidated ones
+            dependent_memories = self._cascade_timeline_manager.find_dependent_memories(
+                task.trigger_memory_ids, 
+                task.cascade_start_index,
+                task.max_cascade_depth
+            )
+            
+            if not dependent_memories:
+                logger.debug("No dependent memories found for cascade")
+                return
+            
+            # STEP 2: Group dependent memories by container for efficient processing
+            container_groups = group_memories_by_container(dependent_memories)
+            
+            # STEP 3: Apply cascade invalidation to each container
+            total_cascaded = 0
+            for element_id, memory_ids in container_groups.items():
+                cascaded_count = await self._apply_cascade_to_container(
+                    element_id, memory_ids, task.trigger_reason, task.trigger_element_id
+                )
+                total_cascaded += cascaded_count
+            
+            # STEP 4: Update formation timeline to mark cascaded memories
+            self._cascade_timeline_manager.mark_memories_as_cascaded(dependent_memories, task.trigger_memory_ids)
+            
+            # STEP 5: Update statistics
+            self._cascade_stats.total_memories_cascaded += total_cascaded
+            self._cascade_stats.total_containers_affected += len(container_groups)
+            self._cascade_stats.record_cascade_depth(len(dependent_memories))
+            
+            logger.info(f"Cascade processing complete: {total_cascaded} memories invalidated "
+                       f"across {len(container_groups)} containers")
+            
+        except Exception as e:
+            logger.error(f"Error processing cascade task: {e}", exc_info=True)
+            self._cascade_stats.cascade_errors += 1
+
+    async def _apply_cascade_to_container(self, 
+                                        element_id: str, 
+                                        memory_ids: List[str], 
+                                        trigger_reason: str,
+                                        trigger_element_id: str) -> int:
+        """
+        Apply cascade invalidation to memories in a specific container.
+        
+        This marks the M-chunks as invalid but preserves them for recompression.
+        """
+        try:
+            cascaded_count = 0
+            chunk_structure = self._element_chunks.get(element_id)
+            
+            if not chunk_structure:
+                logger.warning(f"No chunk structure found for container {element_id}")
+                return 0
+            
+            m_chunks = chunk_structure.get("m_chunks", [])
+            for m_chunk in m_chunks:
+                memory_node = m_chunk.get("memory_node", {})
+                memory_id = memory_node.get("veil_id")
+                
+                if memory_id in memory_ids and not m_chunk.get("is_invalid", False):
+                    # Mark M-chunk as cascade-invalidated
+                    m_chunk["is_invalid"] = True
+                    m_chunk["invalidated_at"] = datetime.now().isoformat()
+                    m_chunk["invalidation_reason"] = f"cascade_from_{trigger_element_id}"
+                    
+                    # Update cascade metadata
+                    cascade_metadata = m_chunk.get("cascade_metadata", {})
+                    cascade_metadata.update({
+                        "invalidation_reason": "cascade_dependency",
+                        "cascade_source_element_id": trigger_element_id,
+                        "cascade_trigger_reason": trigger_reason,
+                        "cascaded_at": datetime.now().isoformat()
+                    })
+                    m_chunk["cascade_metadata"] = cascade_metadata
+                    
+                    cascaded_count += 1
+                    logger.debug(f"Cascade-invalidated memory {memory_id} in container {element_id}")
+            
+            logger.info(f"Applied cascade invalidation to {cascaded_count} memories in container {element_id}")
+            return cascaded_count
+            
+        except Exception as e:
+            logger.error(f"Error applying cascade to container {element_id}: {e}", exc_info=True)
+            return 0
+
+    async def _trigger_cascade_invalidation(self, 
+                                          trigger_element_id: str, 
+                                          invalidated_memory_ids: List[str], 
+                                          trigger_reason: str) -> None:
+        """
+        Trigger cascade invalidation processing for memory dependencies.
+        
+        This is the main entry point for cascade invalidation.
+        """
+        try:
+            if not invalidated_memory_ids:
+                return
+            
+            # Find the earliest formation index among invalidated memories
+            earliest_formation_index = find_earliest_formation_index(
+                invalidated_memory_ids, 
+                self._cascade_timeline_manager.memory_id_to_formation_index
+            )
+            if earliest_formation_index is None:
+                logger.warning(f"Could not find formation index for invalidated memories: {invalidated_memory_ids}")
+                return
+            
+            # Create cascade task for background processing
+            cascade_task = CascadeInvalidationTask(
+                trigger_element_id=trigger_element_id,
+                trigger_memory_ids=invalidated_memory_ids.copy(),
+                trigger_reason=trigger_reason,
+                cascade_start_index=earliest_formation_index,
+                priority=0,  # High priority for immediate processing
+                max_cascade_depth=50
+            )
+            
+            # Queue for background processing
+            await self._cascade_invalidation_queue.put(cascade_task)
+            self._cascade_stats.total_invalidations_triggered += 1
+            self._cascade_stats.update_queue_size(self._cascade_invalidation_queue.qsize())
+            
+            logger.info(f"Triggered cascade invalidation from {trigger_element_id}: "
+                       f"{len(invalidated_memory_ids)} memories, starting from formation index {earliest_formation_index}")
+            
+        except Exception as e:
+            logger.error(f"Error triggering cascade invalidation: {e}", exc_info=True)
+
+    async def _load_cascade_timeline_from_storage(self) -> None:
+        """Load cascade timeline from storage."""
+        try:
+            if not self._storage or not self._cascade_timeline_file:
+                return
+                
+            # Try to load timeline data from storage
+            timeline_data = await self._storage.load_raw_messages(f"cascade_timeline_{self._conversation_id}")
+            if timeline_data:
+                self._cascade_timeline_manager.load_timeline_from_persistence(timeline_data)
+                logger.info(f"Loaded cascade timeline: {len(timeline_data)} formation records")
+            else:
+                logger.debug(f"No existing cascade timeline found for {self._conversation_id}")
+                
+        except Exception as e:
+            logger.error(f"Error loading cascade timeline: {e}", exc_info=True)
+
+    async def _save_cascade_timeline_to_storage(self) -> None:
+        """Save cascade timeline to storage."""
+        try:
+            if not self._storage or not self._cascade_timeline_file:
+                return
+                
+            timeline_data = self._cascade_timeline_manager.get_timeline_data_for_persistence()
+            if timeline_data:
+                await self._storage.store_raw_messages(f"cascade_timeline_{self._conversation_id}", timeline_data)
+                logger.debug(f"Saved cascade timeline: {len(timeline_data)} formation records")
+                
+        except Exception as e:
+            logger.error(f"Error saving cascade timeline: {e}", exc_info=True)
+
+    async def optimize_cascade_timeline(self, retention_hours: int = 24) -> Dict[str, Any]:
+        """
+        Manually optimize the cascade timeline to free memory.
+        
+        Args:
+            retention_hours: Hours of formation history to retain
+            
+        Returns:
+            Optimization results
+        """
+        try:
+            original_size = len(self._cascade_timeline_manager.timeline)
+            removed_count = self._cascade_timeline_manager.optimize_timeline(retention_hours)
+            
+            # Save optimized timeline
+            await self._save_cascade_timeline_to_storage()
+            
+            return {
+                "success": True,
+                "original_records": original_size,
+                "removed_records": removed_count,
+                "remaining_records": len(self._cascade_timeline_manager.timeline),
+                "retention_hours": retention_hours
+            }
+            
+        except Exception as e:
+            logger.error(f"Error optimizing cascade timeline: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+    async def get_cascade_health_status(self) -> Dict[str, Any]:
+        """Get health status of cascade invalidation system for monitoring."""
+        try:
+            queue_size = self._cascade_invalidation_queue.qsize()
+            processor_running = bool(self._cascade_processor_task and not self._cascade_processor_task.done())
+            
+            # Calculate error rate
+            total_tasks = self._cascade_stats.total_invalidations_triggered
+            error_rate = (self._cascade_stats.cascade_errors / max(1, total_tasks)) if total_tasks > 0 else 0.0
+            
+            # Determine health status
+            health_status = "healthy"
+            warnings = []
+            
+            if queue_size > 100:
+                health_status = "warning"
+                warnings.append(f"High queue size: {queue_size}")
+            
+            if error_rate > 0.1:
+                health_status = "warning" if health_status == "healthy" else "critical"
+                warnings.append(f"High error rate: {error_rate:.2%}")
+            
+            if not processor_running and self._cascade_processing_enabled:
+                health_status = "critical"
+                warnings.append("Cascade processor not running")
+            
+            return {
+                "status": health_status,
+                "cascade_enabled": self._cascade_processing_enabled,
+                "processor_running": processor_running,
+                "queue_size": queue_size,
+                "error_rate": error_rate,
+                "total_cascaded": self._cascade_stats.total_memories_cascaded,
+                "total_containers_affected": self._cascade_stats.total_containers_affected,
+                "max_cascade_depth": self._cascade_stats.max_cascade_depth_seen,
+                "warnings": warnings,
+                "timeline_size": len(self._cascade_timeline_manager.timeline)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting cascade health status: {e}", exc_info=True)
+            return {
+                "status": "error",
+                "error": str(e)
+            }
+
+    async def _create_memory_with_dependency_tracking(self, 
+                                                    element_id: str, 
+                                                    chunk_content: List[Dict[str, Any]], 
+                                                    chunk_index: int,
+                                                    chunk_element_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Enhanced memory creation with global dependency tracking for cascade invalidation.
+        
+        This creates memories using AgentMemoryCompressor while tracking formation context
+        for cascade invalidation across containers.
+        """
+        try:
+            # STEP 1: Capture current global memory context for dependency tracking
+            context_memory_ids = self._get_all_valid_memory_ids()
+            context_fingerprint = calculate_dependency_fingerprint(context_memory_ids)
+            
+            # STEP 2: Get formation metadata
+            formation_timestamp = time.time()
+            formation_delta_index = self._get_current_delta_index()
+            global_formation_index = self._cascade_timeline_manager.next_global_formation_index
+            
+            # STEP 3: Create memory using AgentMemoryCompressor with enhanced context
+            compression_context = {
+                "element_id": element_id,
+                "compression_reason": "chunk_boundary_compression",
+                "is_focused": True,  # Chunk boundary compression is focused
+                "use_background_compression": True,
+                "global_formation_index": global_formation_index,
+                "formation_context": context_memory_ids,
+                "existing_memory_context": self._get_existing_memory_context_for_agent(element_id),
+                "full_veil_context": await self._get_hud_rendered_context_for_memory_formation(element_id, chunk_content)
+            }
+            
+            if self._memory_compressor:
+                logger.debug(f"Creating memory with dependency tracking for N-chunk {chunk_index} of {element_id}")
+                
+                # Use AgentMemoryCompressor's get_memory_or_fallback for background compression
+                result_node = await self._memory_compressor.get_memory_or_fallback(
+                    element_ids=[chunk_element_id],
+                    raw_veil_nodes=chunk_content,
+                    token_limit=self.COMPRESSION_CHUNK_SIZE
+                )
+                
+                if result_node:
+                    memory_id = result_node.get("veil_id", f"memory_{chunk_element_id}")
+                    
+                    # STEP 4: Add cascade metadata to the memory node
+                    memory_props = result_node.get("properties", {})
+                    memory_props["cascade_metadata"] = {
+                        "global_formation_index": global_formation_index,
+                        "formation_dependencies": context_memory_ids.copy(),
+                        "dependency_fingerprint": context_fingerprint,
+                        "formation_timestamp": formation_timestamp,
+                        "formation_delta_index": formation_delta_index,
+                        "invalidation_state": "valid",
+                        "cascade_generation": 0
+                    }
+                    
+                    # STEP 5: Record in global formation timeline
+                    formation_record = MemoryFormationRecord(
+                        memory_id=memory_id,
+                        element_id=element_id,
+                        global_formation_index=global_formation_index,
+                        formation_timestamp=formation_timestamp,
+                        formation_delta_index=formation_delta_index,
+                        context_memory_ids=context_memory_ids.copy(),
+                        context_fingerprint=context_fingerprint,
+                        formation_generation=0
+                    )
+                    
+                    # Add to timeline (includes circular dependency check)
+                    if self._cascade_timeline_manager.add_memory_formation(formation_record):
+                        logger.info(f"Created memory {memory_id} at formation index {global_formation_index} "
+                                   f"with {len(context_memory_ids)} dependencies")
+                        return result_node
+                    else:
+                        logger.warning(f"Failed to add memory {memory_id} to timeline - circular dependency detected")
+                        return None
+                else:
+                    logger.warning(f"AgentMemoryCompressor returned None for {chunk_element_id}")
+                    return None
+            else:
+                logger.warning(f"No AgentMemoryCompressor available for {chunk_element_id}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error creating memory with dependency tracking: {e}", exc_info=True)
+            return None
+
+    def _get_all_valid_memory_ids(self) -> List[str]:
+        """Get all currently valid memory IDs from all containers for dependency tracking."""
+        valid_memory_ids = []
+        
+        try:
+            for element_id, chunk_structure in self._element_chunks.items():
+                m_chunks = chunk_structure.get("m_chunks", [])
+                for m_chunk in m_chunks:
+                    # Only include valid (non-invalidated) memories
+                    if not m_chunk.get("is_invalid", False):
+                        memory_node = m_chunk.get("memory_node", {})
+                        memory_id = memory_node.get("veil_id")
+                        if memory_id:
+                            valid_memory_ids.append(memory_id)
+        except Exception as e:
+            logger.error(f"Error getting valid memory IDs: {e}", exc_info=True)
+        
+        return valid_memory_ids
+
+    def _get_current_delta_index(self) -> int:
+        """Get current delta index from SpaceVeilProducer for temporal consistency."""
+        try:
+            veil_producer = self._get_space_veil_producer()
+            if veil_producer and hasattr(veil_producer, '_next_delta_index'):
+                return veil_producer._next_delta_index
+            return -1  # Fallback for missing producer
+        except Exception as e:
+            logger.warning(f"Error getting current delta index: {e}")
+            return -1
+
+    def _get_existing_memory_context_for_agent(self, element_id: str) -> List[str]:
+        """Get existing memory summaries for agent reflection context."""
+        try:
+            memory_summaries = []
+            chunk_structure = self._element_chunks.get(element_id, {})
+            m_chunks = chunk_structure.get("m_chunks", [])
+            
+            for m_chunk in m_chunks:
+                if not m_chunk.get("is_invalid", False):
+                    memory_node = m_chunk.get("memory_node", {})
+                    memory_summary = memory_node.get("properties", {}).get("memory_summary")
+                    if memory_summary:
+                        memory_summaries.append(memory_summary)
+            
+            return memory_summaries[-5:]  # Last 5 memories for context
+        except Exception as e:
+            logger.error(f"Error getting existing memory context: {e}", exc_info=True)
+            return []
+
+    async def _get_hud_rendered_context_for_memory_formation(self, element_id: str, 
+                                                           chunk_content: List[Dict[str, Any]]) -> Optional[str]:
+        """
+        Get HUD-rendered context for memory formation with temporal consistency.
+        
+        This is the complex integration point mentioned in the requirements - it gets
+        context that shows how the system looked at memory formation time with future edits applied.
+        """
+        try:
+            # Get HUD component for rendering
+            hud_component = self._get_hud_component()
+            if not hud_component:
+                logger.debug(f"HUD component not available for memory formation context")
+                return None
+            
+            # Get current flat VEIL cache from SpaceVeilProducer
+            flat_veil_cache = self._get_flat_veil_cache_from_space()
+            if not flat_veil_cache:
+                logger.debug(f"No flat VEIL cache available for memory formation context")
+                return None
+            
+            # Apply any pending edit deltas for temporal consistency
+            temporal_flat_cache = await self._apply_edit_deltas_to_flat_cache(
+                flat_veil_cache, element_id, chunk_content
+            )
+            
+            # Use HUD's specialized context rendering for agent memory formation
+            if hasattr(hud_component, 'render_memorization_context_with_flat_cache'):
+                memorization_context = await hud_component.render_memorization_context_with_flat_cache(
+                    flat_veil_cache=temporal_flat_cache,
+                    exclude_element_id=element_id,
+                    exclude_content=chunk_content,  # Exclude the content being memorized
+                    focus_element_id=element_id  # Focus on the element being memorized
+                )
+                
+                if memorization_context:
+                    logger.debug(f"Generated temporal memorization context for {element_id}: {len(memorization_context)} characters")
+                    return memorization_context
+            
+            logger.debug(f"HUD temporal context rendering not available")
+            return None
+                
+        except Exception as e:
+            logger.warning(f"Error getting HUD-rendered context for memory formation: {e}")
+            return None
+
     async def shutdown(self) -> bool:
         """Gracefully shutdown the compression engine and storage."""
         try:
+            # NEW: Shutdown cascade invalidation system
+            self._cascade_processing_enabled = False
+            if self._cascade_processor_task:
+                logger.info(f"Shutting down cascade processor for agent {self._agent_name}")
+                self._cascade_processor_task.cancel()
+                try:
+                    await self._cascade_processor_task
+                except asyncio.CancelledError:
+                    pass
+                self._cascade_processor_task = None
+                
+                # Save cascade timeline before shutdown
+                await self._save_cascade_timeline_to_storage()
+
             # NEW: Phase 3 - Shutdown AgentMemoryCompressor
             if self._memory_compressor:
                 logger.info(f"Shutting down AgentMemoryCompressor for agent {self._agent_name}")
@@ -372,7 +931,7 @@ class CompressionEngineComponent(Component):
             logger.error(f"Error storing interaction messages: {e}", exc_info=True)
 
     async def get_memory_stats(self) -> Dict[str, Any]:
-        """Get statistics about stored memory."""
+        """Get comprehensive statistics about stored memory and cascade invalidation."""
         try:
             # NEW: Phase 3 - Get stats from AgentMemoryCompressor if available
             memory_compressor_stats = {}
@@ -383,12 +942,51 @@ class CompressionEngineComponent(Component):
                     logger.warning(f"Error getting AgentMemoryCompressor stats: {stats_err}")
                     memory_compressor_stats = {"error": str(stats_err)}
 
+            # NEW: Get cascade invalidation statistics
+            cascade_stats = self._cascade_stats.to_dict()
+            
+            # Get timeline statistics
+            timeline_stats = {
+                "total_formation_records": len(self._cascade_timeline_manager.timeline),
+                "next_formation_index": self._cascade_timeline_manager.next_global_formation_index,
+                "timeline_cache_size": len(self._cascade_timeline_manager.memory_id_to_formation_index),
+                "valid_memories": len([r for r in self._cascade_timeline_manager.timeline 
+                                     if r.invalidation_state == InvalidationState.VALID]),
+                "invalidated_memories": len([r for r in self._cascade_timeline_manager.timeline 
+                                           if r.invalidation_state != InvalidationState.VALID])
+            }
+            
+            # Get dual-stream chunk statistics
+            chunk_stats = {}
+            for element_id, chunk_structure in self._element_chunks.items():
+                chunk_stats[element_id] = {
+                    "n_chunks": len(chunk_structure.get("n_chunks", [])),
+                    "m_chunks": len(chunk_structure.get("m_chunks", [])),
+                    "total_tokens": chunk_structure.get("total_tokens", 0),
+                    "last_update": chunk_structure.get("last_update", "unknown")
+                }
+
             return {
                 "agent_name": self._agent_name,
                 "conversation_id": self._conversation_id,
                 "memory_compressor_available": bool(self._memory_compressor),
                 "memory_compressor_stats": memory_compressor_stats,
-                "phase": "3_agent_memory_compressor_integrated",
+                
+                # NEW: Cascade invalidation statistics
+                "cascade_invalidation": {
+                    "enabled": self._cascade_processing_enabled,
+                    "processor_running": bool(self._cascade_processor_task and not self._cascade_processor_task.done()),
+                    "queue_size": self._cascade_invalidation_queue.qsize(),
+                    "statistics": cascade_stats
+                },
+                
+                # NEW: Timeline statistics
+                "global_memory_timeline": timeline_stats,
+                
+                # NEW: Dual-stream chunk statistics
+                "dual_stream_chunks": chunk_stats,
+                
+                "phase": "cascade_invalidation_integrated",
                 "last_updated": datetime.now().isoformat()
             }
         except Exception as e:
@@ -396,7 +994,7 @@ class CompressionEngineComponent(Component):
             return {
                 "error": str(e),
                 "agent_name": self._agent_name,
-                "phase": "3_integration_error"
+                "phase": "cascade_integration_error"
             }
 
     async def clear_memory(self) -> bool:
@@ -1631,99 +2229,66 @@ class CompressionEngineComponent(Component):
                         chunk_index = chunk.get('chunk_index', 0)
                         chunk_element_id = f"{element_id}_chunk_{chunk_index}"
                         
-                        # FIXED: Use AgentMemoryCompressor's background compression capability
-                        if self._memory_compressor:
-                            logger.debug(f"Starting background compression for N-chunk {chunk_index} of {element_id}")
+                        # NEW: Create memory with dependency tracking for cascade invalidation
+                        result_node = await self._create_memory_with_dependency_tracking(
+                            element_id, chunk_content, chunk_index, chunk_element_id
+                        )
+                        
+                        if result_node:
+                            # Convert result to M-chunk format
+                            result_props = result_node.get("properties", {})
+                            node_type = result_node.get("node_type", "")
                             
-                            # Use get_memory_or_fallback for true background compression
-                            result_node = await self._memory_compressor.get_memory_or_fallback(
-                                element_ids=[chunk_element_id],
-                                raw_veil_nodes=chunk_content,
-                                token_limit=self.COMPRESSION_CHUNK_SIZE
-                            )
-                            
-                            if result_node:
-                                # Convert result to M-chunk format
-                                result_props = result_node.get("properties", {})
-                                node_type = result_node.get("node_type", "")
+                            if node_type == "memorized_content":
+                                # Completed memory
+                                memory_summary = result_props.get("memory_summary", f"Background memory of N-chunk {chunk_index}")
+                                compression_approach = "agent_memory_compressor_background_complete"
                                 
-                                if node_type == "memorized_content":
-                                    # Completed memory
-                                    memory_summary = result_props.get("memory_summary", f"Background memory of N-chunk {chunk_index}")
-                                    compression_approach = "agent_memory_compressor_background_complete"
-                                    
-                                elif node_type in ["fresh_content", "trimmed_fresh_content"]:
-                                    # Background compression in progress, using fresh content fallback
-                                    memory_summary = f"⏳ Background compression in progress for N-chunk {chunk_index} (using fresh content)"
-                                    compression_approach = "agent_memory_compressor_background_fallback"
-                                    
-                                elif node_type == "compression_placeholder":
-                                    # Background compression starting
-                                    memory_summary = result_props.get("memory_summary", f"⏳ Starting background compression for N-chunk {chunk_index}")
-                                    compression_approach = "agent_memory_compressor_background_placeholder"
-                                    
-                                else:
-                                    # Unknown result type
-                                    memory_summary = f"Background compression result for N-chunk {chunk_index}"
-                                    compression_approach = f"agent_memory_compressor_background_{node_type}"
+                            elif node_type in ["fresh_content", "trimmed_fresh_content"]:
+                                # Background compression in progress, using fresh content fallback
+                                memory_summary = f"⏳ Background compression in progress for N-chunk {chunk_index} (using fresh content)"
+                                compression_approach = "agent_memory_compressor_background_fallback"
                                 
-                                # Create memory node from background compression result
-                                memory_node = {
-                                    "veil_id": f"memory_{element_id}_{chunk_index}_{self.id}",
-                                    "node_type": "content_memory",
-                                    "properties": {
-                                        "structural_role": "compressed_content",
-                                        "content_nature": "content_memory",
-                                        "original_element_id": element_id,
-                                        "memory_summary": memory_summary,
-                                        "original_child_count": len(chunk_content),
-                                        "compression_timestamp": datetime.now().isoformat(),
-                                        "compression_approach": compression_approach,
-                                        "is_focused": False,
-                                        "is_background_compression": True,  # Now actually true!
-                                        "background_compression_type": node_type,
-                                        "source_chunk_index": chunk_index,
-                                        "source_chunk_tokens": chunk.get('token_count', 0),
-                                        # NEW: Store content fingerprint for change detection
-                                        "content_fingerprint": self._calculate_content_fingerprint(chunk_content)
-                                    },
-                                    "children": []
-                                }
-                                
-                                logger.debug(f"Background compression result for N-chunk {chunk_index}: {compression_approach}")
+                            elif node_type == "compression_placeholder":
+                                # Background compression starting
+                                memory_summary = result_props.get("memory_summary", f"⏳ Starting background compression for N-chunk {chunk_index}")
+                                compression_approach = "agent_memory_compressor_background_placeholder"
                                 
                             else:
-                                # No result from background compression, create placeholder
-                                logger.warning(f"Background compression returned None for N-chunk {chunk_index}, creating placeholder")
-                                memory_summary = f"⏳ Background compression failed to start for N-chunk {chunk_index}"
-                                compression_approach = "agent_memory_compressor_background_failed"
-                                
-                                memory_node = {
-                                    "veil_id": f"memory_{element_id}_{chunk_index}_{self.id}",
-                                    "node_type": "content_memory",
-                                    "properties": {
-                                        "structural_role": "compressed_content",
-                                        "content_nature": "content_memory",
-                                        "original_element_id": element_id,
-                                        "memory_summary": memory_summary,
-                                        "original_child_count": len(chunk_content),
-                                        "compression_timestamp": datetime.now().isoformat(),
-                                        "compression_approach": compression_approach,
-                                        "is_focused": False,
-                                        "is_background_compression": True,
-                                        "background_compression_type": "failed",
-                                        "source_chunk_index": chunk_index,
-                                        "source_chunk_tokens": chunk.get('token_count', 0),
-                                        # NEW: Store content fingerprint even for failed compression
-                                        "content_fingerprint": self._calculate_content_fingerprint(chunk_content)
-                                    },
-                                    "children": []
-                                }
+                                # Unknown result type
+                                memory_summary = f"Background compression result for N-chunk {chunk_index}"
+                                compression_approach = f"agent_memory_compressor_background_{node_type}"
+                            
+                            # Create memory node from background compression result
+                            memory_node = {
+                                "veil_id": f"memory_{element_id}_{chunk_index}_{self.id}",
+                                "node_type": "content_memory",
+                                "properties": {
+                                    "structural_role": "compressed_content",
+                                    "content_nature": "content_memory",
+                                    "original_element_id": element_id,
+                                    "memory_summary": memory_summary,
+                                    "original_child_count": len(chunk_content),
+                                    "compression_timestamp": datetime.now().isoformat(),
+                                    "compression_approach": compression_approach,
+                                    "is_focused": False,
+                                    "is_background_compression": True,  # Now actually true!
+                                    "background_compression_type": node_type,
+                                    "source_chunk_index": chunk_index,
+                                    "source_chunk_tokens": chunk.get('token_count', 0),
+                                    # NEW: Store content fingerprint for change detection
+                                    "content_fingerprint": self._calculate_content_fingerprint(chunk_content)
+                                },
+                                "children": []
+                            }
+                            
+                            logger.debug(f"Background compression result for N-chunk {chunk_index}: {compression_approach}")
+                            
                         else:
-                            # No AgentMemoryCompressor available, create simple fallback
-                            logger.warning(f"No AgentMemoryCompressor available for background compression of N-chunk {chunk_index}")
-                            memory_summary = f"Simple summary of N-chunk {chunk_index}: {len(chunk_content)} items"
-                            compression_approach = "simple_fallback_no_compressor"
+                            # No result from background compression, create placeholder
+                            logger.warning(f"Background compression returned None for N-chunk {chunk_index}, creating placeholder")
+                            memory_summary = f"⏳ Background compression failed to start for N-chunk {chunk_index}"
+                            compression_approach = "agent_memory_compressor_background_failed"
                             
                             memory_node = {
                                 "veil_id": f"memory_{element_id}_{chunk_index}_{self.id}",
@@ -1737,29 +2302,31 @@ class CompressionEngineComponent(Component):
                                     "compression_timestamp": datetime.now().isoformat(),
                                     "compression_approach": compression_approach,
                                     "is_focused": False,
-                                    "is_background_compression": False,  # Not actually background without compressor
+                                    "is_background_compression": True,
+                                    "background_compression_type": "failed",
                                     "source_chunk_index": chunk_index,
                                     "source_chunk_tokens": chunk.get('token_count', 0),
-                                    # NEW: Store content fingerprint for change detection
+                                    # NEW: Store content fingerprint even for failed compression
                                     "content_fingerprint": self._calculate_content_fingerprint(chunk_content)
                                 },
                                 "children": []
                             }
-                        
-                        # Add to M-chunks
-                        new_m_chunk = {
-                            "chunk_type": "m_chunk",
-                            "memory_node": memory_node,
-                            "token_count": self._calculate_memory_tokens([memory_node]),
-                            "chunk_index": len(m_chunks),
-                            "created_at": datetime.now(),
-                            "is_complete": True,
-                            "source_n_chunk_index": chunk_index,
-                            "is_background_generated": True
-                        }
-                        
-                        m_chunks.append(new_m_chunk)
-                        logger.debug(f"Created background M-chunk backup for N-chunk {chunk_index} for {element_id}")
+                            
+                        if self._memory_compressor:
+                            # Add to M-chunks
+                            new_m_chunk = {
+                                "chunk_type": "m_chunk",
+                                "memory_node": memory_node,
+                                "token_count": self._calculate_memory_tokens([memory_node]),
+                                "chunk_index": len(m_chunks),
+                                "created_at": datetime.now(),
+                                "is_complete": True,
+                                "source_n_chunk_index": chunk_index,
+                                "is_background_generated": True
+                            }
+                            
+                            m_chunks.append(new_m_chunk)
+                            logger.debug(f"Created background M-chunk backup for N-chunk {chunk_index} for {element_id}")
                         
                     except Exception as chunk_error:
                         logger.error(f"Error creating background M-chunk backup for {element_id}: {chunk_error}", exc_info=True)
@@ -1827,16 +2394,29 @@ class CompressionEngineComponent(Component):
                         logger.warning(f"No content in source N-chunk {source_chunk_index}, skipping M-chunk recompression")
                         continue
                     
-                    # Recompress using AgentMemoryCompressor
+                    # NEW: Recompress using AgentMemoryCompressor with temporal context
                     chunk_element_id = f"{element_id}_chunk_{source_chunk_index}_recompressed"
                     
                     if self._memory_compressor:
-                        logger.debug(f"Recompressing M-chunk for updated N-chunk {source_chunk_index}")
+                        logger.debug(f"Recompressing M-chunk for updated N-chunk {source_chunk_index} with temporal context")
                         
-                        result_node = await self._memory_compressor.get_memory_or_fallback(
-                            element_ids=[chunk_element_id],
+                        # Create enhanced compression context for recompression
+                        recompression_context = {
+                            "element_id": element_id,
+                            "compression_reason": "cascade_recompression",
+                            "is_focused": True,
+                            "use_background_compression": False,  # Urgent recompression
+                            "is_recompression": True,
+                            "original_formation_index": m_chunk.get("cascade_metadata", {}).get("global_formation_index", -1),
+                            "existing_memory_context": self._get_existing_memory_context_for_agent(element_id),
+                            "full_veil_context": await self._get_hud_rendered_context_for_memory_formation(element_id, updated_content)
+                        }
+                        
+                        # Use AgentMemoryCompressor with enhanced context
+                        result_node = await self._memory_compressor.compress_nodes(
                             raw_veil_nodes=updated_content,
-                            token_limit=self.COMPRESSION_CHUNK_SIZE
+                            element_ids=[chunk_element_id],
+                            compression_context=recompression_context
                         )
                         
                         if result_node:
@@ -2150,7 +2730,7 @@ class CompressionEngineComponent(Component):
             logger.warning(f"Error getting memorization context for {element_id}: {e}")
             return None
 
-    def _get_space_veil_producer(self) -> Optional:
+    def _get_space_veil_producer(self):
         """
         NEW: Get SpaceVeilProducer from owner Space for temporal VEIL operations.
         
@@ -2418,12 +2998,13 @@ class CompressionEngineComponent(Component):
     async def _invalidate_affected_m_chunks(self, element_id: str, current_children: List[Dict[str, Any]], 
                                           current_structure: Dict[str, Any]) -> None:
         """
-        NEW: Invalidate M-chunks that correspond to changed N-chunks.
+        ENHANCED: Invalidate M-chunks and trigger cascade invalidation for cross-container dependencies.
         
         When content changes (like message edits), we need to:
         1. Rebuild N-chunks from current content
         2. Mark corresponding M-chunks as invalid/stale 
-        3. Trigger background recompression of affected M-chunks
+        3. Extract invalidated memory IDs and trigger cascade invalidation
+        4. Schedule background recompression of affected M-chunks
         
         Args:
             element_id: ID of the element
@@ -2449,24 +3030,40 @@ class CompressionEngineComponent(Component):
             if changed_chunk_indices:
                 logger.info(f"Found {len(changed_chunk_indices)} changed N-chunks for {element_id}: {changed_chunk_indices}")
                 
-                # Mark corresponding M-chunks as invalid
+                # Mark corresponding M-chunks as invalid and collect invalidated memory IDs
                 invalidated_m_chunks = []
+                invalidated_memory_ids = []
+                
                 for m_chunk in old_m_chunks:
                     source_chunk_index = m_chunk.get("source_n_chunk_index", -1)
                     if source_chunk_index in changed_chunk_indices:
                         # Mark this M-chunk as invalid
                         m_chunk["is_invalid"] = True
                         m_chunk["invalidated_at"] = datetime.now().isoformat()
+                        m_chunk["invalidation_reason"] = "content_change"
                         invalidated_m_chunks.append(m_chunk)
+                        
+                        # Extract memory ID for cascade processing
+                        memory_node = m_chunk.get("memory_node", {})
+                        memory_id = memory_node.get("veil_id")
+                        if memory_id:
+                            invalidated_memory_ids.append(memory_id)
+                        
                         logger.debug(f"Invalidated M-chunk for N-chunk {source_chunk_index}")
                 
                 # Update the chunk structure with new N-chunks
                 current_structure["n_chunks"] = new_n_chunks
                 
-                # Keep existing M-chunks but mark invalids for recompression
-                # They will be recompressed in the next _process_chunk_boundaries call
+                # NEW: Trigger cascade invalidation for cross-container dependencies
+                if invalidated_memory_ids:
+                    await self._trigger_cascade_invalidation(
+                        trigger_element_id=element_id,
+                        invalidated_memory_ids=invalidated_memory_ids,
+                        trigger_reason="content_change"
+                    )
+                    logger.info(f"Triggered cascade invalidation for {len(invalidated_memory_ids)} invalidated memories")
                 
-                logger.info(f"Invalidated {len(invalidated_m_chunks)} M-chunks for recompression")
+                logger.info(f"Invalidated {len(invalidated_m_chunks)} M-chunks for recompression and triggered cascade processing")
             else:
                 logger.debug(f"No specific N-chunk changes detected, updating N-chunks anyway")
                 # Update N-chunks even if no specific changes detected
