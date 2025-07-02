@@ -652,11 +652,11 @@ class CompressionEngineComponent(Component):
             if self._memory_compressor:
                 logger.debug(f"Creating memory with dependency tracking for N-chunk {chunk_index} of {element_id}")
                 
-                # Use AgentMemoryCompressor's get_memory_or_fallback for background compression
-                result_node = await self._memory_compressor.get_memory_or_fallback(
-                    element_ids=[chunk_element_id],
+                # Use AgentMemoryCompressor's compress_nodes for background compression
+                result_node = await self._memory_compressor.compress_nodes(
                     raw_veil_nodes=chunk_content,
-                    token_limit=self.COMPRESSION_CHUNK_SIZE
+                    element_ids=[chunk_element_id],
+                    compression_context=compression_context
                 )
                 
                 if result_node:
@@ -1194,6 +1194,8 @@ class CompressionEngineComponent(Component):
         """
         focus_element_id = focus_context.get('focus_element_id') if focus_context else None
 
+        logger.warning(f"🚀 COMPRESSION ENGINE DEBUG: process_veil_with_compression called - focus_element_id={focus_element_id}, full_veil_nodes={len(full_veil) if full_veil else 0}")
+
         with tracer.start_as_current_span("compression_engine.process_veil", attributes={
             "veil.focus_element_id": focus_element_id or "none",
             "veil.has_memory_data": bool(memory_data)
@@ -1249,10 +1251,6 @@ class CompressionEngineComponent(Component):
             import copy
             processed_veil = copy.deepcopy(full_veil)
 
-            # Inject memory context at the top level if provided
-            if memory_data:
-                processed_veil = await self._inject_memory_context(processed_veil, memory_data)
-
             # Apply compression to unfocused containers
             await self._compress_unfocused_containers(processed_veil, focus_element_id)
 
@@ -1284,59 +1282,11 @@ class CompressionEngineComponent(Component):
             import copy
             processed_veil = copy.deepcopy(full_veil)
 
-            # Inject memory context
-            processed_veil = await self._inject_memory_context(processed_veil, memory_data)
-
             return processed_veil
 
         except Exception as e:
             logger.error(f"Error processing full VEIL with memory: {e}", exc_info=True)
             return full_veil
-
-    async def _inject_memory_context(self,
-                                   veil_root: Dict[str, Any],
-                                   memory_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Inject memory context into VEIL structure as additional nodes.
-
-        SIMPLIFIED: Only inject agent workspace info at top level.
-        Element-specific memories are now handled within containers by _compress_container_children().
-
-        Args:
-            veil_root: Root VEIL node to modify
-            memory_data: Memory data to inject
-
-        Returns:
-            Modified VEIL with memory context injected
-        """
-        try:
-            # Only inject agent workspace info (not element-specific memories)
-            agent_info = memory_data.get('agent_info', {})
-            if agent_info:
-                workspace_node = {
-                    "veil_id": f"memory_workspace_{self.id}",
-                    "node_type": "memory_context",
-                    "properties": {
-                        "structural_role": "memory_section",
-                        "content_nature": "agent_workspace",
-                        "memory_type": "workspace_info",
-                        "agent_name": agent_info.get('agent_name', 'Unknown'),
-                        "workspace_description": agent_info.get('workspace_description', ''),
-                        "total_interactions": agent_info.get('total_stored_interactions', 0)
-                    },
-                    "children": []
-                }
-
-                # Inject only workspace info at top level
-                children = veil_root.get('children', [])
-                veil_root['children'] = [workspace_node] + children
-                logger.debug(f"Injected agent workspace memory context into VEIL")
-
-            return veil_root
-
-        except Exception as e:
-            logger.error(f"Error injecting memory context: {e}", exc_info=True)
-            return veil_root
 
     async def _compress_unfocused_containers(self,
                                            veil_node: Dict[str, Any],
@@ -1446,6 +1396,7 @@ class CompressionEngineComponent(Component):
             
             # Update container children with selected stream
             container_node['children'] = selected_nodes
+            logger.critical(f"Selected nodes: {selected_nodes}")
             
             # Ensure tool information is preserved
             if available_tools:
@@ -2011,14 +1962,19 @@ class CompressionEngineComponent(Component):
             Initialized chunk structure
         """
         try:
+            logger.critical(f"🟢 COMPRESSION INIT DEBUG: Starting chunk initialization for {element_id} with {len(children)} children")
+            
             # Separate existing memories from fresh content
             existing_memories, fresh_content = self._separate_memories_and_content(children)
+            logger.critical(f"🟢 COMPRESSION INIT DEBUG: {element_id} - Found {len(existing_memories)} existing memories, {len(fresh_content)} fresh content items")
             
             # Convert fresh content into N-chunks (4k token boundaries)
             n_chunks = await self._content_to_n_chunks(fresh_content)
+            logger.critical(f"🟢 COMPRESSION INIT DEBUG: {element_id} - Created {len(n_chunks)} N-chunks from fresh content")
             
             # Convert existing memories into M-chunks
             m_chunks = self._memories_to_m_chunks(existing_memories)
+            logger.critical(f"🟢 COMPRESSION INIT DEBUG: {element_id} - Converted {len(existing_memories)} existing memories to {len(m_chunks)} M-chunks")
             
             # Calculate total tokens
             total_tokens = sum(self._calculate_chunk_tokens(chunk) for chunk in n_chunks)
@@ -2031,6 +1987,13 @@ class CompressionEngineComponent(Component):
                 "total_tokens": total_tokens,
                 "initialization_source": "veil_children"
             }
+            
+            # DEBUG: Check how many N-chunks are complete and ready for M-chunk creation
+            complete_n_chunks = [chunk for chunk in n_chunks if chunk.get("is_complete", False)]
+            incomplete_n_chunks = [chunk for chunk in n_chunks if not chunk.get("is_complete", False)]
+            
+            logger.critical(f"🟢 COMPRESSION INIT DEBUG: {element_id} - N-chunk analysis: {len(complete_n_chunks)} complete, {len(incomplete_n_chunks)} incomplete")
+            logger.critical(f"🟢 COMPRESSION INIT DEBUG: {element_id} - INITIALIZATION COMPLETE - Will need {len(complete_n_chunks)} M-chunks for complete N-chunks")
             
             logger.info(f"Initialized chunks for {element_id}: {len(n_chunks)} N-chunks, {len(m_chunks)} M-chunks, {total_tokens} tokens")
             return chunk_structure
@@ -2065,29 +2028,38 @@ class CompressionEngineComponent(Component):
             needs_initial_processing = (initialization_source == "veil_children" and 
                                       not current_structure.get("initial_processing_complete", False))
             
+            logger.critical(f"🟠 UPDATE CHUNKS DEBUG: {element_id} - initialization_source={initialization_source}, needs_initial_processing={needs_initial_processing}")
+            
             # Detect new content since last update
             new_content = await self._detect_new_content(element_id, children)
             
             # Add new content to N-stream if any
             if new_content:
                 current_structure["n_chunks"].extend(await self._content_to_n_chunks(new_content))
-                logger.debug(f"Added {len(new_content)} new content items to N-stream for {element_id}")
+                logger.critical(f"🟠 UPDATE CHUNKS DEBUG: Added {len(new_content)} new content items to N-stream for {element_id}")
             else:
-                logger.debug(f"No new content detected for element {element_id}")
+                logger.critical(f"🟠 UPDATE CHUNKS DEBUG: No new content detected for element {element_id}")
             
             # FIXED: Always check chunk boundaries, even if no new content
             # This is crucial for initial M-chunk creation after first initialization
             if new_content or needs_initial_processing:
-                logger.debug(f"Processing chunk boundaries for {element_id} (new_content={len(new_content) if new_content else 0}, initial_processing={needs_initial_processing})")
+                logger.critical(f"🟠 UPDATE CHUNKS DEBUG: {element_id} - Triggering chunk boundary processing (new_content={len(new_content) if new_content else 0}, initial_processing={needs_initial_processing})")
                 await self._process_chunk_boundaries(element_id)
+                
+                # Mark initial processing as complete
+                if needs_initial_processing:
+                    current_structure["initial_processing_complete"] = True
+                    logger.critical(f"🟠 UPDATE CHUNKS DEBUG: {element_id} - Marked initial processing as complete")
             else:
-                logger.debug(f"Skipping chunk boundary processing for {element_id} (no new content, no initial processing needed)")
+                logger.critical(f"🟠 UPDATE CHUNKS DEBUG: {element_id} - Skipping chunk boundary processing (no new content, no initial processing needed)")
             
             # Update metadata
             current_structure["last_update"] = datetime.now()
             current_structure["total_tokens"] = self._calculate_total_chunk_tokens(current_structure)
             
-            logger.debug(f"Updated chunks for {element_id}: {len(current_structure['n_chunks'])} N-chunks, {len(current_structure['m_chunks'])} M-chunks")
+            final_n_count = len(current_structure['n_chunks'])
+            final_m_count = len(current_structure['m_chunks'])
+            logger.critical(f"🟠 UPDATE CHUNKS COMPLETE DEBUG: Updated chunks for {element_id}: {final_n_count} N-chunks, {final_m_count} M-chunks")
             
         except Exception as e:
             logger.error(f"Error updating chunks for {element_id}: {e}", exc_info=True)
@@ -2201,10 +2173,12 @@ class CompressionEngineComponent(Component):
             n_chunks = chunk_structure["n_chunks"]
             m_chunks = chunk_structure["m_chunks"]
             
+            logger.critical(f"🟡 CHUNK BOUNDARY DEBUG: Starting boundary processing for {element_id}: {len(n_chunks)} N-chunks, {len(m_chunks)} M-chunks")
+            
             # NEW: Handle invalidated M-chunks that need recompression
             invalidated_m_chunks = [m for m in m_chunks if m.get("is_invalid", False)]
             if invalidated_m_chunks:
-                logger.info(f"Found {len(invalidated_m_chunks)} invalidated M-chunks for {element_id}, recompressing...")
+                logger.critical(f"🟡 CHUNK BOUNDARY DEBUG: Found {len(invalidated_m_chunks)} invalidated M-chunks for {element_id}, recompressing...")
                 await self._recompress_invalidated_m_chunks(element_id, invalidated_m_chunks, n_chunks)
             
             # Create M-chunks for complete N-chunks (but KEEP the N-chunks!)
@@ -2215,8 +2189,10 @@ class CompressionEngineComponent(Component):
             new_complete_chunks = [chunk for chunk in complete_n_chunks 
                                  if chunk.get("chunk_index", -1) not in existing_m_chunk_sources]
             
+            logger.critical(f"🟡 CHUNK BOUNDARY DEBUG: {element_id} - Complete N-chunks: {len(complete_n_chunks)}, Existing M-chunk sources: {existing_m_chunk_sources}, New complete chunks: {len(new_complete_chunks)}")
+            
             if new_complete_chunks:
-                logger.info(f"Found {len(new_complete_chunks)} new complete N-chunks for {element_id}, creating M-chunks (keeping N-chunks) - BACKGROUND MODE")
+                logger.critical(f"🔴 M-CHUNK CREATION DEBUG: Starting M-chunk creation for {element_id} - {len(new_complete_chunks)} new complete N-chunks - BACKGROUND MODE")
                 
                 # Create M-chunks for new complete N-chunks using TRUE BACKGROUND COMPRESSION
                 for chunk in new_complete_chunks:
@@ -2229,6 +2205,8 @@ class CompressionEngineComponent(Component):
                         chunk_index = chunk.get('chunk_index', 0)
                         chunk_element_id = f"{element_id}_chunk_{chunk_index}"
                         
+                        logger.critical(f"🔴 M-CHUNK CREATION DEBUG: Creating M-chunk for {element_id} N-chunk {chunk_index} with {len(chunk_content)} content items")
+                        
                         # NEW: Create memory with dependency tracking for cascade invalidation
                         result_node = await self._create_memory_with_dependency_tracking(
                             element_id, chunk_content, chunk_index, chunk_element_id
@@ -2239,25 +2217,31 @@ class CompressionEngineComponent(Component):
                             result_props = result_node.get("properties", {})
                             node_type = result_node.get("node_type", "")
                             
+                            logger.critical(f"🔴 M-CHUNK CREATION DEBUG: Memory creation result for {element_id} N-chunk {chunk_index}: node_type={node_type}")
+                            
                             if node_type == "memorized_content":
                                 # Completed memory
                                 memory_summary = result_props.get("memory_summary", f"Background memory of N-chunk {chunk_index}")
                                 compression_approach = "agent_memory_compressor_background_complete"
+                                logger.critical(f"🟢 M-CHUNK COMPLETE DEBUG: {element_id} N-chunk {chunk_index} - COMPLETED immediately: {memory_summary[:50]}...")
                                 
                             elif node_type in ["fresh_content", "trimmed_fresh_content"]:
                                 # Background compression in progress, using fresh content fallback
                                 memory_summary = f"⏳ Background compression in progress for N-chunk {chunk_index} (using fresh content)"
                                 compression_approach = "agent_memory_compressor_background_fallback"
+                                logger.critical(f"🟡 M-CHUNK PROGRESS DEBUG: {element_id} N-chunk {chunk_index} - Background compression in progress, using fallback")
                                 
                             elif node_type == "compression_placeholder":
                                 # Background compression starting
                                 memory_summary = result_props.get("memory_summary", f"⏳ Starting background compression for N-chunk {chunk_index}")
                                 compression_approach = "agent_memory_compressor_background_placeholder"
+                                logger.critical(f"🟡 M-CHUNK PROGRESS DEBUG: {element_id} N-chunk {chunk_index} - Background compression placeholder created")
                                 
                             else:
                                 # Unknown result type
                                 memory_summary = f"Background compression result for N-chunk {chunk_index}"
                                 compression_approach = f"agent_memory_compressor_background_{node_type}"
+                                logger.critical(f"🟠 M-CHUNK UNKNOWN DEBUG: {element_id} N-chunk {chunk_index} - Unknown result type: {node_type}")
                             
                             # Create memory node from background compression result
                             memory_node = {
@@ -2286,7 +2270,7 @@ class CompressionEngineComponent(Component):
                             
                         else:
                             # No result from background compression, create placeholder
-                            logger.warning(f"Background compression returned None for N-chunk {chunk_index}, creating placeholder")
+                            logger.critical(f"🔴 M-CHUNK FAILED DEBUG: Background compression returned None for {element_id} N-chunk {chunk_index}, creating placeholder")
                             memory_summary = f"⏳ Background compression failed to start for N-chunk {chunk_index}"
                             compression_approach = "agent_memory_compressor_background_failed"
                             
@@ -2326,13 +2310,15 @@ class CompressionEngineComponent(Component):
                             }
                             
                             m_chunks.append(new_m_chunk)
-                            logger.debug(f"Created background M-chunk backup for N-chunk {chunk_index} for {element_id}")
+                            logger.critical(f"🟢 M-CHUNK ADDED DEBUG: Added M-chunk backup for {element_id} N-chunk {chunk_index} - Total M-chunks now: {len(m_chunks)}")
                         
                     except Exception as chunk_error:
-                        logger.error(f"Error creating background M-chunk backup for {element_id}: {chunk_error}", exc_info=True)
+                        logger.error(f"🔴 M-CHUNK ERROR DEBUG: Error creating background M-chunk backup for {element_id}: {chunk_error}", exc_info=True)
                         continue
                 
-                logger.info(f"Background M-chunk creation complete for {element_id}: {len(new_complete_chunks)} new backups created, N-chunks preserved")
+                logger.critical(f"🟢 M-CHUNK CREATION COMPLETE DEBUG: Background M-chunk creation complete for {element_id}: {len(new_complete_chunks)} new backups created, N-chunks preserved")
+            else:
+                logger.critical(f"🟡 CHUNK BOUNDARY DEBUG: No new complete N-chunks found for {element_id} - no M-chunk creation needed")
             
             # FIXED: Only remove old N-chunks when we exceed storage limits (not window limits!)
             # For now, keep all N-chunks since we have dual-stream storage separation
@@ -2357,7 +2343,9 @@ class CompressionEngineComponent(Component):
                     all_n_content.extend(chunk.get("content", []))
                 chunk_structure["content_fingerprint"] = self._calculate_content_fingerprint(all_n_content)
             
-            logger.debug(f"Processed chunk boundaries for {element_id}: {len(chunk_structure['n_chunks'])} N-chunks (preserved), {len(chunk_structure['m_chunks'])} M-chunks (background)")
+            final_m_count = len(chunk_structure["m_chunks"])
+            final_n_count = len(chunk_structure["n_chunks"])
+            logger.critical(f"🟢 CHUNK BOUNDARY COMPLETE DEBUG: Processed chunk boundaries for {element_id}: {final_n_count} N-chunks (preserved), {final_m_count} M-chunks (background)")
             
         except Exception as e:
             logger.error(f"Error processing chunk boundaries for {element_id}: {e}", exc_info=True)
@@ -2588,15 +2576,26 @@ class CompressionEngineComponent(Component):
             n_chunks = chunks.get("n_chunks", [])
             m_chunks = chunks.get("m_chunks", [])
             
+            logger.critical(f"🔵 STREAM SELECTION DEBUG: {element_id} - is_focused={is_focused}, n_chunks={len(n_chunks)}, m_chunks={len(m_chunks)}")
+            
+            # Debug chunk states
+            complete_n_chunks = [chunk for chunk in n_chunks if chunk.get("is_complete", False)]
+            incomplete_n_chunks = [chunk for chunk in n_chunks if not chunk.get("is_complete", False)]
+            valid_m_chunks = [m for m in m_chunks if not m.get("is_invalid", False)]
+            invalid_m_chunks = [m for m in m_chunks if m.get("is_invalid", False)]
+            
+            logger.critical(f"🔵 STREAM SELECTION DEBUG: {element_id} - N-chunks: {len(complete_n_chunks)} complete, {len(incomplete_n_chunks)} incomplete")
+            logger.critical(f"🔵 STREAM SELECTION DEBUG: {element_id} - M-chunks: {len(valid_m_chunks)} valid, {len(invalid_m_chunks)} invalid")
+            
             if is_focused:
-                logger.debug(f"Focused rendering for {element_id}: {len(n_chunks)} N-chunks, {len(m_chunks)} M-chunks")
+                logger.critical(f"🔵 FOCUSED STREAM DEBUG: {element_id} - Processing focused rendering logic")
                 
                 # FIXED: Focused logic - use window size properly
                 if len(n_chunks) <= self.FOCUSED_CHUNK_LIMIT:  # ≤8 N-chunks
                     # All N-chunks fit in window, show all fresh content (no M-chunks needed)
                     fresh_content = n_chunks
                     memory_content = []
-                    logger.debug(f"All {len(n_chunks)} N-chunks fit in {self.FOCUSED_CHUNK_LIMIT}-chunk window, showing all fresh content")
+                    logger.critical(f"🔵 FOCUSED STREAM DEBUG: {element_id} - All {len(n_chunks)} N-chunks fit in {self.FOCUSED_CHUNK_LIMIT}-chunk window, showing all fresh content, NO M-chunks")
                 else:
                     # >8 N-chunks: show M-chunks for oldest + last 8 N-chunks for recent
                     # Show last 8 N-chunks as fresh content
@@ -2605,31 +2604,45 @@ class CompressionEngineComponent(Component):
                     # Determine how many old N-chunks we need M-chunks for
                     num_old_chunks = len(n_chunks) - self.FOCUSED_CHUNK_LIMIT
                     
+                    logger.critical(f"🔵 FOCUSED STREAM DEBUG: {element_id} - Window overflow: {len(n_chunks)} > {self.FOCUSED_CHUNK_LIMIT}, need M-chunks for {num_old_chunks} old N-chunks")
+                    
                     # Get M-chunks for the oldest N-chunks (chronological order)
                     # M-chunks should correspond to the first num_old_chunks N-chunks
                     memory_content = []
                     for i in range(min(num_old_chunks, len(m_chunks))):
                         # Find M-chunk that corresponds to N-chunk index i
                         for m_chunk in m_chunks:
-                            if m_chunk.get("source_n_chunk_index", -1) == i:
+                            if m_chunk.get("source_n_chunk_index", -1) == i and not m_chunk.get("is_invalid", False):
                                 memory_content.append(m_chunk)
+                                logger.critical(f"🔵 FOCUSED STREAM DEBUG: {element_id} - Selected M-chunk for old N-chunk {i}")
                                 break
+                        else:
+                            logger.critical(f"🔴 FOCUSED STREAM DEBUG: {element_id} - MISSING M-chunk for old N-chunk {i} - this may cause rendering issues!")
                     
-                    logger.debug(f"Window overflow: showing {len(memory_content)} M-chunks (for oldest N-chunks) + {len(fresh_content)} recent N-chunks")
+                    logger.critical(f"🔵 FOCUSED STREAM DEBUG: {element_id} - Window overflow result: {len(memory_content)} M-chunks (for oldest) + {len(fresh_content)} recent N-chunks")
                 
                 # Return: memories first, then fresh content (chronological order)
-                return await self._flatten_chunks_for_rendering(memory_content + fresh_content)
+                selected_chunks = memory_content + fresh_content
+                logger.critical(f"🔵 FOCUSED STREAM DEBUG: {element_id} - Final selection: {len(memory_content)} M-chunks + {len(fresh_content)} N-chunks = {len(selected_chunks)} total chunks")
                 
             else:
-                logger.debug(f"Unfocused rendering for {element_id}: {len(m_chunks)} M-chunks + current N-chunk")
+                logger.critical(f"🔵 UNFOCUSED STREAM DEBUG: {element_id} - Processing unfocused rendering logic")
                 
                 # Unfocused: Show all M-chunks + current incomplete N-chunk only
                 incomplete_chunks = [chunk for chunk in n_chunks if not chunk.get("is_complete", False)]
                 current_chunk = incomplete_chunks[-1:] if incomplete_chunks else []
-                return await self._flatten_chunks_for_rendering(m_chunks + current_chunk)
+                selected_chunks = valid_m_chunks + current_chunk
                 
+                logger.critical(f"🔵 UNFOCUSED STREAM DEBUG: {element_id} - Selected {len(valid_m_chunks)} valid M-chunks + {len(current_chunk)} current incomplete N-chunk = {len(selected_chunks)} total chunks")
+            
+            # Flatten chunks to VEIL nodes
+            results = await self._flatten_chunks_for_rendering(selected_chunks)
+            logger.critical(f"🔵 STREAM SELECTION COMPLETE DEBUG: {element_id} - Flattened {len(selected_chunks)} chunks to {len(results)} VEIL nodes for {is_focused and 'FOCUSED' or 'UNFOCUSED'} rendering")
+            
+            return results
+        
         except Exception as e:
-            logger.error(f"Error selecting rendering stream for {element_id}: {e}", exc_info=True)
+            logger.critical(f"🔴 STREAM SELECTION ERROR: Error selecting rendering stream for {element_id}: {e}", exc_info=True)
             # Fallback: use original children unchanged
             return []
 
@@ -2640,7 +2653,7 @@ class CompressionEngineComponent(Component):
         This converts N-chunks and M-chunks back into the VEIL node format
         that the HUD rendering system expects.
         
-        Args:
+      Args:
             chunks: List of chunk structures (mix of N-chunks and M-chunks)
             
         Returns:
@@ -3226,21 +3239,23 @@ class CompressionEngineComponent(Component):
                         element_id, children, is_focused, processed_cache
                     )
                     
+                    # CRITICAL FIX: Update the flat cache with selected children!
+                    # This was missing and caused M-chunks to be lost
+                    await self._update_flat_cache_with_selected_children(
+                        processed_cache, container_veil_id, selected_children
+                    )
+                    
                     # Update container's tool metadata
                     available_tools = container_node.get("properties", {}).get("available_tools", [])
                     if available_tools:
                         container_node["properties"]["tools_available_despite_dual_stream"] = True
                         container_node["properties"]["dual_stream_focus_state"] = "focused" if is_focused else "unfocused"
                     
-                    logger.debug(f"Applied dual-stream processing to container {element_id}: {is_focused and 'focused' or 'unfocused'}")
+                    logger.debug(f"Applied dual-stream processing to container {element_id}: {len(selected_children)} selected nodes ({is_focused and 'focused' or 'unfocused'})")
                     
                 except Exception as container_error:
                     logger.error(f"Error processing container {element_id}: {container_error}", exc_info=True)
                     continue
-            
-            # Inject memory context if provided
-            if memory_data:
-                processed_cache = await self._inject_memory_context_to_flat_cache(processed_cache, memory_data)
             
             return processed_cache
             
@@ -3301,57 +3316,16 @@ class CompressionEngineComponent(Component):
             # Select which stream to render based on focus state
             selected_nodes = await self._select_rendering_stream(element_id, is_focused, chunks)
             
-            logger.debug(f"Dual-stream selection for {element_id}: {len(selected_nodes)} nodes selected ({is_focused and 'focused' or 'unfocused'})")
+            # DEBUG: Check if M-chunks are in the selected nodes
+            memory_nodes_count = sum(1 for node in selected_nodes if node.get("node_type") == "content_memory")
+            n_chunk_nodes_count = len(selected_nodes) - memory_nodes_count
+            
+            logger.critical(f"🔵 FLAT CACHE DUAL-STREAM DEBUG: {element_id} - Selected {len(selected_nodes)} nodes: {memory_nodes_count} memory nodes, {n_chunk_nodes_count} N-chunk nodes ({is_focused and 'focused' or 'unfocused'})")
             return selected_nodes
             
         except Exception as e:
             logger.error(f"Error applying dual-stream selection to flat cache: {e}", exc_info=True)
             return children  # Fallback to original children
-
-    async def _inject_memory_context_to_flat_cache(self, flat_cache: Dict[str, Any], 
-                                                  memory_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        NEW: Inject memory context into flat VEIL cache.
-        
-        This adds memory nodes directly to the flat cache instead of
-        reconstructing hierarchy first.
-        
-        Args:
-            flat_cache: Flat VEIL cache to modify
-            memory_data: Memory data to inject
-            
-        Returns:
-            Modified flat cache with memory context
-        """
-        try:
-            # Only inject agent workspace info at top level
-            agent_info = memory_data.get('agent_info', {})
-            if agent_info:
-                workspace_node_id = f"memory_workspace_{self.id}"
-                workspace_node = {
-                    "veil_id": workspace_node_id,
-                    "node_type": "memory_context",
-                    "properties": {
-                        "structural_role": "memory_section",
-                        "content_nature": "agent_workspace",
-                        "memory_type": "workspace_info",
-                        "agent_name": agent_info.get('agent_name', 'Unknown'),
-                        "workspace_description": agent_info.get('workspace_description', ''),
-                        "total_interactions": agent_info.get('total_stored_interactions', 0),
-                        "parent_id": self._find_space_root_in_flat_cache(flat_cache)
-                    },
-                    "children": []
-                }
-                
-                # Add to flat cache
-                flat_cache[workspace_node_id] = workspace_node
-                logger.debug(f"Injected agent workspace memory context into flat cache")
-            
-            return flat_cache
-            
-        except Exception as e:
-            logger.error(f"Error injecting memory context to flat cache: {e}", exc_info=True)
-            return flat_cache
 
     def _find_space_root_in_flat_cache(self, flat_cache: Dict[str, Any]) -> Optional[str]:
         """
@@ -3566,3 +3540,61 @@ class CompressionEngineComponent(Component):
         except Exception as e:
             logger.error(f"Error getting temporal VEIL at delta index {delta_index}: {e}", exc_info=True)
             return None
+
+    async def _update_flat_cache_with_selected_children(self, 
+                                                       flat_cache: Dict[str, Any], 
+                                                       container_veil_id: str, 
+                                                       selected_children: List[Dict[str, Any]]) -> None:
+        """
+        CRITICAL FIX: Update flat cache with selected children from dual-stream processing.
+        
+        This was the missing piece that caused M-chunks to be lost in flat cache approach.
+        When dual-stream selection picks M-chunks, we need to update the flat cache so that
+        HUD's hierarchy reconstruction uses the compressed nodes instead of original N-chunks.
+        
+        Args:
+            flat_cache: The processed flat cache to update
+            container_veil_id: VEIL ID of the container whose children we're updating
+            selected_children: Selected children from dual-stream processing (may include M-chunks)
+        """
+        try:
+            # First, remove all existing children of this container from flat cache
+            children_to_remove = []
+            for veil_id, node_data in flat_cache.items():
+                if isinstance(node_data, dict):
+                    props = node_data.get("properties", {})
+                    parent_id = props.get("parent_id") or node_data.get("parent_id")
+                    
+                    if parent_id == container_veil_id:
+                        children_to_remove.append(veil_id)
+            
+            # Remove old children
+            for veil_id in children_to_remove:
+                del flat_cache[veil_id]
+                logger.debug(f"Removed old child {veil_id} from flat cache")
+            
+            # Add selected children to flat cache
+            memory_nodes_added = 0
+            for child in selected_children:
+                child_veil_id = child.get("veil_id")
+                if child_veil_id:
+                    # Ensure parent_id is set correctly
+                    child_props = child.get("properties", {})
+                    child_props["parent_id"] = container_veil_id
+                    
+                    # Add to flat cache
+                    flat_cache[child_veil_id] = child
+                    
+                    # Track memory nodes
+                    if child.get("node_type") == "content_memory":
+                        memory_nodes_added += 1
+                        logger.critical(f"🟢 FLAT CACHE UPDATE DEBUG: Added M-chunk memory node {child_veil_id} to flat cache (parent: {container_veil_id})")
+                    else:
+                        logger.debug(f"Added selected child {child_veil_id} to flat cache (parent: {container_veil_id})")
+                else:
+                    logger.warning(f"Selected child missing veil_id, cannot add to flat cache: {child}")
+            
+            logger.critical(f"🟢 FLAT CACHE UPDATE DEBUG: Updated flat cache for container {container_veil_id}: removed {len(children_to_remove)} old children, added {len(selected_children)} selected children ({memory_nodes_added} memory nodes)")
+            
+        except Exception as e:
+            logger.error(f"Error updating flat cache with selected children for container {container_veil_id}: {e}", exc_info=True)

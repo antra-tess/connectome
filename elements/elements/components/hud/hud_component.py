@@ -2146,6 +2146,10 @@ class HUDComponent(Component):
                 logger.warning(f"Failed to reconstruct hierarchy from processed flat cache")
                 return "Error: Could not reconstruct VEIL hierarchy for rendering"
             
+            # DEBUG: Check if M-chunks made it through the reconstruction
+            memory_node_count = self._count_memory_nodes_recursively(hierarchical_veil)
+            logger.critical(f"🔴 HUD HIERARCHY DEBUG: Reconstructed hierarchy contains {memory_node_count} memory nodes")
+            
             # Set default render style if not specified
             if 'render_style' not in options:
                 options['render_style'] = 'verbose_tags'
@@ -2160,3 +2164,33 @@ class HUDComponent(Component):
         except Exception as e:
             logger.error(f"Error rendering processed flat VEIL: {e}", exc_info=True)
             return f"Error rendering processed VEIL: {e}"
+
+    def _count_memory_nodes_recursively(self, veil_node: Dict[str, Any]) -> int:
+        """
+        DEBUG: Recursively count memory nodes in a VEIL hierarchy.
+        
+        Args:
+            veil_node: Root VEIL node to start counting from
+            
+        Returns:
+            Total count of memory nodes in the hierarchy
+        """
+        try:
+            count = 0
+            
+            # Check if current node is a memory node
+            if isinstance(veil_node, dict):
+                node_type = veil_node.get("node_type", "")
+                if node_type == "content_memory":
+                    count += 1
+                
+                # Recursively count in children
+                children = veil_node.get("children", [])
+                for child in children:
+                    count += self._count_memory_nodes_recursively(child)
+            
+            return count
+            
+        except Exception as e:
+            logger.error(f"Error counting memory nodes: {e}", exc_info=True)
+            return 0
