@@ -895,9 +895,6 @@ class ExternalEventRouter:
         if not conversation_id:
             logger.error("conversation_started event missing 'conversation_id'. Cannot process.")
             return
-        if not isinstance(history, list):
-            logger.error(f"conversation_started event for '{conversation_id}' missing 'history' list or it's not a list. Cannot process history.")
-            history = [] # Process without history if it's invalid
 
         # NEW: Get the target InnerSpace for the agent (same as _handle_direct_message)
         target_inner_space = self.space_registry.get_inner_space_for_agent(recipient_agent_id)
@@ -905,22 +902,7 @@ class ExternalEventRouter:
             logger.error(f"Could not route conversation_started: InnerSpace for agent_id '{recipient_agent_id}' not found.")
             return
 
-        logger.info(f"Processing conversation_started for agent '{recipient_agent_id}' InnerSpace '{target_inner_space.id}' with {len(history)} history messages...")
-
-        # NEW: Route via bulk processing path only (remove legacy processing)
-        if history:
-            await self._process_bulk_history(
-                source_adapter_id=source_adapter_id,
-                conversation_id=conversation_id,
-                history_messages=history,
-                is_dm=is_dm,
-                recipient_agent_id=recipient_agent_id,
-                target_inner_space=target_inner_space,
-                original_adapter_data=adapter_data,
-                source_event_type="conversation_started"
-            )
-        else:
-            logger.info(f"No history to process for conversation_started: {conversation_id}")
+        logger.info(f"Processing conversation_started for agent '{recipient_agent_id}' InnerSpace '{target_inner_space.id}'")
 
     # --- NEW HANDLER for Bulk History Processing ---
     async def _handle_history_fetched(self, source_adapter_id: str, adapter_data: Dict[str, Any]):
