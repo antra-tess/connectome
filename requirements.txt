@@ -1,6 +1,6 @@
 # Core dependencies
 python-socketio[aiohttp]==5.11.1
-aiohttp==3.9.3
+aiohttp>=3.10
 python-dotenv>=1.0.0                           # For environment variable management
 pydantic>=2.0.0                                # Data validation
 pydantic-settings>=2.0.0                       # Settings management with Pydantic
