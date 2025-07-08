@@ -52,6 +52,8 @@ class MessageListComponent(Component):
         super().initialize(**kwargs)
         self._state.setdefault('_messages', []) # List of MessageType dictionaries
         self._state.setdefault('_message_map', {}) # Optional: Map internal_msg_id -> index in _messages for faster updates/deletes
+        # NEW: Track operations for VEIL generation
+        self._state.setdefault('_pending_veil_operations', [])
         self._max_messages = max_messages
         logger.debug(f"MessageListComponent initialized for Element {self.owner.id}. Max messages: {max_messages}")
 
@@ -329,6 +331,24 @@ class MessageListComponent(Component):
             logger.warning(f"[{self.owner.id}] Could not delete message: External ID '{original_external_id}' not found.")
             return False
 
+        # NEW: Record delete operation for VEIL generation BEFORE making changes
+        original_text = message_to_update.get('original_text_before_pending_delete', message_to_update.get('text'))
+        self._record_veil_operation({
+            "operation_type": "delete",
+            "veil_id": message_to_update['internal_id'],
+            "conversation_context": self._get_conversation_metadata(),
+            "sender_info": {
+                "sender_id": message_to_update.get('sender_id'),
+                "sender_name": message_to_update.get('sender_name')
+            },
+            "delete_details": {
+                "original_text": original_text,
+                "delete_timestamp": delete_content.get('timestamp', time.time()),
+                "original_preview": self._create_text_preview(original_text or "", 50),
+                "deletion_source": "external" if not message_to_update.get('status') == "pending_delete" else "agent"
+            }
+        })
+
         current_status = message_to_update.get('status', 'received')
 
         if current_status == "pending_delete":
@@ -396,6 +416,25 @@ class MessageListComponent(Component):
         if not message_to_edit:
             logger.warning(f"[{self.owner.id}] Could not edit message: External ID '{original_external_id}' not found.")
             return False
+
+        # NEW: Record edit operation for VEIL generation BEFORE making changes
+        original_text = message_to_edit.get('original_text_before_pending_edit', message_to_edit.get('text'))
+        self._record_veil_operation({
+            "operation_type": "edit",
+            "veil_id": message_to_edit['internal_id'],
+            "conversation_context": self._get_conversation_metadata(),
+            "sender_info": {
+                "sender_id": message_to_edit.get('sender_id'),
+                "sender_name": message_to_edit.get('sender_name')
+            },
+            "edit_details": {
+                "original_text": original_text,
+                "new_text": new_text,
+                "edit_timestamp": edit_timestamp,
+                "original_preview": self._create_text_preview(original_text or "", 50),
+                "new_preview": self._create_text_preview(new_text, 50)
+            }
+        })
 
         current_status = message_to_edit.get('status', 'received')
 
@@ -2062,3 +2101,45 @@ class MessageListComponent(Component):
             logger.debug(f"[{self.owner.id}] Sorted {len(self._state['_messages'])} messages by timestamp")
         except Exception as e:
             logger.error(f"[{self.owner.id}] Error sorting messages by timestamp: {e}", exc_info=True)
+
+    # --- NEW: Helper Methods for VEIL Operation Tracking ---
+    def _record_veil_operation(self, operation_data: Dict[str, Any]) -> None:
+        """Record operation for VEIL generation."""
+        self._state['_pending_veil_operations'].append(operation_data)
+        logger.debug(f"[{self.owner.id}] Recorded VEIL operation: {operation_data.get('operation_type')} for {operation_data.get('veil_id')}")
+        
+    def get_pending_veil_operations(self) -> List[Dict[str, Any]]:
+        """Get and clear pending VEIL operations."""
+        operations = list(self._state.get('_pending_veil_operations', []))
+        self._state['_pending_veil_operations'].clear()
+        return operations
+        
+    def _create_text_preview(self, text: str, max_length: int) -> Dict[str, Any]:
+        """Create text preview with truncation info."""
+        if not text:
+            return {"preview": "", "truncated": False, "original_length": 0}
+            
+        if len(text) <= max_length:
+            return {"preview": text, "truncated": False, "original_length": len(text)}
+        else:
+            truncated_count = len(text) - max_length
+            return {
+                "preview": text[:max_length], 
+                "truncated": True, 
+                "original_length": len(text),
+                "truncated_count": truncated_count
+            }
+
+    def _get_conversation_metadata(self) -> Dict[str, Any]:
+        """Get conversation metadata from the owner element."""
+        metadata = {}
+        if self.owner:
+            metadata.update({
+                "adapter_type": getattr(self.owner, 'adapter_type', None),
+                "server_name": getattr(self.owner, 'server_name', None), 
+                "conversation_name": getattr(self.owner, 'conversation_name', None),
+                "adapter_id": getattr(self.owner, 'adapter_id', None),
+                "external_conversation_id": getattr(self.owner, 'external_conversation_id', None),
+                "alias": getattr(self.owner, 'alias', None)
+            })
+        return metadata

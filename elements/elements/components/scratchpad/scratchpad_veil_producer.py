@@ -63,7 +63,12 @@ class ScratchpadVeilProducer(VeilProducer):
 
         for index, note_content in enumerate(current_notes_list):
             import hashlib
+            import time
+            from datetime import datetime
             note_hash_id = hashlib.md5(str(note_content).encode()).hexdigest()[:8] 
+            
+            # Add timestamp for time markers (operation_index handles chronological placement)
+            current_timestamp = time.time()
             
             child_node = {
                 "veil_id": f"{self.owner.id}_scratchpad_note_{note_hash_id}",
@@ -72,6 +77,12 @@ class ScratchpadVeilProducer(VeilProducer):
                     "structural_role": "list_item",
                     "content_nature": "text_note",
                     VEIL_NOTE_CONTENT_PROP: note_content,
+                    # NEW: Add timestamp fields for time markers (not chronological placement)
+                    "timestamp": current_timestamp,
+                    "timestamp_iso": datetime.fromtimestamp(current_timestamp).isoformat() + "Z",
+                    "note_timestamp": current_timestamp,
+                    "created_at": datetime.fromtimestamp(current_timestamp).isoformat() + "Z"
+                    # NOTE: operation_index will be added by SpaceVeilProducer for chronological placement
                 },
                 "children": [] 
             }
@@ -186,7 +197,13 @@ class ScratchpadVeilProducer(VeilProducer):
             original_note_content = notes_to_add_map.get(note_str_content)
             if original_note_content is None: continue
             import hashlib
+            import time
+            from datetime import datetime
             note_hash_id = hashlib.md5(str(original_note_content).encode()).hexdigest()[:8]
+            
+            # Add timestamp for time markers (operation_index handles chronological placement)
+            current_timestamp = time.time()
+            
             added_node = {
                 "veil_id": f"{self.owner.id}_scratchpad_note_{note_hash_id}",
                 "node_type": VEIL_NOTE_ITEM_TYPE,
@@ -194,6 +211,12 @@ class ScratchpadVeilProducer(VeilProducer):
                     "structural_role": "list_item",
                     "content_nature": "text_note",
                     VEIL_NOTE_CONTENT_PROP: original_note_content,
+                    # NEW: Add timestamp fields for time markers (not chronological placement)
+                    "timestamp": current_timestamp,
+                    "timestamp_iso": datetime.fromtimestamp(current_timestamp).isoformat() + "Z",
+                    "note_timestamp": current_timestamp,
+                    "created_at": datetime.fromtimestamp(current_timestamp).isoformat() + "Z"
+                    # NOTE: operation_index will be added by SpaceVeilProducer for chronological placement
                 },
                 "children": []
             }

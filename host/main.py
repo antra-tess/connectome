@@ -221,6 +221,7 @@ async def amain():
                 name=f"{agent_config.name}'s Mind", 
                 agent_name=agent_config.name,
                 description=f"Inner space for agent {agent_config.name}",
+                agent_description=agent_config.description,
                 agent_id=agent_config.agent_id,
                 llm_provider=llm_provider,
                 agent_loop_component_type=agent_loop_component_class,

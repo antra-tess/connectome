@@ -1396,7 +1396,7 @@ class CompressionEngineComponent(Component):
             
             # Update container children with selected stream
             container_node['children'] = selected_nodes
-            logger.critical(f"Selected nodes: {selected_nodes}")
+            logger.info(f"Selected nodes: {selected_nodes}")
             
             # Ensure tool information is preserved
             if available_tools:
@@ -1962,19 +1962,19 @@ class CompressionEngineComponent(Component):
             Initialized chunk structure
         """
         try:
-            logger.critical(f"🟢 COMPRESSION INIT DEBUG: Starting chunk initialization for {element_id} with {len(children)} children")
+            logger.info(f"🟢 COMPRESSION INIT DEBUG: Starting chunk initialization for {element_id} with {len(children)} children")
             
             # Separate existing memories from fresh content
             existing_memories, fresh_content = self._separate_memories_and_content(children)
-            logger.critical(f"🟢 COMPRESSION INIT DEBUG: {element_id} - Found {len(existing_memories)} existing memories, {len(fresh_content)} fresh content items")
+            logger.info(f"🟢 COMPRESSION INIT DEBUG: {element_id} - Found {len(existing_memories)} existing memories, {len(fresh_content)} fresh content items")
             
             # Convert fresh content into N-chunks (4k token boundaries)
             n_chunks = await self._content_to_n_chunks(fresh_content)
-            logger.critical(f"🟢 COMPRESSION INIT DEBUG: {element_id} - Created {len(n_chunks)} N-chunks from fresh content")
+            logger.info(f"🟢 COMPRESSION INIT DEBUG: {element_id} - Created {len(n_chunks)} N-chunks from fresh content")
             
             # Convert existing memories into M-chunks
             m_chunks = self._memories_to_m_chunks(existing_memories)
-            logger.critical(f"🟢 COMPRESSION INIT DEBUG: {element_id} - Converted {len(existing_memories)} existing memories to {len(m_chunks)} M-chunks")
+            logger.info(f"🟢 COMPRESSION INIT DEBUG: {element_id} - Converted {len(existing_memories)} existing memories to {len(m_chunks)} M-chunks")
             
             # Calculate total tokens
             total_tokens = sum(self._calculate_chunk_tokens(chunk) for chunk in n_chunks)
@@ -1992,8 +1992,8 @@ class CompressionEngineComponent(Component):
             complete_n_chunks = [chunk for chunk in n_chunks if chunk.get("is_complete", False)]
             incomplete_n_chunks = [chunk for chunk in n_chunks if not chunk.get("is_complete", False)]
             
-            logger.critical(f"🟢 COMPRESSION INIT DEBUG: {element_id} - N-chunk analysis: {len(complete_n_chunks)} complete, {len(incomplete_n_chunks)} incomplete")
-            logger.critical(f"🟢 COMPRESSION INIT DEBUG: {element_id} - INITIALIZATION COMPLETE - Will need {len(complete_n_chunks)} M-chunks for complete N-chunks")
+            logger.info(f"🟢 COMPRESSION INIT DEBUG: {element_id} - N-chunk analysis: {len(complete_n_chunks)} complete, {len(incomplete_n_chunks)} incomplete")
+            logger.info(f"🟢 COMPRESSION INIT DEBUG: {element_id} - INITIALIZATION COMPLETE - Will need {len(complete_n_chunks)} M-chunks for complete N-chunks")
             
             logger.info(f"Initialized chunks for {element_id}: {len(n_chunks)} N-chunks, {len(m_chunks)} M-chunks, {total_tokens} tokens")
             return chunk_structure
@@ -2028,7 +2028,7 @@ class CompressionEngineComponent(Component):
             needs_initial_processing = (initialization_source == "veil_children" and 
                                       not current_structure.get("initial_processing_complete", False))
             
-            logger.critical(f"🟠 UPDATE CHUNKS DEBUG: {element_id} - initialization_source={initialization_source}, needs_initial_processing={needs_initial_processing}")
+            logger.info(f"🟠 UPDATE CHUNKS DEBUG: {element_id} - initialization_source={initialization_source}, needs_initial_processing={needs_initial_processing}")
             
             # Detect new content since last update
             new_content = await self._detect_new_content(element_id, children)
@@ -2036,22 +2036,22 @@ class CompressionEngineComponent(Component):
             # Add new content to N-stream if any
             if new_content:
                 current_structure["n_chunks"].extend(await self._content_to_n_chunks(new_content))
-                logger.critical(f"🟠 UPDATE CHUNKS DEBUG: Added {len(new_content)} new content items to N-stream for {element_id}")
+                logger.info(f"🟠 UPDATE CHUNKS DEBUG: Added {len(new_content)} new content items to N-stream for {element_id}")
             else:
-                logger.critical(f"🟠 UPDATE CHUNKS DEBUG: No new content detected for element {element_id}")
+                logger.info(f"🟠 UPDATE CHUNKS DEBUG: No new content detected for element {element_id}")
             
             # FIXED: Always check chunk boundaries, even if no new content
             # This is crucial for initial M-chunk creation after first initialization
             if new_content or needs_initial_processing:
-                logger.critical(f"🟠 UPDATE CHUNKS DEBUG: {element_id} - Triggering chunk boundary processing (new_content={len(new_content) if new_content else 0}, initial_processing={needs_initial_processing})")
+                logger.info(f"🟠 UPDATE CHUNKS DEBUG: {element_id} - Triggering chunk boundary processing (new_content={len(new_content) if new_content else 0}, initial_processing={needs_initial_processing})")
                 await self._process_chunk_boundaries(element_id)
                 
                 # Mark initial processing as complete
                 if needs_initial_processing:
                     current_structure["initial_processing_complete"] = True
-                    logger.critical(f"🟠 UPDATE CHUNKS DEBUG: {element_id} - Marked initial processing as complete")
+                    logger.info(f"🟠 UPDATE CHUNKS DEBUG: {element_id} - Marked initial processing as complete")
             else:
-                logger.critical(f"🟠 UPDATE CHUNKS DEBUG: {element_id} - Skipping chunk boundary processing (no new content, no initial processing needed)")
+                logger.info(f"🟠 UPDATE CHUNKS DEBUG: {element_id} - Skipping chunk boundary processing (no new content, no initial processing needed)")
             
             # Update metadata
             current_structure["last_update"] = datetime.now()
@@ -2059,7 +2059,7 @@ class CompressionEngineComponent(Component):
             
             final_n_count = len(current_structure['n_chunks'])
             final_m_count = len(current_structure['m_chunks'])
-            logger.critical(f"🟠 UPDATE CHUNKS COMPLETE DEBUG: Updated chunks for {element_id}: {final_n_count} N-chunks, {final_m_count} M-chunks")
+            logger.info(f"🟠 UPDATE CHUNKS COMPLETE DEBUG: Updated chunks for {element_id}: {final_n_count} N-chunks, {final_m_count} M-chunks")
             
         except Exception as e:
             logger.error(f"Error updating chunks for {element_id}: {e}", exc_info=True)
@@ -2173,12 +2173,12 @@ class CompressionEngineComponent(Component):
             n_chunks = chunk_structure["n_chunks"]
             m_chunks = chunk_structure["m_chunks"]
             
-            logger.critical(f"🟡 CHUNK BOUNDARY DEBUG: Starting boundary processing for {element_id}: {len(n_chunks)} N-chunks, {len(m_chunks)} M-chunks")
+            logger.info(f"🟡 CHUNK BOUNDARY DEBUG: Starting boundary processing for {element_id}: {len(n_chunks)} N-chunks, {len(m_chunks)} M-chunks")
             
             # NEW: Handle invalidated M-chunks that need recompression
             invalidated_m_chunks = [m for m in m_chunks if m.get("is_invalid", False)]
             if invalidated_m_chunks:
-                logger.critical(f"🟡 CHUNK BOUNDARY DEBUG: Found {len(invalidated_m_chunks)} invalidated M-chunks for {element_id}, recompressing...")
+                logger.info(f"🟡 CHUNK BOUNDARY DEBUG: Found {len(invalidated_m_chunks)} invalidated M-chunks for {element_id}, recompressing...")
                 await self._recompress_invalidated_m_chunks(element_id, invalidated_m_chunks, n_chunks)
             
             # Create M-chunks for complete N-chunks (but KEEP the N-chunks!)
@@ -2189,10 +2189,10 @@ class CompressionEngineComponent(Component):
             new_complete_chunks = [chunk for chunk in complete_n_chunks 
                                  if chunk.get("chunk_index", -1) not in existing_m_chunk_sources]
             
-            logger.critical(f"🟡 CHUNK BOUNDARY DEBUG: {element_id} - Complete N-chunks: {len(complete_n_chunks)}, Existing M-chunk sources: {existing_m_chunk_sources}, New complete chunks: {len(new_complete_chunks)}")
+            logger.info(f"🟡 CHUNK BOUNDARY DEBUG: {element_id} - Complete N-chunks: {len(complete_n_chunks)}, Existing M-chunk sources: {existing_m_chunk_sources}, New complete chunks: {len(new_complete_chunks)}")
             
             if new_complete_chunks:
-                logger.critical(f"🔴 M-CHUNK CREATION DEBUG: Starting M-chunk creation for {element_id} - {len(new_complete_chunks)} new complete N-chunks - BACKGROUND MODE")
+                logger.info(f"🔴 M-CHUNK CREATION DEBUG: Starting M-chunk creation for {element_id} - {len(new_complete_chunks)} new complete N-chunks - BACKGROUND MODE")
                 
                 # Create M-chunks for new complete N-chunks using TRUE BACKGROUND COMPRESSION
                 for chunk in new_complete_chunks:
@@ -2205,7 +2205,7 @@ class CompressionEngineComponent(Component):
                         chunk_index = chunk.get('chunk_index', 0)
                         chunk_element_id = f"{element_id}_chunk_{chunk_index}"
                         
-                        logger.critical(f"🔴 M-CHUNK CREATION DEBUG: Creating M-chunk for {element_id} N-chunk {chunk_index} with {len(chunk_content)} content items")
+                        logger.info(f"🔴 M-CHUNK CREATION DEBUG: Creating M-chunk for {element_id} N-chunk {chunk_index} with {len(chunk_content)} content items")
                         
                         # NEW: Create memory with dependency tracking for cascade invalidation
                         result_node = await self._create_memory_with_dependency_tracking(
@@ -2217,31 +2217,31 @@ class CompressionEngineComponent(Component):
                             result_props = result_node.get("properties", {})
                             node_type = result_node.get("node_type", "")
                             
-                            logger.critical(f"🔴 M-CHUNK CREATION DEBUG: Memory creation result for {element_id} N-chunk {chunk_index}: node_type={node_type}")
+                            logger.info(f"🔴 M-CHUNK CREATION DEBUG: Memory creation result for {element_id} N-chunk {chunk_index}: node_type={node_type}")
                             
                             if node_type == "memorized_content":
                                 # Completed memory
                                 memory_summary = result_props.get("memory_summary", f"Background memory of N-chunk {chunk_index}")
                                 compression_approach = "agent_memory_compressor_background_complete"
-                                logger.critical(f"🟢 M-CHUNK COMPLETE DEBUG: {element_id} N-chunk {chunk_index} - COMPLETED immediately: {memory_summary[:50]}...")
+                                logger.info(f"🟢 M-CHUNK COMPLETE DEBUG: {element_id} N-chunk {chunk_index} - COMPLETED immediately: {memory_summary[:50]}...")
                                 
                             elif node_type in ["fresh_content", "trimmed_fresh_content"]:
                                 # Background compression in progress, using fresh content fallback
                                 memory_summary = f"⏳ Background compression in progress for N-chunk {chunk_index} (using fresh content)"
                                 compression_approach = "agent_memory_compressor_background_fallback"
-                                logger.critical(f"🟡 M-CHUNK PROGRESS DEBUG: {element_id} N-chunk {chunk_index} - Background compression in progress, using fallback")
+                                logger.info(f"🟡 M-CHUNK PROGRESS DEBUG: {element_id} N-chunk {chunk_index} - Background compression in progress, using fallback")
                                 
                             elif node_type == "compression_placeholder":
                                 # Background compression starting
                                 memory_summary = result_props.get("memory_summary", f"⏳ Starting background compression for N-chunk {chunk_index}")
                                 compression_approach = "agent_memory_compressor_background_placeholder"
-                                logger.critical(f"🟡 M-CHUNK PROGRESS DEBUG: {element_id} N-chunk {chunk_index} - Background compression placeholder created")
+                                logger.info(f"🟡 M-CHUNK PROGRESS DEBUG: {element_id} N-chunk {chunk_index} - Background compression placeholder created")
                                 
                             else:
                                 # Unknown result type
                                 memory_summary = f"Background compression result for N-chunk {chunk_index}"
                                 compression_approach = f"agent_memory_compressor_background_{node_type}"
-                                logger.critical(f"🟠 M-CHUNK UNKNOWN DEBUG: {element_id} N-chunk {chunk_index} - Unknown result type: {node_type}")
+                                logger.info(f"🟠 M-CHUNK UNKNOWN DEBUG: {element_id} N-chunk {chunk_index} - Unknown result type: {node_type}")
                             
                             # Create memory node from background compression result
                             memory_node = {
@@ -2266,11 +2266,14 @@ class CompressionEngineComponent(Component):
                                 "children": []
                             }
                             
+                            # CRITICAL FIX: Use content timestamp for proper chronological placement
+                            memory_node = self._create_memory_with_content_timestamp(memory_node, chunk_content)
+                            
                             logger.debug(f"Background compression result for N-chunk {chunk_index}: {compression_approach}")
                             
                         else:
                             # No result from background compression, create placeholder
-                            logger.critical(f"🔴 M-CHUNK FAILED DEBUG: Background compression returned None for {element_id} N-chunk {chunk_index}, creating placeholder")
+                            logger.info(f"🔴 M-CHUNK FAILED DEBUG: Background compression returned None for {element_id} N-chunk {chunk_index}, creating placeholder")
                             memory_summary = f"⏳ Background compression failed to start for N-chunk {chunk_index}"
                             compression_approach = "agent_memory_compressor_background_failed"
                             
@@ -2296,6 +2299,9 @@ class CompressionEngineComponent(Component):
                                 "children": []
                             }
                             
+                            # CRITICAL FIX: Use content timestamp for proper chronological placement
+                            memory_node = self._create_memory_with_content_timestamp(memory_node, chunk_content)
+                            
                         if self._memory_compressor:
                             # Add to M-chunks
                             new_m_chunk = {
@@ -2310,15 +2316,15 @@ class CompressionEngineComponent(Component):
                             }
                             
                             m_chunks.append(new_m_chunk)
-                            logger.critical(f"🟢 M-CHUNK ADDED DEBUG: Added M-chunk backup for {element_id} N-chunk {chunk_index} - Total M-chunks now: {len(m_chunks)}")
+                            logger.info(f"🟢 M-CHUNK ADDED DEBUG: Added M-chunk backup for {element_id} N-chunk {chunk_index} - Total M-chunks now: {len(m_chunks)}")
                         
                     except Exception as chunk_error:
                         logger.error(f"🔴 M-CHUNK ERROR DEBUG: Error creating background M-chunk backup for {element_id}: {chunk_error}", exc_info=True)
                         continue
                 
-                logger.critical(f"🟢 M-CHUNK CREATION COMPLETE DEBUG: Background M-chunk creation complete for {element_id}: {len(new_complete_chunks)} new backups created, N-chunks preserved")
+                logger.info(f"🟢 M-CHUNK CREATION COMPLETE DEBUG: Background M-chunk creation complete for {element_id}: {len(new_complete_chunks)} new backups created, N-chunks preserved")
             else:
-                logger.critical(f"🟡 CHUNK BOUNDARY DEBUG: No new complete N-chunks found for {element_id} - no M-chunk creation needed")
+                logger.info(f"🟡 CHUNK BOUNDARY DEBUG: No new complete N-chunks found for {element_id} - no M-chunk creation needed")
             
             # FIXED: Only remove old N-chunks when we exceed storage limits (not window limits!)
             # For now, keep all N-chunks since we have dual-stream storage separation
@@ -2345,7 +2351,7 @@ class CompressionEngineComponent(Component):
             
             final_m_count = len(chunk_structure["m_chunks"])
             final_n_count = len(chunk_structure["n_chunks"])
-            logger.critical(f"🟢 CHUNK BOUNDARY COMPLETE DEBUG: Processed chunk boundaries for {element_id}: {final_n_count} N-chunks (preserved), {final_m_count} M-chunks (background)")
+            logger.info(f"🟢 CHUNK BOUNDARY COMPLETE DEBUG: Processed chunk boundaries for {element_id}: {final_n_count} N-chunks (preserved), {final_m_count} M-chunks (background)")
             
         except Exception as e:
             logger.error(f"Error processing chunk boundaries for {element_id}: {e}", exc_info=True)
@@ -2451,6 +2457,9 @@ class CompressionEngineComponent(Component):
                                 "children": []
                             }
                             
+                            # CRITICAL FIX: Use content timestamp for proper chronological placement
+                            updated_memory_node = self._create_memory_with_content_timestamp(updated_memory_node, updated_content)
+                            
                             # Update the M-chunk
                             m_chunk["memory_node"] = updated_memory_node
                             m_chunk["token_count"] = self._calculate_memory_tokens([updated_memory_node])
@@ -2487,6 +2496,9 @@ class CompressionEngineComponent(Component):
                             },
                             "children": []
                         }
+                        
+                        # CRITICAL FIX: Use content timestamp for proper chronological placement
+                        updated_memory_node = self._create_memory_with_content_timestamp(updated_memory_node, updated_content)
                         
                         m_chunk["memory_node"] = updated_memory_node
                         m_chunk["token_count"] = self._calculate_memory_tokens([updated_memory_node])
@@ -2576,7 +2588,7 @@ class CompressionEngineComponent(Component):
             n_chunks = chunks.get("n_chunks", [])
             m_chunks = chunks.get("m_chunks", [])
             
-            logger.critical(f"🔵 STREAM SELECTION DEBUG: {element_id} - is_focused={is_focused}, n_chunks={len(n_chunks)}, m_chunks={len(m_chunks)}")
+            logger.info(f"🔵 STREAM SELECTION DEBUG: {element_id} - is_focused={is_focused}, n_chunks={len(n_chunks)}, m_chunks={len(m_chunks)}")
             
             # Debug chunk states
             complete_n_chunks = [chunk for chunk in n_chunks if chunk.get("is_complete", False)]
@@ -2584,18 +2596,18 @@ class CompressionEngineComponent(Component):
             valid_m_chunks = [m for m in m_chunks if not m.get("is_invalid", False)]
             invalid_m_chunks = [m for m in m_chunks if m.get("is_invalid", False)]
             
-            logger.critical(f"🔵 STREAM SELECTION DEBUG: {element_id} - N-chunks: {len(complete_n_chunks)} complete, {len(incomplete_n_chunks)} incomplete")
-            logger.critical(f"🔵 STREAM SELECTION DEBUG: {element_id} - M-chunks: {len(valid_m_chunks)} valid, {len(invalid_m_chunks)} invalid")
+            logger.info(f"🔵 STREAM SELECTION DEBUG: {element_id} - N-chunks: {len(complete_n_chunks)} complete, {len(incomplete_n_chunks)} incomplete")
+            logger.info(f"🔵 STREAM SELECTION DEBUG: {element_id} - M-chunks: {len(valid_m_chunks)} valid, {len(invalid_m_chunks)} invalid")
             
             if is_focused:
-                logger.critical(f"🔵 FOCUSED STREAM DEBUG: {element_id} - Processing focused rendering logic")
+                logger.info(f"🔵 FOCUSED STREAM DEBUG: {element_id} - Processing focused rendering logic")
                 
                 # FIXED: Focused logic - use window size properly
                 if len(n_chunks) <= self.FOCUSED_CHUNK_LIMIT:  # ≤8 N-chunks
                     # All N-chunks fit in window, show all fresh content (no M-chunks needed)
                     fresh_content = n_chunks
                     memory_content = []
-                    logger.critical(f"🔵 FOCUSED STREAM DEBUG: {element_id} - All {len(n_chunks)} N-chunks fit in {self.FOCUSED_CHUNK_LIMIT}-chunk window, showing all fresh content, NO M-chunks")
+                    logger.info(f"🔵 FOCUSED STREAM DEBUG: {element_id} - All {len(n_chunks)} N-chunks fit in {self.FOCUSED_CHUNK_LIMIT}-chunk window, showing all fresh content, NO M-chunks")
                 else:
                     # >8 N-chunks: show M-chunks for oldest + last 8 N-chunks for recent
                     # Show last 8 N-chunks as fresh content
@@ -2604,7 +2616,7 @@ class CompressionEngineComponent(Component):
                     # Determine how many old N-chunks we need M-chunks for
                     num_old_chunks = len(n_chunks) - self.FOCUSED_CHUNK_LIMIT
                     
-                    logger.critical(f"🔵 FOCUSED STREAM DEBUG: {element_id} - Window overflow: {len(n_chunks)} > {self.FOCUSED_CHUNK_LIMIT}, need M-chunks for {num_old_chunks} old N-chunks")
+                    logger.info(f"🔵 FOCUSED STREAM DEBUG: {element_id} - Window overflow: {len(n_chunks)} > {self.FOCUSED_CHUNK_LIMIT}, need M-chunks for {num_old_chunks} old N-chunks")
                     
                     # Get M-chunks for the oldest N-chunks (chronological order)
                     # M-chunks should correspond to the first num_old_chunks N-chunks
@@ -2614,35 +2626,35 @@ class CompressionEngineComponent(Component):
                         for m_chunk in m_chunks:
                             if m_chunk.get("source_n_chunk_index", -1) == i and not m_chunk.get("is_invalid", False):
                                 memory_content.append(m_chunk)
-                                logger.critical(f"🔵 FOCUSED STREAM DEBUG: {element_id} - Selected M-chunk for old N-chunk {i}")
+                                logger.info(f"🔵 FOCUSED STREAM DEBUG: {element_id} - Selected M-chunk for old N-chunk {i}")
                                 break
                         else:
-                            logger.critical(f"🔴 FOCUSED STREAM DEBUG: {element_id} - MISSING M-chunk for old N-chunk {i} - this may cause rendering issues!")
+                            logger.info(f"🔴 FOCUSED STREAM DEBUG: {element_id} - MISSING M-chunk for old N-chunk {i} - this may cause rendering issues!")
                     
-                    logger.critical(f"🔵 FOCUSED STREAM DEBUG: {element_id} - Window overflow result: {len(memory_content)} M-chunks (for oldest) + {len(fresh_content)} recent N-chunks")
+                    logger.info(f"🔵 FOCUSED STREAM DEBUG: {element_id} - Window overflow result: {len(memory_content)} M-chunks (for oldest) + {len(fresh_content)} recent N-chunks")
                 
                 # Return: memories first, then fresh content (chronological order)
                 selected_chunks = memory_content + fresh_content
-                logger.critical(f"🔵 FOCUSED STREAM DEBUG: {element_id} - Final selection: {len(memory_content)} M-chunks + {len(fresh_content)} N-chunks = {len(selected_chunks)} total chunks")
+                logger.info(f"🔵 FOCUSED STREAM DEBUG: {element_id} - Final selection: {len(memory_content)} M-chunks + {len(fresh_content)} N-chunks = {len(selected_chunks)} total chunks")
                 
             else:
-                logger.critical(f"🔵 UNFOCUSED STREAM DEBUG: {element_id} - Processing unfocused rendering logic")
+                logger.info(f"🔵 UNFOCUSED STREAM DEBUG: {element_id} - Processing unfocused rendering logic")
                 
                 # Unfocused: Show all M-chunks + current incomplete N-chunk only
                 incomplete_chunks = [chunk for chunk in n_chunks if not chunk.get("is_complete", False)]
                 current_chunk = incomplete_chunks[-1:] if incomplete_chunks else []
                 selected_chunks = valid_m_chunks + current_chunk
                 
-                logger.critical(f"🔵 UNFOCUSED STREAM DEBUG: {element_id} - Selected {len(valid_m_chunks)} valid M-chunks + {len(current_chunk)} current incomplete N-chunk = {len(selected_chunks)} total chunks")
+                logger.info(f"🔵 UNFOCUSED STREAM DEBUG: {element_id} - Selected {len(valid_m_chunks)} valid M-chunks + {len(current_chunk)} current incomplete N-chunk = {len(selected_chunks)} total chunks")
             
             # Flatten chunks to VEIL nodes
             results = await self._flatten_chunks_for_rendering(selected_chunks)
-            logger.critical(f"🔵 STREAM SELECTION COMPLETE DEBUG: {element_id} - Flattened {len(selected_chunks)} chunks to {len(results)} VEIL nodes for {is_focused and 'FOCUSED' or 'UNFOCUSED'} rendering")
+            logger.info(f"🔵 STREAM SELECTION COMPLETE DEBUG: {element_id} - Flattened {len(selected_chunks)} chunks to {len(results)} VEIL nodes for {is_focused and 'FOCUSED' or 'UNFOCUSED'} rendering")
             
             return results
         
         except Exception as e:
-            logger.critical(f"🔴 STREAM SELECTION ERROR: Error selecting rendering stream for {element_id}: {e}", exc_info=True)
+            logger.info(f"🔴 STREAM SELECTION ERROR: Error selecting rendering stream for {element_id}: {e}", exc_info=True)
             # Fallback: use original children unchanged
             return []
 
@@ -3320,7 +3332,7 @@ class CompressionEngineComponent(Component):
             memory_nodes_count = sum(1 for node in selected_nodes if node.get("node_type") == "content_memory")
             n_chunk_nodes_count = len(selected_nodes) - memory_nodes_count
             
-            logger.critical(f"🔵 FLAT CACHE DUAL-STREAM DEBUG: {element_id} - Selected {len(selected_nodes)} nodes: {memory_nodes_count} memory nodes, {n_chunk_nodes_count} N-chunk nodes ({is_focused and 'focused' or 'unfocused'})")
+            logger.info(f"🔵 FLAT CACHE DUAL-STREAM DEBUG: {element_id} - Selected {len(selected_nodes)} nodes: {memory_nodes_count} memory nodes, {n_chunk_nodes_count} N-chunk nodes ({is_focused and 'focused' or 'unfocused'})")
             return selected_nodes
             
         except Exception as e:
@@ -3588,13 +3600,277 @@ class CompressionEngineComponent(Component):
                     # Track memory nodes
                     if child.get("node_type") == "content_memory":
                         memory_nodes_added += 1
-                        logger.critical(f"🟢 FLAT CACHE UPDATE DEBUG: Added M-chunk memory node {child_veil_id} to flat cache (parent: {container_veil_id})")
+                        logger.info(f"🟢 FLAT CACHE UPDATE DEBUG: Added M-chunk memory node {child_veil_id} to flat cache (parent: {container_veil_id})")
                     else:
                         logger.debug(f"Added selected child {child_veil_id} to flat cache (parent: {container_veil_id})")
                 else:
                     logger.warning(f"Selected child missing veil_id, cannot add to flat cache: {child}")
             
-            logger.critical(f"🟢 FLAT CACHE UPDATE DEBUG: Updated flat cache for container {container_veil_id}: removed {len(children_to_remove)} old children, added {len(selected_children)} selected children ({memory_nodes_added} memory nodes)")
+            logger.info(f"🟢 FLAT CACHE UPDATE DEBUG: Updated flat cache for container {container_veil_id}: removed {len(children_to_remove)} old children, added {len(selected_children)} selected children ({memory_nodes_added} memory nodes)")
             
         except Exception as e:
             logger.error(f"Error updating flat cache with selected children for container {container_veil_id}: {e}", exc_info=True)
+
+    # NEW: Content Timestamp Extraction for Proper Chronological Placement
+
+    def _extract_content_timestamp_range(self, content: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Extract timestamp range from content being compressed.
+        
+        For proper chronological rendering, memories should be placed at the time
+        of their most recent content, not the compression time.
+        
+        Args:
+            content: List of VEIL content nodes
+            
+        Returns:
+            Dictionary with 'earliest_timestamp', 'latest_timestamp', 'has_timestamps'
+        """
+        try:
+            timestamps = []
+            
+            for item in content:
+                props = item.get("properties", {})
+                
+                # Extract timestamp from various possible fields
+                timestamp_value = None
+                timestamp_fields = ["timestamp_iso", "timestamp", "created_at", "modified_at"]
+                
+                for field in timestamp_fields:
+                    if field in props:
+                        timestamp_value = props[field]
+                        break
+                
+                if timestamp_value:
+                    # Convert to unix timestamp for comparison
+                    unix_timestamp = self._convert_to_unix_timestamp(timestamp_value)
+                    if unix_timestamp is not None:
+                        timestamps.append(unix_timestamp)
+            
+            if not timestamps:
+                return {
+                    "earliest_timestamp": None,
+                    "latest_timestamp": None,
+                    "has_timestamps": False,
+                    "timestamp_count": 0
+                }
+            
+            return {
+                "earliest_timestamp": min(timestamps),
+                "latest_timestamp": max(timestamps),
+                "has_timestamps": True,
+                "timestamp_count": len(timestamps),
+                "content_timespan_seconds": max(timestamps) - min(timestamps) if len(timestamps) > 1 else 0
+            }
+            
+        except Exception as e:
+            logger.error(f"Error extracting content timestamp range: {e}", exc_info=True)
+            return {
+                "earliest_timestamp": None,
+                "latest_timestamp": None,
+                "has_timestamps": False,
+                "timestamp_count": 0,
+                "error": str(e)
+            }
+
+    def _convert_to_unix_timestamp(self, timestamp_value: Any) -> Optional[float]:
+        """
+        Convert various timestamp formats to unix timestamp.
+        
+        Args:
+            timestamp_value: Timestamp in various formats (ISO string, unix float, etc.)
+            
+        Returns:
+            Unix timestamp as float, or None if conversion fails
+        """
+        try:
+            if isinstance(timestamp_value, (int, float)):
+                # Already a unix timestamp
+                return float(timestamp_value)
+            
+            elif isinstance(timestamp_value, str) and timestamp_value:
+                # Try to parse ISO format string
+                from datetime import datetime
+                
+                # Handle various ISO format variations
+                timestamp_str = timestamp_value.replace('Z', '+00:00')
+                
+                # Try different parsing approaches
+                try:
+                    dt = datetime.fromisoformat(timestamp_str)
+                    return dt.timestamp()
+                except ValueError:
+                    # Try parsing without microseconds
+                    try:
+                        dt = datetime.strptime(timestamp_value, "%Y-%m-%dT%H:%M:%S")
+                        return dt.timestamp()
+                    except ValueError:
+                        # Try parsing with Z suffix
+                        try:
+                            dt = datetime.strptime(timestamp_value, "%Y-%m-%dT%H:%M:%SZ")
+                            return dt.timestamp()
+                        except ValueError:
+                            logger.warning(f"Could not parse timestamp string: {timestamp_value}")
+                            return None
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Error converting timestamp {timestamp_value}: {e}")
+            return None
+
+    # NEW: Operation Index Extraction for Chronological Placement
+
+    def _extract_latest_operation_index(self, content: List[Dict[str, Any]]) -> int:
+        """
+        Extract the latest operation_index from content being compressed.
+        
+        NOTE: This method is now deprecated in favor of timestamp-based chronological placement.
+        The AgentMemoryCompressor now extracts content timestamps for more accurate positioning.
+        
+        Args:
+            content: List of VEIL content nodes
+            
+        Returns:
+            Latest operation_index from content, or 0 if none found
+        """
+        try:
+            latest_index = 0
+            
+            for item in content:
+                props = item.get("properties", {})
+                op_index = props.get("operation_index")
+                
+                if op_index is not None and op_index > latest_index:
+                    latest_index = op_index
+            
+            logger.debug(f"Extracted latest operation_index from content: {latest_index}")
+            return latest_index
+            
+        except Exception as e:
+            logger.error(f"Error extracting operation_index from content: {e}")
+            return 0
+
+    def _assign_memory_operation_index(self, memory_node: Dict[str, Any], content: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Assign operation_index to memory based on latest content operation_index.
+        
+        This ensures memories appear at the chronological position of their content.
+        
+        Args:
+            memory_node: Memory node to update
+            content: Original content that was compressed
+            
+        Returns:
+            Updated memory node with proper operation_index
+        """
+        try:
+            # Get latest operation_index from compressed content
+            latest_op_index = self._extract_latest_operation_index(content)
+            
+            if latest_op_index > 0:
+                # Assign memory to take the position of the latest content
+                memory_props = memory_node.get("properties", {})
+                memory_props["operation_index"] = latest_op_index
+                memory_props["replaces_content_through_index"] = latest_op_index
+                memory_props["is_chronologically_positioned"] = True
+                
+                logger.debug(f"Memory assigned operation_index {latest_op_index} from compressed content")
+            else:
+                # Fallback: use current operation_index from SpaceVeilProducer
+                veil_producer = self._get_space_veil_producer()
+                if veil_producer:
+                    memory_props = memory_node.get("properties", {})
+                    fallback_index = getattr(veil_producer, '_next_delta_index', 0)
+                    memory_props["operation_index"] = fallback_index
+                    memory_props["is_chronologically_positioned"] = False
+                    memory_props["fallback_reason"] = "no_operation_index_in_content"
+                    logger.debug(f"Memory assigned fallback operation_index {fallback_index}")
+        
+            return memory_node
+            
+        except Exception as e:
+            logger.error(f"Error assigning memory operation_index: {e}")
+            return memory_node
+
+    def _get_space_veil_producer(self):
+        """Get SpaceVeilProducer from owner InnerSpace for operation_index access."""
+        try:
+            if self.owner:
+                return self.owner.get_sibling_component("SpaceVeilProducer")
+            return None
+        except Exception as e:
+            logger.warning(f"Error getting SpaceVeilProducer: {e}")
+            return None
+
+    def _create_memory_with_content_timestamp(self, 
+                                             memory_node: Dict[str, Any], 
+                                             content: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Update memory node to use content timestamp AND operation_index for proper chronological placement.
+        
+        UPDATED: Now handles both timestamp and operation_index for chronological positioning.
+        
+        Args:
+            memory_node: The memory node to update
+            content: Original content that was compressed
+            
+        Returns:
+            Updated memory node with proper timestamp and operation_index
+        """
+        try:
+            # Extract timestamp range from content
+            timestamp_info = self._extract_content_timestamp_range(content)
+            
+            memory_props = memory_node.get("properties", {})
+            
+            if timestamp_info["has_timestamps"]:
+                # Use the latest content timestamp for chronological placement
+                latest_timestamp = timestamp_info["latest_timestamp"]
+                earliest_timestamp = timestamp_info["earliest_timestamp"]
+                
+                # Set the main timestamp field for chronological ordering
+                memory_props["timestamp"] = latest_timestamp
+                memory_props["timestamp_iso"] = datetime.fromtimestamp(latest_timestamp).isoformat() + "Z"
+                
+                # Keep compression timestamp as metadata
+                if "compression_timestamp" in memory_props:
+                    memory_props["compression_metadata"] = memory_props.get("compression_metadata", {})
+                    memory_props["compression_metadata"]["compression_timestamp"] = memory_props["compression_timestamp"]
+                
+                # Replace compression_timestamp with content timestamp for chronological placement
+                memory_props["compression_timestamp"] = datetime.fromtimestamp(latest_timestamp).isoformat() + "Z"
+                
+                # Add temporal metadata
+                memory_props["temporal_info"] = {
+                    "content_earliest_timestamp": earliest_timestamp,
+                    "content_latest_timestamp": latest_timestamp,
+                    "content_timespan_seconds": timestamp_info["content_timespan_seconds"],
+                    "content_timestamp_count": timestamp_info["timestamp_count"],
+                    "uses_content_timestamp_for_placement": True
+                }
+                
+                logger.debug(f"Updated memory timestamp to content timestamp: {latest_timestamp} ({memory_props['timestamp_iso']})")
+                
+            else:
+                # No content timestamps available, keep compression timestamp
+                memory_props["temporal_info"] = {
+                    "content_earliest_timestamp": None,
+                    "content_latest_timestamp": None,
+                    "content_timespan_seconds": 0,
+                    "content_timestamp_count": 0,
+                    "uses_content_timestamp_for_placement": False,
+                    "fallback_reason": "no_content_timestamps_found"
+                }
+                
+                logger.debug(f"No content timestamps found, keeping compression timestamp for memory")
+
+            # CRITICAL FIX: Assign operation_index for proper chronological placement
+            memory_node = self._assign_memory_operation_index(memory_node, content)
+            
+            return memory_node
+            
+        except Exception as e:
+            logger.error(f"Error updating memory with content timestamp and operation_index: {e}", exc_info=True)
+            # Return original memory node on error
+            return memory_node

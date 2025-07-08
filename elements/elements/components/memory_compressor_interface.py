@@ -334,24 +334,45 @@ class MemoryCompressor(ABC):
                                    memory_summary: str,
                                    original_node_count: int,
                                    token_count: int,
-                                   compression_metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                                   compression_metadata: Optional[Dict[str, Any]] = None,
+                                   content_timestamp: Optional[float] = None) -> Dict[str, Any]:
         """Create base structure for memorized VEIL node."""
+        
+        # Use content timestamp if provided, otherwise use compression time
+        if content_timestamp is not None:
+            timestamp_iso = datetime.fromtimestamp(content_timestamp).isoformat() + "Z"
+            actual_compression_timestamp = datetime.now().isoformat()
+        else:
+            timestamp_iso = datetime.now().isoformat()
+            actual_compression_timestamp = timestamp_iso
+        
+        properties = {
+            "structural_role": "compressed_memory",
+            "content_nature": "memorized_content",
+            "memory_id": memory_id,
+            "memory_summary": memory_summary,
+            "original_element_ids": element_ids.copy(),
+            "original_node_count": original_node_count,
+            "compression_timestamp": timestamp_iso,  # Use content timestamp for chronological placement
+            "token_count": token_count,
+            "compressor_type": self.__class__.__name__,
+            "compressor_version": getattr(self, 'VERSION', '1.0.0'),
+            "compression_metadata": compression_metadata or {}
+        }
+        
+        # Add temporal metadata when using content timestamp
+        if content_timestamp is not None:
+            properties["timestamp"] = content_timestamp
+            properties["timestamp_iso"] = timestamp_iso
+            properties["compression_metadata"]["actual_compression_timestamp"] = actual_compression_timestamp
+            properties["compression_metadata"]["uses_content_timestamp_for_placement"] = True
+        else:
+            properties["compression_metadata"]["uses_content_timestamp_for_placement"] = False
+        
         return {
             "veil_id": f"memory_{memory_id}",
             "node_type": "memorized_content",
-            "properties": {
-                "structural_role": "compressed_memory",
-                "content_nature": "memorized_content",
-                "memory_id": memory_id,
-                "memory_summary": memory_summary,
-                "original_element_ids": element_ids.copy(),
-                "original_node_count": original_node_count,
-                "compression_timestamp": datetime.now().isoformat(),
-                "token_count": token_count,
-                "compressor_type": self.__class__.__name__,
-                "compressor_version": getattr(self, 'VERSION', '1.0.0'),
-                "compression_metadata": compression_metadata or {}
-            },
+            "properties": properties,
             "children": []
         }
 

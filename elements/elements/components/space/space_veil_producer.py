@@ -51,11 +51,13 @@ class SpaceVeilProducer(VeilProducer):
         # Add operation timestamps and indices
         timestamped_deltas = []
         current_time = time.time()
+        current_iso = time.strftime('%Y-%m-%dT%H:%M:%S.%fZ', time.gmtime(current_time))
         
         for delta in delta_operations:
             # CRITICAL FIX: Deep copy to prevent data contamination
             timestamped_delta = copy.deepcopy(delta)
             timestamped_delta["operation_timestamp"] = current_time
+            timestamped_delta["operation_timestamp_iso"] = current_iso  # NEW: ISO format for system messages
             timestamped_delta["operation_index"] = self._next_delta_index
             timestamped_deltas.append(timestamped_delta)
             self._next_delta_index += 1
@@ -65,6 +67,9 @@ class SpaceVeilProducer(VeilProducer):
         
         # Apply to flat VEIL cache (moved from Space)
         self._apply_deltas_to_flat_cache(timestamped_deltas)
+        
+        # CRITICAL: Inject operation_index into all nodes for chronological rendering
+        self._inject_operation_index_into_cache(timestamped_deltas)
         
         # Accumulate for frame-end dispatch
         self._accumulated_deltas.extend(timestamped_deltas)
@@ -132,6 +137,48 @@ class SpaceVeilProducer(VeilProducer):
         except Exception as e:
             logger.error(f"Error applying deltas to flat cache: {e}", exc_info=True)
     
+    def _inject_operation_index_into_cache(self, deltas: List[Dict[str, Any]]) -> None:
+        """
+        CRITICAL: Inject operation_index into flat cache nodes for chronological rendering.
+        
+        This ensures all VEIL nodes have operation_index for proper operational chronology
+        as required by the HUD rendering refactor (uses operation_index, not timestamps).
+        
+        Args:
+            deltas: Timestamped deltas with operation_index
+        """
+        try:
+            for delta in deltas:
+                op = delta.get("op")
+                operation_index = delta.get("operation_index")
+                
+                if operation_index is None:
+                    continue
+                
+                if op == "add_node":
+                    node = delta.get("node", {})
+                    veil_id = node.get("veil_id")
+                    if veil_id and veil_id in self._flat_veil_cache:
+                        # Inject operation_index into node properties
+                        if "properties" not in self._flat_veil_cache[veil_id]:
+                            self._flat_veil_cache[veil_id]["properties"] = {}
+                        self._flat_veil_cache[veil_id]["properties"]["operation_index"] = operation_index
+                        
+                elif op == "update_node":
+                    veil_id = delta.get("veil_id")
+                    if veil_id and veil_id in self._flat_veil_cache:
+                        # Update operation_index to reflect latest operation
+                        if "properties" not in self._flat_veil_cache[veil_id]:
+                            self._flat_veil_cache[veil_id]["properties"] = {}
+                        self._flat_veil_cache[veil_id]["properties"]["operation_index"] = operation_index
+                
+                # Note: remove_node doesn't need operation_index injection since node is deleted
+                        
+            logger.debug(f"Injected operation_index into {len(deltas)} cache nodes for chronological rendering")
+            
+        except Exception as e:
+            logger.error(f"Error injecting operation_index into cache: {e}", exc_info=True)
+
     def get_flat_veil_cache(self) -> Dict[str, Any]:
         """
         NEW: Expose flat VEIL cache with proper encapsulation.
@@ -509,6 +556,9 @@ class SpaceVeilProducer(VeilProducer):
             "element_type": self.owner.__class__.__name__,
             "is_inner_space": getattr(self.owner, 'IS_INNER_SPACE', False)
         }
+        if hasattr(self.owner, 'agent_description'):
+            props['agent_description'] = self.owner.agent_description
+            props['agent_name'] = self.owner.agent_name
         return props
 
     def build_hierarchical_veil_from_flat_cache(self,

@@ -71,6 +71,7 @@ class InnerSpace(Space):
         element_id: str,
         name: str,
         agent_name: str,
+        agent_description: str,
         description: str,
         agent_id: str,
         llm_provider: 'LLMProviderInterface',
@@ -106,6 +107,7 @@ class InnerSpace(Space):
         self.agent_id = agent_id
         self.agent_name = agent_name
         self._llm_provider = llm_provider
+        self.agent_description = agent_description
         
         # NEW: Adapter tracking for mention-based activation
         self._adapter_mappings: Dict[str, Dict[str, str]] = {}  # {adapter_type: {adapter_name: adapter_id}}
@@ -143,7 +145,7 @@ class InnerSpace(Space):
             logger.info(f"[{self.id}] Attempting to create default scratchpad element '{scratchpad_id}'.")
             scratchpad_config = {
                 "name": "Agent Scratchpad",
-                "description": f"Default scratchpad for agent {self.agent_id}"
+                "description": f"Default scratchpad for agent {self.agent_name}"
             }
             creation_result = self._element_factory.handle_create_element_from_prefab(
                 element_id=scratchpad_id,
