@@ -1894,16 +1894,17 @@ class HUDComponent(Component):
 
     def _get_chronological_timestamp(self, node_data: Dict[str, Any]) -> float:
         """
-        Extract unified chronological timestamp from VEIL node for sorting.
+        UPDATED: Use operation_index as primary sort key for operational chronology.
         
-        Handles various timestamp fields and formats to provide consistent chronological ordering.
-        This solves the historical message problem where old messages get fresh operation indices.
+        This implements the HUD rendering refactor requirement to use operation_index
+        instead of content timestamps for chronological ordering. This preserves
+        causal information flow - agent sees information in order they encountered it.
         
         Args:
-            node_data: VEIL node to extract timestamp from
+            node_data: VEIL node to extract operation index from
             
         Returns:
-            Unix timestamp as float for sorting (fallback to operation_index if no content timestamps)
+            operation_index as float for sorting (fallback to timestamp if no operation_index)
         """
         try:
             if not isinstance(node_data, dict):
@@ -1911,49 +1912,30 @@ class HUDComponent(Component):
                 
             props = node_data.get("properties", {})
             
-            # Check unified timestamp field first (new standard)
-            timestamp = props.get("timestamp")
+            # PRIMARY: Use operation_index for chronological ordering (HUD refactor requirement)
+            operation_index = props.get("operation_index")
+            if operation_index is not None:
+                return float(operation_index)
+            
+            # FALLBACK: Use timestamp only if no operation_index (legacy content or edge cases)
+            timestamp = props.get("timestamp") or props.get("timestamp_iso")
             if timestamp:
-                if isinstance(timestamp, (int, float)):
-                    return float(timestamp)
-                elif isinstance(timestamp, str):
-                    numeric_ts = self._convert_timestamp_to_numeric(timestamp)
-                    if numeric_ts:
-                        return numeric_ts
-            
-            # Check legacy message timestamp_iso field
-            timestamp_iso = props.get("timestamp_iso")
-            if timestamp_iso:
-                numeric_ts = self._convert_timestamp_to_numeric(timestamp_iso)
+                numeric_ts = self._convert_timestamp_to_numeric(timestamp)
                 if numeric_ts:
                     return numeric_ts
             
-            # Check compression_timestamp for old memories
-            compression_timestamp = props.get("compression_timestamp")
-            if compression_timestamp:
-                numeric_ts = self._convert_timestamp_to_numeric(compression_timestamp)
-                if numeric_ts:
-                    return numeric_ts
-            
-            # Check other timestamp fields
-            for field in ["created_at", "message_timestamp", "note_timestamp"]:
+            # Check other timestamp fields as final fallback
+            for field in ["compression_timestamp", "created_at", "message_timestamp", "note_timestamp"]:
                 value = props.get(field)
                 if value:
                     numeric_ts = self._convert_timestamp_to_numeric(value)
                     if numeric_ts:
                         return numeric_ts
             
-            # Fallback to operation_index for content without timestamps
-            operation_index = props.get("operation_index", 0)
-            if operation_index:
-                # Convert operation_index to timestamp-like value for sorting
-                # Use a base time + operation_index seconds for relative ordering
-                return float(operation_index)
-            
             return 0.0
             
         except Exception as e:
-            logger.debug(f"Error extracting chronological timestamp: {e}")
+            logger.debug(f"Error extracting chronological order key: {e}")
             return 0.0
 
     def _convert_timestamp_to_numeric(self, timestamp_value: Any) -> Optional[float]:
@@ -2009,7 +1991,7 @@ class HUDComponent(Component):
             content_items = []
             container_items = []  # NEW: Separate containers for structural rendering
             
-            # NEW: Sort by unified timestamp field for true chronological order
+            # UPDATED: Sort by operation_index for operational chronological order
             veil_nodes = [(veil_id, node_data) for veil_id, node_data in flat_cache.items()]
             veil_nodes.sort(key=lambda x: self._get_chronological_timestamp(x[1]))
             
@@ -2062,7 +2044,7 @@ class HUDComponent(Component):
             return {"content_items": [], "container_items": []}
 
     def _extract_chat_message_content(self, node_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Extract chat message content with metadata."""
+        """ENHANCED: Extract chat message content with metadata, handling deleted messages."""
         try:
             props = node_data.get("properties", {})
             timestamp = props.get("timestamp_iso", 0)
@@ -2076,19 +2058,34 @@ class HUDComponent(Component):
                 except:
                     timestamp = 0
             
-            # DEBUG: Log extracted conversation context
-            logger.debug(f"Extracting chat message - adapter_type: {props.get('adapter_type')}, server_name: {props.get('server_name')}, conversation_name: {props.get('conversation_name')}")
+            # NEW: Check message status for deleted messages
+            message_status = props.get("status", "received")
+            is_deleted = message_status == "deleted"
+            
+            # NEW: Handle deleted messages - render as tombstones with original content context
+            text_content = props.get("text_content", "")
+            if is_deleted:
+                # For deleted messages, text_content should already be the tombstone from MessageListComponent
+                # e.g., "[🗑️ Message was deleted]" but we'll ensure it's properly handled
+                if not text_content.startswith("[") and not "deleted" in text_content.lower():
+                    text_content = "[🗑️ Message was deleted]"
+            
+            # DEBUG: Log extracted conversation context and status
+            logger.debug(f"Extracting chat message - status: {message_status}, adapter_type: {props.get('adapter_type')}, server_name: {props.get('server_name')}, conversation_name: {props.get('conversation_name')}")
             
             return {
                 "content_type": "chat_message",
+                "operation_index": props.get("operation_index", 0),  # NEW: Include operation_index for chronological sorting
                 "timestamp": timestamp,
                 "veil_id": node_data.get("veil_id"),
                 "node_data": node_data,
                 "conversation_name": props.get("conversation_name"),
                 "element_id": props.get("element_id"),
                 "sender_name": props.get("sender_name", "Unknown"),
-                "text_content": props.get("text_content", ""),
+                "text_content": text_content,
                 "is_edited": props.get("is_edited", False),
+                "is_deleted": is_deleted,  # NEW: Track deletion status
+                "message_status": message_status,  # NEW: Include full status
                 "is_agent": props.get("is_agent", False),  # SIMPLIFIED: Use direct is_agent field from VEIL
                 # NEW: Extract conversation context directly for message rendering
                 "adapter_type": props.get("adapter_type"),
@@ -2107,6 +2104,7 @@ class HUDComponent(Component):
             
             return {
                 "content_type": "scratchpad",
+                "operation_index": props.get("operation_index", 0),  # NEW: Include operation_index for chronological sorting
                 "timestamp": timestamp,
                 "veil_id": node_data.get("veil_id"),
                 "node_data": node_data,
@@ -2139,6 +2137,7 @@ class HUDComponent(Component):
             
             return {
                 "content_type": "memory",
+                "operation_index": props.get("operation_index", 0),  # NEW: Include operation_index for chronological sorting
                 "timestamp": float(timestamp),
                 "veil_id": node_data.get("veil_id"),
                 "node_data": node_data,
@@ -2247,12 +2246,15 @@ class HUDComponent(Component):
                     current_group = {
                         "group_type": content_type,
                         "items": [item],
-                        "start_timestamp": item.get("timestamp", 0),
+                        "start_operation_index": item.get("operation_index", 0),  # NEW: Track operation_index range
+                        "end_operation_index": item.get("operation_index", 0),
+                        "start_timestamp": item.get("timestamp", 0),  # Keep for display context
                         "end_timestamp": item.get("timestamp", 0)
                     }
                 else:
                     # Add to current group
                     current_group["items"].append(item)
+                    current_group["end_operation_index"] = item.get("operation_index", 0)  # NEW: Update operation_index range
                     current_group["end_timestamp"] = item.get("timestamp", 0)
             
             # Add final group
@@ -2303,12 +2305,15 @@ class HUDComponent(Component):
             if not content_groups:
                 return content_groups
             
-            # Find most recent timestamp
+            # Find most recent operation_index for relative time markers
+            most_recent_operation = 0
             most_recent_time = 0
             for group in content_groups:
+                group_operation = group.get("end_operation_index", 0)
                 group_time = group.get("end_timestamp", 0)
-                if group_time > most_recent_time:
-                    most_recent_time = group_time
+                if group_operation > most_recent_operation:
+                    most_recent_operation = group_operation
+                    most_recent_time = group_time  # Use timestamp of most recent operation
             
             if most_recent_time == 0:
                 return content_groups
@@ -2379,9 +2384,6 @@ class HUDComponent(Component):
             # Apply time markers to content groups
             if content_groups:
                 content_groups = self._apply_time_markers(content_groups)
-            
-            # Generate system messages for edits (if enabled)
-            if options.get("include_system_messages", True) and content_groups:
                 content_groups = self._generate_system_messages(content_groups, flat_cache)
             
             # NEW: Build complete structure with containers
@@ -2539,12 +2541,14 @@ class HUDComponent(Component):
             return ""
 
     def _render_flat_chat_message(self, item: Dict[str, Any], options: Dict[str, Any]) -> str:
-        """ENHANCED: Render individual chat message with full conversation context."""
+        """ENHANCED: Render individual chat message with full conversation context and deletion handling."""
         try:
             is_agent = item.get("is_agent", False)
             sender_name = item.get("sender_name", "Unknown")
             text_content = item.get("text_content", "")
             is_edited = item.get("is_edited", False)
+            is_deleted = item.get("is_deleted", False)  # NEW: Check deletion status
+            message_status = item.get("message_status", "received")  # NEW: Get full status
             time_marker = item.get("time_marker")
             
             # FIXED: Use conversation context that was already extracted during content extraction
@@ -2560,7 +2564,10 @@ class HUDComponent(Component):
                 message_attrs.append(f'messenger="{adapter_type}"')
             if server_name:
                 message_attrs.append(f'server="{server_name}"')
-            # logger.critical("MESSAGE ATTRS: " + str(message_attrs) + "Item: " + str(item))
+            
+            # NEW: Add deletion status to message attributes for structured parsing
+            if is_deleted:
+                message_attrs.append('deleted="true"')
             
             if message_attrs:
                 opening_tag = f'<chat_message {" ".join(message_attrs)}>'
@@ -2575,15 +2582,30 @@ class HUDComponent(Component):
                 # Human messages: include sender tag
                 message_content = f"<sender>{sender_name}</sender>{text_content}"
             
-            # Add edited marker
-            if is_edited:
-                message_content += " (edited)"
+            # NEW: Handle deleted messages - don't show edited marker or attachments for deleted messages
+            if is_deleted:
+                # For deleted messages, just show the tombstone text
+                pass  # text_content already contains the tombstone
+            else:
+                # Add edited marker for non-deleted messages
+                if is_edited:
+                    message_content += " (edited)"
+                
+                # Handle attachments for non-deleted messages
+                node_data = item.get("node_data", {})
+                attachment_text = self._render_flat_message_attachments(node_data)
+                if attachment_text:
+                    message_content += f"\n{attachment_text}"
             
-            # Handle attachments
-            node_data = item.get("node_data", {})
-            attachment_text = self._render_flat_message_attachments(node_data)
-            if attachment_text:
-                message_content += f"\n{attachment_text}"
+            # NEW: Add status indicators for pending operations
+            if message_status == "pending_send":
+                message_content += " ⏳"
+            elif message_status == "pending_edit":
+                message_content += " ✏️"
+            elif message_status == "pending_delete":
+                message_content += " 🗑️"
+            elif message_status == "failed_to_send":
+                message_content += " ❌"
             
             # Build complete message with tags
             message_line = f"{opening_tag}{message_content}</chat_message>"
@@ -2706,7 +2728,7 @@ class HUDComponent(Component):
             return ""
 
     def _render_flat_system_group(self, group: Dict[str, Any], options: Dict[str, Any]) -> str:
-        """Render a group of system messages (edit notifications, etc.)."""
+        """ENHANCED: Render a group of system messages (edit/delete notifications, etc.)."""
         try:
             items = group.get("items", [])
             if not items:
@@ -2716,13 +2738,21 @@ class HUDComponent(Component):
             system_lines = []
             for item in items:
                 system_text = item.get("system_text", "")
+                system_type = item.get("system_type", "unknown")
                 time_marker = item.get("time_marker")
+                conversation_context = item.get("conversation_context", {})
                 
                 if time_marker:
                     system_lines.append(f"<time_marker>{time_marker}</time_marker>")
                 
                 if system_text:
-                    system_lines.append(f"[SYSTEM] {system_text}")
+                    # NEW: Use proper system message format with XML tags for structured parsing
+                    if system_type in ["message_edit", "message_delete"]:
+                        # Use structured <system> tags for edit/delete operations
+                        system_lines.append(f"<system>{system_text}</system>")
+                    else:
+                        # Use legacy format for other system messages
+                        system_lines.append(f"[SYSTEM] {system_text}")
             
             if not system_lines:
                 return ""
@@ -2731,32 +2761,56 @@ class HUDComponent(Component):
             return content  # System messages don't need wrapper tags
             
         except Exception as e:
-            logger.error(f"Error rendering flat system group: {e}", exc_info=True)
+            logger.error(f"Error rendering enhanced flat system group: {e}", exc_info=True)
             return ""
 
     def _generate_system_messages(self, content_groups: List[Dict[str, Any]], flat_cache: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Generate system messages for edit/delete operations."""
+        """ENHANCED: Generate system messages from VEIL deltas for edit/delete operations."""
         try:
-            # For now, detect edits from message properties
-            # Future: could track actual edit deltas
+            # NEW: Get recent VEIL deltas from SpaceVeilProducer to detect edit/delete operations
+            veil_producer = self._get_space_veil_producer()
+            if not veil_producer:
+                logger.debug(f"No SpaceVeilProducer available for system message generation")
+                return content_groups
             
-            for group in content_groups:
-                if group.get("group_type") != "chat_message":
-                    continue
-                
-                for item in group.get("items", []):
-                    if item.get("is_edited", False):
-                        # Create system message for this edit
-                        system_message = self._create_edit_system_message(item)
-                        if system_message:
-                            # Insert system message at appropriate chronological position
-                            # For now, add to same group
-                            pass  # Implementation depends on exact requirements
+            # Get accumulated deltas that contain edit/delete operations
+            accumulated_deltas = veil_producer.get_accumulated_deltas()
+            if not accumulated_deltas:
+                logger.debug(f"No accumulated VEIL deltas for system message generation")
+                return content_groups
+            
+            # Filter to only recent deltas (e.g., from current agent cycle)
+            recent_deltas = self._filter_current_cycle_deltas(accumulated_deltas)
+            if not recent_deltas:
+                logger.debug(f"No recent VEIL deltas for system message generation")
+                return content_groups
+            
+            logger.debug(f"Processing {len(recent_deltas)} recent VEIL deltas for system message generation")
+            
+            # Process deltas to find edit/delete operations with rich context
+            system_messages = []
+            for delta in recent_deltas:
+                if delta.get("op") == "update_node" and delta.get("properties", {}).get("edit_context"):
+                    system_msg = self._create_edit_system_message_from_delta(delta)
+                    if system_msg:
+                        system_messages.append(system_msg)
+                        logger.debug(f"Generated edit system message from delta: {delta.get('veil_id')}")
+                        
+                elif delta.get("op") == "remove_node" and delta.get("deletion_context"):
+                    system_msg = self._create_delete_system_message_from_delta(delta)
+                    if system_msg:
+                        system_messages.append(system_msg)
+                        logger.debug(f"Generated delete system message from delta: {delta.get('veil_id')}")
+            
+            # Insert system messages into appropriate chronological positions
+            if system_messages:
+                content_groups = self._insert_system_messages_chronologically(content_groups, system_messages)
+                logger.info(f"Generated {len(system_messages)} system messages from VEIL deltas")
             
             return content_groups
             
         except Exception as e:
-            logger.error(f"Error generating system messages: {e}", exc_info=True)
+            logger.error(f"Error generating system messages from VEIL deltas: {e}", exc_info=True)
             return content_groups
 
     def _create_edit_system_message(self, edited_item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -2782,3 +2836,161 @@ class HUDComponent(Component):
         except Exception as e:
             logger.warning(f"Error creating edit system message: {e}")
             return None
+
+    # --- NEW: System Message Generation from VEIL Deltas ---
+
+    def _filter_current_cycle_deltas(self, accumulated_deltas: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Filter accumulated deltas to only include recent ones from current agent cycle.
+        
+        This prevents generating duplicate system messages for old edits/deletes.
+        For now, we'll take deltas from the last few seconds to capture current activity.
+        
+        Args:
+            accumulated_deltas: All accumulated VEIL deltas
+            
+        Returns:
+            List of recent deltas relevant for system message generation
+        """
+        try:
+            import time
+            current_time = time.time()
+            recent_threshold = current_time - 30  # Last 30 seconds
+            
+            recent_deltas = []
+            for delta in accumulated_deltas:
+                # Check if delta has edit/delete context (from our Phase 2 implementation)
+                if delta.get("op") == "update_node" and delta.get("properties", {}).get("edit_context"):
+                    edit_timestamp = delta.get("properties", {}).get("edit_context", {}).get("edit_timestamp", 0)
+                    if edit_timestamp >= recent_threshold:
+                        recent_deltas.append(delta)
+                        
+                elif delta.get("op") == "remove_node" and delta.get("deletion_context"):
+                    delete_timestamp = delta.get("deletion_context", {}).get("delete_timestamp", 0)
+                    if delete_timestamp >= recent_threshold:
+                        recent_deltas.append(delta)
+            
+            logger.debug(f"Filtered {len(recent_deltas)} recent deltas from {len(accumulated_deltas)} total")
+            return recent_deltas
+            
+        except Exception as e:
+            logger.error(f"Error filtering current cycle deltas: {e}", exc_info=True)
+            return []
+
+    def _create_edit_system_message_from_delta(self, edit_delta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """REVISED: Create system message for message edit using operation_index for positioning."""
+        try:
+            edit_context = edit_delta.get("properties", {}).get("edit_context", {})
+            
+            sender_name = edit_context.get("sender_name", "Unknown")
+            conversation_name = edit_context.get("conversation_name", "Unknown")
+            original_preview = edit_context.get("original_preview", "")
+            original_truncated = edit_context.get("original_truncated", False)
+            truncated_count = edit_context.get("original_truncated_count", 0)
+            edit_timestamp = edit_context.get("edit_timestamp", time.time())
+            
+            # CRITICAL: Use operation_index from delta for chronological positioning
+            operation_index = edit_delta.get("operation_index", 0)
+            
+            # Build truncation text
+            truncated_text = f"({truncated_count} symbols truncated)" if original_truncated else ""
+            
+            # Create system message text matching the expected format
+            system_text = f'Message <sender>{sender_name}</sender> in {conversation_name}, starting with "{original_preview}"{truncated_text} was edited'
+            
+            return {
+                "content_type": "system",
+                "operation_index": operation_index,  # NEW: Use operation_index for positioning
+                "timestamp": edit_timestamp,  # Keep for display context
+                "system_text": system_text,
+                "system_type": "message_edit",
+                "conversation_context": edit_context,
+                "veil_id": edit_delta.get("veil_id")
+            }
+            
+        except Exception as e:
+            logger.error(f"Error creating edit system message from delta: {e}", exc_info=True)
+            return None
+
+    def _create_delete_system_message_from_delta(self, delete_delta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """REVISED: Create system message for message deletion using operation_index for positioning."""
+        try:
+            deletion_context = delete_delta.get("deletion_context", {})
+            
+            sender_name = deletion_context.get("sender_name", "Unknown")
+            conversation_name = deletion_context.get("conversation_name", "Unknown")
+            original_preview = deletion_context.get("original_preview", "")
+            original_truncated = deletion_context.get("original_truncated", False)
+            truncated_count = deletion_context.get("original_truncated_count", 0)
+            delete_timestamp = deletion_context.get("delete_timestamp", time.time())
+            
+            # CRITICAL: Use operation_index from delta for chronological positioning
+            operation_index = delete_delta.get("operation_index", 0)
+            
+            # Build truncation text
+            truncated_text = f"({truncated_count} symbols truncated)" if original_truncated else ""
+            
+            # Create system message text matching the expected format
+            system_text = f'Message <sender>{sender_name}</sender> in {conversation_name}, starting with "{original_preview}"{truncated_text} was deleted'
+            
+            return {
+                "content_type": "system",
+                "operation_index": operation_index,  # NEW: Use operation_index for positioning
+                "timestamp": delete_timestamp,  # Keep for display context
+                "system_text": system_text,
+                "system_type": "message_delete",
+                "conversation_context": deletion_context,
+                "veil_id": delete_delta.get("veil_id")
+            }
+            
+        except Exception as e:
+            logger.error(f"Error creating delete system message from delta: {e}", exc_info=True)
+            return None
+
+    def _insert_system_messages_chronologically(self, 
+                                              content_groups: List[Dict[str, Any]], 
+                                              system_messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        REVISED: Insert system messages using operation_index for proper chronological positioning.
+        
+        Args:
+            content_groups: Existing content groups
+            system_messages: System messages to insert
+            
+        Returns:
+            Updated content groups with system messages inserted
+        """
+        try:
+            if not system_messages:
+                return content_groups
+            
+            # Convert system messages to content items
+            system_items = []
+            for sys_msg in system_messages:
+                system_items.append({
+                    "content_type": "system",
+                    "operation_index": sys_msg.get("operation_index", 0),  # NEW: Use operation_index
+                    "timestamp": sys_msg.get("timestamp", 0),  # Keep for display context
+                    "system_text": sys_msg.get("system_text", ""),
+                    "system_type": sys_msg.get("system_type", "unknown"),
+                    "conversation_context": sys_msg.get("conversation_context", {}),
+                    "veil_id": sys_msg.get("veil_id")
+                })
+            
+            # Merge system items with existing content items from all groups
+            all_items = []
+            for group in content_groups:
+                all_items.extend(group.get("items", []))
+            
+            all_items.extend(system_items)
+            
+            # CRITICAL: Sort by operation_index (operational chronology), not timestamp
+            all_items.sort(key=lambda x: x.get("operation_index", 0))
+            
+            # Regroup by content type
+            regrouped = self._group_content_by_type({"content_items": all_items, "container_items": []})
+            return regrouped.get("content_groups", [])
+            
+        except Exception as e:
+            logger.error(f"Error inserting system messages chronologically: {e}", exc_info=True)
+            return content_groups

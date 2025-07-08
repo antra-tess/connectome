@@ -601,7 +601,6 @@ class ChatManagerComponent(Component):
             source_adapter_id = event_payload.get("source_adapter_id")
             external_conversation_id = event_payload.get("external_conversation_id")
             conversation_metadata = inner_payload.get("conversation_metadata", {})
-            logger.critical("CONVERSATION STARTED EVENT (METADATA): " + str(conversation_metadata))
             is_dm = inner_payload.get("is_dm", False)
             
             if not source_adapter_id or not external_conversation_id:

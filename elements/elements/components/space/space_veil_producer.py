@@ -68,6 +68,9 @@ class SpaceVeilProducer(VeilProducer):
         # Apply to flat VEIL cache (moved from Space)
         self._apply_deltas_to_flat_cache(timestamped_deltas)
         
+        # CRITICAL: Inject operation_index into all nodes for chronological rendering
+        self._inject_operation_index_into_cache(timestamped_deltas)
+        
         # Accumulate for frame-end dispatch
         self._accumulated_deltas.extend(timestamped_deltas)
         
@@ -134,6 +137,48 @@ class SpaceVeilProducer(VeilProducer):
         except Exception as e:
             logger.error(f"Error applying deltas to flat cache: {e}", exc_info=True)
     
+    def _inject_operation_index_into_cache(self, deltas: List[Dict[str, Any]]) -> None:
+        """
+        CRITICAL: Inject operation_index into flat cache nodes for chronological rendering.
+        
+        This ensures all VEIL nodes have operation_index for proper operational chronology
+        as required by the HUD rendering refactor (uses operation_index, not timestamps).
+        
+        Args:
+            deltas: Timestamped deltas with operation_index
+        """
+        try:
+            for delta in deltas:
+                op = delta.get("op")
+                operation_index = delta.get("operation_index")
+                
+                if operation_index is None:
+                    continue
+                
+                if op == "add_node":
+                    node = delta.get("node", {})
+                    veil_id = node.get("veil_id")
+                    if veil_id and veil_id in self._flat_veil_cache:
+                        # Inject operation_index into node properties
+                        if "properties" not in self._flat_veil_cache[veil_id]:
+                            self._flat_veil_cache[veil_id]["properties"] = {}
+                        self._flat_veil_cache[veil_id]["properties"]["operation_index"] = operation_index
+                        
+                elif op == "update_node":
+                    veil_id = delta.get("veil_id")
+                    if veil_id and veil_id in self._flat_veil_cache:
+                        # Update operation_index to reflect latest operation
+                        if "properties" not in self._flat_veil_cache[veil_id]:
+                            self._flat_veil_cache[veil_id]["properties"] = {}
+                        self._flat_veil_cache[veil_id]["properties"]["operation_index"] = operation_index
+                
+                # Note: remove_node doesn't need operation_index injection since node is deleted
+                        
+            logger.debug(f"Injected operation_index into {len(deltas)} cache nodes for chronological rendering")
+            
+        except Exception as e:
+            logger.error(f"Error injecting operation_index into cache: {e}", exc_info=True)
+
     def get_flat_veil_cache(self) -> Dict[str, Any]:
         """
         NEW: Expose flat VEIL cache with proper encapsulation.

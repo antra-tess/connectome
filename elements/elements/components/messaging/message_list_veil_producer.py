@@ -4,6 +4,7 @@ Generates VEIL representation for a list of messages.
 """
 import logging
 from typing import Dict, Any, Optional, List
+import time
 
 from ..base_component import VeilProducer
 # Assuming MessageListComponent is in the same directory
@@ -43,6 +44,8 @@ class MessageListVeilProducer(VeilProducer):
         self._state.setdefault('_last_generated_element_properties', set())
         self._state.setdefault('_has_produced_list_root_add_before', False)
         self._state.setdefault('_last_list_root_properties', {})
+        # NEW: Track message content for edit detection
+        self._state.setdefault('_last_message_content_map', {})
         logger.debug(f"MessageListVeilProducer initialized for Element {self.owner.id}")
 
     def _get_message_list_component(self) -> Optional[MessageListComponent]:
@@ -346,12 +349,34 @@ class MessageListVeilProducer(VeilProducer):
                 "veil_id": removed_id # This implies removal from its parent (the list root)
             })
 
-        # TODO: Detect modified messages (property changes on existing messages)
-        # common_message_ids = last_message_ids.intersection(current_message_ids)
-        # for msg_id in common_message_ids:
-        #     # Fetch old and new message data, compare properties, generate "update_node" if different.
-        #     # This requires storing _last_generated_message_properties_map {msg_id: properties}
-        #     pass
+        # NEW: Check for edit/delete operations from MessageListComponent
+        message_list_comp = self._get_message_list_component()
+        if message_list_comp:
+            pending_operations = message_list_comp.get_pending_veil_operations()
+            
+            for operation in pending_operations:
+                if operation["operation_type"] == "edit":
+                    delta_operations.append(self._create_edit_delta(operation))
+                elif operation["operation_type"] == "delete":
+                    delta_operations.append(self._create_delete_delta(operation))
+
+        # NEW: Fallback - detect edits by comparing message content
+        if message_list_comp:
+            current_messages = message_list_comp.get_messages()
+            last_message_content = self._state.get('_last_message_content_map', {})
+            
+            for msg in current_messages:
+                internal_id = msg.get('internal_id')
+                if internal_id in last_message_content:
+                    last_content = last_message_content[internal_id]
+                    current_content = msg.get('text', '')
+                    
+                    if last_content != current_content and msg.get('is_edited', False):
+                        # Detected edit that wasn't captured by operation tracking
+                        delta_operations.append(self._create_content_change_delta(msg, last_content))
+            
+            # Update content tracking for next frame
+            self._update_message_content_tracking(current_messages)
 
         # NEW: Add owner tracking to all delta operations
         if delta_operations:
@@ -385,4 +410,101 @@ class MessageListVeilProducer(VeilProducer):
         # --- End State Update ---
 
         return delta_operations
+
+    # --- NEW: Rich Delta Generation Methods ---
+    def _create_edit_delta(self, operation: Dict[str, Any]) -> Dict[str, Any]:
+        """Create rich edit delta with full context for system messages."""
+        edit_details = operation.get("edit_details", {})
+        conversation_context = operation.get("conversation_context", {})
+        sender_info = operation.get("sender_info", {})
+        
+        return {
+            "op": "update_node",
+            "veil_id": operation["veil_id"],
+            "properties": {
+                "text_content": edit_details.get("new_text"),
+                "is_edited": True,
+                "edit_timestamp": edit_details.get("edit_timestamp"),
+                "last_edited_timestamp": edit_details.get("edit_timestamp"),
+                # NEW: Rich context for system message generation
+                "edit_context": {
+                    "conversation_name": conversation_context.get("conversation_name"),
+                    "adapter_type": conversation_context.get("adapter_type"), 
+                    "server_name": conversation_context.get("server_name"),
+                    "sender_name": sender_info.get("sender_name"),
+                    "sender_id": sender_info.get("sender_id"),
+                    "original_preview": edit_details.get("original_preview", {}).get("preview"),
+                    "original_truncated": edit_details.get("original_preview", {}).get("truncated", False),
+                    "original_truncated_count": edit_details.get("original_preview", {}).get("truncated_count", 0),
+                    "new_preview": edit_details.get("new_preview", {}).get("preview"), 
+                    "new_truncated": edit_details.get("new_preview", {}).get("truncated", False),
+                    "new_truncated_count": edit_details.get("new_preview", {}).get("truncated_count", 0),
+                    "edit_type": "content_change"
+                }
+            }
+        }
+
+    def _create_delete_delta(self, operation: Dict[str, Any]) -> Dict[str, Any]:
+        """Create rich delete delta with full context for system messages."""
+        delete_details = operation.get("delete_details", {})
+        conversation_context = operation.get("conversation_context", {})
+        sender_info = operation.get("sender_info", {})
+        
+        return {
+            "op": "remove_node",
+            "veil_id": operation["veil_id"],
+            # NEW: Rich deletion context
+            "deletion_context": {
+                "conversation_name": conversation_context.get("conversation_name"),
+                "adapter_type": conversation_context.get("adapter_type"),
+                "server_name": conversation_context.get("server_name"), 
+                "sender_name": sender_info.get("sender_name"),
+                "sender_id": sender_info.get("sender_id"),
+                "original_preview": delete_details.get("original_preview", {}).get("preview"),
+                "original_truncated": delete_details.get("original_preview", {}).get("truncated", False),
+                "original_truncated_count": delete_details.get("original_preview", {}).get("truncated_count", 0),
+                "delete_timestamp": delete_details.get("delete_timestamp"),
+                "deletion_source": delete_details.get("deletion_source", "external"),
+                "delete_type": "message_removal"
+            }
+        }
+
+    def _create_content_change_delta(self, msg: Dict[str, Any], last_content: str) -> Dict[str, Any]:
+        """Create delta for content changes detected by fallback comparison."""
+        conversation_metadata = self._get_conversation_metadata()
+        
+        return {
+            "op": "update_node",
+            "veil_id": msg.get('internal_id'),
+            "properties": {
+                "text_content": msg.get('text', ''),
+                "is_edited": True,
+                "edit_timestamp": msg.get('last_edited_timestamp', time.time()),
+                "last_edited_timestamp": msg.get('last_edited_timestamp', time.time()),
+                # Rich context for system message generation
+                "edit_context": {
+                    "conversation_name": conversation_metadata.get("conversation_name"),
+                    "adapter_type": conversation_metadata.get("adapter_type"),
+                    "server_name": conversation_metadata.get("server_name"),
+                    "sender_name": msg.get('sender_name'),
+                    "sender_id": msg.get('sender_id'),
+                    "original_preview": last_content[:50] if last_content else "",
+                    "original_truncated": len(last_content) > 50 if last_content else False,
+                    "original_truncated_count": max(0, len(last_content) - 50) if last_content else 0,
+                    "new_preview": msg.get('text', '')[:50],
+                    "new_truncated": len(msg.get('text', '')) > 50,
+                    "new_truncated_count": max(0, len(msg.get('text', '')) - 50),
+                    "edit_type": "content_change_fallback"
+                }
+            }
+        }
+
+    def _update_message_content_tracking(self, current_messages: List[Dict[str, Any]]) -> None:
+        """Update content tracking for next frame's comparison."""
+        content_map = {}
+        for msg in current_messages:
+            internal_id = msg.get('internal_id')
+            if internal_id:
+                content_map[internal_id] = msg.get('text', '')
+        self._state['_last_message_content_map'] = content_map
 
