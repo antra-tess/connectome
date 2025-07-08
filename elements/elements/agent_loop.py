@@ -533,27 +533,13 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
             logger.warning(f"{self.agent_loop_name} ({self.id}): CompressionEngine not available. Proceeding without memory.")
 
         try:
-            # --- Get Context via Unified Pipeline or Fallback ---
-            if compression_engine and hasattr(hud, 'get_agent_context_via_compression_engine'):
-                # Use unified CompressionEngine pipeline
-                pipeline_options = {
-                    'focus_context': focus_context,
-                    'include_memory': True,
-                    'render_style': 'verbose_tags'
-                }
-                context_data = await hud.get_agent_context_via_compression_engine(options=pipeline_options)
-                logger.info(f"Using unified CompressionEngine pipeline for context generation")
-            else:
-                # Simple fallback: get context directly from HUD
-                render_options = {'render_style': 'verbose_tags'}
-                if focus_context and focus_context.get('focus_element_id'):
-                    render_options['render_type'] = 'focused'
-                    render_options['focus_element_id'] = focus_context.get('focus_element_id')
-                else:
-                    render_options['render_type'] = 'full'
-
-                context_data = await hud.get_agent_context(options=render_options)
-                logger.info(f"Using direct HUD rendering (compression engine not available)")
+            pipeline_options = {
+                'focus_context': focus_context,
+                'include_memory': True,
+                'render_style': 'chronological_flat'
+            }
+            context_data = await hud.get_agent_context_via_compression_engine(options=pipeline_options)
+            logger.info(f"Using unified CompressionEngine pipeline for context generation")
 
             if not context_data:
                 logger.warning(f"{self.agent_loop_name} ({self.id}): No context data received. Aborting cycle.")
@@ -681,56 +667,6 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                                   await self._get_outgoing_action_callback()(action_request)
                               except Exception as e:
                                   logger.error(f"Error dispatching final external action: {e}")
-                    # REMOVED: Excessive timeline event recording - action dispatching creates its own events
-
-            # --- Store Complete Reasoning Chain in CompressionEngine ---
-            if compression_engine:
-                try:
-                    # NEW: Determine which rendering approach was used
-                    if hasattr(hud, 'get_agent_context_via_compression_engine') and compression_engine:
-                        render_approach = "unified_compression_pipeline"
-                    else:
-                        render_approach = "legacy_combined_rendering"
-
-                    # Store reasoning chain with context summary instead of full redundant context
-                    reasoning_chain_data = {
-                        "render_approach_used": render_approach,  # NEW: Track which rendering approach was used
-                        "had_multimodal_content": has_multimodal_content,  # NEW: Track multimodal usage
-                        "agent_response": agent_response_text,
-                        "tool_calls": [
-                            {
-                                "tool_name": tc.tool_name if hasattr(tc, 'tool_name') else str(tc),
-                                "parameters": tc.parameters if hasattr(tc, 'parameters') else {}
-                            }
-                            for tc in agent_tool_calls
-                        ],
-                        "tool_results": tool_results,
-                        "reasoning_notes": f"simple_cycle with {render_approach}" + (" (multimodal)" if has_multimodal_content else ""),
-                        "metadata": {
-                            "cycle_type": "simple_request_response",
-                            "had_focus_context": bool(focus_context),
-                            "focus_element_id": focus_context.get('focus_element_id') if focus_context else None,
-                            "multimodal_attachments": len(context_data.get('attachments', [])) if isinstance(context_data, dict) else 0,
-                            "used_unified_pipeline": render_approach == "unified_compression_pipeline"
-                        }
-                    }
-
-                    # Instead of storing the full context, create a context summary
-                    context_summary = f"{render_approach.replace('_', ' ').title()}"
-                    if focus_context and focus_context.get('focus_element_id'):
-                        context_summary += f" focused on {focus_context.get('focus_element_id')}"
-                    if render_approach == "unified_compression_pipeline":
-                        context_summary += " with integrated memory and compression"
-                    if has_multimodal_content:
-                        attachment_count = len(context_data.get('attachments', [])) if isinstance(context_data, dict) else 0
-                        context_summary += f" (multimodal: {attachment_count} attachments)"
-
-                    text_length = len(context_data.get('text', '')) if isinstance(context_data, dict) else len(str(context_data))
-                    reasoning_chain_data["context_received"] = f"Agent processed {context_summary} ({text_length} chars)"
-
-                    logger.info(f"Stored reasoning chain with {render_approach}" + (" (multimodal)" if has_multimodal_content else ""))
-                except Exception as store_err:
-                    logger.error(f"Error storing reasoning chain: {store_err}", exc_info=True)
 
         except Exception as e:
             logger.error(f"{self.agent_loop_name} ({self.id}): Error during simple cycle: {e}", exc_info=True)

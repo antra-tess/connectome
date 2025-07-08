@@ -50,29 +50,6 @@ PREFABS = {
         "required_configs_for_element": ["remote_space_id", "name"] # 'description' is optional in constructor
     },
 
-    "direct_message_session": {
-        "description": "A BaseElement configured to represent and handle a direct message session with a user on a specific adapter.",
-        "element_class_name": "BaseElement", # Explicitly BaseElement
-        "element_constructor_arg_keys": ["name", "description",],
-        "components": [
-            {"type": "ToolProviderComponent"},
-            {"type": "MessageListComponent"},
-            {"type": "MessageActionHandler"},
-            {"type": "MessageListVeilProducer"},
-        ],
-        "required_configs_for_element": [ 
-            "dm_adapter_id",
-            "dm_external_conversation_id", 
-            "dm_recipient_info" 
-        ],
-        "element_attributes_from_config": {
-            "dm_adapter_id": "dm_adapter_id", 
-            "dm_external_conversation_id": "dm_external_conversation_id", 
-            "dm_recipient_info": "dm_recipient_info" 
-        },
-        "required_component_configs": {}
-    },
-
     "standard_chat_interface": {
         "description": "A standard chat interface element, typically used within SharedSpaces. Requires 'adapter_id' and 'external_conversation_id' in element_config to be set as attributes on the element.",
         "element_class_name": "BaseElement",
@@ -103,37 +80,10 @@ PREFABS = {
         "required_configs_for_element": ["name", "adapter_id", "external_conversation_id"],
         "element_attributes_from_config": {
             "adapter_id": "adapter_id",
-            "external_conversation_id": "external_conversation_id"
+            "external_conversation_id": "external_conversation_id",
+            "adapter_type": "adapter_type",
+            "server_name": "server_name",
+            "conversation_name": "conversation_name"
         }
     },
-    
-    # --- Add more prefabs here ---
-    
-    # Example: Placeholder for a message list (requires components to exist)
-    # "discord_message_list": {
-    #     "description": "Represents messages from a specific Discord channel.",
-    #     "components": [
-    #         {"type": "MessageListComponent", "config": {"channel_id": None}}, # Base config
-    #         {"type": "ToolProviderComponent"},
-    #         {"type": "MessageListVeilProducer"}
-    #     ],
-    #     "required_configs": {"MessageListComponent": ["channel_id"]} # Mark required overrides
-    # },
-
-    # Example: Uplink Proxy (Hypothetical - requires Uplink Components)
-    # "uplink_proxy": {
-    #     "description": "Connects to and caches state from a remote Space.",
-    #     "components": [
-    #         {"type": "UplinkConnectionComponent", "config": {"remote_space_id": None, "sync_interval": 60}},
-    #         {"type": "RemoteStateCacheComponent", "config": {"remote_space_id": None, "cache_ttl": 300}},
-    #         {"type": "ToolProviderComponent"},
-    #         {"type": "UplinkVeilProducer"} 
-    #         # Spaces inherit ContainerComponent and TimelineComponent
-    #     ],
-    #     # Requires remote_space_id to be provided via overrides for connection/cache
-    #     "required_configs": {
-    #           "UplinkConnectionComponent": ["remote_space_id"],
-    #           "RemoteStateCacheComponent": ["remote_space_id"]
-    #      }
-    # }
 } 

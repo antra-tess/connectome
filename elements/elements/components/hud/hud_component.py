@@ -1,6 +1,7 @@
 import logging
 from typing import Dict, Any, Optional, List, TYPE_CHECKING, Union
 from datetime import datetime, timezone
+import time
 import copy
 import json
 
@@ -110,73 +111,6 @@ class HUDComponent(Component):
         except Exception as e:
             logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] Error getting temporal context: {e}", exc_info=True)
             return f"Error getting temporal context: {e}"
-
-    # def _get_global_attention(self) -> Optional[GlobalAttentionComponent]:
-    #     """Helper to get the GlobalAttentionComponent from the owning InnerSpace."""
-    #     if not self.owner:
-    #         return None
-    #     return self.owner.get_component(GlobalAttentionComponent)
-
-    async def get_agent_context(self, options: Optional[Dict[str, Any]] = None) -> Union[str, Dict[str, Any]]:
-        """
-        Generate agent context using modular rendering functions.
-
-        Args:
-            options: Optional dictionary controlling which rendering function to use:
-                     - render_type: 'memory', 'focused', 'full', or 'combined' (default: 'combined')
-                     - focus_element_id: Element ID for focused rendering
-                     - memory_context: Memory data for memory rendering
-                     - Other rendering-specific options
-
-        Returns:
-            A string representing the agent's context (if no live multimodal content)
-            OR a dictionary with 'text' and 'attachments' keys (if live multimodal content detected)
-        """
-        logger.debug(f"Generating agent context for {self.owner.id}...")
-        options = options or {}
-
-        render_type = options.get('render_type', 'combined')  # Changed default from 'full' to 'combined'
-
-        # Set default render_style to use rich tags for better structure
-        if 'render_style' not in options:
-            options['render_style'] = 'verbose_tags'
-
-        try:
-            if render_type == 'memory':
-                context = await self.render_memory_frame_part(options)
-            elif render_type == 'focused':
-                context = await self.render_focused_frame_part(options)
-            elif render_type == 'full':
-                context = await self.render_full_frame(options)
-            elif render_type == 'combined':
-                context = await self.render_combined_frame(options)
-            else:
-                logger.warning(f"Unknown render_type '{render_type}', falling back to full rendering")
-                context = await self.render_full_frame(options)
-
-            # FIXED: Auto-detect multimodal content for all render types
-            # (render_combined_frame already handles this internally, so check if it's a dict)
-            if isinstance(context, dict):
-                # Combined frame already detected and structured multimodal content
-                return context
-            elif isinstance(context, str):
-                # Other render types return strings, check for live multimodal content
-                focus_element_id = options.get('focus_element_id')
-                if focus_element_id and self.owner:
-                    # OPTIMIZED: Single-pass detection and extraction instead of separate operations
-                    return await self._detect_and_extract_multimodal_content(context, options, focus_element_id)
-
-                # No multimodal content detected, return text
-                return context
-            else:
-                # Fallback for unexpected types
-                return context
-
-        except Exception as e:
-            logger.error(f"Error in get_agent_context with render_type '{render_type}': {e}", exc_info=True)
-            # Fallback to basic full rendering
-            fallback_context = await self.render_full_frame({})
-            return fallback_context
 
     async def _extract_multimodal_content(self, text_context: str, options: Dict[str, Any], focus_element_id: str) -> Dict[str, Any]:
         """
@@ -394,192 +328,6 @@ class HUDComponent(Component):
         except Exception as e:
             logger.error(f"Error processing attachment node for LLM: {e}", exc_info=True)
             return None
-
-    async def render_memory_frame_part(self, options: Dict[str, Any]) -> str:
-        """
-        Render memory context part of the frame.
-
-
-        Args:
-            options: Rendering options, should include 'memory_context' with memory data
-
-        Returns:
-            Rendered memory frame part
-        """
-        try:
-            memory_context = options.get('memory_context')
-            if not memory_context:
-                return "[MEMORY]\n(No memory context provided)"
-
-            frame_parts = []
-
-            # Agent Workspace Header
-            workspace_section = self._render_workspace_section(memory_context.get('agent_info', {}))
-            if workspace_section:
-                frame_parts.append(workspace_section)
-
-            # Scratchpad Section
-            scratchpad_section = self._render_scratchpad_section(memory_context.get('scratchpad'))
-            if scratchpad_section:
-                frame_parts.append(scratchpad_section)
-
-            # Compressed Context Section
-            compressed_section = self._render_compressed_context_section(memory_context.get('compressed_context', {}))
-            if compressed_section:
-                frame_parts.append(compressed_section)
-
-            # No more latest reasoning section - removed in Phase 2 cleanup
-
-            memory_frame = "\n\n".join(frame_parts)
-            logger.info(f"[{self.owner.id}] Rendered memory frame: {len(memory_frame)} chars, {len(frame_parts)} sections")
-            return memory_frame
-
-        except Exception as e:
-            logger.error(f"[{self.owner.id}] Error rendering memory frame: {e}", exc_info=True)
-            return "[MEMORY]\n(Error rendering memory context)"
-
-    async def render_focused_frame_part(self, options: Dict[str, Any]) -> str:
-        """
-        Render focused element with essential InnerSpace context.
-
-        Args:
-            options: Rendering options, should include 'focus_element_id' and optionally 'conversation_context'
-
-        Returns:
-            Rendered focused frame part
-        """
-        try:
-            focus_element_id = options.get('focus_element_id')
-            if not focus_element_id:
-                logger.warning(f"[{self.owner.id}] No focus_element_id provided for focused rendering")
-                return await self.render_full_frame(options)
-
-            conversation_context = options.get('conversation_context', {})
-
-            # Find the focused element
-            focused_element = None
-            if focus_element_id == self.owner.id:
-                logger.info(f"[{self.owner.id}] Focus target is InnerSpace itself, using full context")
-                return await self.render_full_frame(options)
-            else:
-                mounted_elements = self.owner.get_mounted_elements() if hasattr(self.owner, 'get_mounted_elements') else {}
-                for mount_id, element in mounted_elements.items():
-                    if element.id == focus_element_id or mount_id == focus_element_id:
-                        focused_element = element
-                        break
-
-            if not focused_element:
-                logger.warning(f"[{self.owner.id}] Focused element {focus_element_id} not found, falling back to full context")
-                return await self.render_full_frame(options)
-
-            # Build focused rendering: InnerSpace essentials + focused element
-            context_parts = []
-
-            # InnerSpace Identity & Context
-            innerspace_header = self._build_innerspace_identity_context()
-            context_parts.append(innerspace_header)
-
-            # Essential InnerSpace Components
-            essential_components = await self._get_essential_innerspace_components(options)
-            if essential_components:
-                context_parts.append(essential_components)
-
-            # Focused Element Header
-            focus_header = self._build_focused_context_header(focused_element, conversation_context)
-            context_parts.append(focus_header)
-
-            # Focused Element Content
-            focused_veil = self._get_element_veil(focused_element)
-            if focused_veil:
-                attention_requests = {}  # No global attention in focused mode
-                focused_content = self._render_veil_node_to_string(focused_veil, attention_requests, options, indent=0)
-                context_parts.append(focused_content)
-            else:
-                context_parts.append(f"[No content available for {focus_element_id}]")
-
-            focused_frame = "\n\n".join(context_parts)
-            logger.info(f"[{self.owner.id}] Rendered focused frame: InnerSpace + {focus_element_id} ({len(focused_frame)} chars)")
-            return focused_frame
-
-        except Exception as e:
-            logger.error(f"[{self.owner.id}] Error rendering focused frame: {e}", exc_info=True)
-            return await self.render_full_frame(options)
-
-    async def render_full_frame(self, options: Dict[str, Any]) -> str:
-        """
-        Render complete space context with all VEIL objects.
-
-        Args:
-            options: Rendering options (render_style, etc.)
-
-        Returns:
-            Rendered full frame
-        """
-        try:
-            # Get the full aggregated VEIL from InnerSpace's producer
-            veil_producer = self._get_space_veil_producer()
-            if not veil_producer:
-                logger.error(f"[{self.owner.id}] Cannot generate context: SpaceVeilProducer not found.")
-                return "Error: Could not retrieve internal state."
-
-            full_veil = veil_producer.get_full_veil()
-            if not full_veil:
-                logger.warning(f"[{self.owner.id}] SpaceVeilProducer returned empty VEIL.")
-                return "Current context is empty."
-
-            # Get attention signals
-            attention_requests = {}
-
-            # Render the VEIL structure into a string
-            context_string = self._render_veil_node_to_string(full_veil, attention_requests, options, indent=0)
-
-            logger.info(f"[{self.owner.id}] Rendered full frame: {len(context_string)} chars")
-            return context_string
-
-        except Exception as e:
-            logger.error(f"[{self.owner.id}] Error rendering full frame: {e}", exc_info=True)
-            import json
-            return f"Error rendering context: {e}\nRaw VEIL:\n{json.dumps(full_veil, indent=2) if 'full_veil' in locals() else 'N/A'}"
-
-    async def render_combined_frame(self, options: Dict[str, Any]) -> Union[str, Dict[str, Any]]:
-        """
-        Render combined frame with memory + focused element.
-
-        Args:
-            options: Rendering options, should include 'memory_context' and 'focus_element_id'
-
-        Returns:
-            Rendered combined frame (string or dict with multimodal content)
-        """
-        try:
-            frame_parts = []
-
-            # Memory part
-            memory_frame = await self.render_memory_frame_part(options)
-            if memory_frame:
-                frame_parts.append(memory_frame)
-
-            # Focused part
-            focused_frame = await self.render_focused_frame_part(options)
-            if focused_frame:
-                frame_parts.append(focused_frame)
-
-            combined_text = "\n\n".join(frame_parts)
-
-            # OPTIMIZED: Single pass detection + extraction instead of two separate searches
-            focus_element_id = options.get('focus_element_id')
-            if focus_element_id and self.owner:
-                # Single efficient operation: detect AND extract if found
-                return await self._detect_and_extract_multimodal_content(combined_text, options, focus_element_id)
-            else:
-                # No focus element - return text only
-                logger.info(f"[{self.owner.id}] Rendered combined frame: {len(combined_text)} chars, {len(frame_parts)} parts")
-                return combined_text
-
-        except Exception as e:
-            logger.error(f"[{self.owner.id}] Error rendering combined frame: {e}", exc_info=True)
-            # Fallback to full frame
-            return await self.render_full_frame(options)
 
     async def _detect_and_extract_multimodal_content(self, text_context: str, options: Dict[str, Any], focus_element_id: str) -> Union[str, Dict[str, Any]]:
         """
@@ -1556,123 +1304,58 @@ class HUDComponent(Component):
 
     async def get_agent_context_via_compression_engine(self, options: Optional[Dict[str, Any]] = None) -> Union[str, Dict[str, Any]]:
         """
-        Get agent context by routing through CompressionEngine for VEIL processing.
-
-        NEW: This method can now optionally pass flat VEIL cache directly to CompressionEngine
-        instead of always reconstructing hierarchy through SpaceVeilProducer, reducing duplication.
-
+        MODIFIED: Always use chronological flat rendering by default.
+        
         Args:
-            options: Rendering options including focus_context, include_memory, use_flat_cache
-
-        Returns:
-            Processed agent context ready for rendering
+            options: Rendering options including:
+                - render_style: 'chronological_flat' (default), 'hierarchical' (deprecated)
+                - include_time_markers: bool (default: True)
+                - include_system_messages: bool (default: True)
+                - focus_context: dict for focus element
+                - include_memory: bool (default: True)
         """
         
         with tracer.start_as_current_span("hud.render_context_pipeline") as span:
             try:
                 logger.debug(f"Generating agent context via CompressionEngine unified pipeline...")
                 options = options or {}
+                
+                # Set default rendering options for chronological flat
+                options.setdefault('render_style', 'chronological_flat')
+                options.setdefault('include_time_markers', True)
+                options.setdefault('include_system_messages', True)
+                
                 span.set_attribute("hud.render.options", json.dumps(options, default=str))
 
                 # Get required components
                 compression_engine = self.get_sibling_component("CompressionEngineComponent")
-
-                if not compression_engine:
-                    logger.warning(f"CompressionEngine not available, falling back to standard rendering")
-                    span.set_attribute("hud.render.fallback", "no_compression_engine")
-                    return await self.get_agent_context(options)
-
-                # NEW: Option to use flat VEIL cache directly
-                use_flat_cache = options.get('use_flat_cache', True)  # Default to True for efficiency
+                veil_producer = self._get_space_veil_producer()                    
+                flat_veil_cache = veil_producer.get_flat_veil_cache()                    
+                logger.debug(f"Using flat VEIL cache approach for CompressionEngine processing")
+                span.set_attribute("hud.render.veil_source", "flat_cache")
                 
-                if use_flat_cache:
-                    # FIXED: Get flat cache from SpaceVeilProducer instead of direct access
-                    veil_producer = self._get_space_veil_producer()
-                    if not veil_producer:
-                        logger.warning(f"SpaceVeilProducer not available, falling back to standard rendering")
-                        span.set_attribute("hud.render.fallback", "no_veil_producer")
-                        return await self.get_agent_context(options)
-                    
-                    flat_veil_cache = veil_producer.get_flat_veil_cache()
-                    if not flat_veil_cache:
-                        logger.warning(f"Empty flat VEIL cache from SpaceVeilProducer, falling back to standard rendering")
-                        span.set_attribute("hud.render.fallback", "empty_flat_cache")
-                        return await self.get_agent_context(options)
-                    
-                    # Use flat cache approach - more efficient, less duplication
-                    logger.debug(f"Using flat VEIL cache approach for CompressionEngine processing")
-                    span.set_attribute("hud.render.veil_source", "flat_cache")
-                    
-                    # Get memory data if needed
-                    memory_data = None
-                    include_memory = options.get('include_memory', True)
-                    if include_memory:
-                        memory_data = await compression_engine.get_memory_data()
-                        logger.debug(f"Retrieved memory data for flat cache VEIL processing")
-                    
-                    # Process flat VEIL cache through CompressionEngine
-                    focus_context = options.get('focus_context')
-                    processed_veil = await compression_engine.process_flat_veil_with_compression(
-                        flat_veil_cache=flat_veil_cache,
-                        focus_context=focus_context,
-                        memory_data=memory_data
-                    )
-                    
-                    if not processed_veil:
-                        logger.warning(f"CompressionEngine returned empty result from flat cache processing")
-                        span.set_attribute("hud.render.status", "empty_processed_veil")
-                        return "Current context is empty."
-                    
-                    # Render the processed flat cache
-                    context_string = await self._render_processed_flat_veil(processed_veil, options)
-                    
-                else:
-                    # Fallback to hierarchical VEIL approach
-                    logger.debug(f"Using hierarchical VEIL approach for CompressionEngine processing")
-                    span.set_attribute("hud.render.veil_source", "hierarchical")
-                    
-                    veil_producer = self._get_space_veil_producer()
-                    if not veil_producer:
-                        logger.error(f"SpaceVeilProducer not available, cannot generate context")
-                        span.set_status(trace.Status(trace.StatusCode.ERROR, "SpaceVeilProducer not found"))
-                        return "Error: Could not retrieve internal state."
-
-                    # Get full VEIL from SpaceVeilProducer
-                    full_veil = veil_producer.get_full_veil()
-                    if not full_veil:
-                        logger.warning(f"Empty VEIL from SpaceVeilProducer")
-                        span.set_attribute("hud.render.status", "empty_veil")
-                        return "Current context is empty."
-
-                    # Get memory data if needed
-                    memory_data = None
-                    focus_context = options.get('focus_context')
-                    include_memory = options.get('include_memory', True)
-
-                    if include_memory:
-                        memory_data = await compression_engine.get_memory_data()
-                        logger.debug(f"Retrieved memory data for VEIL processing")
-
-                    # Process hierarchical VEIL through CompressionEngine
-                    processed_veil = await compression_engine.process_veil_with_compression(
-                        full_veil=full_veil,
-                        focus_context=focus_context,
-                        memory_data=memory_data
-                    )
-
-                    if not processed_veil:
-                        logger.warning(f"CompressionEngine returned empty VEIL")
-                        span.set_attribute("hud.render.status", "empty_processed_veil")
-                        return "Current context is empty."
-
-                    # Render the processed hierarchical VEIL  
-                    context_string = self._render_veil_node_to_string(processed_veil, {}, options, indent=0)
-
-                # Add metadata
-                include_metadata = options.get('include_metadata', False)
-                if include_metadata:
-                    metadata = await self._get_rendering_metadata(options)
-                    context_string += f"\n\n<!-- Rendering Metadata -->\n{metadata}"
+                # Get memory data if needed
+                memory_data = None
+                include_memory = options.get('include_memory', True)
+                if include_memory:
+                    memory_data = await compression_engine.get_memory_data()
+                    logger.debug(f"Retrieved memory data for flat cache VEIL processing")
+                
+                # Process flat VEIL cache through CompressionEngine
+                focus_context = options.get('focus_context')
+                processed_veil = await compression_engine.process_flat_veil_with_compression(
+                    flat_veil_cache=flat_veil_cache,
+                    focus_context=focus_context,
+                    memory_data=memory_data
+                )
+                
+                if not processed_veil:
+                    logger.warning(f"CompressionEngine returned empty result from flat cache processing")
+                    span.set_attribute("hud.render.status", "empty_processed_veil")
+                    return "Current context is empty."
+                
+                # Render the processed flat cache
+                context_string = await self._render_processed_flat_veil(processed_veil, options)
 
                 logger.info(f"Agent context generated via CompressionEngine: {len(context_string)} chars")
                 span.set_attribute("hud.render.output_length", len(context_string))
@@ -1684,9 +1367,24 @@ class HUDComponent(Component):
                 span.record_exception(e)
                 span.set_status(trace.Status(trace.StatusCode.ERROR, "Context pipeline failed"))
                 
-                # Fallback to standard context generation
-                logger.warning(f"Falling back to standard context generation due to error")
-                return await self.get_agent_context(options)
+                # NEW: Fallback to direct chronological flat rendering
+                try:
+                    logger.info(f"Falling back to direct chronological flat rendering")
+                    span.set_attribute("hud.render.fallback", "direct_flat_cache")
+                    
+                    # Get flat cache directly
+                    flat_cache = self.get_flat_veil_cache_via_producer()
+                    if flat_cache:
+                        fallback_context = self._render_chronological_flat_content(flat_cache, options)
+                        logger.info(f"Fallback chronological rendering successful: {len(fallback_context)} chars")
+                        return fallback_context
+                    else:
+                        logger.warning(f"No flat cache available for fallback")
+                        return "Error: No context available"
+                        
+                except Exception as fallback_error:
+                    logger.error(f"Fallback rendering also failed: {fallback_error}", exc_info=True)
+                    return "Error: Both primary and fallback rendering failed"
 
     async def process_llm_response(self, llm_response_text: str) -> List[Dict[str, Any]]:
         """
@@ -2127,40 +1825,37 @@ class HUDComponent(Component):
 
     async def _render_processed_flat_veil(self, processed_flat_cache: Dict[str, Any], options: Dict[str, Any]) -> str:
         """
-        NEW: Render processed flat VEIL cache from CompressionEngine.
+        MODIFIED: Render processed flat VEIL cache using chronological flat rendering.
         
-        This reconstructs the hierarchy as needed for rendering and applies
-        the same rendering logic as the hierarchical approach.
-        
-        Args:
-            processed_flat_cache: Processed flat VEIL cache from CompressionEngine
-            options: Rendering options
-            
-        Returns:
-            Rendered context string
+        This now bypasses hierarchy reconstruction and renders directly from flat cache.
         """
         try:
-            # Reconstruct hierarchy from processed flat cache
-            hierarchical_veil = self._reconstruct_veil_hierarchy_from_flat_cache(processed_flat_cache)
-            if not hierarchical_veil:
-                logger.warning(f"Failed to reconstruct hierarchy from processed flat cache")
-                return "Error: Could not reconstruct VEIL hierarchy for rendering"
-            
-            # DEBUG: Check if M-chunks made it through the reconstruction
-            memory_node_count = self._count_memory_nodes_recursively(hierarchical_veil)
-            logger.critical(f"🔴 HUD HIERARCHY DEBUG: Reconstructed hierarchy contains {memory_node_count} memory nodes")
-            
-            # Set default render style if not specified
-            if 'render_style' not in options:
-                options['render_style'] = 'verbose_tags'
-            
-            # Render using standard hierarchical rendering
-            attention_requests = {}
-            context_string = self._render_veil_node_to_string(hierarchical_veil, attention_requests, options, indent=0)
-            
-            logger.debug(f"Rendered processed flat VEIL: {len(context_string)} characters")
-            return context_string
-            
+            # Check if we should use chronological flat rendering (default)
+            render_style = options.get('render_style', 'chronological_flat')
+            if render_style == 'chronological_flat':
+                # NEW: Use chronological flat rendering
+                context_string = self._render_chronological_flat_content(processed_flat_cache, options)
+                logger.debug(f"Rendered flat VEIL chronologically: {len(context_string)} characters")
+                return context_string
+            else:
+                # DEPRECATED: Fall back to hierarchical rendering for compatibility
+                logger.debug(f"Using deprecated hierarchical rendering (render_style: {render_style})")
+                hierarchical_veil = self._reconstruct_veil_hierarchy_from_flat_cache(processed_flat_cache)
+                if not hierarchical_veil:
+                    logger.warning(f"Failed to reconstruct hierarchy from processed flat cache")
+                    return "Error: Could not reconstruct VEIL hierarchy for rendering"
+                
+                # Set default render style if not specified
+                if 'render_style' not in options:
+                    options['render_style'] = 'verbose_tags'
+                
+                # Render using standard hierarchical rendering
+                attention_requests = {}
+                context_string = self._render_veil_node_to_string(hierarchical_veil, attention_requests, options, indent=0)
+                
+                logger.debug(f"Rendered processed flat VEIL hierarchically: {len(context_string)} characters")
+                return context_string
+                
         except Exception as e:
             logger.error(f"Error rendering processed flat VEIL: {e}", exc_info=True)
             return f"Error rendering processed VEIL: {e}"
@@ -2194,3 +1889,896 @@ class HUDComponent(Component):
         except Exception as e:
             logger.error(f"Error counting memory nodes: {e}", exc_info=True)
             return 0
+
+    # NEW: Chronological Flat Rendering Implementation
+
+    def _get_chronological_timestamp(self, node_data: Dict[str, Any]) -> float:
+        """
+        Extract unified chronological timestamp from VEIL node for sorting.
+        
+        Handles various timestamp fields and formats to provide consistent chronological ordering.
+        This solves the historical message problem where old messages get fresh operation indices.
+        
+        Args:
+            node_data: VEIL node to extract timestamp from
+            
+        Returns:
+            Unix timestamp as float for sorting (fallback to operation_index if no content timestamps)
+        """
+        try:
+            if not isinstance(node_data, dict):
+                return 0.0
+                
+            props = node_data.get("properties", {})
+            
+            # Check unified timestamp field first (new standard)
+            timestamp = props.get("timestamp")
+            if timestamp:
+                if isinstance(timestamp, (int, float)):
+                    return float(timestamp)
+                elif isinstance(timestamp, str):
+                    numeric_ts = self._convert_timestamp_to_numeric(timestamp)
+                    if numeric_ts:
+                        return numeric_ts
+            
+            # Check legacy message timestamp_iso field
+            timestamp_iso = props.get("timestamp_iso")
+            if timestamp_iso:
+                numeric_ts = self._convert_timestamp_to_numeric(timestamp_iso)
+                if numeric_ts:
+                    return numeric_ts
+            
+            # Check compression_timestamp for old memories
+            compression_timestamp = props.get("compression_timestamp")
+            if compression_timestamp:
+                numeric_ts = self._convert_timestamp_to_numeric(compression_timestamp)
+                if numeric_ts:
+                    return numeric_ts
+            
+            # Check other timestamp fields
+            for field in ["created_at", "message_timestamp", "note_timestamp"]:
+                value = props.get(field)
+                if value:
+                    numeric_ts = self._convert_timestamp_to_numeric(value)
+                    if numeric_ts:
+                        return numeric_ts
+            
+            # Fallback to operation_index for content without timestamps
+            operation_index = props.get("operation_index", 0)
+            if operation_index:
+                # Convert operation_index to timestamp-like value for sorting
+                # Use a base time + operation_index seconds for relative ordering
+                return float(operation_index)
+            
+            return 0.0
+            
+        except Exception as e:
+            logger.debug(f"Error extracting chronological timestamp: {e}")
+            return 0.0
+
+    def _convert_timestamp_to_numeric(self, timestamp_value: Any) -> Optional[float]:
+        """
+        Convert various timestamp formats to numeric Unix timestamp.
+        
+        Args:
+            timestamp_value: Timestamp in various formats
+            
+        Returns:
+            Unix timestamp as float, or None if conversion fails
+        """
+        try:
+            if isinstance(timestamp_value, (int, float)):
+                return float(timestamp_value)
+            
+            elif isinstance(timestamp_value, str):
+                from datetime import datetime
+                try:
+                    # Handle ISO formats
+                    if timestamp_value.endswith('Z'):
+                        dt = datetime.fromisoformat(timestamp_value.replace('Z', '+00:00'))
+                    elif '+' in timestamp_value or timestamp_value.endswith('UTC'):
+                        dt = datetime.fromisoformat(timestamp_value.replace('UTC', ''))
+                    else:
+                        dt = datetime.fromisoformat(timestamp_value)
+                    
+                    return dt.timestamp()
+                    
+                except ValueError:
+                    # Try parsing as numeric string
+                    try:
+                        return float(timestamp_value)
+                    except ValueError:
+                        return None
+            
+            return None
+            
+        except Exception:
+            return None
+
+    def _extract_chronological_content_from_flat_cache(self, flat_cache: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Extract all renderable content from flat cache in natural chronological order.
+        
+        ENHANCED: Now extracts both content nodes AND container nodes to provide
+        complete structural information including space metadata and chat containers.
+        
+        Returns:
+            List of content items with metadata for chronological rendering
+        """
+        try:
+            content_items = []
+            container_items = []  # NEW: Separate containers for structural rendering
+            
+            # NEW: Sort by unified timestamp field for true chronological order
+            veil_nodes = [(veil_id, node_data) for veil_id, node_data in flat_cache.items()]
+            veil_nodes.sort(key=lambda x: self._get_chronological_timestamp(x[1]))
+            
+            for veil_id, node_data in veil_nodes:
+                if not isinstance(node_data, dict):
+                    continue
+                    
+                node_type = node_data.get("node_type", "")
+                props = node_data.get("properties", {})
+                content_nature = props.get("content_nature", "")
+                structural_role = props.get("structural_role", "")
+
+                # NEW: Extract container items (structural)
+                container_item = None
+                if node_type == "space_root" or structural_role == "root":
+                    container_item = self._extract_space_root_content(node_data)
+                elif structural_role == "container" and content_nature == "message_list":
+                    container_item = self._extract_message_list_container_content(node_data)
+                elif structural_role == "container" and content_nature == "scratchpad_summary":
+                    container_item = self._extract_scratchpad_container_content(node_data)
+                    
+                if container_item:
+                    container_items.append(container_item)
+
+                # Extract content items (chronological)
+                content_item = None
+                if content_nature == "chat_message":
+                    content_item = self._extract_chat_message_content(node_data)
+                elif content_nature == "scratchpad_summary" or "scratchpad" in node_type.lower():
+                    content_item = self._extract_scratchpad_content(node_data)
+                elif node_type in ["content_memory", "memorized_content"]:
+                    content_item = self._extract_memory_content(node_data)
+                elif structural_role == "attachment_content":
+                    # Attachments are handled as children of messages
+                    continue
+                    
+                if content_item:
+                    content_items.append(content_item)
+            
+            logger.debug(f"Extracted {len(content_items)} content items and {len(container_items)} container items")
+            
+            # Return combined structure: containers provide metadata, content provides chronological flow
+            return {
+                "content_items": content_items,
+                "container_items": container_items
+            }
+            
+        except Exception as e:
+            logger.error(f"Error extracting chronological content: {e}", exc_info=True)
+            return {"content_items": [], "container_items": []}
+
+    def _extract_chat_message_content(self, node_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Extract chat message content with metadata."""
+        try:
+            props = node_data.get("properties", {})
+            timestamp = props.get("timestamp_iso", 0)
+            
+            # Convert timestamp to numeric if it's a string
+            if isinstance(timestamp, str):
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    timestamp = dt.timestamp()
+                except:
+                    timestamp = 0
+            
+            # DEBUG: Log extracted conversation context
+            logger.debug(f"Extracting chat message - adapter_type: {props.get('adapter_type')}, server_name: {props.get('server_name')}, conversation_name: {props.get('conversation_name')}")
+            
+            return {
+                "content_type": "chat_message",
+                "timestamp": timestamp,
+                "veil_id": node_data.get("veil_id"),
+                "node_data": node_data,
+                "conversation_name": props.get("conversation_name"),
+                "element_id": props.get("element_id"),
+                "sender_name": props.get("sender_name", "Unknown"),
+                "text_content": props.get("text_content", ""),
+                "is_edited": props.get("is_edited", False),
+                "is_agent": props.get("is_agent", False),  # SIMPLIFIED: Use direct is_agent field from VEIL
+                # NEW: Extract conversation context directly for message rendering
+                "adapter_type": props.get("adapter_type"),
+                "server_name": props.get("server_name"),
+            }
+        except Exception as e:
+            logger.warning(f"Error extracting chat message content: {e}")
+            return None
+
+    def _extract_scratchpad_content(self, node_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Extract scratchpad content with metadata."""
+        try:
+            props = node_data.get("properties", {})
+            # Use current time for scratchpad content if no timestamp
+            timestamp = props.get("timestamp", time.time())
+            
+            return {
+                "content_type": "scratchpad",
+                "timestamp": timestamp,
+                "veil_id": node_data.get("veil_id"),
+                "node_data": node_data,
+                "element_id": props.get("element_id"),
+                "note_content": props.get("note_content", "")
+            }
+        except Exception as e:
+            logger.warning(f"Error extracting scratchpad content: {e}")
+            return None
+
+    def _extract_memory_content(self, node_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Extract memory content with metadata."""
+        try:
+            props = node_data.get("properties", {})
+            
+            # NEW: Use unified timestamp field for chronological placement
+            # This ensures memories appear at content time, not compression time
+            timestamp = props.get("timestamp")  # Content timestamp from AgentMemoryCompressor
+            
+            if not timestamp:
+                # Fallback to compression_timestamp for legacy memories
+                timestamp = props.get("compression_timestamp", time.time())
+            
+            # Convert to numeric if needed
+            if isinstance(timestamp, str):
+                numeric_ts = self._convert_timestamp_to_numeric(timestamp)
+                timestamp = numeric_ts if numeric_ts else time.time()
+            elif not isinstance(timestamp, (int, float)):
+                timestamp = time.time()
+            
+            return {
+                "content_type": "memory",
+                "timestamp": float(timestamp),
+                "veil_id": node_data.get("veil_id"),
+                "node_data": node_data,
+                "memory_summary": props.get("memory_summary", ""),
+                "memory_type": props.get("memory_type", "unknown"),
+                # NEW: Include conversation context for memories
+                "conversation_name": props.get("conversation_name"),
+                "adapter_type": props.get("adapter_type"),
+                "server_name": props.get("server_name")
+            }
+        except Exception as e:
+            logger.warning(f"Error extracting memory content: {e}")
+            return None
+
+    def _extract_space_root_content(self, node_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """NEW: Extract space root content for inner_space wrapper."""
+        try:
+            props = node_data.get("properties", {})
+            
+            return {
+                "container_type": "space_root",
+                "veil_id": node_data.get("veil_id"),
+                "node_data": node_data,
+                "element_id": props.get("element_id"),
+                "element_name": props.get("element_name", "Unknown Space"),
+                "agent_name": props.get("agent_name"),
+                "agent_description": props.get("agent_description"),
+                "is_inner_space": props.get("is_inner_space", False)
+            }
+        except Exception as e:
+            logger.warning(f"Error extracting space root content: {e}")
+            return None
+
+    def _extract_message_list_container_content(self, node_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """NEW: Extract message list container for chat_info sections."""
+        try:
+            props = node_data.get("properties", {})
+            
+            # DEBUG: Log extracted metadata for debugging
+            logger.debug(f"Extracting message list container - adapter_type: {props.get('adapter_type')}, server_name: {props.get('server_name')}, conversation_name: {props.get('conversation_name')}")
+            
+            return {
+                "container_type": "message_list",
+                "veil_id": node_data.get("veil_id"),
+                "node_data": node_data,
+                "element_id": props.get("element_id"),
+                "element_name": props.get("element_name", "Unknown Chat"),
+                "conversation_name": props.get("conversation_name"),
+                "adapter_type": props.get("adapter_type"),
+                "server_name": props.get("server_name"),
+                "adapter_id": props.get("adapter_id"),
+                "external_conversation_id": props.get("external_conversation_id"),
+                "available_tools": props.get("available_tools", []),
+                "tool_target_element_id": props.get("tool_target_element_id"),
+                "message_count": props.get("message_count", 0),
+                "alias": props.get("alias"),
+                "is_focused": False  # Will be determined later by focus context
+            }
+        except Exception as e:
+            logger.warning(f"Error extracting message list container: {e}")
+            return None
+
+    def _extract_scratchpad_container_content(self, node_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """NEW: Extract scratchpad container for scratchpad info."""
+        try:
+            props = node_data.get("properties", {})
+            
+            return {
+                "container_type": "scratchpad",
+                "veil_id": node_data.get("veil_id"),
+                "node_data": node_data,
+                "element_id": props.get("element_id"),
+                "element_name": props.get("element_name", "Scratchpad"),
+                "note_count": props.get("note_count", 0)
+            }
+        except Exception as e:
+            logger.warning(f"Error extracting scratchpad container: {e}")
+            return None
+
+    def _group_content_by_type(self, extraction_result: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        ENHANCED: Group content items and organize container items.
+        
+        Args:
+            extraction_result: Dictionary with 'content_items' and 'container_items' keys
+            
+        Returns:
+            Dictionary with grouped content and organized containers
+        """
+        try:
+            content_items = extraction_result.get("content_items", [])
+            container_items = extraction_result.get("container_items", [])
+            
+            # Group content items by type (as before)
+            content_groups = []
+            current_group = None
+            
+            for item in content_items:
+                content_type = item.get("content_type")
+                
+                # Start new group if type changes or no current group
+                if not current_group or current_group["group_type"] != content_type:
+                    if current_group:
+                        content_groups.append(current_group)
+                    
+                    current_group = {
+                        "group_type": content_type,
+                        "items": [item],
+                        "start_timestamp": item.get("timestamp", 0),
+                        "end_timestamp": item.get("timestamp", 0)
+                    }
+                else:
+                    # Add to current group
+                    current_group["items"].append(item)
+                    current_group["end_timestamp"] = item.get("timestamp", 0)
+            
+            # Add final group
+            if current_group:
+                content_groups.append(current_group)
+            
+            # NEW: Organize containers by type for structural rendering
+            containers = {
+                "space_root": None,
+                "message_lists": [],
+                "scratchpad": None
+            }
+            
+            for container in container_items:
+                container_type = container.get("container_type")
+                if container_type == "space_root":
+                    containers["space_root"] = container
+                elif container_type == "message_list":
+                    containers["message_lists"].append(container)
+                elif container_type == "scratchpad":
+                    containers["scratchpad"] = container
+            
+            logger.debug(f"Grouped {len(content_groups)} content groups and {len(container_items)} containers")
+            
+            return {
+                "content_groups": content_groups,
+                "containers": containers
+            }
+            
+        except Exception as e:
+            logger.error(f"Error grouping content by type: {e}", exc_info=True)
+            return {"content_groups": [], "containers": {"space_root": None, "message_lists": [], "scratchpad": None}}
+
+    def _apply_time_markers(self, content_groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Apply relative time markers to content groups.
+        
+        Time intervals (relative to most recent message):
+        - 1 minute ago
+        - 1 hour ago  
+        - 8 hours ago
+        - 1 day ago
+        - 2 days ago
+        - more than 2 days ago
+        - more than 7 days ago
+        """
+        try:
+            if not content_groups:
+                return content_groups
+            
+            # Find most recent timestamp
+            most_recent_time = 0
+            for group in content_groups:
+                group_time = group.get("end_timestamp", 0)
+                if group_time > most_recent_time:
+                    most_recent_time = group_time
+            
+            if most_recent_time == 0:
+                return content_groups
+            
+            # Define time intervals (in seconds)
+            intervals = [
+                (60, "1 minute ago"),           # 1 minute
+                (3600, "1 hour ago"),           # 1 hour  
+                (8 * 3600, "8 hours ago"),      # 8 hours
+                (24 * 3600, "1 day ago"),       # 1 day
+                (2 * 24 * 3600, "2 days ago"),  # 2 days
+                (7 * 24 * 3600, "more than 2 days ago"),  # 7 days
+                (float('inf'), "more than 7 days ago")     # > 7 days
+            ]
+            
+            # Track which intervals we've already marked
+            marked_intervals = set()
+            
+            # Process groups from newest to oldest
+            for group in reversed(content_groups):
+                group_time = group.get("end_timestamp", 0)
+                time_diff = most_recent_time - group_time
+                
+                # Find appropriate interval
+                for threshold, label in intervals:
+                    if time_diff <= threshold and threshold not in marked_intervals:
+                        # Mark this interval on the last message of the group
+                        if group["items"]:
+                            last_item = group["items"][-1]
+                            last_item["time_marker"] = label
+                            marked_intervals.add(threshold)
+                        break
+            
+            return content_groups
+            
+        except Exception as e:
+            logger.error(f"Error applying time markers: {e}", exc_info=True)
+            return content_groups
+
+    def _render_chronological_flat_content(self, flat_cache: Dict[str, Any], options: Dict[str, Any]) -> str:
+        """
+        ENHANCED: Main chronological flat rendering with complete structural information.
+        
+        Now renders both container metadata and chronological content to match expected output.
+        """
+        try:
+            logger.debug(f"Starting enhanced chronological flat rendering of {len(flat_cache)} VEIL nodes")
+            
+            # Extract both content and containers
+            extraction_result = self._extract_chronological_content_from_flat_cache(flat_cache)
+            if not extraction_result.get("content_items") and not extraction_result.get("container_items"):
+                return "Current context is empty."
+            
+            # Group content and organize containers
+            grouped_result = self._group_content_by_type(extraction_result)
+            content_groups = grouped_result.get("content_groups", [])
+            containers = grouped_result.get("containers", {})
+            
+            # NEW: Determine focus context from options
+            focus_context = options.get("focus_context", {})
+            focused_element_id = focus_context.get("focus_element_id")  # FIXED: Use correct field name
+            
+            # NEW: Mark focused message list containers
+            for msg_list in containers.get("message_lists", []):
+                if msg_list.get("element_id") == focused_element_id:
+                    msg_list["is_focused"] = True
+            
+            # Apply time markers to content groups
+            if content_groups:
+                content_groups = self._apply_time_markers(content_groups)
+            
+            # Generate system messages for edits (if enabled)
+            if options.get("include_system_messages", True) and content_groups:
+                content_groups = self._generate_system_messages(content_groups, flat_cache)
+            
+            # NEW: Build complete structure with containers
+            rendered_sections = []
+            
+            # 1. Render space root (inner_space wrapper)
+            space_root = containers.get("space_root")
+            if space_root:
+                space_section = self._render_space_root_wrapper(space_root, containers, options)
+                if space_section:
+                    rendered_sections.append(space_section)
+            
+            # 2. Render early scratchpad sections (if any exist early in timeline)
+            early_scratchpad_groups = [g for g in content_groups if g.get("group_type") == "scratchpad" and g.get("start_timestamp", 0) < (content_groups[0].get("start_timestamp", 0) + 3600) if content_groups]
+            for group in early_scratchpad_groups:
+                rendered_section = self._render_flat_scratchpad_group(group, options)
+                if rendered_section:
+                    rendered_sections.append(rendered_section)
+            
+            # 3. Render chat info containers 
+            message_lists = containers.get("message_lists", [])
+            if message_lists:
+                chat_info_section = self._render_chat_info_section(message_lists, options)
+                if chat_info_section:
+                    rendered_sections.append(chat_info_section)
+            
+            # 4. Render chronological content groups (all types interleaved)
+            for group in content_groups:
+                group_type = group.get("group_type")
+                
+                if group_type == "chat_message":
+                    rendered_section = self._render_flat_chat_group(group, options)
+                elif group_type == "memory":
+                    rendered_section = self._render_flat_memory_group(group, options)
+                elif group_type == "scratchpad":
+                    # Skip early scratchpad groups already rendered
+                    if group not in early_scratchpad_groups:
+                        rendered_section = self._render_flat_scratchpad_group(group, options)
+                    else:
+                        continue
+                elif group_type == "system":
+                    rendered_section = self._render_flat_system_group(group, options)
+                else:
+                    logger.warning(f"Unknown content group type: {group_type}")
+                    continue
+                
+                if rendered_section:
+                    rendered_sections.append(rendered_section)
+            
+            # 5. Close space root wrapper if we opened it
+            if space_root:
+                rendered_sections.append("</inner_space>")
+            
+            result = "\n\n".join(rendered_sections)
+            logger.info(f"Rendered enhanced chronological flat content: {len(result)} chars, {len(rendered_sections)} sections")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error in enhanced chronological flat rendering: {e}", exc_info=True)
+            return f"Error rendering enhanced chronological content: {e}"
+
+    def _render_space_root_wrapper(self, space_root: Dict[str, Any], containers: Dict[str, Any], options: Dict[str, Any]) -> str:
+        """NEW: Render the space root as inner_space wrapper with agent metadata."""
+        try:
+            agent_name = space_root.get("agent_name")
+            agent_description = space_root.get("agent_description")
+            
+            # Build opening tag with agent metadata
+            if agent_name:
+                opening_tag = f'<inner_space agent_name="{agent_name}"'
+                if agent_description:
+                    opening_tag += f' agent_description="{agent_description}"'
+                opening_tag += '>'
+            else:
+                opening_tag = '<inner_space>'
+            
+            return opening_tag
+            
+        except Exception as e:
+            logger.error(f"Error rendering space root wrapper: {e}", exc_info=True)
+            return '<inner_space>'
+
+    def _render_chat_info_section(self, message_lists: List[Dict[str, Any]], options: Dict[str, Any]) -> str:
+        """NEW: Render chat_info section with channel information."""
+        try:
+            if not message_lists:
+                return ""
+            
+            # Group by adapter type and server
+            adapter_groups = {}
+            for msg_list in message_lists:
+                adapter_type = msg_list.get("adapter_type") or "unknown"  # FIXED: Handle None values
+                server_name = msg_list.get("server_name") or "default"    # FIXED: Handle None values
+                alias = msg_list.get("alias") or "unknown"
+                key = f"{adapter_type}:{server_name}"
+                
+                if key not in adapter_groups:
+                    adapter_groups[key] = {
+                        "adapter_type": adapter_type,
+                        "server_name": server_name,
+                        "channels": []
+                    }
+                
+                adapter_groups[key]["channels"].append(msg_list)
+            
+            # Render chat info sections
+            info_sections = []
+            for group_key, group_data in adapter_groups.items():
+                adapter_type = group_data["adapter_type"]
+                server_name = group_data["server_name"]
+                channels = group_data["channels"]
+                
+                # Build chat_info opening tag
+                info_section = f'<chat_info type="{adapter_type}" server="{server_name}" alias="{alias}">\n'
+                
+                # Add channels
+                for channel in channels:
+                    conversation_name = channel.get("conversation_name", "unknown")
+                    is_focused = channel.get("is_focused", False)
+                    focused_attr = f' focused={is_focused}'
+                    info_section += f'<channel conversation_name="{conversation_name}"{focused_attr}>\n'
+                
+                info_section += '</chat_info>'
+                info_sections.append(info_section)
+            
+            return "\n\n".join(info_sections)
+            
+        except Exception as e:
+            logger.error(f"Error rendering chat info section: {e}", exc_info=True)
+            return ""
+
+    def _render_flat_chat_group(self, group: Dict[str, Any], options: Dict[str, Any]) -> str:
+        """Render a group of consecutive chat messages."""
+        try:
+            items = group.get("items", [])
+            if not items:
+                return ""
+            
+            # Render messages
+            message_lines = []
+            for item in items:
+                message_line = self._render_flat_chat_message(item, options)
+                if message_line:
+                    message_lines.append(message_line)
+            
+            if not message_lines:
+                return ""
+            
+            # Wrap in chat_contents tags
+            content = "\n".join(message_lines)
+            return f"<chat_contents>\n{content}\n</chat_contents>"
+            
+        except Exception as e:
+            logger.error(f"Error rendering flat chat group: {e}", exc_info=True)
+            return ""
+
+    def _render_flat_chat_message(self, item: Dict[str, Any], options: Dict[str, Any]) -> str:
+        """ENHANCED: Render individual chat message with full conversation context."""
+        try:
+            is_agent = item.get("is_agent", False)
+            sender_name = item.get("sender_name", "Unknown")
+            text_content = item.get("text_content", "")
+            is_edited = item.get("is_edited", False)
+            time_marker = item.get("time_marker")
+            
+            # FIXED: Use conversation context that was already extracted during content extraction
+            conversation_name = item.get("conversation_name", "")
+            adapter_type = item.get("adapter_id") or ""      # FIXED: Handle None values
+            server_name = item.get("server_name") or ""        # FIXED: Handle None values
+            
+            # Build opening chat_message tag with conversation context
+            message_attrs = []
+            if conversation_name:
+                message_attrs.append(f'conversation_name="{conversation_name}"')
+            if adapter_type:
+                message_attrs.append(f'messenger="{adapter_type}"')
+            if server_name:
+                message_attrs.append(f'server="{server_name}"')
+            # logger.critical("MESSAGE ATTRS: " + str(message_attrs) + "Item: " + str(item))
+            
+            if message_attrs:
+                opening_tag = f'<chat_message {" ".join(message_attrs)}>'
+            else:
+                opening_tag = '<chat_message>'
+            
+            # Build message content
+            if is_agent:
+                # Agent messages: no sender tag
+                message_content = text_content
+            else:
+                # Human messages: include sender tag
+                message_content = f"<sender>{sender_name}</sender>{text_content}"
+            
+            # Add edited marker
+            if is_edited:
+                message_content += " (edited)"
+            
+            # Handle attachments
+            node_data = item.get("node_data", {})
+            attachment_text = self._render_flat_message_attachments(node_data)
+            if attachment_text:
+                message_content += f"\n{attachment_text}"
+            
+            # Build complete message with tags
+            message_line = f"{opening_tag}{message_content}</chat_message>"
+            
+            # Add time marker if present
+            if time_marker:
+                message_line = f"<time_marker>{time_marker}</time_marker>\n{message_line}"
+            
+            return message_line
+            
+        except Exception as e:
+            logger.error(f"Error rendering enhanced flat chat message: {e}", exc_info=True)
+            return ""
+
+    def _render_flat_message_attachments(self, node_data: Dict[str, Any]) -> str:
+        """Render attachments for a message in flat view."""
+        try:
+            props = node_data.get("properties", {})
+            attachment_metadata = props.get("attachment_metadata", [])
+            
+            if not attachment_metadata:
+                return ""
+            
+            attachment_lines = []
+            for att_meta in attachment_metadata:
+                filename = att_meta.get('filename', 'unknown_file')
+                att_type = att_meta.get('attachment_type', 'unknown')
+                attachment_lines.append(f"[Attachment: {filename} (Type: {att_type})]")
+            
+            return "\n".join(attachment_lines)
+            
+        except Exception as e:
+            logger.warning(f"Error rendering message attachments: {e}")
+            return ""
+
+    def _render_flat_scratchpad_group(self, group: Dict[str, Any], options: Dict[str, Any]) -> str:
+        """Render a group of scratchpad content."""
+        try:
+            items = group.get("items", [])
+            if not items:
+                return ""
+            
+            # Check if there's any actual content before proceeding
+            has_content = any(item.get("note_content", "").strip() for item in items)
+            if not has_content:
+                # FIXED: Don't render empty scratchpad with just time markers - it's confusing
+                return ""
+            
+            # Render scratchpad items
+            scratchpad_lines = []
+            for item in items:
+                note_content = item.get("note_content", "").strip()
+                time_marker = item.get("time_marker")
+                
+                # Only add time marker if there's actual content
+                if time_marker and note_content:
+                    scratchpad_lines.append(f"<time_marker>{time_marker}</time_marker>")
+                
+                if note_content:
+                    scratchpad_lines.append(note_content)
+            
+            if not scratchpad_lines:
+                return ""
+            
+            # Wrap in scratchpad tags
+            content = "\n".join(scratchpad_lines)
+            return f"<scratchpad>\n{content}\n</scratchpad>"
+            
+        except Exception as e:
+            logger.error(f"Error rendering flat scratchpad group: {e}", exc_info=True)
+            return ""
+
+    def _render_flat_memory_group(self, group: Dict[str, Any], options: Dict[str, Any]) -> str:
+        """Render a group of memory content."""
+        try:
+            items = group.get("items", [])
+            if not items:
+                return ""
+            
+            # Render memory items
+            memory_lines = []
+            for item in items:
+                memory_summary = item.get("memory_summary", "")
+                memory_type = item.get("memory_type", "unknown")
+                time_marker = item.get("time_marker")
+                
+                # NEW: Extract conversation context for memory
+                conversation_name = item.get("conversation_name") or ""    # FIXED: Handle None values
+                adapter_type = item.get("adapter_type") or ""              # FIXED: Handle None values
+                server_name = item.get("server_name") or ""                # FIXED: Handle None values
+                
+                if time_marker:
+                    memory_lines.append(f"<time_marker>{time_marker}</time_marker>")
+                
+                if memory_summary:
+                    # Build memory tag with conversation context
+                    memory_attrs = []
+                    if conversation_name:
+                        memory_attrs.append(f'conversation_name="{conversation_name}"')
+                    if time_marker:
+                        memory_attrs.append(f'timestamp="{time_marker}"')
+                    
+                    if memory_attrs:
+                        memory_tag = f'<memory {" ".join(memory_attrs)}>'
+                        closing_tag = '</memory>'
+                    else:
+                        memory_tag = f'<{memory_type}_memory>'
+                        closing_tag = f'</{memory_type}_memory>'
+                    
+                    memory_lines.append(f"{memory_tag}{memory_summary}{closing_tag}")
+            
+            if not memory_lines:
+                return ""
+            
+            content = "\n".join(memory_lines)
+            return content  # Memory content doesn't need wrapper tags
+            
+        except Exception as e:
+            logger.error(f"Error rendering flat memory group: {e}", exc_info=True)
+            return ""
+
+    def _render_flat_system_group(self, group: Dict[str, Any], options: Dict[str, Any]) -> str:
+        """Render a group of system messages (edit notifications, etc.)."""
+        try:
+            items = group.get("items", [])
+            if not items:
+                return ""
+            
+            # Render system messages
+            system_lines = []
+            for item in items:
+                system_text = item.get("system_text", "")
+                time_marker = item.get("time_marker")
+                
+                if time_marker:
+                    system_lines.append(f"<time_marker>{time_marker}</time_marker>")
+                
+                if system_text:
+                    system_lines.append(f"[SYSTEM] {system_text}")
+            
+            if not system_lines:
+                return ""
+            
+            content = "\n".join(system_lines)
+            return content  # System messages don't need wrapper tags
+            
+        except Exception as e:
+            logger.error(f"Error rendering flat system group: {e}", exc_info=True)
+            return ""
+
+    def _generate_system_messages(self, content_groups: List[Dict[str, Any]], flat_cache: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate system messages for edit/delete operations."""
+        try:
+            # For now, detect edits from message properties
+            # Future: could track actual edit deltas
+            
+            for group in content_groups:
+                if group.get("group_type") != "chat_message":
+                    continue
+                
+                for item in group.get("items", []):
+                    if item.get("is_edited", False):
+                        # Create system message for this edit
+                        system_message = self._create_edit_system_message(item)
+                        if system_message:
+                            # Insert system message at appropriate chronological position
+                            # For now, add to same group
+                            pass  # Implementation depends on exact requirements
+            
+            return content_groups
+            
+        except Exception as e:
+            logger.error(f"Error generating system messages: {e}", exc_info=True)
+            return content_groups
+
+    def _create_edit_system_message(self, edited_item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Create system message for an edited message."""
+        try:
+            sender_name = edited_item.get("sender_name", "Unknown")
+            text_content = edited_item.get("text_content", "")
+            
+            # Create preview (first 50 chars)
+            preview = text_content[:50]
+            truncated = ""
+            if len(text_content) > 50:
+                truncated = f" ({len(text_content) - 50} symbols truncated)"
+            
+            system_text = f'Message <sender>{sender_name}</sender> with content "{preview}"{truncated} was edited'
+            
+            return {
+                "content_type": "system",
+                "timestamp": edited_item.get("timestamp", 0),
+                "system_text": system_text
+            }
+            
+        except Exception as e:
+            logger.warning(f"Error creating edit system message: {e}")
+            return None

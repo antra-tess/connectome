@@ -58,6 +58,20 @@ class MessageListVeilProducer(VeilProducer):
             return tool_provider.list_tools()
         return []
 
+    def _get_conversation_metadata(self) -> Dict[str, Any]:
+        """Get conversation metadata from the owner element."""
+        metadata = {}
+        if self.owner:
+            metadata.update({
+                "adapter_type": getattr(self.owner, 'adapter_type', None),
+                "server_name": getattr(self.owner, 'server_name', None), 
+                "conversation_name": getattr(self.owner, 'conversation_name', None),
+                "adapter_id": getattr(self.owner, 'adapter_id', None),
+                "external_conversation_id": getattr(self.owner, 'external_conversation_id', None),
+                "alias": getattr(self.owner, 'alias', None)
+            })
+        return metadata
+
     def get_full_veil(self) -> Optional[Dict[str, Any]]:
         """
         Generates the complete VEIL structure for the current message list.
@@ -66,6 +80,10 @@ class MessageListVeilProducer(VeilProducer):
         if not message_list_comp:
             logger.error(f"[{self.owner.id}] Cannot generate VEIL: MessageListComponent not found.")
             return None
+        
+        # Get conversation metadata for VEIL properties
+        conversation_metadata = self._get_conversation_metadata()
+
 
         messages = message_list_comp.get_messages() # Get all current messages
         message_nodes = []
@@ -101,6 +119,9 @@ class MessageListVeilProducer(VeilProducer):
                     # VEIL_ATTACHMENT_METADATA_PROP: processed_attachments_from_mlc # Store the rich attachment dicts
                     # Let's refine this: the VEIL_ATTACHMENT_METADATA_PROP should probably just be the metadata part,
                     # and the content part should lead to a child node if content exists.
+                    "adapter_type": conversation_metadata.get("adapter_type"),
+                    "server_name": conversation_metadata.get("server_name"),
+                    "conversation_name": conversation_metadata.get("conversation_name"),
                     "error_details": msg_data.get('error_details', None),
                     VEIL_ATTACHMENT_METADATA_PROP: [
                         {k: v for k, v in att.items() if k != 'content'}
@@ -142,6 +163,7 @@ class MessageListVeilProducer(VeilProducer):
             self._add_owner_tracking(message_node)
             message_nodes.append(message_node)
 
+
         # Create the root container node for the list
         root_veil_node = {
             "veil_id": f"{self.owner.id}_message_list_root",
@@ -152,10 +174,15 @@ class MessageListVeilProducer(VeilProducer):
                 "element_id": self.owner.id,
                 "element_name": self.owner.name,
                 "message_count": len(message_nodes),
-                # NEW: Include tool information for agent targeting
                 "available_tools": self._get_available_tools_for_element(),
-                "tool_target_element_id": self.owner.id  # Explicit target for tools
-                # Add other container properties/annotations if needed
+                "tool_target_element_id": self.owner.id,  # Explicit target for tools
+                # NEW: Include conversation metadata for rich VEIL context
+                "adapter_type": conversation_metadata.get("adapter_type"),
+                "server_name": conversation_metadata.get("server_name"),
+                "conversation_name": conversation_metadata.get("conversation_name"),
+                "adapter_id": conversation_metadata.get("adapter_id"),
+                "external_conversation_id": conversation_metadata.get("external_conversation_id"),
+                "alias": conversation_metadata.get("alias")
             },
             "children": message_nodes
         }
@@ -186,6 +213,9 @@ class MessageListVeilProducer(VeilProducer):
         current_messages = message_list_comp.get_messages()
         current_message_ids = {msg.get('internal_id') for msg in current_messages if msg.get('internal_id')}
 
+        # Include metadata in current properties for delta tracking
+        conversation_metadata = self._get_conversation_metadata()
+
         # Prepare current properties for the list root node
         current_list_root_properties = {
             "structural_role": "container",
@@ -193,9 +223,15 @@ class MessageListVeilProducer(VeilProducer):
             "element_id": self.owner.id,
             "element_name": self.owner.name,
             "message_count": len(current_message_ids), # Use count of valid messages
-            # NEW: Include tool information for agent targeting
             "available_tools": self._get_available_tools_for_element(),
-            "tool_target_element_id": self.owner.id  # Explicit target for tools
+            "tool_target_element_id": self.owner.id,  # Explicit target for tools
+            # NEW: Include metadata in delta tracking
+            "adapter_type": conversation_metadata.get("adapter_type"),
+            "server_name": conversation_metadata.get("server_name"), 
+            "conversation_name": conversation_metadata.get("conversation_name"),
+            "adapter_id": conversation_metadata.get("adapter_id"),
+            "external_conversation_id": conversation_metadata.get("external_conversation_id"),
+            "alias": conversation_metadata.get("alias")
         }
 
         # 1. Handle the list root node (add or update)
@@ -259,6 +295,10 @@ class MessageListVeilProducer(VeilProducer):
                     # NEW: Include reaction data for HUD rendering in deltas too
                     "reactions": msg_data.get('reactions', {}),  # Include full reaction dict {emoji: [user_ids]}
                     "message_status": msg_data.get('status', 'received'),  # Include message status for pending states
+                    "adapter_type": conversation_metadata.get("adapter_type"),
+                    "server_name": conversation_metadata.get("server_name"),
+                    "conversation_name": conversation_metadata.get("conversation_name"),
+                    "is_agent": msg_data.get('sender_name', 'Unknown') == conversation_metadata.get("alias"),
                     "error_details": msg_data.get('error_details', None),
                     VEIL_ATTACHMENT_METADATA_PROP: [
                         {k: v for k, v in att.items() if k != 'content'}

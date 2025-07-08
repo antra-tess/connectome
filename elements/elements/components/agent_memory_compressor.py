@@ -377,16 +377,21 @@ class AgentMemoryCompressor(MemoryCompressor):
                 logger.warning(f"Agent {self.agent_id}: Agent reflection returned empty memory")
                 return None
             
+            # NEW: Extract latest timestamp from compressed content for chronological placement
+            content_timestamp = self._extract_latest_content_timestamp(raw_veil_nodes)
+            current_time = time.time()
+            
             # Create memorized VEIL node
             memorized_node = {
-                "veil_id": f"memory_{self.agent_id}_{int(time.time())}",
+                "veil_id": f"memory_{self.agent_id}_{int(current_time)}",
                 "node_type": "memorized_content",
                 "properties": {
                     "structural_role": "compressed_content",
                     "content_nature": "content_memory",
                     "memory_summary": memory_summary,
                     "original_child_count": len(raw_veil_nodes),
-                    "compression_timestamp": datetime.now().isoformat(),
+                    "timestamp": content_timestamp,  # NEW: Use content timestamp for chronological placement
+                    "compression_timestamp": datetime.now().isoformat(),  # Keep for metadata
                     "compression_approach": "agent_memory_compressor_async",
                     "is_focused": compression_context.get("is_focused", True) if compression_context else True,
                     "agent_id": self.agent_id,
@@ -399,6 +404,107 @@ class AgentMemoryCompressor(MemoryCompressor):
             
         except Exception as e:
             logger.error(f"Agent {self.agent_id}: Error forming memory: {e}", exc_info=True)
+            return None
+
+    def _extract_latest_content_timestamp(self, raw_veil_nodes: List[Dict[str, Any]]) -> float:
+        """
+        Extract the latest timestamp from compressed content for chronological placement.
+        
+        This ensures memories appear at the time of their newest content, not compression time.
+        Week-old messages compressed today should appear in week-old position, not today.
+        
+        Args:
+            raw_veil_nodes: List of VEIL nodes being compressed
+            
+        Returns:
+            Latest content timestamp as Unix timestamp (float)
+        """
+        try:
+            latest_timestamp = 0.0
+            timestamps_found = 0
+            
+            for node in raw_veil_nodes:
+                props = node.get("properties", {})
+                
+                # Check various timestamp fields
+                timestamp_fields = [
+                    "timestamp_iso",    # Messages
+                    "timestamp",        # Scratchpad, numeric timestamps
+                    "created_at",       # Other content
+                    "message_timestamp" # Alternative message timestamp
+                ]
+                
+                for field in timestamp_fields:
+                    timestamp_value = props.get(field)
+                    if timestamp_value:
+                        numeric_timestamp = self._convert_timestamp_to_numeric(timestamp_value)
+                        if numeric_timestamp and numeric_timestamp > latest_timestamp:
+                            latest_timestamp = numeric_timestamp
+                            timestamps_found += 1
+                            
+                # Also check children recursively for nested timestamps
+                children = node.get("children", [])
+                if children:
+                    child_timestamp = self._extract_latest_content_timestamp(children)
+                    if child_timestamp > latest_timestamp:
+                        latest_timestamp = child_timestamp
+            
+            if timestamps_found > 0:
+                logger.debug(f"Agent {self.agent_id}: Extracted latest content timestamp {latest_timestamp} from {timestamps_found} timestamps")
+                return latest_timestamp
+            else:
+                # Fallback to current time if no timestamps found
+                fallback_time = time.time()
+                logger.warning(f"Agent {self.agent_id}: No content timestamps found, using current time {fallback_time}")
+                return fallback_time
+                
+        except Exception as e:
+            logger.error(f"Agent {self.agent_id}: Error extracting content timestamp: {e}", exc_info=True)
+            return time.time()  # Fallback to current time
+
+    def _convert_timestamp_to_numeric(self, timestamp_value: Any) -> Optional[float]:
+        """
+        Convert various timestamp formats to numeric Unix timestamp.
+        
+        Args:
+            timestamp_value: Timestamp in various formats (ISO string, Unix timestamp, etc.)
+            
+        Returns:
+            Unix timestamp as float, or None if conversion fails
+        """
+        try:
+            if isinstance(timestamp_value, (int, float)):
+                # Already numeric timestamp
+                return float(timestamp_value)
+            
+            elif isinstance(timestamp_value, str):
+                # Parse ISO timestamp string
+                from datetime import datetime
+                try:
+                    # Handle various ISO formats
+                    if timestamp_value.endswith('Z'):
+                        dt = datetime.fromisoformat(timestamp_value.replace('Z', '+00:00'))
+                    elif '+' in timestamp_value or timestamp_value.endswith('UTC'):
+                        dt = datetime.fromisoformat(timestamp_value.replace('UTC', ''))
+                    else:
+                        dt = datetime.fromisoformat(timestamp_value)
+                    
+                    return dt.timestamp()
+                    
+                except ValueError:
+                    # Try parsing as pure numeric string
+                    try:
+                        return float(timestamp_value)
+                    except ValueError:
+                        logger.debug(f"Could not parse timestamp string: {timestamp_value}")
+                        return None
+            
+            else:
+                logger.debug(f"Unsupported timestamp type: {type(timestamp_value)}")
+                return None
+                
+        except Exception as e:
+            logger.debug(f"Error converting timestamp {timestamp_value}: {e}")
             return None
 
     def _create_forming_fallback(self, memory_id: str, element_ids: List[str], 
@@ -919,6 +1025,9 @@ MEMORY SUMMARY:"""
         total_tokens = estimate_veil_tokens(raw_veil_nodes)
         memory_id = self._generate_memory_id(element_ids)
         
+        # NEW: Extract latest content timestamp for chronological placement
+        content_timestamp = self._extract_latest_content_timestamp(raw_veil_nodes)
+        
         # Create memorized node with multimodal metadata
         memorized_node = {
             "veil_id": f"memorized_{memory_id}",
@@ -931,7 +1040,8 @@ MEMORY SUMMARY:"""
                 "original_element_ids": element_ids,
                 "original_node_count": len(raw_veil_nodes),
                 "token_count": total_tokens,
-                "compression_timestamp": datetime.now().isoformat(),
+                "timestamp": content_timestamp,  # NEW: Use content timestamp for chronological placement
+                "compression_timestamp": datetime.now().isoformat(),  # Keep for metadata
                 "compressor_type": f"{self.__class__.__name__}_fallback",
                 "has_multimodal_content": len(attachments) > 0,  # NEW: Track multimodal in fallback too
                 "attachment_count": len(attachments)

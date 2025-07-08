@@ -51,11 +51,13 @@ class SpaceVeilProducer(VeilProducer):
         # Add operation timestamps and indices
         timestamped_deltas = []
         current_time = time.time()
+        current_iso = time.strftime('%Y-%m-%dT%H:%M:%S.%fZ', time.gmtime(current_time))
         
         for delta in delta_operations:
             # CRITICAL FIX: Deep copy to prevent data contamination
             timestamped_delta = copy.deepcopy(delta)
             timestamped_delta["operation_timestamp"] = current_time
+            timestamped_delta["operation_timestamp_iso"] = current_iso  # NEW: ISO format for system messages
             timestamped_delta["operation_index"] = self._next_delta_index
             timestamped_deltas.append(timestamped_delta)
             self._next_delta_index += 1
@@ -509,6 +511,9 @@ class SpaceVeilProducer(VeilProducer):
             "element_type": self.owner.__class__.__name__,
             "is_inner_space": getattr(self.owner, 'IS_INNER_SPACE', False)
         }
+        if hasattr(self.owner, 'agent_description'):
+            props['agent_description'] = self.owner.agent_description
+            props['agent_name'] = self.owner.agent_name
         return props
 
     def build_hierarchical_veil_from_flat_cache(self,

@@ -16,7 +16,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DM_SESSION_PREFAB_NAME = "direct_message_session" # Renamed for clarity
 STANDARD_CHAT_INTERFACE_PREFAB_NAME = "standard_chat_interface"
 
 @register_component
@@ -155,7 +154,11 @@ class ChatManagerComponent(Component):
                 "external_user_id": user_ext_id_for_naming,
                 "display_name": user_display_name_for_naming,
                 "is_dm": is_dm  # Store DM flag for context
-            }
+            },
+            # NEW: Add placeholders for conversation metadata
+            "adapter_type": None,  # Will be set by _apply_conversation_metadata_to_element if available
+            "server_name": None,
+            "conversation_name": None
         }
 
         creation_result = element_factory.handle_create_element_from_prefab(
@@ -189,6 +192,37 @@ class ChatManagerComponent(Component):
             logger.error(f"Failed to create chat element for {session_key}: {error_msg}")
             return None, None
 
+    def _ensure_chat_element_with_metadata(self, adapter_id: str, conv_id: str, user_ext_id_for_naming: str, 
+                                         user_display_name_for_naming: str, is_dm: bool, 
+                                         conversation_metadata: Optional[Dict[str, Any]] = None) -> tuple[Optional['BaseElement'], Optional[str]]:
+        """
+        Enhanced version of _ensure_chat_element that includes conversation metadata.
+        """
+        # Call existing _ensure_chat_element method
+        element, mount_id = self._ensure_chat_element(adapter_id, conv_id, user_ext_id_for_naming, 
+                                                    user_display_name_for_naming, is_dm)
+        
+        # If element was created/found and we have metadata, apply it
+        if element and conversation_metadata:
+            self._apply_conversation_metadata_to_element(element, conversation_metadata)
+            
+        return element, mount_id
+    
+    def _apply_conversation_metadata_to_element(self, element: 'BaseElement', metadata: Dict[str, Any]) -> None:
+        """
+        Apply conversation metadata to a chat element for later access by components.
+        """
+        # Store metadata as element attributes for component access
+        for key, value in metadata.items():
+            setattr(element, key, value)
+        
+        # Update element name to use conversation_name if available
+        conversation_name = metadata.get("conversation_name")
+        if conversation_name and conversation_name != "Unknown Conversation":
+            element.name = conversation_name
+            
+        logger.debug(f"Applied conversation metadata to element {element.id}: adapter_type={element.adapter_type}, server={element.server_name}")
+
 
     def handle_event(self, event_node: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
         """
@@ -197,7 +231,6 @@ class ChatManagerComponent(Component):
         """
         from ..inner_space import InnerSpace # For type checking owner
         from ..space import Space # For type checking owner
-
         event_payload_from_space = event_node.get('payload', {})
         connectome_event_type = event_payload_from_space.get("event_type")
 
@@ -210,6 +243,10 @@ class ChatManagerComponent(Component):
         # NEW: Handle bulk history fetched event
         if connectome_event_type == "bulk_history_fetched":
             return self._handle_bulk_history_fetched(event_payload_from_space, timeline_context)
+
+        # NEW: Handle conversation started event
+        if connectome_event_type == "conversation_started":
+            return self._handle_conversation_started_event(event_payload_from_space, timeline_context)
 
         # NEW: Handle message events (including replay events)
         if connectome_event_type in ["message_received", "historical_message_received", "agent_message_confirmed",
@@ -267,14 +304,34 @@ class ChatManagerComponent(Component):
                 # Use external_conversation_id as the primary key for finding the chat element
 
                 if connectome_event_type in ["message_received", "historical_message_received", "agent_message_confirmed"]:
-                    # For new messages, ensure the chat element exists (may create it)
-                    target_chat_element, _ = self._ensure_chat_element(
-                        source_adapter_id,
-                        external_conversation_id,  # Always use this as the conversation key
-                        sender_external_id,        # For naming/display purposes
-                        sender_display_name,       # For naming/display purposes
-                        is_dm=is_dm,              # DM flag determines behavior, not routing
-                    )
+                    # For message events, find existing chat element (should already exist from conversation_started)
+                    session_key = (source_adapter_id, external_conversation_id)
+                    session_info = self._state["dm_sessions_map"].get(session_key)
+
+                    if session_info:
+                        mounted_element = self.owner.get_mounted_element(session_info["mount_id"])
+                        if mounted_element and mounted_element.id == session_info["element_id"]:
+                            target_chat_element = mounted_element
+                            logger.debug(f"Found existing chat element {target_chat_element.id} for {connectome_event_type} on conversation {external_conversation_id}")
+                        else:
+                            logger.warning(f"Chat session for {session_key} in map but element not found/mismatched for {connectome_event_type}.")
+                            # Clean up stale entry
+                            self._state["dm_sessions_map"].pop(session_key, None)
+                            target_chat_element = None
+                    else:
+                        target_chat_element = None
+
+                    # FALLBACK: If no existing element found, create one without metadata
+                    # This handles edge cases where conversation_started might have been missed
+                    if not target_chat_element:
+                        logger.warning(f"No existing chat element found for {connectome_event_type} on conversation {external_conversation_id}. Creating fallback element (conversation_started may have been missed).")
+                        target_chat_element, _ = self._ensure_chat_element(
+                            source_adapter_id,
+                            external_conversation_id,  
+                            sender_external_id,        
+                            sender_display_name,       
+                            is_dm=is_dm
+                        )
                 else:
                     # For update/delete/reaction events, find existing chat element (don't create)
                     session_key = (source_adapter_id, external_conversation_id)
@@ -450,25 +507,45 @@ class ChatManagerComponent(Component):
                 logger.error(f"[{self.COMPONENT_TYPE}] Bulk history processing only supported on InnerSpace owners.")
                 return False
 
-            # For bulk history, we need to find or create the target chat element first
-            # Use the first message for sender information if available
-            sender_external_id = external_conversation_id  # Default fallback
-            sender_display_name = "Unknown"
+            # Find existing chat element (should already exist from conversation_started)
+            session_key = (source_adapter_id, external_conversation_id)
+            session_info = self._state["dm_sessions_map"].get(session_key)
 
-            if history_messages and isinstance(history_messages[0], dict):
-                first_msg_sender = history_messages[0].get('sender', {})
-                if first_msg_sender:
-                    sender_external_id = first_msg_sender.get("user_id", external_conversation_id)
-                    sender_display_name = first_msg_sender.get("display_name", "Unknown")
+            if session_info:
+                mounted_element = self.owner.get_mounted_element(session_info["mount_id"])
+                if mounted_element and mounted_element.id == session_info["element_id"]:
+                    target_chat_element = mounted_element
+                    logger.debug(f"Found existing chat element {target_chat_element.id} for bulk history on conversation {external_conversation_id}")
+                else:
+                    logger.warning(f"Chat session for {session_key} in map but element not found/mismatched for bulk history.")
+                    # Clean up stale entry
+                    self._state["dm_sessions_map"].pop(session_key, None)
+                    target_chat_element = None
+            else:
+                target_chat_element = None
 
-            # Ensure the chat element exists for bulk processing
-            target_chat_element, mount_id = self._ensure_chat_element(
-                source_adapter_id,
-                external_conversation_id,
-                sender_external_id,
-                sender_display_name,
-                is_dm=is_dm
-            )
+            # FALLBACK: If no existing element found, create one without metadata
+            # This handles edge cases where conversation_started might have been missed
+            if not target_chat_element:
+                logger.warning(f"No existing chat element found for bulk history on conversation {external_conversation_id}. Creating fallback element (conversation_started may have been missed).")
+                
+                # Use the first message for sender information if available
+                sender_external_id = external_conversation_id  # Default fallback
+                sender_display_name = "Unknown"
+
+                if history_messages and isinstance(history_messages[0], dict):
+                    first_msg_sender = history_messages[0].get('sender', {})
+                    if first_msg_sender:
+                        sender_external_id = first_msg_sender.get("user_id", external_conversation_id)
+                        sender_display_name = first_msg_sender.get("display_name", "Unknown")
+
+                target_chat_element, mount_id = self._ensure_chat_element(
+                    source_adapter_id,
+                    external_conversation_id,
+                    sender_external_id,
+                    sender_display_name,
+                    is_dm=is_dm
+                )
 
             if not target_chat_element:
                 logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Could not ensure chat element for bulk history processing. Conversation: {external_conversation_id}")
@@ -504,4 +581,59 @@ class ChatManagerComponent(Component):
 
         except Exception as e:
             logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Error processing bulk history: {e}", exc_info=True)
+            return False
+
+    def _handle_conversation_started_event(self, event_payload: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
+        """
+        Handles conversation_started events to ensure chat elements exist with proper metadata.
+        
+        Args:
+            event_payload: The conversation_started event payload
+            timeline_context: Timeline context for the event
+            
+        Returns:
+            True if handled successfully, False otherwise
+        """
+        from ..inner_space import InnerSpace
+        
+        try:
+            inner_payload = event_payload.get("payload", {})
+            source_adapter_id = event_payload.get("source_adapter_id")
+            external_conversation_id = event_payload.get("external_conversation_id")
+            conversation_metadata = inner_payload.get("conversation_metadata", {})
+            logger.critical("CONVERSATION STARTED EVENT (METADATA): " + str(conversation_metadata))
+            is_dm = inner_payload.get("is_dm", False)
+            
+            if not source_adapter_id or not external_conversation_id:
+                logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] conversation_started missing required fields")
+                return False
+                
+            if not isinstance(self.owner, InnerSpace):
+                logger.error(f"[{self.COMPONENT_TYPE}] conversation_started only supported on InnerSpace owners")
+                return False
+            
+            # Extract display information from metadata
+            conversation_name = conversation_metadata.get("conversation_name", "Unknown Conversation")
+            sender_display_name = conversation_name  # Use conversation name as display name
+            sender_external_id = external_conversation_id  # Fallback for sender ID
+            
+            # Ensure chat element exists with enhanced metadata
+            target_chat_element, mount_id = self._ensure_chat_element_with_metadata(
+                source_adapter_id,
+                external_conversation_id,
+                sender_external_id,
+                sender_display_name,
+                is_dm=is_dm,
+                conversation_metadata=conversation_metadata  # Pass metadata for element config
+            )
+            
+            if target_chat_element:
+                logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Successfully ensured chat element for conversation_started: {target_chat_element.id}")
+                return True
+            else:
+                logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Failed to ensure chat element for conversation_started")
+                return False
+                
+        except Exception as e:
+            logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Error handling conversation_started: {e}", exc_info=True)
             return False
