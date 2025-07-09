@@ -133,6 +133,10 @@ class ToolProviderComponent(Component):
         """
         Returns a list of available tools with their descriptions and parameter schemas.
         Formatted for easy consumption.
+        
+        DEPRECATED: Use get_llm_tool_definitions() for LLMToolDefinition objects
+        or get_available_tool_names() for simple name lists.
+        This method is maintained for backward compatibility.
         """
         available_tools_list = []
         for tool_name, tool_info in self._tools.items():
@@ -153,6 +157,77 @@ class ToolProviderComponent(Component):
             })
         return available_tools_list
 
+    def get_available_tool_names(self) -> List[str]:
+        """
+        Returns a list of names of all registered tools.
+        
+        NEW: Backward compatibility method for components that expect simple tool name lists.
+        This is the same as list_tools() but with a more descriptive name.
+        """
+        return list(self._tools.keys())
+
+    def get_enhanced_tool_definitions(self) -> List[Dict[str, Any]]:
+        """
+        NEW: Returns enhanced tool definitions with complete metadata for VEIL emission.
+        
+        This provides the rich tool information needed for tool aggregation and rendering
+        while maintaining all original tool metadata including target element information.
+        
+        Returns:
+            List of enhanced tool definition dictionaries with complete metadata
+        """
+        enhanced_definitions = []
+        for tool_name, tool_info in self._tools.items():
+            # Build the complete tool definition with all metadata
+            enhanced_def = {
+                "name": tool_name,
+                "description": tool_info["description"],
+                "parameters": self._build_json_schema_from_parameters(tool_info["parameters_schema"]),
+                "target_element_id": self.owner.id if self.owner else None,
+                "element_name": getattr(self.owner, 'name', 'Unknown Element') if self.owner else 'Unknown Element',
+                "element_type": self.owner.__class__.__name__ if self.owner else 'Unknown',
+                "original_tool_name": tool_name  # For aggregation logic
+            }
+            enhanced_definitions.append(enhanced_def)
+        return enhanced_definitions
+
+    def _build_json_schema_from_parameters(self, parameters_schema: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        NEW: Build JSON schema from parameter definitions for enhanced tool definitions.
+        
+        This is extracted from get_llm_tool_definitions() to avoid code duplication.
+        """
+        json_schema_properties = {}
+        required_params = []
+
+        for param_def in parameters_schema:
+            param_name = param_def["name"]
+            prop_schema = {
+                "type": param_def["type"],
+                "description": param_def["description"]
+            }
+            # Add optional fields if present
+            if param_def.get("items"):
+                prop_schema["items"] = param_def["items"]
+            if param_def.get("properties"): # For object type
+                prop_schema["properties"] = param_def["properties"]
+            if param_def.get("enum"):
+                 prop_schema["enum"] = param_def["enum"]
+            
+            json_schema_properties[param_name] = prop_schema
+            
+            if param_def["required"]:
+                required_params.append(param_name)
+        
+        final_json_schema = {
+            "type": "object",
+            "properties": json_schema_properties
+        }
+        if required_params: # Only add 'required' key if there are required parameters
+            final_json_schema["required"] = required_params
+        
+        return final_json_schema
+
     def get_llm_tool_definitions(self) -> List[LLMToolDefinition]:
         """
         Returns a list of available tools formatted as LLMToolDefinition objects,
@@ -161,43 +236,9 @@ class ToolProviderComponent(Component):
         """
         llm_tools = []
         for tool_name, tool_info in self._tools.items():
-            json_schema_properties = {}
-            required_params = []
-
-            for param_def in tool_info["parameters_schema"]:
-                param_name = param_def["name"]
-                prop_schema = {
-                    "type": param_def["type"],
-                    "description": param_def["description"]
-                }
-                # Add optional fields if present
-                if param_def.get("items"):
-                    prop_schema["items"] = param_def["items"]
-                if param_def.get("properties"): # For object type
-                    prop_schema["properties"] = param_def["properties"]
-                if param_def.get("enum"):
-                     prop_schema["enum"] = param_def["enum"]
-                
-                json_schema_properties[param_name] = prop_schema
-                
-                if param_def["required"]:
-                    required_params.append(param_name)
+            # Use the new helper method to build JSON schema
+            final_json_schema = self._build_json_schema_from_parameters(tool_info["parameters_schema"])
             
-            final_json_schema = {
-                "type": "object",
-                "properties": json_schema_properties
-            }
-            if required_params: # Only add 'required' key if there are required parameters
-                final_json_schema["required"] = required_params
-            
-            # If no parameters at all, the schema should reflect that (e.g. empty properties)
-            if not json_schema_properties:
-                # Some LLMs expect an empty properties object if no params
-                # Others might not need 'properties' or 'required' at all.
-                # For now, let's ensure 'properties' is there but empty.
-                # 'required' list would be empty and thus omitted.
-                pass
-
             llm_tools.append(LLMToolDefinition(
                 name=tool_name,
                 description=tool_info["description"],

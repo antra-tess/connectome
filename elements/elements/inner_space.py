@@ -27,7 +27,7 @@ from .components.compression_engine_component import CompressionEngineComponent 
 from .components.space.space_veil_producer import SpaceVeilProducer
 
 # Import agent loop components
-from .agent_loop import BaseAgentLoopComponent, SimpleRequestResponseLoopComponent
+from .components.agent_loop import BaseAgentLoopComponent, SimpleRequestResponseLoopComponent
 
 # Type checking imports
 from typing import TYPE_CHECKING

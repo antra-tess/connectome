@@ -288,6 +288,11 @@ CONNECTOME_LLM_API_KEY=your_openai_key_here
 # Activity Adapters
 CONNECTOME_ACTIVITY_ADAPTERS_JSON=[{"id": "discord_adapter_1", "url": "http://localhost:5001", "auth_token": null}]
 
-# Agents
+# Agents - Choose agent loop component type based on your needs
+# SimpleRequestResponseLoopComponent: Uses LLM's native tool_call API (default)
+# ToolTextParsingLoopComponent: Parses tools from text, supports multiple tools per response
 CONNECTOME_AGENTS_JSON=[{"agent_id": "demo_agent", "name": "Demo Agent", "description": "A demonstration agent", "agent_loop_component_type_name": "SimpleRequestResponseLoopComponent", "platform_aliases": {"discord_adapter_1": "DemoBot"}, "handles_direct_messages_from_adapter_ids": ["discord_adapter_1"]}]
+
+# Example with text-parsing agent loop:
+# CONNECTOME_AGENTS_JSON=[{"agent_id": "text_parsing_agent", "name": "Text Parsing Agent", "description": "An agent using text-based tool parsing", "agent_loop_component_type_name": "ToolTextParsingLoopComponent", "platform_aliases": {"discord_adapter_1": "TextBot"}, "handles_direct_messages_from_adapter_ids": ["discord_adapter_1"]}]
 ```

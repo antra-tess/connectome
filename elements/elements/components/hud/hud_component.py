@@ -12,6 +12,7 @@ from ..space.space_veil_producer import SpaceVeilProducer
 from elements.component_registry import register_component
 # Import shared prefix generator for consistency with AgentLoop
 from ...utils.prefix_generator import create_short_element_prefix
+from dataclasses import dataclass
 # May need access to GlobalAttentionComponent for filtering
 # from ..attention.global_attention_component import GlobalAttentionComponent
 
@@ -24,6 +25,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 tracer = get_tracer(__name__)
+
+# NEW: Tool aggregation data structures for Phase 2
+@dataclass
+class ElementTarget:
+    element_id: str
+    element_name: str  # Human-readable name for tool parameter
+    element_type: str  # "Discord", "Telegram", etc.
+    original_prefix: str  # "cha_123", etc.
+
+@dataclass  
+class AggregatedTool:
+    base_name: str  # "send_message"
+    description: str
+    base_parameters: Dict[str, Any]  # Original parameters minus target-specific ones
+    available_targets: List[ElementTarget]
+    original_tools: List[Any]  # Reference to source tools (enhanced tool definitions)
 
 @register_component
 class HUDComponent(Component):
@@ -1302,9 +1319,11 @@ class HUDComponent(Component):
 
     # NEW: Unified VEIL Processing Pipeline
 
-    async def get_agent_context_via_compression_engine(self, options: Optional[Dict[str, Any]] = None) -> Union[str, Dict[str, Any]]:
+    async def get_agent_context_via_compression_engine(self, 
+                                                 options: Optional[Dict[str, Any]] = None,
+                                                 tools: Optional[List[Dict[str, Any]]] = None) -> Union[str, Dict[str, Any]]:
         """
-        MODIFIED: Always use chronological flat rendering by default.
+        ENHANCED: Always use chronological flat rendering by default with optional tool rendering.
         
         Args:
             options: Rendering options including:
@@ -1313,6 +1332,8 @@ class HUDComponent(Component):
                 - include_system_messages: bool (default: True)
                 - focus_context: dict for focus element
                 - include_memory: bool (default: True)
+                - tool_rendering_mode: 'simple' (default) or 'full' for text parsing
+            tools: Optional enhanced tool definitions from VEIL for rendering
         """
         
         with tracer.start_as_current_span("hud.render_context_pipeline") as span:
@@ -1357,6 +1378,22 @@ class HUDComponent(Component):
                 # Render the processed flat cache
                 context_string = await self._render_processed_flat_veil(processed_veil, options)
 
+                # NEW: Add tool rendering based on mode if tools are provided (Phase 2)
+                if tools:
+                    tool_mode = options.get('tool_rendering_mode', 'simple')  # 'simple' or 'full'
+                    
+                    if tool_mode == 'full':
+                        # For text-parsing AgentLoop - aggregate and render complete definitions
+                        aggregated_tools = self._aggregate_tools_by_base_name(tools)
+                        tool_section = self._render_full_tool_definitions_section(aggregated_tools)
+                    else:
+                        # For tool_call API AgentLoop - render original prefixed list (no aggregation)
+                        tool_section = self._render_simple_tool_list_section(tools)
+                    
+                    if tool_section:
+                        context_string = f"{context_string}\n\n{tool_section}"
+                        logger.debug(f"Added {tool_mode} tool rendering to context")
+
                 logger.info(f"Agent context generated via CompressionEngine: {len(context_string)} chars")
                 span.set_attribute("hud.render.output_length", len(context_string))
                 span.set_status(trace.Status(trace.StatusCode.OK))
@@ -1376,6 +1413,21 @@ class HUDComponent(Component):
                     flat_cache = self.get_flat_veil_cache_via_producer()
                     if flat_cache:
                         fallback_context = self._render_chronological_flat_content(flat_cache, options)
+                        
+                        # NEW: Add tool rendering to fallback as well (Phase 2)
+                        if tools:
+                            tool_mode = options.get('tool_rendering_mode', 'simple')
+                            
+                            if tool_mode == 'full':
+                                aggregated_tools = self._aggregate_tools_by_base_name(tools)
+                                tool_section = self._render_full_tool_definitions_section(aggregated_tools)
+                            else:
+                                tool_section = self._render_simple_tool_list_section(tools)
+                            
+                            if tool_section:
+                                fallback_context = f"{fallback_context}\n\n{tool_section}"
+                                logger.debug(f"Added {tool_mode} tool rendering to fallback context")
+                        
                         logger.info(f"Fallback chronological rendering successful: {len(fallback_context)} chars")
                         return fallback_context
                     else:
@@ -1889,6 +1941,278 @@ class HUDComponent(Component):
         except Exception as e:
             logger.error(f"Error counting memory nodes: {e}", exc_info=True)
             return 0
+
+    # NEW: Phase 2 Tool Aggregation Methods
+
+    def _aggregate_tools_by_base_name(self, enhanced_tools: List[Dict[str, Any]]) -> Dict[str, AggregatedTool]:
+        """
+        NEW: Aggregate enhanced tool definitions by base name for full tool rendering mode.
+        
+        Takes enhanced tool definitions from VEIL and groups them by their base name
+        (stripping prefixes), creating target parameter enums for the aggregated tools.
+        
+        Args:
+            enhanced_tools: Enhanced tool definitions from VEIL with complete metadata
+            
+        Returns:
+            Dictionary mapping base names to AggregatedTool objects
+        """
+        try:
+            aggregated_tools = {}
+            
+            for tool_def in enhanced_tools:
+                tool_name = tool_def.get("name", "")
+                if not tool_name:
+                    continue
+                
+                # Extract base name (strip prefix if present)
+                if "__" in tool_name:
+                    prefix, base_name = tool_name.split("__", 1)
+                else:
+                    base_name = tool_name
+                    prefix = ""
+                
+                # Create element target from tool definition
+                element_target = ElementTarget(
+                    element_id=tool_def.get("target_element_id", "unknown"),
+                    element_name=tool_def.get("element_name", "Unknown Element"),
+                    element_type=tool_def.get("element_type", "Element"),
+                    original_prefix=prefix
+                )
+                
+                # Get or create aggregated tool
+                if base_name not in aggregated_tools:
+                    # Use the original parameters as base (we'll add target parameter later)
+                    base_parameters = tool_def.get("parameters", {}).copy()
+                    
+                    aggregated_tools[base_name] = AggregatedTool(
+                        base_name=base_name,
+                        description=tool_def.get("description", ""),
+                        base_parameters=base_parameters,
+                        available_targets=[element_target],
+                        original_tools=[tool_def]
+                    )
+                else:
+                    # Add to existing aggregated tool
+                    aggregated_tools[base_name].available_targets.append(element_target)
+                    aggregated_tools[base_name].original_tools.append(tool_def)
+            
+            # Add target_element parameter to aggregated tools that have multiple targets
+            for base_name, aggregated_tool in aggregated_tools.items():
+                if len(aggregated_tool.available_targets) > 1:
+                    # Create enum of available target names
+                    target_names = [target.element_name for target in aggregated_tool.available_targets]
+                    
+                    # Add target_element parameter to the schema
+                    if "properties" not in aggregated_tool.base_parameters:
+                        aggregated_tool.base_parameters["properties"] = {}
+                    
+                    aggregated_tool.base_parameters["properties"]["target_element"] = {
+                        "type": "string",
+                        "description": "Target element to execute the tool on",
+                        "enum": target_names
+                    }
+                    
+                    # Add to required parameters
+                    if "required" not in aggregated_tool.base_parameters:
+                        aggregated_tool.base_parameters["required"] = []
+                    
+                    if "target_element" not in aggregated_tool.base_parameters["required"]:
+                        aggregated_tool.base_parameters["required"].append("target_element")
+            
+            logger.debug(f"Aggregated {len(enhanced_tools)} tools into {len(aggregated_tools)} base tools")
+            return aggregated_tools
+            
+        except Exception as e:
+            logger.error(f"Error aggregating tools by base name: {e}", exc_info=True)
+            return {}
+
+    def _extract_element_targets_for_tool(self, base_name: str, enhanced_tools: List[Dict[str, Any]]) -> List[ElementTarget]:
+        """
+        NEW: Extract all element targets for a specific tool base name.
+        
+        Args:
+            base_name: Base tool name (e.g., "send_message")
+            enhanced_tools: Enhanced tool definitions from VEIL
+            
+        Returns:
+            List of ElementTarget objects for this tool
+        """
+        try:
+            targets = []
+            
+            for tool_def in enhanced_tools:
+                tool_name = tool_def.get("name", "")
+                
+                # Check if this tool matches the base name
+                if "__" in tool_name:
+                    prefix, extracted_base = tool_name.split("__", 1)
+                    if extracted_base == base_name:
+                        targets.append(ElementTarget(
+                            element_id=tool_def.get("target_element_id", "unknown"),
+                            element_name=tool_def.get("element_name", "Unknown Element"),
+                            element_type=tool_def.get("element_type", "Element"),
+                            original_prefix=prefix
+                        ))
+                elif tool_name == base_name:
+                    targets.append(ElementTarget(
+                        element_id=tool_def.get("target_element_id", "unknown"),
+                        element_name=tool_def.get("element_name", "Unknown Element"),
+                        element_type=tool_def.get("element_type", "Element"),
+                        original_prefix=""
+                    ))
+            
+            return targets
+            
+        except Exception as e:
+            logger.error(f"Error extracting element targets for tool {base_name}: {e}", exc_info=True)
+            return []
+
+    def _create_target_parameter_enum(self, targets: List[ElementTarget]) -> Dict[str, Any]:
+        """
+        NEW: Create target_element parameter schema with enum of available targets.
+        
+        Args:
+            targets: List of ElementTarget objects
+            
+        Returns:
+            Parameter schema dictionary for target_element parameter
+        """
+        try:
+            target_names = [target.element_name for target in targets]
+            
+            return {
+                "type": "string",
+                "description": "Target element to execute the tool on",
+                "enum": target_names
+            }
+            
+        except Exception as e:
+            logger.error(f"Error creating target parameter enum: {e}", exc_info=True)
+            return {"type": "string", "description": "Target element"}
+
+    # NEW: Phase 2 Tool Rendering Methods
+
+    def _render_simple_tool_list_section(self, enhanced_tools: List[Dict[str, Any]]) -> str:
+        """
+        NEW: Render simple tool list section for existing tool_call API mode.
+        
+        This renders the original prefixed tool names for backward compatibility
+        with existing AgentLoop components that use the tool_call API.
+        
+        Args:
+            enhanced_tools: Enhanced tool definitions from VEIL
+            
+        Returns:
+            Rendered tool list section
+        """
+        try:
+            if not enhanced_tools:
+                return ""
+            
+            # Extract just the tool names (keeping original prefixed format)
+            tool_names = [tool.get("name", "") for tool in enhanced_tools if tool.get("name")]
+            
+            if not tool_names:
+                return ""
+            
+            # Format as simple list for tool_call API compatibility
+            tool_list = self._format_simple_tool_list(tool_names)
+            return f"Available tools: {tool_list}"
+            
+        except Exception as e:
+            logger.error(f"Error rendering simple tool list section: {e}", exc_info=True)
+            return ""
+
+    def _render_full_tool_definitions_section(self, aggregated_tools: Dict[str, AggregatedTool]) -> str:
+        """
+        NEW: Render complete tool definitions section for text-parsing mode.
+        
+        This renders aggregated tool definitions with complete schemas in JSON format
+        for the new text-parsing AgentLoop components.
+        
+        Args:
+            aggregated_tools: Dictionary of aggregated tools by base name
+            
+        Returns:
+            Rendered tool definitions section in JSON format
+        """
+        try:
+            if not aggregated_tools:
+                return ""
+            
+            # Build the complete tool definitions structure
+            tools_structure = {
+                "available_tools": []
+            }
+            
+            for base_name, aggregated_tool in aggregated_tools.items():
+                tool_definition = self._format_full_tool_definition(base_name, aggregated_tool)
+                if tool_definition:
+                    tools_structure["available_tools"].append(tool_definition)
+            
+            if not tools_structure["available_tools"]:
+                return ""
+            
+            # Render as JSON within <tools> tags
+            import json
+            tools_json = json.dumps(tools_structure, indent=2)
+            return f"<tools>\n{tools_json}\n</tools>"
+            
+        except Exception as e:
+            logger.error(f"Error rendering full tool definitions section: {e}", exc_info=True)
+            return ""
+
+    def _format_simple_tool_list(self, tool_names: List[str]) -> str:
+        """
+        NEW: Format tool names as simple comma-separated list.
+        
+        Args:
+            tool_names: List of tool names
+            
+        Returns:
+            Comma-separated tool names string
+        """
+        try:
+            return ", ".join(tool_names)
+        except Exception as e:
+            logger.error(f"Error formatting simple tool list: {e}", exc_info=True)
+            return ""
+
+    def _format_full_tool_definition(self, base_name: str, aggregated_tool: AggregatedTool) -> Optional[Dict[str, Any]]:
+        """
+        NEW: Format aggregated tool as complete tool definition dictionary.
+        
+        Args:
+            base_name: Base name of the tool
+            aggregated_tool: AggregatedTool object with all metadata
+            
+        Returns:
+            Complete tool definition dictionary or None if formatting fails
+        """
+        try:
+            tool_definition = {
+                "name": base_name,
+                "description": aggregated_tool.description,
+                "parameters": aggregated_tool.base_parameters
+            }
+            
+            # Add metadata about available targets for debugging/context
+            if len(aggregated_tool.available_targets) > 1:
+                target_info = [
+                    f"{target.element_name} ({target.element_type})"
+                    for target in aggregated_tool.available_targets
+                ]
+                tool_definition["_metadata"] = {
+                    "available_targets": target_info,
+                    "aggregated_from": len(aggregated_tool.original_tools)
+                }
+            
+            return tool_definition
+            
+        except Exception as e:
+            logger.error(f"Error formatting full tool definition for {base_name}: {e}", exc_info=True)
+            return None
 
     # NEW: Chronological Flat Rendering Implementation
 
