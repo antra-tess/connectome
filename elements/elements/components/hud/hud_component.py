@@ -12,6 +12,7 @@ from ..space.space_veil_producer import SpaceVeilProducer
 from elements.component_registry import register_component
 # Import shared prefix generator for consistency with AgentLoop
 from ...utils.prefix_generator import create_short_element_prefix
+from dataclasses import dataclass
 # May need access to GlobalAttentionComponent for filtering
 # from ..attention.global_attention_component import GlobalAttentionComponent
 
@@ -24,6 +25,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 tracer = get_tracer(__name__)
+
+# NEW: Tool aggregation data structures for Phase 2
+@dataclass
+class ElementTarget:
+    element_id: str
+    element_name: str  # Human-readable name for tool parameter
+    element_type: str  # "Discord", "Telegram", etc.
+    original_prefix: str  # "cha_123", etc.
+
+@dataclass  
+class AggregatedTool:
+    base_name: str  # "send_message"
+    description: str
+    base_parameters: Dict[str, Any]  # Original parameters minus target-specific ones
+    available_targets: List[ElementTarget]
+    original_tools: List[Any]  # Reference to source tools (enhanced tool definitions)
 
 @register_component
 class HUDComponent(Component):
@@ -814,7 +831,7 @@ class HUDComponent(Component):
             return f"{indent_str}[EXCLUDED: {element_name} - content being memorized separately]\n"
 
         # NEW: Include tool targeting information
-        available_tools = props.get("available_tools", [])
+        available_tool_names = props.get("available_tool_names", [])
         tool_target_element_id = props.get("tool_target_element_id")
 
         # Build header with element information - always include element type and ID for future needs
@@ -826,7 +843,7 @@ class HUDComponent(Component):
             header += f" [{element_type}]"
 
         # Add tool information if available
-        if available_tools:
+        if available_tool_names:
             # NEW: Check if this is a remote element accessed via uplink proxy
             prefix_element_id = self._determine_tool_prefix_element_id(element_id)
 
@@ -844,7 +861,7 @@ class HUDComponent(Component):
                         if chat_mappings:
                             chat_prefix_info = f" (Chat prefixes: {', '.join(f'{p}={n}' for p, n in chat_mappings.items())})"
 
-            prefixed_tools = [f"{short_prefix}__{tool}" for tool in available_tools]
+            prefixed_tools = [f"{short_prefix}__{tool}" for tool in available_tool_names]
 
             if tool_target_element_id and tool_target_element_id != element_id:
                 header += f" - Tools: {', '.join(prefixed_tools)} → {tool_target_element_id}"
@@ -1302,9 +1319,11 @@ class HUDComponent(Component):
 
     # NEW: Unified VEIL Processing Pipeline
 
-    async def get_agent_context_via_compression_engine(self, options: Optional[Dict[str, Any]] = None) -> Union[str, Dict[str, Any]]:
+    async def get_agent_context_via_compression_engine(self, 
+                                                 options: Optional[Dict[str, Any]] = None,
+                                                 tools: Optional[List[Dict[str, Any]]] = None) -> Union[str, Dict[str, Any]]:
         """
-        MODIFIED: Always use chronological flat rendering by default.
+        ENHANCED: Always use chronological flat rendering by default with optional tool rendering.
         
         Args:
             options: Rendering options including:
@@ -1313,6 +1332,8 @@ class HUDComponent(Component):
                 - include_system_messages: bool (default: True)
                 - focus_context: dict for focus element
                 - include_memory: bool (default: True)
+                - tool_rendering_mode: 'simple' (default) or 'full' for text parsing
+            tools: Optional enhanced tool definitions from VEIL for rendering
         """
         
         with tracer.start_as_current_span("hud.render_context_pipeline") as span:
@@ -1354,8 +1375,29 @@ class HUDComponent(Component):
                     span.set_attribute("hud.render.status", "empty_processed_veil")
                     return "Current context is empty."
                 
-                # Render the processed flat cache
-                context_string = await self._render_processed_flat_veil(processed_veil, options)
+                # NEW: Add tool rendering to processed veil before rendering (Phase 2)
+                tool_rendering_data = None
+                if tools:
+                    tool_mode = options.get('tool_rendering_mode', 'simple')  # 'simple' or 'full'
+                    
+                    if tool_mode == 'full':
+                        # For text-parsing AgentLoop - aggregate and render complete definitions
+                        aggregated_tools = self._aggregate_tools_by_base_name(tools)
+                        tool_rendering_data = {
+                            'mode': 'full',
+                            'aggregated_tools': aggregated_tools
+                        }
+                    else:
+                        # For tool_call API AgentLoop - render original prefixed list (no aggregation)
+                        tool_rendering_data = {
+                            'mode': 'simple', 
+                            'tools': tools
+                        }
+                    
+                    logger.debug(f"Prepared {tool_mode} tool rendering data for integrated context")
+
+                # Render the processed flat cache with integrated tool rendering
+                context_string = await self._render_processed_flat_veil(processed_veil, options, tool_rendering_data)
 
                 logger.info(f"Agent context generated via CompressionEngine: {len(context_string)} chars")
                 span.set_attribute("hud.render.output_length", len(context_string))
@@ -1375,7 +1417,10 @@ class HUDComponent(Component):
                     # Get flat cache directly
                     flat_cache = self.get_flat_veil_cache_via_producer()
                     if flat_cache:
-                        fallback_context = self._render_chronological_flat_content(flat_cache, options)
+                        # Use same integrated approach as main pipeline for consistency
+                        fallback_tool_rendering_data = tool_rendering_data  # Reuse the prepared tool data
+                        fallback_context = self._render_chronological_flat_content(flat_cache, options, fallback_tool_rendering_data)
+                        
                         logger.info(f"Fallback chronological rendering successful: {len(fallback_context)} chars")
                         return fallback_context
                     else:
@@ -1823,18 +1868,23 @@ class HUDComponent(Component):
         except Exception as e:
             logger.error(f"Error excluding content from VEIL element: {e}", exc_info=True)
 
-    async def _render_processed_flat_veil(self, processed_flat_cache: Dict[str, Any], options: Dict[str, Any]) -> str:
+    async def _render_processed_flat_veil(self, processed_flat_cache: Dict[str, Any], options: Dict[str, Any], tool_rendering_data: Optional[Dict[str, Any]] = None) -> str:
         """
-        MODIFIED: Render processed flat VEIL cache using chronological flat rendering.
+        MODIFIED: Render processed flat VEIL cache using chronological flat rendering with integrated tool rendering.
         
         This now bypasses hierarchy reconstruction and renders directly from flat cache.
+        
+        Args:
+            processed_flat_cache: Processed flat VEIL cache 
+            options: Rendering options
+            tool_rendering_data: Optional tool rendering data to integrate into context
         """
         try:
             # Check if we should use chronological flat rendering (default)
             render_style = options.get('render_style', 'chronological_flat')
             if render_style == 'chronological_flat':
-                # NEW: Use chronological flat rendering
-                context_string = self._render_chronological_flat_content(processed_flat_cache, options)
+                # NEW: Use chronological flat rendering with integrated tools
+                context_string = self._render_chronological_flat_content(processed_flat_cache, options, tool_rendering_data)
                 logger.debug(f"Rendered flat VEIL chronologically: {len(context_string)} characters")
                 return context_string
             else:
@@ -1852,6 +1902,12 @@ class HUDComponent(Component):
                 # Render using standard hierarchical rendering
                 attention_requests = {}
                 context_string = self._render_veil_node_to_string(hierarchical_veil, attention_requests, options, indent=0)
+                
+                # Add tools separately for hierarchical mode if provided
+                if tool_rendering_data:
+                    tool_section = self._render_tool_section_from_data(tool_rendering_data)
+                    if tool_section:
+                        context_string = f"{context_string}\n\n{tool_section}"
                 
                 logger.debug(f"Rendered processed flat VEIL hierarchically: {len(context_string)} characters")
                 return context_string
@@ -1889,6 +1945,346 @@ class HUDComponent(Component):
         except Exception as e:
             logger.error(f"Error counting memory nodes: {e}", exc_info=True)
             return 0
+
+    # NEW: Phase 2 Tool Aggregation Methods
+
+    def _aggregate_tools_by_base_name(self, enhanced_tools: List[Dict[str, Any]]) -> Dict[str, AggregatedTool]:
+        """
+        NEW: Aggregate enhanced tool definitions by base name for full tool rendering mode.
+        
+        Takes enhanced tool definitions from VEIL and groups them by their base name
+        (stripping prefixes), creating target parameter enums for the aggregated tools.
+        
+        Args:
+            enhanced_tools: Enhanced tool definitions from VEIL with complete metadata
+            
+        Returns:
+            Dictionary mapping base names to AggregatedTool objects
+        """
+        try:
+            aggregated_tools = {}
+            
+            for tool_def in enhanced_tools:
+                tool_name = tool_def.get("name", "")
+                if not tool_name:
+                    continue
+                
+                # Extract base name (strip prefix if present)
+                if "__" in tool_name:
+                    prefix, base_name = tool_name.split("__", 1)
+                else:
+                    base_name = tool_name
+                    prefix = ""
+                
+                # Create element target from tool definition
+                element_target = ElementTarget(
+                    element_id=tool_def.get("target_element_id", "unknown"),
+                    element_name=tool_def.get("element_name", "Unknown Element"),
+                    element_type=tool_def.get("element_type", "Element"),
+                    original_prefix=prefix
+                )
+                
+                # Get or create aggregated tool
+                if base_name not in aggregated_tools:
+                    # Use the original parameters as base (we'll add target parameter later)
+                    base_parameters = tool_def.get("parameters", {}).copy()
+                    
+                    aggregated_tools[base_name] = AggregatedTool(
+                        base_name=base_name,
+                        description=tool_def.get("description", ""),
+                        base_parameters=base_parameters,
+                        available_targets=[element_target],
+                        original_tools=[tool_def]
+                    )
+                else:
+                    # Add to existing aggregated tool
+                    aggregated_tools[base_name].available_targets.append(element_target)
+                    aggregated_tools[base_name].original_tools.append(tool_def)
+            
+            # Add target_element parameter to aggregated tools that have multiple targets
+            for base_name, aggregated_tool in aggregated_tools.items():
+                if len(aggregated_tool.available_targets) > 1:
+                    # Create enum of available target names
+                    target_names = [target.element_name for target in aggregated_tool.available_targets]
+                    
+                    # Add target_element parameter to the schema
+                    if "properties" not in aggregated_tool.base_parameters:
+                        aggregated_tool.base_parameters["properties"] = {}
+                    
+                    aggregated_tool.base_parameters["properties"]["target_element"] = {
+                        "type": "string",
+                        "description": "Target element to execute the tool on",
+                        "enum": target_names
+                    }
+                    
+                    # Add to required parameters
+                    if "required" not in aggregated_tool.base_parameters:
+                        aggregated_tool.base_parameters["required"] = []
+                    
+                    if "target_element" not in aggregated_tool.base_parameters["required"]:
+                        aggregated_tool.base_parameters["required"].append("target_element")
+            
+            logger.debug(f"Aggregated {len(enhanced_tools)} tools into {len(aggregated_tools)} base tools")
+            return aggregated_tools
+            
+        except Exception as e:
+            logger.error(f"Error aggregating tools by base name: {e}", exc_info=True)
+            return {}
+
+    def _extract_element_targets_for_tool(self, base_name: str, enhanced_tools: List[Dict[str, Any]]) -> List[ElementTarget]:
+        """
+        NEW: Extract all element targets for a specific tool base name.
+        
+        Args:
+            base_name: Base tool name (e.g., "send_message")
+            enhanced_tools: Enhanced tool definitions from VEIL
+            
+        Returns:
+            List of ElementTarget objects for this tool
+        """
+        try:
+            targets = []
+            
+            for tool_def in enhanced_tools:
+                tool_name = tool_def.get("name", "")
+                
+                # Check if this tool matches the base name
+                if "__" in tool_name:
+                    prefix, extracted_base = tool_name.split("__", 1)
+                    if extracted_base == base_name:
+                        targets.append(ElementTarget(
+                            element_id=tool_def.get("target_element_id", "unknown"),
+                            element_name=tool_def.get("element_name", "Unknown Element"),
+                            element_type=tool_def.get("element_type", "Element"),
+                            original_prefix=prefix
+                        ))
+                elif tool_name == base_name:
+                    targets.append(ElementTarget(
+                        element_id=tool_def.get("target_element_id", "unknown"),
+                        element_name=tool_def.get("element_name", "Unknown Element"),
+                        element_type=tool_def.get("element_type", "Element"),
+                        original_prefix=""
+                    ))
+            
+            return targets
+            
+        except Exception as e:
+            logger.error(f"Error extracting element targets for tool {base_name}: {e}", exc_info=True)
+            return []
+
+    def _create_target_parameter_enum(self, targets: List[ElementTarget]) -> Dict[str, Any]:
+        """
+        NEW: Create target_element parameter schema with enum of available targets.
+        
+        Args:
+            targets: List of ElementTarget objects
+            
+        Returns:
+            Parameter schema dictionary for target_element parameter
+        """
+        try:
+            target_names = [target.element_name for target in targets]
+            
+            return {
+                "type": "string",
+                "description": "Target element to execute the tool on",
+                "enum": target_names
+            }
+            
+        except Exception as e:
+            logger.error(f"Error creating target parameter enum: {e}", exc_info=True)
+            return {"type": "string", "description": "Target element"}
+
+    # NEW: Phase 2 Tool Rendering Methods
+
+    def _render_simple_tool_list_section(self, enhanced_tools: List[Dict[str, Any]]) -> str:
+        """
+        NEW: Render simple tool list section for existing tool_call API mode.
+        
+        This renders the original prefixed tool names for backward compatibility
+        with existing AgentLoop components that use the tool_call API.
+        
+        Args:
+            enhanced_tools: Enhanced tool definitions from VEIL
+            
+        Returns:
+            Rendered tool list section
+        """
+        try:
+            if not enhanced_tools:
+                return ""
+            
+            # Extract just the tool names (keeping original prefixed format)
+            tool_names = [tool.get("name", "") for tool in enhanced_tools if tool.get("name")]
+            
+            if not tool_names:
+                return ""
+            
+            # Format as simple list for tool_call API compatibility
+            tool_list = self._format_simple_tool_list(tool_names)
+            return f"Available tools: {tool_list}"
+            
+        except Exception as e:
+            logger.error(f"Error rendering simple tool list section: {e}", exc_info=True)
+            return ""
+
+    def _render_full_tool_definitions_section(self, aggregated_tools: Dict[str, AggregatedTool]) -> str:
+        """
+        NEW: Render complete tool definitions section for text-parsing mode.
+        
+        This renders aggregated tool definitions with complete schemas in JSON format
+        for the new text-parsing AgentLoop components.
+        
+        Args:
+            aggregated_tools: Dictionary of aggregated tools by base name
+            
+        Returns:
+            Rendered tool definitions section with instructions and JSON format
+        """
+        try:
+            if not aggregated_tools:
+                return ""
+            
+            # Build the complete tool definitions structure
+            tools_structure = {
+                "available_tools": []
+            }
+            
+            for base_name, aggregated_tool in aggregated_tools.items():
+                tool_definition = self._format_full_tool_definition(base_name, aggregated_tool)
+                if tool_definition:
+                    tools_structure["available_tools"].append(tool_definition)
+            
+            if not tools_structure["available_tools"]:
+                return ""
+            
+            # NEW: Add tool call format instructions at the top
+            instructions = self._render_tool_call_instructions()
+            
+            # Render as JSON within <tools> tags
+            import json
+            tools_json = json.dumps(tools_structure, indent=2)
+            return f"{instructions}\n\n<tools>\n{tools_json}\n</tools>"
+            
+        except Exception as e:
+            logger.error(f"Error rendering full tool definitions section: {e}", exc_info=True)
+            return ""
+
+    def _render_tool_section_from_data(self, tool_rendering_data: Dict[str, Any]) -> str:
+        """
+        NEW: Render tool section from tool rendering data.
+        
+        This helper method handles both full and simple tool rendering modes.
+        
+        Args:
+            tool_rendering_data: Dictionary containing mode and tool data
+            
+        Returns:
+            Rendered tool section string
+        """
+        try:
+            mode = tool_rendering_data.get('mode', 'simple')
+            
+            if mode == 'full':
+                aggregated_tools = tool_rendering_data.get('aggregated_tools', {})
+                return self._render_full_tool_definitions_section(aggregated_tools)
+            elif mode == 'simple':
+                tools = tool_rendering_data.get('tools', [])
+                return self._render_simple_tool_list_section(tools)
+            else:
+                logger.warning(f"Unknown tool rendering mode: {mode}")
+                return ""
+                
+        except Exception as e:
+            logger.error(f"Error rendering tool section from data: {e}", exc_info=True)
+            return ""
+
+    def _format_simple_tool_list(self, tool_names: List[str]) -> str:
+        """
+        NEW: Format tool names as simple comma-separated list.
+        
+        Args:
+            tool_names: List of tool names
+            
+        Returns:
+            Comma-separated tool names string
+        """
+        try:
+            return ", ".join(tool_names)
+        except Exception as e:
+            logger.error(f"Error formatting simple tool list: {e}", exc_info=True)
+            return ""
+
+    def _render_tool_call_instructions(self) -> str:
+        """
+        NEW: Render instructions for the agent on how to format tool calls for text parsing.
+        
+        Returns:
+            Instructions text for tool call formatting
+        """
+        try:
+            instructions = """[TOOL CALL INSTRUCTIONS]
+To use tools, format your tool calls using JSON syntax within <tool_calls> tags:
+
+<tool_calls>
+[
+  {
+    "tool": "tool_name", 
+    "parameters": {
+      "parameter_name": "value",
+      "target_element": "Element Name"
+    }
+  }
+]
+</tool_calls>
+
+IMPORTANT NOTES:
+- You can make multiple tool calls in one response by adding multiple objects to the array
+- Use the exact tool names from the available_tools list below
+- For tools with multiple targets, include "target_element" parameter with the element name from the enum
+- To respond conversationally WITHOUT using tools, just provide your response text normally
+- Tool calls and regular conversation can be mixed in the same response"""
+            
+            return instructions
+            
+        except Exception as e:
+            logger.error(f"Error rendering tool call instructions: {e}", exc_info=True)
+            return "[TOOL CALL INSTRUCTIONS]\nUse tools by formatting calls in <tool_calls> JSON blocks."
+
+    def _format_full_tool_definition(self, base_name: str, aggregated_tool: AggregatedTool) -> Optional[Dict[str, Any]]:
+        """
+        NEW: Format aggregated tool as complete tool definition dictionary.
+        
+        Args:
+            base_name: Base name of the tool
+            aggregated_tool: AggregatedTool object with all metadata
+            
+        Returns:
+            Complete tool definition dictionary or None if formatting fails
+        """
+        try:
+            tool_definition = {
+                "name": base_name,
+                "description": aggregated_tool.description,
+                "parameters": aggregated_tool.base_parameters
+            }
+            
+            # Add metadata about available targets for debugging/context
+            if len(aggregated_tool.available_targets) > 1:
+                target_info = [
+                    f"{target.element_name} ({target.element_type})"
+                    for target in aggregated_tool.available_targets
+                ]
+                tool_definition["_metadata"] = {
+                    "available_targets": target_info,
+                    "aggregated_from": len(aggregated_tool.original_tools)
+                }
+            
+            return tool_definition
+            
+        except Exception as e:
+            logger.error(f"Error formatting full tool definition for {base_name}: {e}", exc_info=True)
+            return None
 
     # NEW: Chronological Flat Rendering Implementation
 
@@ -2020,6 +2416,8 @@ class HUDComponent(Component):
                 content_item = None
                 if content_nature == "chat_message":
                     content_item = self._extract_chat_message_content(node_data)
+                elif content_nature == "agent_response":  # NEW: Handle agent responses
+                    content_item = self._extract_agent_response_content(node_data)
                 elif content_nature == "scratchpad_summary" or "scratchpad" in node_type.lower():
                     content_item = self._extract_scratchpad_content(node_data)
                 elif node_type in ["content_memory", "memorized_content"]:
@@ -2152,6 +2550,34 @@ class HUDComponent(Component):
             logger.warning(f"Error extracting memory content: {e}")
             return None
 
+    def _extract_agent_response_content(self, node_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """NEW: Extract agent response content with metadata."""
+        try:
+            props = node_data.get("properties", {})
+            timestamp = props.get("timestamp", time.time())
+            
+            # Convert timestamp to numeric if it's a string
+            if isinstance(timestamp, str):
+                numeric_ts = self._convert_timestamp_to_numeric(timestamp)
+                timestamp = numeric_ts if numeric_ts else time.time()
+            
+            return {
+                "content_type": "agent_response",
+                "operation_index": props.get("operation_index", 0),  # NEW: Include operation_index for chronological sorting
+                "timestamp": timestamp,
+                "veil_id": node_data.get("veil_id"),
+                "node_data": node_data,
+                "element_id": props.get("element_id"),
+                "agent_response_text": props.get("agent_response_text", ""),
+                "tool_calls_count": props.get("tool_calls_count", 0),
+                "has_tool_calls": props.get("has_tool_calls", False),
+                "agent_name": props.get("agent_name", "Agent"),
+                "agent_loop_component_id": props.get("agent_loop_component_id")
+            }
+        except Exception as e:
+            logger.warning(f"Error extracting agent response content: {e}")
+            return None
+
     def _extract_space_root_content(self, node_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """NEW: Extract space root content for inner_space wrapper."""
         try:
@@ -2219,7 +2645,10 @@ class HUDComponent(Component):
 
     def _group_content_by_type(self, extraction_result: Dict[str, Any]) -> Dict[str, Any]:
         """
-        ENHANCED: Group content items and organize container items.
+        ENHANCED: Group content items with speaker-based grouping for chat messages.
+        
+        Chat messages are grouped by speaker transitions (user -> agent -> user etc.),
+        while other content types use the original type-based grouping.
         
         Args:
             extraction_result: Dictionary with 'content_items' and 'container_items' keys
@@ -2231,31 +2660,58 @@ class HUDComponent(Component):
             content_items = extraction_result.get("content_items", [])
             container_items = extraction_result.get("container_items", [])
             
-            # Group content items by type (as before)
+            # Group content items with speaker-aware logic for chat messages
             content_groups = []
             current_group = None
             
             for item in content_items:
                 content_type = item.get("content_type")
                 
-                # Start new group if type changes or no current group
-                if not current_group or current_group["group_type"] != content_type:
-                    if current_group:
-                        content_groups.append(current_group)
+                if content_type == "chat_message":
+                    # For chat messages, group by speaker transitions
+                    is_agent = item.get("is_agent", False)
+                    speaker_type = "agent" if is_agent else "user"
+                    group_type = f"chat_message_{speaker_type}"
                     
-                    current_group = {
-                        "group_type": content_type,
-                        "items": [item],
-                        "start_operation_index": item.get("operation_index", 0),  # NEW: Track operation_index range
-                        "end_operation_index": item.get("operation_index", 0),
-                        "start_timestamp": item.get("timestamp", 0),  # Keep for display context
-                        "end_timestamp": item.get("timestamp", 0)
-                    }
+                    # Start new group if speaker type changes or no current group
+                    if not current_group or current_group["group_type"] != group_type:
+                        if current_group:
+                            content_groups.append(current_group)
+                        
+                        current_group = {
+                            "group_type": group_type,
+                            "speaker_type": speaker_type,  # NEW: Track speaker for rendering
+                            "items": [item],
+                            "start_operation_index": item.get("operation_index", 0),
+                            "end_operation_index": item.get("operation_index", 0),
+                            "start_timestamp": item.get("timestamp", 0),
+                            "end_timestamp": item.get("timestamp", 0)
+                        }
+                    else:
+                        # Add to current group (same speaker)
+                        current_group["items"].append(item)
+                        current_group["end_operation_index"] = item.get("operation_index", 0)
+                        current_group["end_timestamp"] = item.get("timestamp", 0)
+                
                 else:
-                    # Add to current group
-                    current_group["items"].append(item)
-                    current_group["end_operation_index"] = item.get("operation_index", 0)  # NEW: Update operation_index range
-                    current_group["end_timestamp"] = item.get("timestamp", 0)
+                    # For non-chat content, use original type-based grouping
+                    if not current_group or current_group["group_type"] != content_type:
+                        if current_group:
+                            content_groups.append(current_group)
+                        
+                        current_group = {
+                            "group_type": content_type,
+                            "items": [item],
+                            "start_operation_index": item.get("operation_index", 0),
+                            "end_operation_index": item.get("operation_index", 0),
+                            "start_timestamp": item.get("timestamp", 0),
+                            "end_timestamp": item.get("timestamp", 0)
+                        }
+                    else:
+                        # Add to current group
+                        current_group["items"].append(item)
+                        current_group["end_operation_index"] = item.get("operation_index", 0)
+                        current_group["end_timestamp"] = item.get("timestamp", 0)
             
             # Add final group
             if current_group:
@@ -2277,7 +2733,7 @@ class HUDComponent(Component):
                 elif container_type == "scratchpad":
                     containers["scratchpad"] = container
             
-            logger.debug(f"Grouped {len(content_groups)} content groups and {len(container_items)} containers")
+            logger.debug(f"Grouped {len(content_groups)} content groups with speaker-aware chat grouping and {len(container_items)} containers")
             
             return {
                 "content_groups": content_groups,
@@ -2353,11 +2809,16 @@ class HUDComponent(Component):
             logger.error(f"Error applying time markers: {e}", exc_info=True)
             return content_groups
 
-    def _render_chronological_flat_content(self, flat_cache: Dict[str, Any], options: Dict[str, Any]) -> str:
+    def _render_chronological_flat_content(self, flat_cache: Dict[str, Any], options: Dict[str, Any], tool_rendering_data: Optional[Dict[str, Any]] = None) -> str:
         """
-        ENHANCED: Main chronological flat rendering with complete structural information.
+        ENHANCED: Main chronological flat rendering with complete structural information and integrated tool rendering.
         
-        Now renders both container metadata and chronological content to match expected output.
+        Now renders both container metadata and chronological content with tools positioned after containers.
+        
+        Args:
+            flat_cache: Flat VEIL cache to render
+            options: Rendering options
+            tool_rendering_data: Optional tool rendering data to integrate after containers
         """
         try:
             logger.debug(f"Starting enhanced chronological flat rendering of {len(flat_cache)} VEIL nodes")
@@ -2410,12 +2871,21 @@ class HUDComponent(Component):
                 if chat_info_section:
                     rendered_sections.append(chat_info_section)
             
-            # 4. Render chronological content groups (all types interleaved)
+            # 4. NEW: Render tools immediately after containers but before content
+            if tool_rendering_data:
+                tool_section = self._render_tool_section_from_data(tool_rendering_data)
+                if tool_section:
+                    rendered_sections.append(tool_section)
+                    logger.debug(f"Added integrated tool section after containers")
+            
+            # 5. Render chronological content groups (all types interleaved)
             for group in content_groups:
                 group_type = group.get("group_type")
                 
-                if group_type == "chat_message":
+                if group_type.startswith("chat_message"):  # Handles both "chat_message_user" and "chat_message_agent"
                     rendered_section = self._render_flat_chat_group(group, options)
+                elif group_type == "agent_response":  # NEW: Handle agent responses
+                    rendered_section = self._render_flat_agent_response_group(group, options)
                 elif group_type == "memory":
                     rendered_section = self._render_flat_memory_group(group, options)
                 elif group_type == "scratchpad":
@@ -2433,7 +2903,7 @@ class HUDComponent(Component):
                 if rendered_section:
                     rendered_sections.append(rendered_section)
             
-            # 5. Close space root wrapper if we opened it
+            # 6. Close space root wrapper if we opened it
             if space_root:
                 rendered_sections.append("</inner_space>")
             
@@ -2467,7 +2937,7 @@ class HUDComponent(Component):
             return '<inner_space>'
 
     def _render_chat_info_section(self, message_lists: List[Dict[str, Any]], options: Dict[str, Any]) -> str:
-        """NEW: Render chat_info section with channel information."""
+        """NEW: Render chat_info section with channel information and available tools."""
         try:
             if not message_lists:
                 return ""
@@ -2499,12 +2969,51 @@ class HUDComponent(Component):
                 # Build chat_info opening tag
                 info_section = f'<chat_info type="{adapter_type}" server="{server_name}" alias="{alias}">\n'
                 
-                # Add channels
+                # Add channels with tool information
                 for channel in channels:
                     conversation_name = channel.get("conversation_name", "unknown")
                     is_focused = channel.get("is_focused", False)
+                    element_id = channel.get("element_id", "unknown")
+                    available_tools = channel.get("available_tools", [])  # NEW: Use enhanced tools
+                    available_tool_names = channel.get("available_tool_names", [])  # Fallback
+                    tool_target_element_id = channel.get("tool_target_element_id")
+
+                    # NEW: Add tool information using enhanced tools for better clarity
+                    if available_tools:
+                        # Extract tool names from enhanced tools
+                        tool_names = [tool.get("name", "") for tool in available_tools if tool.get("name")]
+                        
+                        # Show tool names clearly associated with this conversation
+                        tool_attr = f' tools="{", ".join(tool_names)}"'
+                    elif available_tool_names:
+                        # Fallback to old format if enhanced tools not available
+                        # Determine prefix element ID (may be uplink proxy for remote elements)
+                        prefix_element_id = self._determine_tool_prefix_element_id(element_id)
+                        
+                        # Create short prefix for display (same logic as agent loop)
+                        short_prefix = self._create_short_element_prefix(prefix_element_id)
+                        
+                        # Create prefixed tools (exact same format agent loop expects)
+                        prefixed_tools = [f"{short_prefix}__{tool}" for tool in available_tool_names]
+                        
+                        # Add target info if different from element
+                        target_info = ""
+                        if tool_target_element_id and tool_target_element_id != element_id:
+                            target_info = f' target="{tool_target_element_id}"'
+                        
+                        # Add uplink info if using proxy prefix
+                        uplink_info = ""
+                        if prefix_element_id != element_id:
+                            uplink_info = " via_uplink=\"true\""
+                        
+                        tool_attr = f' tools_legacy="[{target_info}{uplink_info}{", ".join(prefixed_tools)}]"'
+                    else:
+                        tool_attr = " tools=[]"
+                    
                     focused_attr = f' focused={is_focused}'
-                    info_section += f'<channel conversation_name="{conversation_name}"{focused_attr}>\n'
+                    info_section += f'<channel conversation_name="{conversation_name}"{focused_attr}{tool_attr}>\n'
+                    
+                    
                 
                 info_section += '</chat_info>'
                 info_sections.append(info_section)
@@ -2752,7 +3261,7 @@ class HUDComponent(Component):
                         system_lines.append(f"<system>{system_text}</system>")
                     else:
                         # Use legacy format for other system messages
-                        system_lines.append(f"[SYSTEM] {system_text}")
+                        system_lines.append(f"<system>{system_text}</system>")
             
             if not system_lines:
                 return ""
@@ -2762,6 +3271,43 @@ class HUDComponent(Component):
             
         except Exception as e:
             logger.error(f"Error rendering enhanced flat system group: {e}", exc_info=True)
+            return ""
+
+    def _render_flat_agent_response_group(self, group: Dict[str, Any], options: Dict[str, Any]) -> str:
+        """NEW: Render a group of agent responses."""
+        try:
+            items = group.get("items", [])
+            if not items:
+                return ""
+            
+            # Render agent response items
+            response_lines = []
+            for item in items:
+                agent_response_text = item.get("agent_response_text", "")
+                tool_calls_count = item.get("tool_calls_count", 0)
+                has_tool_calls = item.get("has_tool_calls", False)
+                agent_name = item.get("agent_name", "Agent")
+                time_marker = item.get("time_marker")
+                
+                if time_marker:
+                    response_lines.append(f"<time_marker>{time_marker}</time_marker>")
+                
+                if agent_response_text:
+                    # Build agent response with metadata
+                    tool_info = ""
+                    if has_tool_calls:
+                        tool_info = f' tool_calls="{tool_calls_count}"'
+                    
+                    response_lines.append(f'<agent_response agent="{agent_name}"{tool_info}>{agent_response_text}</agent_response>')
+            
+            if not response_lines:
+                return ""
+            
+            content = "\n".join(response_lines)
+            return content  # Agent responses don't need wrapper tags
+            
+        except Exception as e:
+            logger.error(f"Error rendering flat agent response group: {e}", exc_info=True)
             return ""
 
     def _generate_system_messages(self, content_groups: List[Dict[str, Any]], flat_cache: Dict[str, Any]) -> List[Dict[str, Any]]:

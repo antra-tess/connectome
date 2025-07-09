@@ -26,7 +26,7 @@ from host.modules.activities.activity_client import ActivityClient
 
 # Agent/InnerSpace
 from elements.elements.inner_space import InnerSpace
-from elements.elements.agent_loop import SimpleRequestResponseLoopComponent # Import loop types
+from elements.elements.components.agent_loop import SimpleRequestResponseLoopComponent, ToolTextParsingLoopComponent # Import loop types
 # Import other loop types if needed for config
 from elements.component_registry import COMPONENT_REGISTRY # Import registry to look up loop types
 

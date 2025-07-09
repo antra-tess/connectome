@@ -61,6 +61,19 @@ class MessageListVeilProducer(VeilProducer):
             return tool_provider.list_tools()
         return []
 
+    def _get_enhanced_tools_for_element(self) -> List[Dict[str, Any]]:
+        """
+        NEW: Get enhanced tool definitions with complete metadata for VEIL emission.
+        
+        Returns rich tool information needed for tool aggregation and rendering.
+        """
+        from ..tool_provider import ToolProviderComponent
+
+        tool_provider = self.get_sibling_component(ToolProviderComponent)
+        if tool_provider:
+            return tool_provider.get_enhanced_tool_definitions()
+        return []
+
     def _get_conversation_metadata(self) -> Dict[str, Any]:
         """Get conversation metadata from the owner element."""
         metadata = {}
@@ -167,6 +180,10 @@ class MessageListVeilProducer(VeilProducer):
             message_nodes.append(message_node)
 
 
+        # NEW: Get enhanced tool definitions for Phase 1 VEIL enhancement
+        enhanced_tools = self._get_enhanced_tools_for_element()
+        available_tool_names = self._get_available_tools_for_element()  # Backward compatibility
+
         # Create the root container node for the list
         root_veil_node = {
             "veil_id": f"{self.owner.id}_message_list_root",
@@ -177,7 +194,10 @@ class MessageListVeilProducer(VeilProducer):
                 "element_id": self.owner.id,
                 "element_name": self.owner.name,
                 "message_count": len(message_nodes),
-                "available_tools": self._get_available_tools_for_element(),
+                # ENHANCED: Rich tool metadata for aggregation and rendering
+                "available_tools": enhanced_tools,
+                # BACKWARD COMPATIBILITY: Simple tool names for existing components
+                "available_tool_names": available_tool_names,
                 "tool_target_element_id": self.owner.id,  # Explicit target for tools
                 # NEW: Include conversation metadata for rich VEIL context
                 "adapter_type": conversation_metadata.get("adapter_type"),
@@ -219,6 +239,10 @@ class MessageListVeilProducer(VeilProducer):
         # Include metadata in current properties for delta tracking
         conversation_metadata = self._get_conversation_metadata()
 
+        # NEW: Get enhanced tool definitions for Phase 1 VEIL enhancement
+        enhanced_tools = self._get_enhanced_tools_for_element()
+        available_tool_names = self._get_available_tools_for_element()  # Backward compatibility
+
         # Prepare current properties for the list root node
         current_list_root_properties = {
             "structural_role": "container",
@@ -226,7 +250,10 @@ class MessageListVeilProducer(VeilProducer):
             "element_id": self.owner.id,
             "element_name": self.owner.name,
             "message_count": len(current_message_ids), # Use count of valid messages
-            "available_tools": self._get_available_tools_for_element(),
+            # ENHANCED: Rich tool metadata for aggregation and rendering
+            "available_tools": enhanced_tools,
+            # BACKWARD COMPATIBILITY: Simple tool names for existing components
+            "available_tool_names": available_tool_names,
             "tool_target_element_id": self.owner.id,  # Explicit target for tools
             # NEW: Include metadata in delta tracking
             "adapter_type": conversation_metadata.get("adapter_type"),

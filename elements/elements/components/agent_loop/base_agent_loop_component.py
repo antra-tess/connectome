@@ -1,32 +1,33 @@
 """
-Agent Loop Components
-Defines the base class and simple implementations for agent cognitive cycles.
+Base Agent Loop Component
+Defines the abstract base class for agent cognitive cycles.
 """
 import logging
 import asyncio
 from typing import Dict, Any, Optional, TYPE_CHECKING, List, Set, Type, Union
 from datetime import datetime
 
-from .base import Component
+from ...base import Component
 from elements.component_registry import register_component
-from .utils.prefix_generator import create_short_element_prefix  # NEW: Import shared utility
+from ...utils.prefix_generator import create_short_element_prefix  # NEW: Import shared utility
 
 # NEW: Import LLMMessage for correct provider interaction
 from llm.provider_interface import LLMMessage
 # NEW: Import LLMToolDefinition for passing tools
 from llm.provider_interface import LLMToolDefinition, LLMToolCall, LLMResponse
-from .components.tool_provider import ToolProviderComponent
+from ...components.tool_provider import ToolProviderComponent
 from elements.elements.components.uplink.remote_tool_provider import UplinkRemoteToolProviderComponent
 from elements.elements.components.compression_engine_component import CompressionEngineComponent  # NEW: Import CompressionEngine
 
 if TYPE_CHECKING:
-    from .inner_space import InnerSpace
+    from ...inner_space import InnerSpace
     from llm.provider_interface import LLMProvider
-    from .components.hud.hud_component import HUDComponent # Assuming HUDComponent is in .components.hud
+    from ...components.hud.hud_component import HUDComponent # Assuming HUDComponent is in .components.hud
     from host.event_loop import OutgoingActionCallback
 
 
 logger = logging.getLogger(__name__)
+
 
 class BaseAgentLoopComponent(Component):
     """
@@ -414,6 +415,101 @@ class BaseAgentLoopComponent(Component):
 
         return final_name
 
+    async def _emit_agent_response_delta(self, agent_response_text: str, agent_tool_calls: List) -> None:
+        """
+        NEW: Emit a VEIL delta containing the agent's response for chronological rendering.
+        
+        This allows the agent to see its own previous responses in the HUD context.
+        
+        Args:
+            agent_response_text: The agent's text response from LLM
+            agent_tool_calls: List of tool calls the agent made
+        """
+        try:
+            import time
+            current_time = time.time()
+            
+            # Create unique VEIL ID for this agent response
+            response_veil_id = f"agent_response_{self.parent_inner_space.id}_{int(current_time * 1000)}"
+            
+            # Build agent response delta
+            agent_response_delta = {
+                "op": "add_node",
+                "node": {
+                    "veil_id": response_veil_id,
+                    "node_type": "agent_response",
+                    "properties": {
+                        "structural_role": "content",
+                        "content_nature": "agent_response", 
+                        "owner_id": self.parent_inner_space.id,  # Owned by InnerSpace
+                        "element_id": self.parent_inner_space.id,
+                        "agent_response_text": agent_response_text or "",
+                        "tool_calls_count": len(agent_tool_calls),
+                        "has_tool_calls": len(agent_tool_calls) > 0,
+                        "timestamp": current_time,
+                        "timestamp_iso": time.strftime('%Y-%m-%dT%H:%M:%S.%fZ', time.gmtime(current_time)),
+                        "agent_loop_component_id": self.id,
+                        "agent_name": getattr(self.parent_inner_space, 'agent_name', 'Unknown Agent')
+                    },
+                    "children": []
+                }
+            }
+            
+            # Send delta to InnerSpace for processing
+            self.parent_inner_space.receive_delta([agent_response_delta])
+            
+            logger.debug(f"Emitted agent response delta: {response_veil_id} ({len(agent_response_text or '')} chars, {len(agent_tool_calls)} tool calls)")
+            
+        except Exception as e:
+            logger.error(f"Error emitting agent response delta: {e}", exc_info=True)
+
+    def _extract_enhanced_tools_from_veil(self) -> List[Dict[str, Any]]:
+        """
+        NEW: Extract enhanced tool definitions from VEIL for Phase 2 integration.
+        
+        This method gets enhanced tool metadata from the VEIL structure that was
+        populated during Phase 1 VEIL enhancement.
+        
+        Returns:
+            List of enhanced tool definitions with complete metadata
+        """
+        try:
+            enhanced_tools = []
+            
+            hud = self._get_hud()
+            if not hud:
+                logger.debug(f"No HUD available for extracting enhanced tools from VEIL")
+                return []
+            
+            # Get flat VEIL cache from HUD
+            flat_veil_cache = hud.get_flat_veil_cache_via_producer()
+            if not flat_veil_cache:
+                logger.debug(f"No flat VEIL cache available for enhanced tool extraction")
+                return []
+            
+            # Extract enhanced tools from VEIL nodes
+            for veil_id, veil_node in flat_veil_cache.items():
+                if not isinstance(veil_node, dict):
+                    continue
+                
+                properties = veil_node.get("properties", {})
+                
+                # Look for enhanced tool definitions in container nodes
+                if properties.get("structural_role") == "container":
+                    veil_enhanced_tools = properties.get("available_tools", [])
+                    if isinstance(veil_enhanced_tools, list) and veil_enhanced_tools:
+                        # Check if these are enhanced tool definitions (not just names)
+                        for tool in veil_enhanced_tools:
+                            if isinstance(tool, dict) and "name" in tool and "parameters" in tool:
+                                enhanced_tools.append(tool)
+            
+            logger.debug(f"Extracted {len(enhanced_tools)} enhanced tools from VEIL")
+            return enhanced_tools
+            
+        except Exception as e:
+            logger.error(f"Error extracting enhanced tools from VEIL: {e}", exc_info=True)
+            return []
+
     async def _try_smart_chat_fallback(self, agent_text: str, focus_context: Optional[Dict[str, Any]]) -> bool:
         """
         Smart fallback: if agent has text but no tool calls, try to send it to the activating chat.
@@ -496,225 +592,4 @@ class BaseAgentLoopComponent(Component):
 
         except Exception as e:
             logger.warning(f"Smart chat fallback failed: {e}", exc_info=True)
-            return False
-
-
-@register_component
-class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
-    """
-    A basic agent loop with memory integration that:
-    1. Gets memory context from CompressionEngine (conversation history)
-    2. Gets fresh context from HUD (current frame)
-    3. Combines and sends to LLM with available tools
-    4. Processes LLM response (tool calls + text)
-    5. Stores complete reasoning chain back to CompressionEngine
-
-    This provides simple request-response behavior while maintaining full memory continuity.
-    """
-    COMPONENT_TYPE = "SimpleRequestResponseLoopComponent"
-
-    def __init__(self, parent_inner_space: 'InnerSpace', agent_loop_name: Optional[str] = None, **kwargs):
-        super().__init__(parent_inner_space=parent_inner_space, agent_loop_name=agent_loop_name, **kwargs)
-        logger.info(f"SimpleRequestResponseLoopComponent with memory initialized for '{self.parent_inner_space.name}'")
-
-    async def trigger_cycle(self, focus_context: Optional[Dict[str, Any]] = None):
-        logger.info(f"{self.agent_loop_name} ({self.id}): Simple cycle with memory triggered in InnerSpace '{self.parent_inner_space.name}'.")
-
-        # Get required components
-        hud = self._get_hud()
-        llm_provider = self._get_llm_provider()
-        compression_engine = self._get_compression_engine()
-
-        if not hud or not llm_provider:
-            logger.error(f"{self.agent_loop_name} ({self.id}): Missing critical components (HUD, LLM). Aborting cycle.")
-            return
-
-        if not compression_engine:
-            logger.warning(f"{self.agent_loop_name} ({self.id}): CompressionEngine not available. Proceeding without memory.")
-
-        try:
-            pipeline_options = {
-                'focus_context': focus_context,
-                'include_memory': True,
-                'render_style': 'chronological_flat'
-            }
-            context_data = await hud.get_agent_context_via_compression_engine(options=pipeline_options)
-            logger.info(f"Using unified CompressionEngine pipeline for context generation")
-
-            if not context_data:
-                logger.warning(f"{self.agent_loop_name} ({self.id}): No context data received. Aborting cycle.")
-                return
-
-            # --- HUD automatically detects and returns appropriate format ---
-            has_multimodal_content = isinstance(context_data, dict) and 'attachments' in context_data
-            if has_multimodal_content:
-                logger.critical(f"CONTEXT DATA text {context_data.get('text')}")
-                attachment_count = len(context_data.get('attachments', []))
-                text_length = len(context_data.get('text', ''))
-                logger.info(f"HUD returned multimodal content: {text_length} chars text + {attachment_count} attachments")
-            else:
-                logger.critical(f"CONTEXT DATA text {context_data}")
-                # Context is text-only string
-                logger.debug(f"HUD returned text-only context: {len(str(context_data))} chars")
-
-
-            # --- Build Message for LLM (with multimodal support) ---
-            user_message = create_multimodal_llm_message("user", context_data)
-            messages = [user_message]
-
-            # Log message details
-            if user_message.is_multimodal():
-                attachment_count = user_message.get_attachment_count()
-                text_length = len(user_message.get_text_content())
-                logger.info(f"Built multimodal message: {text_length} chars text + {attachment_count} attachments")
-            else:
-                logger.debug(f"Built text-only message: {len(user_message.get_text_content())} chars")
-
-            # --- Get Available Tools ---
-            aggregated_tools = await self.aggregate_tools()
-
-            # --- Send to LLM ---
-            llm_response_obj = llm_provider.complete(messages=messages, tools=aggregated_tools)
-
-            if not llm_response_obj:
-                logger.warning(f"{self.agent_loop_name} ({self.id}): LLM returned no response. Aborting cycle.")
-                return
-
-            agent_response_text = llm_response_obj.content
-            agent_tool_calls = llm_response_obj.tool_calls or []
-
-            logger.info(f"LLM response: {len(agent_response_text or '')} chars, {len(agent_tool_calls)} tool calls")
-
-            # --- Process Tool Calls (unchanged - still essential) ---
-            tool_results = []
-            if agent_tool_calls:
-                logger.info(f"Processing {len(agent_tool_calls)} tool calls...")
-                for tool_call in agent_tool_calls:
-                    if not isinstance(tool_call, LLMToolCall):
-                        continue
-
-                    # Parse tool target and name
-                    raw_tool_name = tool_call.tool_name
-                    target_element_id = None
-                    actual_tool_name = raw_tool_name
-
-                    if "__" in raw_tool_name:
-                        # Handle prefixed tools (e.g., "smith_a1b2__send_message")
-                        parts = raw_tool_name.split("__", 1)
-                        prefix = parts[0]
-                        actual_tool_name = parts[1]
-
-                        # Resolve the prefix to the full element ID
-                        target_element_id = self._resolve_prefix_to_element_id(prefix)
-                        if not target_element_id:
-                            logger.error(f"Could not resolve tool prefix '{prefix}' to element ID. Skipping.")
-                            continue
-
-                        # Validate the target element exists
-                        target_element = self.parent_inner_space.get_element_by_id(target_element_id)
-                        if not target_element:
-                            logger.error(f"Tool target element '{target_element_id}' not found. Skipping.")
-                            continue
-                    else:
-                        # For non-prefixed tools, try to find the appropriate target element
-                        # Look through mounted elements to find one that has this tool
-                        target_element_id = self._find_element_with_tool(actual_tool_name)
-                        if not target_element_id:
-                            # Fallback to InnerSpace itself
-                            target_element_id = self.parent_inner_space.id
-                            logger.debug(f"No specific element found for tool '{actual_tool_name}', using InnerSpace")
-
-                    # Execute tool
-                    try:
-                        calling_context = {"loop_component_id": self.id}
-                        tool_result = await self.parent_inner_space.execute_action_on_element(
-                            element_id=target_element_id,
-                            action_name=actual_tool_name,
-                            parameters=tool_call.parameters,
-                            calling_context=calling_context
-                        )
-                        tool_results.append({
-                            "tool_name": raw_tool_name,
-                            "parameters": tool_call.parameters,
-                            "result": tool_result
-                        })
-                        logger.debug(f"Tool '{actual_tool_name}' executed successfully on element '{target_element_id}'")
-                    except Exception as e:
-                        logger.error(f"Error executing tool '{actual_tool_name}': {e}", exc_info=True)
-                        tool_results.append({
-                            "tool_name": raw_tool_name,
-                            "parameters": tool_call.parameters,
-                            "result": {"error": str(e)}
-                        })
-
-            # --- Process Text Response (always, regardless of tool calls) ---
-            if agent_response_text:
-                logger.debug(f"Processing text response ({len(agent_tool_calls)} tool calls also present)...")
-
-                # NEW: Smart chat fallback - if agent has text, try to send to activating chat
-                # This keeps conversations flowing even when agent uses other tools
-                fallback_sent = await self._try_smart_chat_fallback(agent_response_text, focus_context)
-
-                if not fallback_sent:
-                    # Original HUD processing as fallback to the fallback
-                    processed_actions = await hud.process_llm_response(agent_response_text)
-                    final_action_requests = processed_actions
-                    logger.info(f"Dispatching {len(final_action_requests)} final action(s) from text response.")
-                    for action_request in final_action_requests:
-                         target_module = action_request.get("target_module")
-                         if target_module and self._get_outgoing_action_callback():
-                              try:
-                                  await self._get_outgoing_action_callback()(action_request)
-                              except Exception as e:
-                                  logger.error(f"Error dispatching final external action: {e}")
-
-        except Exception as e:
-            logger.error(f"{self.agent_loop_name} ({self.id}): Error during simple cycle: {e}", exc_info=True)
-        finally:
-            logger.info(f"{self.agent_loop_name} ({self.id}): Simple cycle with memory completed.")
-
-def create_multimodal_llm_message(role: str, context_data: Union[str, Dict[str, Any]], name: Optional[str] = None) -> LLMMessage:
-    """
-    Create an LLMMessage that supports multimodal content.
-
-    Args:
-        role: Message role ("user", "assistant", "system")
-        context_data: Either a string (text-only) or dict with 'text' and 'attachments' keys
-                     (format automatically determined by HUD based on content)
-        name: Optional name for the message
-
-    Returns:
-        LLMMessage with appropriate content format
-    """
-    if isinstance(context_data, str):
-        # Simple text message
-        return LLMMessage(role=role, content=context_data, name=name)
-
-    elif isinstance(context_data, dict) and 'text' in context_data:
-        # Multimodal message (HUD detected attachments and returned structured format)
-        text_content = context_data['text']
-        attachments = context_data.get('attachments', [])
-
-        if not attachments:
-            # No attachments, just return text
-            return LLMMessage(role=role, content=text_content, name=name)
-
-        # Build multimodal content list
-        content_parts = []
-
-        # Add text part first
-        if text_content.strip():
-            content_parts.append({
-                "type": "text",
-                "text": text_content
-            })
-
-        # Add attachment parts
-        for attachment in attachments:
-            if isinstance(attachment, dict):
-                content_parts.append(attachment)
-        return LLMMessage(role=role, content=content_parts, name=name)
-
-    else:
-        # Fallback to string representation
-        return LLMMessage(role=role, content=str(context_data), name=name)
+            return False 
