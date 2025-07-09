@@ -456,7 +456,7 @@ class BaseAgentLoopComponent(Component):
             }
             
             # Send delta to InnerSpace for processing
-            await self.parent_inner_space.receive_delta([agent_response_delta])
+            self.parent_inner_space.receive_delta([agent_response_delta])
             
             logger.debug(f"Emitted agent response delta: {response_veil_id} ({len(agent_response_text or '')} chars, {len(agent_tool_calls)} tool calls)")
             

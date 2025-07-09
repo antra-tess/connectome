@@ -114,7 +114,7 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
 
             # --- Build Message for LLM (with multimodal support) ---
             user_message = create_multimodal_llm_message("user", context_data)
-            logger.critical(f"USER MESSAGE: {user_message}")
+            logger.critical(f"USER MESSAGE: {user_message.content}")
             messages = [user_message]
 
             # Log message details
@@ -163,6 +163,11 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
                             "parameters": tool_call.parameters,
                             "result": {"error": str(e)}
                         })
+            
+            # 7. Handle non-tool conversational text as fallback response
+            non_tool_text = self._extract_non_tool_text(agent_response_text)
+            if non_tool_text.strip() and focus_context:
+                await self._send_conversational_response(non_tool_text, focus_context)
         except Exception as e:
             logger.error(f"{self.agent_loop_name} ({self.id}): Error during text-parsing cycle: {e}", exc_info=True)
         finally:
@@ -230,7 +235,8 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
         """
         Parse JSON-format tool calls from response.
         
-        Looks for <tool_calls> JSON blocks as described in the refactor document.
+        Looks for <tool_calls> JSON blocks with format:
+        [{"tool": "name", "parameters": {...}}]
         """
         try:
             parsed_calls = []
@@ -245,7 +251,8 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
                     if isinstance(tool_calls_data, list):
                         for tool_call_data in tool_calls_data:
                             if isinstance(tool_call_data, dict):
-                                tool_name = tool_call_data.get("tool", "")
+                                # Support both "tool" and "name" for compatibility
+                                tool_name = tool_call_data.get("tool") or tool_call_data.get("name", "")
                                 parameters = tool_call_data.get("parameters", {})
                                 
                                 if tool_name:
@@ -256,7 +263,7 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
                                         raw_text=match
                                     )
                                     parsed_calls.append(parsed_call)
-                                    logger.debug(f"Parsed JSON tool call: {tool_name}")
+                                    logger.info(f"Parsed JSON tool call: {tool_name} with params: {parameters}")
                 except json.JSONDecodeError as e:
                     logger.warning(f"Failed to parse JSON tool call block: {e}")
                     continue
@@ -433,6 +440,39 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
             logger.error(f"Error extracting non-tool text: {e}", exc_info=True)
             return response_text
 
+    async def _send_conversational_response(self, conversational_text: str, focus_context: Dict[str, Any]) -> None:
+        """
+        Send non-tool conversational text as a message to the focused conversation.
+        
+        This provides fallback behavior so the agent can respond normally without tools.
+        
+        Args:
+            conversational_text: The non-tool text to send as a response
+            focus_context: Focus context containing target element information
+        """
+        try:
+            focus_element_id = focus_context.get('focus_element_id')
+            if not focus_element_id:
+                logger.warning("No focus element ID in context for conversational response")
+                return
+            
+            # Send the conversational text as a message to the focused element
+            calling_context = {"loop_component_id": self.id, "parsing_mode": "text", "response_type": "conversational"}
+            result = await self.parent_inner_space.execute_action_on_element(
+                element_id=focus_element_id,
+                action_name="send_message",
+                parameters={"text": conversational_text},
+                calling_context=calling_context
+            )
+            
+            if result and result.get("success"):
+                logger.info(f"Sent conversational response ({len(conversational_text)} chars) to element {focus_element_id}")
+            else:
+                logger.warning(f"Failed to send conversational response: {result}")
+                
+        except Exception as e:
+            logger.error(f"Error sending conversational response: {e}", exc_info=True)
+
     async def _emit_agent_response_delta(self, agent_response_text: str, tool_calls: List[ParsedToolCall]) -> None:
         """
         Emit a VEIL delta containing the agent's response for chronological rendering.
@@ -473,13 +513,7 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
             if self.parent_inner_space:
                 agent_response_delta["node"]["properties"]["owner_element_id"] = self.parent_inner_space.id
             
-            # Submit delta to VEIL system
-            space_veil_producer = self.parent_inner_space.get_component_by_type("SpaceVeilProducer")
-            if space_veil_producer:
-                space_veil_producer.signal_delta_produced_externally([agent_response_delta])
-                logger.debug(f"Emitted agent response delta with {len(tool_calls)} tool calls")
-            else:
-                logger.warning(f"No SpaceVeilProducer found to emit agent response delta")
+            self.parent_inner_space.receive_delta([agent_response_delta])
                 
         except Exception as e:
             logger.error(f"Error emitting agent response delta: {e}", exc_info=True) 

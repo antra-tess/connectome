@@ -72,20 +72,20 @@ class MessageActionHandler(Component):
         # --- Define Parameter Schemas ---
         send_message_params: List[ToolParameter] = [
             {"name": "text", "type": "string", "description": "The content of the message to send.", "required": True},
-            {"name": "reply_to_external_id", "type": "string", "description": "Optional external ID of the message being replied to.", "required": False},
-            {"name": "target_element_id", "type": "string", "description": "Optional specific element ID to target for sending. If not provided, will use the element this tool is attached to.", "required": False},
-            {
-                "name": "attachments", "type": "array", "description": "Optional list of attachment objects to send.", "required": False,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string", "description": "URL of the attachment."},
-                        "filename": {"type": "string", "description": "Filename of the attachment."},
-                        "attachment_type": {"type": "string", "description": "MIME type (e.g., 'image/png')."}
-                    },
-                    "required": ["url"] # Example: URL is required for an attachment object
-                }
-            }
+            # {"name": "reply_to_external_id", "type": "string", "description": "Optional external ID of the message being replied to.", "required": False},
+            # {"name": "target_element_id", "type": "string", "description": "Optional specific element ID to target for sending. If not provided, will use the element this tool is attached to.", "required": False},
+            # {
+            #     "name": "attachments", "type": "array", "description": "Optional list of attachment objects to send.", "required": False,
+            #     "items": {
+            #         "type": "object",
+            #         "properties": {
+            #             "url": {"type": "string", "description": "URL of the attachment."},
+            #             "filename": {"type": "string", "description": "Filename of the attachment."},
+            #             "attachment_type": {"type": "string", "description": "MIME type (e.g., 'image/png')."}
+            #         },
+            #         "required": ["url"] # Example: URL is required for an attachment object
+            #     }
+            # }
         ]
 
         # delete_message_params: List[ToolParameter] = [
@@ -107,12 +107,12 @@ class MessageActionHandler(Component):
         #     {"name": "emoji", "type": "string", "description": "The emoji reaction to remove (e.g., '👍', ':smile:').", "required": True}
         # ]
 
-        fetch_history_params: List[ToolParameter] = [
-            {"name": "conversation_id", "type": "string", "description": "The external ID of the conversation/channel to fetch history from.", "required": True},
-            {"name": "before", "type": "integer", "description": "Fetch messages before this UTC timestamp in seconds. For example, this param can be set to int(datetime.now().timestamp()). (Either this, or after param must be submitted)", "required": False},
-            {"name": "after", "type": "integer", "description": "Fetch messages after this UTC timestamp in seconds. (Either this, or before param must be submitted)", "required": False},
-            {"name": "limit", "type": "integer", "description": "Maximum number of messages to fetch (e.g., 100). (Optional)", "required": False}
-        ]
+        # fetch_history_params: List[ToolParameter] = [
+        #     {"name": "conversation_id", "type": "string", "description": "The external ID of the conversation/channel to fetch history from.", "required": True},
+        #     {"name": "before", "type": "integer", "description": "Fetch messages before this UTC timestamp in seconds. For example, this param can be set to int(datetime.now().timestamp()). (Either this, or after param must be submitted)", "required": False},
+        #     {"name": "after", "type": "integer", "description": "Fetch messages after this UTC timestamp in seconds. (Either this, or before param must be submitted)", "required": False},
+        #     {"name": "limit", "type": "integer", "description": "Maximum number of messages to fetch (e.g., 100). (Optional)", "required": False}
+        # ]
 
         # get_message_attachment_content_params: List[ToolParameter] = [
         #     {"name": "message_external_id", "type": "string", "description": "The external ID of the message containing the attachment.", "required": True},
@@ -126,9 +126,9 @@ class MessageActionHandler(Component):
             parameters_schema=send_message_params
         )
         async def send_message_tool(text: str,
-                                    attachments: Optional[List[Dict[str, Any]]] = None,
-                                    reply_to_external_id: Optional[str] = None,
-                                    target_element_id: Optional[str] = None,
+                                    # attachments: Optional[List[Dict[str, Any]]] = None,
+                                    # reply_to_external_id: Optional[str] = None,
+                                    # target_element_id: Optional[str] = None,
                                     calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             """
             Tool function to send a message.
@@ -142,7 +142,7 @@ class MessageActionHandler(Component):
                                   as the agent loop will automatically route to the correct element.
                 calling_context: Context from the calling component
             """
-            logger.info(f"[{self.owner.id}] MessageActionHandler.send_message_tool called. Text: '{text[:50]}...', Target: {target_element_id or 'auto'}")
+            logger.info(f"[{self.owner.id}] MessageActionHandler.send_message_tool called. Text: '{text[:50]}...', Target: {'auto'}")
 
             # Note: target_element_id parameter is included for completeness but typically
             # the agent loop handles routing automatically based on tool aggregation
@@ -168,16 +168,16 @@ class MessageActionHandler(Component):
             if msg_list_comp:
                 # Agent name might be different from owner name if tools are on InnerSpace directly
                 # For DMs, requesting_agent_id (self.owner.agent_id) and agent_name are relevant.
-                final_attachments = []
-                if attachments:
-                    if isinstance(attachments, list):
-                        for att in attachments:
-                            if isinstance(att, dict):
-                                final_attachments.append(att)
-                            else:
-                                logger.warning(f"[{self.owner.id}] send_message_tool: Skipping non-dict attachment: {att}")
-                    else:
-                        logger.warning(f"[{self.owner.id}] send_message_tool: Attachments argument was not a list: {attachments}")
+                # final_attachments = []
+                # if attachments:
+                #     if isinstance(attachments, list):
+                #         for att in attachments:
+                #             if isinstance(att, dict):
+                #                 final_attachments.append(att)
+                #             else:
+                #                 logger.warning(f"[{self.owner.id}] send_message_tool: Skipping non-dict attachment: {att}")
+                #     else:
+                #         logger.warning(f"[{self.owner.id}] send_message_tool: Attachments argument was not a list: {attachments}")
 
                 msg_list_comp.add_pending_message(
                     internal_request_id=internal_request_id,
@@ -185,8 +185,8 @@ class MessageActionHandler(Component):
                     sender_id=requesting_agent_id or "unknown_agent",
                     sender_name=agent_name or "Unknown Agent",
                     timestamp=time.time(),
-                    attachments=final_attachments,
-                    reply_to_external_id=reply_to_external_id,
+                    # attachments=final_attachments,
+                    # reply_to_external_id=reply_to_external_id,
                     adapter_id=retrieved_adapter_id # Should be correct for DM context
                 )
                 logger.info(f"[{self.owner.id}] Added pending message (req_id: {internal_request_id}) to MessageListComponent for direct send.")
@@ -201,11 +201,11 @@ class MessageActionHandler(Component):
                     "adapter_id": retrieved_adapter_id,
                     "conversation_id": retrieved_conversation_id,
                     "text": text,
-                    "reply_to_external_id": reply_to_external_id,
-                    "attachments": attachments or [],
+                    # "reply_to_external_id": reply_to_external_id,
+                    # "attachments": attachments or [],
                     "requesting_element_id": self.owner.id,
                     "requesting_agent_id": requesting_agent_id,
-                    "target_element_id": target_element_id
+                    # "target_element_id": target_element_id
                 }
             }
             logger.debug(f"[{self.owner.id}] Dispatching direct send_message action request: {action_request}")
@@ -475,27 +475,27 @@ class MessageActionHandler(Component):
         #         logger.error(f"[{self.owner.id}] Error dispatching remove_reaction action: {e}", exc_info=True)
         #         return {"success": False, "error": f"Error dispatching remove reaction request: {e}"}
 
-        # --- Register fetch_history Tool ---
-        @tool_provider.register_tool(
-            name="fetch_history",
-            description="Fetches historical messages for a specific conversation from the adapter.",
-            parameters_schema=fetch_history_params
-        )
-        async def fetch_history_tool(conversation_id: str, # Explicitly required by tool
-                                 before: Optional[int] = None,
-                                 after: Optional[int] = None,
-                                 limit: Optional[int] = 100,
-                                 calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-            # This tool might be called by an agent loop that doesn't have a `calling_context`
-            # in the same way a direct user tool might.
-            # The agent loop should ideally provide its own ID.
-            return await self.handle_fetch_history(
-                conversation_id=conversation_id,
-                before=before,
-                after=after,
-                limit=limit,
-                calling_context=calling_context # Pass context through
-            )
+        # # --- Register fetch_history Tool ---
+        # @tool_provider.register_tool(
+        #     name="fetch_history",
+        #     description="Fetches historical messages for a specific conversation from the adapter.",
+        #     parameters_schema=fetch_history_params
+        # )
+        # async def fetch_history_tool(conversation_id: str, # Explicitly required by tool
+        #                          before: Optional[int] = None,
+        #                          after: Optional[int] = None,
+        #                          limit: Optional[int] = 100,
+        #                          calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        #     # This tool might be called by an agent loop that doesn't have a `calling_context`
+        #     # in the same way a direct user tool might.
+        #     # The agent loop should ideally provide its own ID.
+        #     return await self.handle_fetch_history(
+        #         conversation_id=conversation_id,
+        #         before=before,
+        #         after=after,
+        #         limit=limit,
+        #         calling_context=calling_context # Pass context through
+        #     )
 
         # --- Register get_message_attachment_content Tool (modified from get_attachment_tool) ---
         # @tool_provider.register_tool(

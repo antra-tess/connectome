@@ -831,7 +831,7 @@ class HUDComponent(Component):
             return f"{indent_str}[EXCLUDED: {element_name} - content being memorized separately]\n"
 
         # NEW: Include tool targeting information
-        available_tools = props.get("available_tools", [])
+        available_tool_names = props.get("available_tool_names", [])
         tool_target_element_id = props.get("tool_target_element_id")
 
         # Build header with element information - always include element type and ID for future needs
@@ -843,7 +843,7 @@ class HUDComponent(Component):
             header += f" [{element_type}]"
 
         # Add tool information if available
-        if available_tools:
+        if available_tool_names:
             # NEW: Check if this is a remote element accessed via uplink proxy
             prefix_element_id = self._determine_tool_prefix_element_id(element_id)
 
@@ -861,7 +861,7 @@ class HUDComponent(Component):
                         if chat_mappings:
                             chat_prefix_info = f" (Chat prefixes: {', '.join(f'{p}={n}' for p, n in chat_mappings.items())})"
 
-            prefixed_tools = [f"{short_prefix}__{tool}" for tool in available_tools]
+            prefixed_tools = [f"{short_prefix}__{tool}" for tool in available_tool_names]
 
             if tool_target_element_id and tool_target_element_id != element_id:
                 header += f" - Tools: {', '.join(prefixed_tools)} → {tool_target_element_id}"
@@ -1375,24 +1375,29 @@ class HUDComponent(Component):
                     span.set_attribute("hud.render.status", "empty_processed_veil")
                     return "Current context is empty."
                 
-                # Render the processed flat cache
-                context_string = await self._render_processed_flat_veil(processed_veil, options)
-
-                # NEW: Add tool rendering based on mode if tools are provided (Phase 2)
+                # NEW: Add tool rendering to processed veil before rendering (Phase 2)
+                tool_rendering_data = None
                 if tools:
                     tool_mode = options.get('tool_rendering_mode', 'simple')  # 'simple' or 'full'
                     
                     if tool_mode == 'full':
                         # For text-parsing AgentLoop - aggregate and render complete definitions
                         aggregated_tools = self._aggregate_tools_by_base_name(tools)
-                        tool_section = self._render_full_tool_definitions_section(aggregated_tools)
+                        tool_rendering_data = {
+                            'mode': 'full',
+                            'aggregated_tools': aggregated_tools
+                        }
                     else:
                         # For tool_call API AgentLoop - render original prefixed list (no aggregation)
-                        tool_section = self._render_simple_tool_list_section(tools)
+                        tool_rendering_data = {
+                            'mode': 'simple', 
+                            'tools': tools
+                        }
                     
-                    if tool_section:
-                        context_string = f"{context_string}\n\n{tool_section}"
-                        logger.debug(f"Added {tool_mode} tool rendering to context")
+                    logger.debug(f"Prepared {tool_mode} tool rendering data for integrated context")
+
+                # Render the processed flat cache with integrated tool rendering
+                context_string = await self._render_processed_flat_veil(processed_veil, options, tool_rendering_data)
 
                 logger.info(f"Agent context generated via CompressionEngine: {len(context_string)} chars")
                 span.set_attribute("hud.render.output_length", len(context_string))
@@ -1412,21 +1417,9 @@ class HUDComponent(Component):
                     # Get flat cache directly
                     flat_cache = self.get_flat_veil_cache_via_producer()
                     if flat_cache:
-                        fallback_context = self._render_chronological_flat_content(flat_cache, options)
-                        
-                        # NEW: Add tool rendering to fallback as well (Phase 2)
-                        if tools:
-                            tool_mode = options.get('tool_rendering_mode', 'simple')
-                            
-                            if tool_mode == 'full':
-                                aggregated_tools = self._aggregate_tools_by_base_name(tools)
-                                tool_section = self._render_full_tool_definitions_section(aggregated_tools)
-                            else:
-                                tool_section = self._render_simple_tool_list_section(tools)
-                            
-                            if tool_section:
-                                fallback_context = f"{fallback_context}\n\n{tool_section}"
-                                logger.debug(f"Added {tool_mode} tool rendering to fallback context")
+                        # Use same integrated approach as main pipeline for consistency
+                        fallback_tool_rendering_data = tool_rendering_data  # Reuse the prepared tool data
+                        fallback_context = self._render_chronological_flat_content(flat_cache, options, fallback_tool_rendering_data)
                         
                         logger.info(f"Fallback chronological rendering successful: {len(fallback_context)} chars")
                         return fallback_context
@@ -1875,18 +1868,23 @@ class HUDComponent(Component):
         except Exception as e:
             logger.error(f"Error excluding content from VEIL element: {e}", exc_info=True)
 
-    async def _render_processed_flat_veil(self, processed_flat_cache: Dict[str, Any], options: Dict[str, Any]) -> str:
+    async def _render_processed_flat_veil(self, processed_flat_cache: Dict[str, Any], options: Dict[str, Any], tool_rendering_data: Optional[Dict[str, Any]] = None) -> str:
         """
-        MODIFIED: Render processed flat VEIL cache using chronological flat rendering.
+        MODIFIED: Render processed flat VEIL cache using chronological flat rendering with integrated tool rendering.
         
         This now bypasses hierarchy reconstruction and renders directly from flat cache.
+        
+        Args:
+            processed_flat_cache: Processed flat VEIL cache 
+            options: Rendering options
+            tool_rendering_data: Optional tool rendering data to integrate into context
         """
         try:
             # Check if we should use chronological flat rendering (default)
             render_style = options.get('render_style', 'chronological_flat')
             if render_style == 'chronological_flat':
-                # NEW: Use chronological flat rendering
-                context_string = self._render_chronological_flat_content(processed_flat_cache, options)
+                # NEW: Use chronological flat rendering with integrated tools
+                context_string = self._render_chronological_flat_content(processed_flat_cache, options, tool_rendering_data)
                 logger.debug(f"Rendered flat VEIL chronologically: {len(context_string)} characters")
                 return context_string
             else:
@@ -1904,6 +1902,12 @@ class HUDComponent(Component):
                 # Render using standard hierarchical rendering
                 attention_requests = {}
                 context_string = self._render_veil_node_to_string(hierarchical_veil, attention_requests, options, indent=0)
+                
+                # Add tools separately for hierarchical mode if provided
+                if tool_rendering_data:
+                    tool_section = self._render_tool_section_from_data(tool_rendering_data)
+                    if tool_section:
+                        context_string = f"{context_string}\n\n{tool_section}"
                 
                 logger.debug(f"Rendered processed flat VEIL hierarchically: {len(context_string)} characters")
                 return context_string
@@ -2135,7 +2139,7 @@ class HUDComponent(Component):
             aggregated_tools: Dictionary of aggregated tools by base name
             
         Returns:
-            Rendered tool definitions section in JSON format
+            Rendered tool definitions section with instructions and JSON format
         """
         try:
             if not aggregated_tools:
@@ -2154,13 +2158,45 @@ class HUDComponent(Component):
             if not tools_structure["available_tools"]:
                 return ""
             
+            # NEW: Add tool call format instructions at the top
+            instructions = self._render_tool_call_instructions()
+            
             # Render as JSON within <tools> tags
             import json
             tools_json = json.dumps(tools_structure, indent=2)
-            return f"<tools>\n{tools_json}\n</tools>"
+            return f"{instructions}\n\n<tools>\n{tools_json}\n</tools>"
             
         except Exception as e:
             logger.error(f"Error rendering full tool definitions section: {e}", exc_info=True)
+            return ""
+
+    def _render_tool_section_from_data(self, tool_rendering_data: Dict[str, Any]) -> str:
+        """
+        NEW: Render tool section from tool rendering data.
+        
+        This helper method handles both full and simple tool rendering modes.
+        
+        Args:
+            tool_rendering_data: Dictionary containing mode and tool data
+            
+        Returns:
+            Rendered tool section string
+        """
+        try:
+            mode = tool_rendering_data.get('mode', 'simple')
+            
+            if mode == 'full':
+                aggregated_tools = tool_rendering_data.get('aggregated_tools', {})
+                return self._render_full_tool_definitions_section(aggregated_tools)
+            elif mode == 'simple':
+                tools = tool_rendering_data.get('tools', [])
+                return self._render_simple_tool_list_section(tools)
+            else:
+                logger.warning(f"Unknown tool rendering mode: {mode}")
+                return ""
+                
+        except Exception as e:
+            logger.error(f"Error rendering tool section from data: {e}", exc_info=True)
             return ""
 
     def _format_simple_tool_list(self, tool_names: List[str]) -> str:
@@ -2178,6 +2214,42 @@ class HUDComponent(Component):
         except Exception as e:
             logger.error(f"Error formatting simple tool list: {e}", exc_info=True)
             return ""
+
+    def _render_tool_call_instructions(self) -> str:
+        """
+        NEW: Render instructions for the agent on how to format tool calls for text parsing.
+        
+        Returns:
+            Instructions text for tool call formatting
+        """
+        try:
+            instructions = """[TOOL CALL INSTRUCTIONS]
+To use tools, format your tool calls using JSON syntax within <tool_calls> tags:
+
+<tool_calls>
+[
+  {
+    "tool": "tool_name", 
+    "parameters": {
+      "parameter_name": "value",
+      "target_element": "Element Name"
+    }
+  }
+]
+</tool_calls>
+
+IMPORTANT NOTES:
+- You can make multiple tool calls in one response by adding multiple objects to the array
+- Use the exact tool names from the available_tools list below
+- For tools with multiple targets, include "target_element" parameter with the element name from the enum
+- To respond conversationally WITHOUT using tools, just provide your response text normally
+- Tool calls and regular conversation can be mixed in the same response"""
+            
+            return instructions
+            
+        except Exception as e:
+            logger.error(f"Error rendering tool call instructions: {e}", exc_info=True)
+            return "[TOOL CALL INSTRUCTIONS]\nUse tools by formatting calls in <tool_calls> JSON blocks."
 
     def _format_full_tool_definition(self, base_name: str, aggregated_tool: AggregatedTool) -> Optional[Dict[str, Any]]:
         """
@@ -2737,11 +2809,16 @@ class HUDComponent(Component):
             logger.error(f"Error applying time markers: {e}", exc_info=True)
             return content_groups
 
-    def _render_chronological_flat_content(self, flat_cache: Dict[str, Any], options: Dict[str, Any]) -> str:
+    def _render_chronological_flat_content(self, flat_cache: Dict[str, Any], options: Dict[str, Any], tool_rendering_data: Optional[Dict[str, Any]] = None) -> str:
         """
-        ENHANCED: Main chronological flat rendering with complete structural information.
+        ENHANCED: Main chronological flat rendering with complete structural information and integrated tool rendering.
         
-        Now renders both container metadata and chronological content to match expected output.
+        Now renders both container metadata and chronological content with tools positioned after containers.
+        
+        Args:
+            flat_cache: Flat VEIL cache to render
+            options: Rendering options
+            tool_rendering_data: Optional tool rendering data to integrate after containers
         """
         try:
             logger.debug(f"Starting enhanced chronological flat rendering of {len(flat_cache)} VEIL nodes")
@@ -2794,7 +2871,14 @@ class HUDComponent(Component):
                 if chat_info_section:
                     rendered_sections.append(chat_info_section)
             
-            # 4. Render chronological content groups (all types interleaved)
+            # 4. NEW: Render tools immediately after containers but before content
+            if tool_rendering_data:
+                tool_section = self._render_tool_section_from_data(tool_rendering_data)
+                if tool_section:
+                    rendered_sections.append(tool_section)
+                    logger.debug(f"Added integrated tool section after containers")
+            
+            # 5. Render chronological content groups (all types interleaved)
             for group in content_groups:
                 group_type = group.get("group_type")
                 
@@ -2819,7 +2903,7 @@ class HUDComponent(Component):
                 if rendered_section:
                     rendered_sections.append(rendered_section)
             
-            # 5. Close space root wrapper if we opened it
+            # 6. Close space root wrapper if we opened it
             if space_root:
                 rendered_sections.append("</inner_space>")
             
@@ -2890,11 +2974,19 @@ class HUDComponent(Component):
                     conversation_name = channel.get("conversation_name", "unknown")
                     is_focused = channel.get("is_focused", False)
                     element_id = channel.get("element_id", "unknown")
-                    available_tools = channel.get("available_tools", [])
+                    available_tools = channel.get("available_tools", [])  # NEW: Use enhanced tools
+                    available_tool_names = channel.get("available_tool_names", [])  # Fallback
                     tool_target_element_id = channel.get("tool_target_element_id")
 
-                    # NEW: Add tool information with proper prefixing (same logic as _render_container)
+                    # NEW: Add tool information using enhanced tools for better clarity
                     if available_tools:
+                        # Extract tool names from enhanced tools
+                        tool_names = [tool.get("name", "") for tool in available_tools if tool.get("name")]
+                        
+                        # Show tool names clearly associated with this conversation
+                        tool_attr = f' tools="{", ".join(tool_names)}"'
+                    elif available_tool_names:
+                        # Fallback to old format if enhanced tools not available
                         # Determine prefix element ID (may be uplink proxy for remote elements)
                         prefix_element_id = self._determine_tool_prefix_element_id(element_id)
                         
@@ -2902,7 +2994,7 @@ class HUDComponent(Component):
                         short_prefix = self._create_short_element_prefix(prefix_element_id)
                         
                         # Create prefixed tools (exact same format agent loop expects)
-                        prefixed_tools = [f"{short_prefix}__{tool}" for tool in available_tools]
+                        prefixed_tools = [f"{short_prefix}__{tool}" for tool in available_tool_names]
                         
                         # Add target info if different from element
                         target_info = ""
@@ -2914,7 +3006,7 @@ class HUDComponent(Component):
                         if prefix_element_id != element_id:
                             uplink_info = " via_uplink=\"true\""
                         
-                        tool_attr = f' tools=[{target_info}{uplink_info}{", ".join(prefixed_tools)}]'
+                        tool_attr = f' tools_legacy="[{target_info}{uplink_info}{", ".join(prefixed_tools)}]"'
                     else:
                         tool_attr = " tools=[]"
                     
