@@ -2020,6 +2020,8 @@ class HUDComponent(Component):
                 content_item = None
                 if content_nature == "chat_message":
                     content_item = self._extract_chat_message_content(node_data)
+                elif content_nature == "agent_response":  # NEW: Handle agent responses
+                    content_item = self._extract_agent_response_content(node_data)
                 elif content_nature == "scratchpad_summary" or "scratchpad" in node_type.lower():
                     content_item = self._extract_scratchpad_content(node_data)
                 elif node_type in ["content_memory", "memorized_content"]:
@@ -2152,6 +2154,34 @@ class HUDComponent(Component):
             logger.warning(f"Error extracting memory content: {e}")
             return None
 
+    def _extract_agent_response_content(self, node_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """NEW: Extract agent response content with metadata."""
+        try:
+            props = node_data.get("properties", {})
+            timestamp = props.get("timestamp", time.time())
+            
+            # Convert timestamp to numeric if it's a string
+            if isinstance(timestamp, str):
+                numeric_ts = self._convert_timestamp_to_numeric(timestamp)
+                timestamp = numeric_ts if numeric_ts else time.time()
+            
+            return {
+                "content_type": "agent_response",
+                "operation_index": props.get("operation_index", 0),  # NEW: Include operation_index for chronological sorting
+                "timestamp": timestamp,
+                "veil_id": node_data.get("veil_id"),
+                "node_data": node_data,
+                "element_id": props.get("element_id"),
+                "agent_response_text": props.get("agent_response_text", ""),
+                "tool_calls_count": props.get("tool_calls_count", 0),
+                "has_tool_calls": props.get("has_tool_calls", False),
+                "agent_name": props.get("agent_name", "Agent"),
+                "agent_loop_component_id": props.get("agent_loop_component_id")
+            }
+        except Exception as e:
+            logger.warning(f"Error extracting agent response content: {e}")
+            return None
+
     def _extract_space_root_content(self, node_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """NEW: Extract space root content for inner_space wrapper."""
         try:
@@ -2219,7 +2249,10 @@ class HUDComponent(Component):
 
     def _group_content_by_type(self, extraction_result: Dict[str, Any]) -> Dict[str, Any]:
         """
-        ENHANCED: Group content items and organize container items.
+        ENHANCED: Group content items with speaker-based grouping for chat messages.
+        
+        Chat messages are grouped by speaker transitions (user -> agent -> user etc.),
+        while other content types use the original type-based grouping.
         
         Args:
             extraction_result: Dictionary with 'content_items' and 'container_items' keys
@@ -2231,31 +2264,58 @@ class HUDComponent(Component):
             content_items = extraction_result.get("content_items", [])
             container_items = extraction_result.get("container_items", [])
             
-            # Group content items by type (as before)
+            # Group content items with speaker-aware logic for chat messages
             content_groups = []
             current_group = None
             
             for item in content_items:
                 content_type = item.get("content_type")
                 
-                # Start new group if type changes or no current group
-                if not current_group or current_group["group_type"] != content_type:
-                    if current_group:
-                        content_groups.append(current_group)
+                if content_type == "chat_message":
+                    # For chat messages, group by speaker transitions
+                    is_agent = item.get("is_agent", False)
+                    speaker_type = "agent" if is_agent else "user"
+                    group_type = f"chat_message_{speaker_type}"
                     
-                    current_group = {
-                        "group_type": content_type,
-                        "items": [item],
-                        "start_operation_index": item.get("operation_index", 0),  # NEW: Track operation_index range
-                        "end_operation_index": item.get("operation_index", 0),
-                        "start_timestamp": item.get("timestamp", 0),  # Keep for display context
-                        "end_timestamp": item.get("timestamp", 0)
-                    }
+                    # Start new group if speaker type changes or no current group
+                    if not current_group or current_group["group_type"] != group_type:
+                        if current_group:
+                            content_groups.append(current_group)
+                        
+                        current_group = {
+                            "group_type": group_type,
+                            "speaker_type": speaker_type,  # NEW: Track speaker for rendering
+                            "items": [item],
+                            "start_operation_index": item.get("operation_index", 0),
+                            "end_operation_index": item.get("operation_index", 0),
+                            "start_timestamp": item.get("timestamp", 0),
+                            "end_timestamp": item.get("timestamp", 0)
+                        }
+                    else:
+                        # Add to current group (same speaker)
+                        current_group["items"].append(item)
+                        current_group["end_operation_index"] = item.get("operation_index", 0)
+                        current_group["end_timestamp"] = item.get("timestamp", 0)
+                
                 else:
-                    # Add to current group
-                    current_group["items"].append(item)
-                    current_group["end_operation_index"] = item.get("operation_index", 0)  # NEW: Update operation_index range
-                    current_group["end_timestamp"] = item.get("timestamp", 0)
+                    # For non-chat content, use original type-based grouping
+                    if not current_group or current_group["group_type"] != content_type:
+                        if current_group:
+                            content_groups.append(current_group)
+                        
+                        current_group = {
+                            "group_type": content_type,
+                            "items": [item],
+                            "start_operation_index": item.get("operation_index", 0),
+                            "end_operation_index": item.get("operation_index", 0),
+                            "start_timestamp": item.get("timestamp", 0),
+                            "end_timestamp": item.get("timestamp", 0)
+                        }
+                    else:
+                        # Add to current group
+                        current_group["items"].append(item)
+                        current_group["end_operation_index"] = item.get("operation_index", 0)
+                        current_group["end_timestamp"] = item.get("timestamp", 0)
             
             # Add final group
             if current_group:
@@ -2277,7 +2337,7 @@ class HUDComponent(Component):
                 elif container_type == "scratchpad":
                     containers["scratchpad"] = container
             
-            logger.debug(f"Grouped {len(content_groups)} content groups and {len(container_items)} containers")
+            logger.debug(f"Grouped {len(content_groups)} content groups with speaker-aware chat grouping and {len(container_items)} containers")
             
             return {
                 "content_groups": content_groups,
@@ -2414,8 +2474,10 @@ class HUDComponent(Component):
             for group in content_groups:
                 group_type = group.get("group_type")
                 
-                if group_type == "chat_message":
+                if group_type.startswith("chat_message"):  # Handles both "chat_message_user" and "chat_message_agent"
                     rendered_section = self._render_flat_chat_group(group, options)
+                elif group_type == "agent_response":  # NEW: Handle agent responses
+                    rendered_section = self._render_flat_agent_response_group(group, options)
                 elif group_type == "memory":
                     rendered_section = self._render_flat_memory_group(group, options)
                 elif group_type == "scratchpad":
@@ -2467,7 +2529,7 @@ class HUDComponent(Component):
             return '<inner_space>'
 
     def _render_chat_info_section(self, message_lists: List[Dict[str, Any]], options: Dict[str, Any]) -> str:
-        """NEW: Render chat_info section with channel information."""
+        """NEW: Render chat_info section with channel information and available tools."""
         try:
             if not message_lists:
                 return ""
@@ -2499,12 +2561,43 @@ class HUDComponent(Component):
                 # Build chat_info opening tag
                 info_section = f'<chat_info type="{adapter_type}" server="{server_name}" alias="{alias}">\n'
                 
-                # Add channels
+                # Add channels with tool information
                 for channel in channels:
                     conversation_name = channel.get("conversation_name", "unknown")
                     is_focused = channel.get("is_focused", False)
+                    element_id = channel.get("element_id", "unknown")
+                    available_tools = channel.get("available_tools", [])
+                    tool_target_element_id = channel.get("tool_target_element_id")
+
+                    # NEW: Add tool information with proper prefixing (same logic as _render_container)
+                    if available_tools:
+                        # Determine prefix element ID (may be uplink proxy for remote elements)
+                        prefix_element_id = self._determine_tool_prefix_element_id(element_id)
+                        
+                        # Create short prefix for display (same logic as agent loop)
+                        short_prefix = self._create_short_element_prefix(prefix_element_id)
+                        
+                        # Create prefixed tools (exact same format agent loop expects)
+                        prefixed_tools = [f"{short_prefix}__{tool}" for tool in available_tools]
+                        
+                        # Add target info if different from element
+                        target_info = ""
+                        if tool_target_element_id and tool_target_element_id != element_id:
+                            target_info = f' target="{tool_target_element_id}"'
+                        
+                        # Add uplink info if using proxy prefix
+                        uplink_info = ""
+                        if prefix_element_id != element_id:
+                            uplink_info = " via_uplink=\"true\""
+                        
+                        tool_attr = f' tools=[{target_info}{uplink_info}{", ".join(prefixed_tools)}]'
+                    else:
+                        tool_attr = " tools=[]"
+                    
                     focused_attr = f' focused={is_focused}'
-                    info_section += f'<channel conversation_name="{conversation_name}"{focused_attr}>\n'
+                    info_section += f'<channel conversation_name="{conversation_name}"{focused_attr}{tool_attr}>\n'
+                    
+                    
                 
                 info_section += '</chat_info>'
                 info_sections.append(info_section)
@@ -2752,7 +2845,7 @@ class HUDComponent(Component):
                         system_lines.append(f"<system>{system_text}</system>")
                     else:
                         # Use legacy format for other system messages
-                        system_lines.append(f"[SYSTEM] {system_text}")
+                        system_lines.append(f"<system>{system_text}</system>")
             
             if not system_lines:
                 return ""
@@ -2762,6 +2855,43 @@ class HUDComponent(Component):
             
         except Exception as e:
             logger.error(f"Error rendering enhanced flat system group: {e}", exc_info=True)
+            return ""
+
+    def _render_flat_agent_response_group(self, group: Dict[str, Any], options: Dict[str, Any]) -> str:
+        """NEW: Render a group of agent responses."""
+        try:
+            items = group.get("items", [])
+            if not items:
+                return ""
+            
+            # Render agent response items
+            response_lines = []
+            for item in items:
+                agent_response_text = item.get("agent_response_text", "")
+                tool_calls_count = item.get("tool_calls_count", 0)
+                has_tool_calls = item.get("has_tool_calls", False)
+                agent_name = item.get("agent_name", "Agent")
+                time_marker = item.get("time_marker")
+                
+                if time_marker:
+                    response_lines.append(f"<time_marker>{time_marker}</time_marker>")
+                
+                if agent_response_text:
+                    # Build agent response with metadata
+                    tool_info = ""
+                    if has_tool_calls:
+                        tool_info = f' tool_calls="{tool_calls_count}"'
+                    
+                    response_lines.append(f'<agent_response agent="{agent_name}"{tool_info}>{agent_response_text}</agent_response>')
+            
+            if not response_lines:
+                return ""
+            
+            content = "\n".join(response_lines)
+            return content  # Agent responses don't need wrapper tags
+            
+        except Exception as e:
+            logger.error(f"Error rendering flat agent response group: {e}", exc_info=True)
             return ""
 
     def _generate_system_messages(self, content_groups: List[Dict[str, Any]], flat_cache: Dict[str, Any]) -> List[Dict[str, Any]]:

@@ -414,6 +414,54 @@ class BaseAgentLoopComponent(Component):
 
         return final_name
 
+    async def _emit_agent_response_delta(self, agent_response_text: str, agent_tool_calls: List) -> None:
+        """
+        NEW: Emit a VEIL delta containing the agent's response for chronological rendering.
+        
+        This allows the agent to see its own previous responses in the HUD context.
+        
+        Args:
+            agent_response_text: The agent's text response from LLM
+            agent_tool_calls: List of tool calls the agent made
+        """
+        try:
+            import time
+            current_time = time.time()
+            
+            # Create unique VEIL ID for this agent response
+            response_veil_id = f"agent_response_{self.parent_inner_space.id}_{int(current_time * 1000)}"
+            
+            # Build agent response delta
+            agent_response_delta = {
+                "op": "add_node",
+                "node": {
+                    "veil_id": response_veil_id,
+                    "node_type": "agent_response",
+                    "properties": {
+                        "structural_role": "content",
+                        "content_nature": "agent_response", 
+                        "owner_id": self.parent_inner_space.id,  # Owned by InnerSpace
+                        "element_id": self.parent_inner_space.id,
+                        "agent_response_text": agent_response_text or "",
+                        "tool_calls_count": len(agent_tool_calls),
+                        "has_tool_calls": len(agent_tool_calls) > 0,
+                        "timestamp": current_time,
+                        "timestamp_iso": time.strftime('%Y-%m-%dT%H:%M:%S.%fZ', time.gmtime(current_time)),
+                        "agent_loop_component_id": self.id,
+                        "agent_name": getattr(self.parent_inner_space, 'agent_name', 'Unknown Agent')
+                    },
+                    "children": []
+                }
+            }
+            
+            # Send delta to InnerSpace for processing
+            await self.parent_inner_space.receive_delta([agent_response_delta])
+            
+            logger.debug(f"Emitted agent response delta: {response_veil_id} ({len(agent_response_text or '')} chars, {len(agent_tool_calls)} tool calls)")
+            
+        except Exception as e:
+            logger.error(f"Error emitting agent response delta: {e}", exc_info=True)
+
     async def _try_smart_chat_fallback(self, agent_text: str, focus_context: Optional[Dict[str, Any]]) -> bool:
         """
         Smart fallback: if agent has text but no tool calls, try to send it to the activating chat.
@@ -584,6 +632,9 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
             agent_tool_calls = llm_response_obj.tool_calls or []
 
             logger.info(f"LLM response: {len(agent_response_text or '')} chars, {len(agent_tool_calls)} tool calls")
+
+            # --- NEW: Emit Agent Response Delta for VEIL ---
+            await self._emit_agent_response_delta(agent_response_text, agent_tool_calls)
 
             # --- Process Tool Calls (unchanged - still essential) ---
             tool_results = []
