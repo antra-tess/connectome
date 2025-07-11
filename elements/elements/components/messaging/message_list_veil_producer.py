@@ -224,6 +224,8 @@ class MessageListVeilProducer(VeilProducer):
         Calculates the changes (delta) since the last VEIL generation.
         Detects added or removed messages and handles the list root node.
         """
+        parent_obj = self.owner.get_parent_object()
+        agent_name = parent_obj.agent_name if parent_obj else None
         message_list_comp = self._get_message_list_component()
         if not message_list_comp:
             logger.error(f"[{self.owner.id}] Cannot calculate VEIL delta: MessageListComponent not found.")
@@ -328,7 +330,7 @@ class MessageListVeilProducer(VeilProducer):
                     "adapter_type": conversation_metadata.get("adapter_type"),
                     "server_name": conversation_metadata.get("server_name"),
                     "conversation_name": conversation_metadata.get("conversation_name"),
-                    "is_agent": msg_data.get('sender_name', 'Unknown') == conversation_metadata.get("alias"),
+                    "is_agent": msg_data.get('sender_name', 'Unknown') == agent_name,
                     "error_details": msg_data.get('error_details', None),
                     VEIL_ATTACHMENT_METADATA_PROP: [
                         {k: v for k, v in att.items() if k != 'content'}

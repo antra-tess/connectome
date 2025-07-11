@@ -615,6 +615,7 @@ class ChatManagerComponent(Component):
             conversation_name = conversation_metadata.get("conversation_name", "Unknown Conversation")
             sender_display_name = conversation_name  # Use conversation name as display name
             sender_external_id = external_conversation_id  # Fallback for sender ID
+
             
             # Ensure chat element exists with enhanced metadata
             target_chat_element, mount_id = self._ensure_chat_element_with_metadata(
