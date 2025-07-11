@@ -2903,10 +2903,6 @@ IMPORTANT NOTES:
                 if rendered_section:
                     rendered_sections.append(rendered_section)
             
-            # 6. Close space root wrapper if we opened it
-            if space_root:
-                rendered_sections.append("</inner_space>")
-            
             result = "\n\n".join(rendered_sections)
             logger.info(f"Rendered enhanced chronological flat content: {len(result)} chars, {len(rendered_sections)} sections")
             return result
@@ -2947,7 +2943,6 @@ IMPORTANT NOTES:
             for msg_list in message_lists:
                 adapter_type = msg_list.get("adapter_type") or "unknown"  # FIXED: Handle None values
                 server_name = msg_list.get("server_name") or "default"    # FIXED: Handle None values
-                alias = msg_list.get("alias") or "unknown"
                 key = f"{adapter_type}:{server_name}"
                 
                 if key not in adapter_groups:
@@ -2965,7 +2960,10 @@ IMPORTANT NOTES:
                 adapter_type = group_data["adapter_type"]
                 server_name = group_data["server_name"]
                 channels = group_data["channels"]
-                
+                alias = "unknown"
+                if channels:
+                    alias = channels[0].get("alias", "unknown")
+
                 # Build chat_info opening tag
                 info_section = f'<chat_info type="{adapter_type}" server="{server_name}" alias="{alias}">\n'
                 
@@ -3062,34 +3060,33 @@ IMPORTANT NOTES:
             
             # FIXED: Use conversation context that was already extracted during content extraction
             conversation_name = item.get("conversation_name", "")
-            adapter_type = item.get("adapter_id") or ""      # FIXED: Handle None values
-            server_name = item.get("server_name") or ""        # FIXED: Handle None values
             
             # Build opening chat_message tag with conversation context
+            
+            
             message_attrs = []
             if conversation_name:
-                message_attrs.append(f'conversation_name="{conversation_name}"')
-            if adapter_type:
-                message_attrs.append(f'messenger="{adapter_type}"')
-            if server_name:
-                message_attrs.append(f'server="{server_name}"')
+                message_attrs.append(f'source="{conversation_name}"')
+            if sender_name:
+                message_attrs.append(f'sender="{sender_name}"')
             
             # NEW: Add deletion status to message attributes for structured parsing
             if is_deleted:
                 message_attrs.append('deleted="true"')
-            
-            if message_attrs:
-                opening_tag = f'<chat_message {" ".join(message_attrs)}>'
+            if is_agent:
+                opening_tag = '<system>'
+            elif message_attrs:
+                opening_tag = f'<msg {" ".join(message_attrs)}>'
             else:
-                opening_tag = '<chat_message>'
+                opening_tag = '<msg>'
             
             # Build message content
             if is_agent:
                 # Agent messages: no sender tag
-                message_content = text_content
+                message_content = f"Message {text_content[:50]} ({len(text_content) - 50} symbols truncated) sent"
             else:
                 # Human messages: include sender tag
-                message_content = f"<sender>{sender_name}</sender>{text_content}"
+                message_content = f"{text_content}"
             
             # NEW: Handle deleted messages - don't show edited marker or attachments for deleted messages
             if is_deleted:
@@ -3108,16 +3105,20 @@ IMPORTANT NOTES:
             
             # NEW: Add status indicators for pending operations
             if message_status == "pending_send":
-                message_content += " ⏳"
-            elif message_status == "pending_edit":
-                message_content += " ✏️"
-            elif message_status == "pending_delete":
-                message_content += " 🗑️"
+                message_content += " [PENDING CONFIRMATION]"
             elif message_status == "failed_to_send":
-                message_content += " ❌"
+                message_content += " [SEND FAILED]"
+            elif is_agent:
+                message_content += " successfully"
             
             # Build complete message with tags
-            message_line = f"{opening_tag}{message_content}</chat_message>"
+            
+            if is_agent:
+                closing_tag = '</system>'
+            else:
+                closing_tag = '</msg>'
+            
+            message_line = f"{opening_tag}{message_content}{closing_tag}"
             
             # Add time marker if present
             if time_marker:
