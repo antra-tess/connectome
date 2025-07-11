@@ -3062,8 +3062,7 @@ IMPORTANT NOTES:
             conversation_name = item.get("conversation_name", "")
             
             # Build opening chat_message tag with conversation context
-            if is_agent:
-                opening_tag = '<system>'
+            
             
             message_attrs = []
             if conversation_name:
@@ -3074,9 +3073,9 @@ IMPORTANT NOTES:
             # NEW: Add deletion status to message attributes for structured parsing
             if is_deleted:
                 message_attrs.append('deleted="true"')
-            logger.critical(f"Message attrs: {message_attrs}")
-            logger.critical(f"Message content: {text_content}")
-            if message_attrs:
+            if is_agent:
+                opening_tag = '<system>'
+            elif message_attrs:
                 opening_tag = f'<msg {" ".join(message_attrs)}>'
             else:
                 opening_tag = '<msg>'
