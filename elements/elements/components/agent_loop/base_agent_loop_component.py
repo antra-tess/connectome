@@ -18,6 +18,7 @@ from llm.provider_interface import LLMToolDefinition, LLMToolCall, LLMResponse
 from ...components.tool_provider import ToolProviderComponent
 from elements.elements.components.uplink.remote_tool_provider import UplinkRemoteToolProviderComponent
 from elements.elements.components.veil_facet_compression_engine import VEILFacetCompressionEngine  # NEW: Import VEILFacet CompressionEngine
+from elements.elements.components.veil import VEILFacetType  # NEW: Import VEILFacetType for facet filtering
 
 if TYPE_CHECKING:
     from ...inner_space import InnerSpace
@@ -465,10 +466,10 @@ class BaseAgentLoopComponent(Component):
 
     def _extract_enhanced_tools_from_veil(self) -> List[Dict[str, Any]]:
         """
-        NEW: Extract enhanced tool definitions from VEIL for Phase 2 integration.
+        NEW: Extract enhanced tool definitions from VEILFacetCache for Phase 2 integration.
         
-        This method gets enhanced tool metadata from the VEIL structure that was
-        populated during Phase 1 VEIL enhancement.
+        This method gets enhanced tool metadata from StatusFacets that represent
+        container creation events with available_tools metadata.
         
         Returns:
             List of enhanced tool definitions with complete metadata
@@ -481,33 +482,47 @@ class BaseAgentLoopComponent(Component):
                 logger.debug(f"No HUD available for extracting enhanced tools from VEIL")
                 return []
             
-            # Get flat VEIL cache from HUD
-            flat_veil_cache = hud.get_flat_veil_cache_via_producer()
-            if not flat_veil_cache:
-                logger.debug(f"No flat VEIL cache available for enhanced tool extraction")
+            # Get VEILFacetCache directly from SpaceVeilProducer via HUD
+            veil_producer = hud._get_space_veil_producer()
+            if not veil_producer:
+                logger.debug(f"No SpaceVeilProducer available for enhanced tool extraction")
+                return []
+                
+            facet_cache = veil_producer.get_facet_cache()
+            if not facet_cache:
+                logger.debug(f"No VEILFacetCache available for enhanced tool extraction")
                 return []
             
-            # Extract enhanced tools from VEIL nodes
-            for veil_id, veil_node in flat_veil_cache.items():
-                if not isinstance(veil_node, dict):
-                    continue
-                
-                properties = veil_node.get("properties", {})
-                
-                # Look for enhanced tool definitions in container nodes
-                if properties.get("structural_role") == "container":
-                    veil_enhanced_tools = properties.get("available_tools", [])
-                    if isinstance(veil_enhanced_tools, list) and veil_enhanced_tools:
-                        # Check if these are enhanced tool definitions (not just names)
-                        for tool in veil_enhanced_tools:
-                            if isinstance(tool, dict) and "name" in tool and "parameters" in tool:
-                                enhanced_tools.append(tool)
+            # Extract enhanced tools from StatusFacets representing container creation
+            for facet in facet_cache.facets.values():
+                if facet.facet_type == VEILFacetType.STATUS:  # StatusFacet
+                    # Look for container creation status facets
+                    if hasattr(facet, 'status_type') and facet.status_type == "container_created":
+                        current_state = getattr(facet, 'current_state', {})
+                        if isinstance(current_state, dict):
+                            # Extract available_tools from current_state
+                            available_tools = current_state.get("available_tools", [])
+                            if isinstance(available_tools, list) and available_tools:
+                                # Check if these are enhanced tool definitions (not just names)
+                                for tool in available_tools:
+                                    if isinstance(tool, dict) and "name" in tool and "parameters" in tool:
+                                        enhanced_tools.append(tool)
+                                        
+                    # Also check general status facets with available_tools in properties
+                    elif hasattr(facet, 'properties') and facet.properties:
+                        properties = facet.properties
+                        if isinstance(properties, dict):
+                            available_tools = properties.get("available_tools", [])
+                            if isinstance(available_tools, list) and available_tools:
+                                for tool in available_tools:
+                                    if isinstance(tool, dict) and "name" in tool and "parameters" in tool:
+                                        enhanced_tools.append(tool)
             
-            logger.debug(f"Extracted {len(enhanced_tools)} enhanced tools from VEIL")
+            logger.debug(f"Extracted {len(enhanced_tools)} enhanced tools from VEILFacetCache")
             return enhanced_tools
             
         except Exception as e:
-            logger.error(f"Error extracting enhanced tools from VEIL: {e}", exc_info=True)
+            logger.error(f"Error extracting enhanced tools from VEILFacetCache: {e}", exc_info=True)
             return []
 
     async def _try_smart_chat_fallback(self, agent_text: str, focus_context: Optional[Dict[str, Any]]) -> bool:

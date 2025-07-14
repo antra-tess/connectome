@@ -12,6 +12,7 @@ tiktoken>=0.7.0                                # For token counting (used by con
 
 # Web and HTTP
 requests>=2.28.2                               # HTTP client for synchronous requests
+flask>=2.3.0                                   # For scaffolding web interface
 jsonschema>=4.17.3                             # JSON Schema validation
 PyYAML>=6.0                                    # For YAML file handling
 

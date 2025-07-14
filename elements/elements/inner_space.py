@@ -525,7 +525,7 @@ class InnerSpace(Space):
     def get_uplink_manager(self) -> Optional[UplinkManagerComponent]:
         return self._uplink_manager
 
-    def get_hud(self) -> Optional[HUDComponent]:
+    def get_hud(self) -> Optional[FacetAwareHUDComponent]:
         return self._hud
 
     def get_compression_engine(self) -> Optional[VEILFacetCompressionEngine]:

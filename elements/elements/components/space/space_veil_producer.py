@@ -77,6 +77,9 @@ class SpaceVeilProducer(VeilProducer):
             VEILFacetCache instance with current facets
         """
         return self._facet_cache
+    
+    def get_flat_veil_cache(self) -> VEILFacetCache:
+        return self.get_facet_cache()
         
     def get_facet_cache_copy(self) -> VEILFacetCache:
         """
@@ -116,6 +119,14 @@ class SpaceVeilProducer(VeilProducer):
         """
         return self._facet_cache.get_cache_statistics()
 
+    def clear_facet_cache(self) -> None:
+        """
+        Clear the VEILFacetCache.
+        
+        Used during replay and regeneration scenarios.
+        """
+        self._facet_cache.clear()
+
     def calculate_delta(self) -> Optional[List[VEILFacetOperation]]:
         """
         NEW: Calculate VEILFacet operations for Space root management.
@@ -137,7 +148,7 @@ class SpaceVeilProducer(VeilProducer):
         current_space_props = self._get_current_space_properties()
 
         # Check if space root facet exists in facet cache
-        root_facet_exists = self._facet_cache.has_facet(space_root_facet_id)
+        root_facet_exists = self.has_facet(space_root_facet_id)
         has_produced_flag = self._state.get('_has_produced_space_root_facet', False)
 
         # Generate add_facet if either: never produced before OR root missing from facet cache
@@ -279,7 +290,7 @@ class SpaceVeilProducer(VeilProducer):
         Returns:
             True if the facet exists, False otherwise
         """
-        return self._facet_cache.has_facet(facet_id)
+        return self._facet_cache.get_facet_or_none(facet_id) is not None
 
     # --- REMOVED: All legacy delta operation methods ---
     # - receive_delta_operations()

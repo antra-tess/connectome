@@ -8,8 +8,8 @@ replacing the hierarchical VEIL node system with temporal facets.
 from .veil_facet import VEILFacet, VEILFacetType
 from .facet_types import EventFacet, StatusFacet, AmbientFacet
 from .temporal_system import ConnectomeEpoch
-from .facet_cache import VEILFacetCache
-from .facet_operations import VEILFacetOperation
+from .facet_cache import VEILFacetCache, TemporalConsistencyValidator
+from .facet_operations import VEILFacetOperation, FacetOperationBuilder
 
 __all__ = [
     'VEILFacet',
@@ -19,5 +19,7 @@ __all__ = [
     'AmbientFacet',
     'ConnectomeEpoch',
     'VEILFacetCache',
-    'VEILFacetOperation'
+    'VEILFacetOperation',
+    'FacetOperationBuilder',
+    'TemporalConsistencyValidator'
 ] 

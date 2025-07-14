@@ -936,7 +936,7 @@ class Space(BaseElement):
             
             # Clear the existing VEIL cache to force regeneration
             if self._veil_producer:
-                self._veil_producer.clear_flat_veil_cache()
+                self._veil_producer.clear_facet_cache()
             
             # Ensure own VEIL presence is initialized
             self._ensure_own_veil_presence_initialized()
@@ -983,7 +983,7 @@ class Space(BaseElement):
             if hasattr(self, 'on_frame_end') and callable(self.on_frame_end):
                 self.on_frame_end()
                 
-            cache_size = self._veil_producer.get_flat_veil_cache_size() if self._veil_producer else 0
+            cache_size = self._veil_producer.get_facet_cache_size() if self._veil_producer else 0
             logger.info(f"[{self.id}] VEIL state regeneration completed. Cache size: {cache_size}")
             return True
             
@@ -1243,7 +1243,7 @@ class Space(BaseElement):
             success = await self._timeline._storage.store_system_state(storage_key, snapshot_data)
             
             if success:
-                cache_size = self._veil_producer.get_flat_veil_cache_size() if self._veil_producer else 0
+                cache_size = self._veil_producer.get_facet_cache_size() if self._veil_producer else 0
                 logger.info(f"[{self.id}] VEIL snapshot stored successfully. Cache size: {cache_size}")
             else:
                 logger.error(f"[{self.id}] Failed to store VEIL snapshot")

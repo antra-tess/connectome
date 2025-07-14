@@ -14,7 +14,8 @@ from elements.component_registry import register_component
 from ..veil import (
     VEILFacetOperation, VEILFacet, VEILFacetType,
     EventFacet, StatusFacet, AmbientFacet, ConnectomeEpoch,
-    FacetOperationBuilder, create_message_event_facet, 
+    FacetOperationBuilder)
+from ..veil.facet_types import (create_message_event_facet, 
     create_container_status_facet, create_tool_instructions_ambient_facet
 )
 

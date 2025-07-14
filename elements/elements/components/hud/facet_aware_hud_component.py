@@ -16,9 +16,9 @@ from ..base_component import Component
 from elements.component_registry import register_component
 from ..veil import (
     VEILFacetCache, VEILFacet, VEILFacetType,
-    EventFacet, StatusFacet, AmbientFacet, 
-    TemporalConsistencyValidator
+    EventFacet, StatusFacet, AmbientFacet,
 )
+from ..veil.facet_cache import TemporalConsistencyValidator
 from ..space.space_veil_producer import SpaceVeilProducer
 
 logger = logging.getLogger(__name__)

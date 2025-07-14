@@ -143,6 +143,13 @@ class VEILFacetCache:
         Returns:
             VEILFacet instance or None if not found
         """
+        facet = self.facets.get(facet_id)
+        if not facet:
+            logger.error(f"Facet {facet_id} not found in cache")
+            raise ValueError(f"Facet {facet_id} not found in cache")
+        return facet
+
+    def get_facet_or_none(self, facet_id: str) -> Optional[VEILFacet]:
         return self.facets.get(facet_id)
         
     def get_linked_facets(self, facet_id: str) -> List[VEILFacet]:
