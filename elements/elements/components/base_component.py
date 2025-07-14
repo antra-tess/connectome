@@ -301,12 +301,18 @@ class VeilProducer(Component):
         if delta_operations:
             self.owner.receive_delta(delta_operations)
 
-    def calculate_delta(self) -> Optional[List[Dict[str, Any]]]:
+    def calculate_delta(self) -> Optional[List]:
         """
         Base implementation for calculate_delta.
         Subclasses should override this to provide specific delta calculation logic.
         This method should also be responsible for updating the producer's internal state 
         (e.g., _last_ids, _has_produced_root_add_before) after determining the deltas.
+        
+        NEW: Return type is now VEILFacetOperation only.
+        All legacy delta operation support has been removed for clean VEILFacet architecture.
+        
+        Returns:
+            List[VEILFacetOperation] instances for the VEILFacet system
         """
         logger.warning(f"[{self.owner.id if self.owner else 'Unknown'}/{self.COMPONENT_TYPE}] calculate_delta() not implemented.")
         return None

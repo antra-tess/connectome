@@ -17,7 +17,7 @@ from llm.provider_interface import LLMMessage
 from llm.provider_interface import LLMToolDefinition, LLMToolCall, LLMResponse
 from ...components.tool_provider import ToolProviderComponent
 from elements.elements.components.uplink.remote_tool_provider import UplinkRemoteToolProviderComponent
-from elements.elements.components.compression_engine_component import CompressionEngineComponent  # NEW: Import CompressionEngine
+from elements.elements.components.veil_facet_compression_engine import VEILFacetCompressionEngine  # NEW: Import VEILFacet CompressionEngine
 
 if TYPE_CHECKING:
     from ...inner_space import InnerSpace
@@ -191,10 +191,10 @@ class BaseAgentLoopComponent(Component):
             self._outgoing_action_callback = self.parent_inner_space._outgoing_action_callback
         return self._outgoing_action_callback
 
-    def _get_compression_engine(self) -> Optional[CompressionEngineComponent]:
-        """Get the CompressionEngineComponent from parent InnerSpace."""
+    def _get_compression_engine(self) -> Optional[VEILFacetCompressionEngine]:
+        """Get the VEILFacetCompressionEngine from parent InnerSpace."""
         if not hasattr(self, '_compression_engine'):
-            self._compression_engine = self.get_sibling_component(CompressionEngineComponent)
+            self._compression_engine = self.get_sibling_component("VEILFacetCompressionEngine")
         return self._compression_engine
 
     def _create_short_element_prefix(self, element_id: str) -> str:
