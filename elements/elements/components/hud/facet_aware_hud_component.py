@@ -51,6 +51,37 @@ class FacetAwareHUDComponent(Component):
     - Ambient facets float temporally based on status changes/thresholds  
     - EventFacets and StatusFacets maintain strict temporal positioning
     - Memory facets integrate seamlessly into temporal stream
+    
+    NEW: Three-Phase Ambient Facet Approach (Fixed)
+    ==============================================
+    
+    PHASE 1: Natural Chronological Placement
+    - Ambient facets assigned to turns based on their temporal occurrence
+    - Simple chronological placement, no logic applied yet
+    
+    PHASE 2: Additive Triggered Placement
+    - Identify turns with triggers (status changes, content thresholds, first turn)
+    - ADD all available ambient facets to triggered turns (no filtering!)
+    - Ambient facets are never lost, only added to additional locations
+    
+    PHASE 3: Simple Reverse Deduplication  
+    - Iterate backwards through turns (latest to earliest)
+    - Keep ambient facets only in their LATEST occurrence
+    - Remove earlier occurrences of the same ambient facet
+    
+    Benefits of New Approach:
+    - No ambient facets are ever lost (only moved)
+    - Simpler logic: place → trigger → deduplicate
+    - Consistent behavior regardless of trigger type
+    - Each ambient facet appears exactly once in optimal location
+    
+    Example:
+    Turn 0: [tool_A, tool_B] + status change → triggers → [tool_A, tool_B, tool_C]
+    Turn 2: [tool_A, tool_C] + status change → triggers → [tool_A, tool_C, tool_B]  
+    
+    After deduplication:
+    Turn 0: [] (all moved to later turn)
+    Turn 2: [tool_A, tool_C, tool_B] (latest occurrence)
     """
     
     COMPONENT_TYPE = "FacetAwareHUDComponent"
@@ -64,6 +95,7 @@ class FacetAwareHUDComponent(Component):
             "ambient_renders": 0,
             "memory_context_renders": 0
         }
+        self._agent_name = "Agent"
         logger.debug(f"FacetAwareHUDComponent initialized for Element {self.owner.id}")
         logger.info("Turn-based rendering with sophisticated status repetition and ambient threshold rules is active")
 
@@ -291,6 +323,8 @@ class FacetAwareHUDComponent(Component):
           ...
         ]
         
+        ENHANCED: Handles consecutive agent_response events by grouping them into a single agent turn.
+        
         Args:
             temporal_stream: Chronologically ordered list of VEILFacet instances
             
@@ -310,37 +344,53 @@ class FacetAwareHUDComponent(Component):
         }
         
         for facet in temporal_stream:
-            # Check if this facet triggers a new agent turn
+            # Check if this facet triggers agent turn logic
             is_agent_response = (
                 facet.facet_type == VEILFacetType.EVENT and 
                 facet.get_property("event_type") == "agent_response"
             )
             
             if is_agent_response:
-                # End current user turn if it has content
-                if current_turn["status"] or current_turn["ambient"] or current_turn["events"]:
-                    turn_structure.append(current_turn)
-                
-                # Start new agent turn for this agent response
-                agent_turn = {
-                    "type": "agent_turn",
-                    "status": [],
-                    "ambient": [],
-                    "events": [facet],  # Add the agent response event
-                    "turn_index": len(turn_structure)
-                }
-                turn_structure.append(agent_turn)
-                
-                # Start fresh user turn for next content
-                current_turn = {
-                    "type": "user_turn", 
-                    "status": [],
-                    "ambient": [],
-                    "events": [],
-                    "turn_index": len(turn_structure)
-                }
+                # ENHANCED: Handle consecutive agent_response events
+                if current_turn["type"] == "agent_turn":
+                    # Already in agent turn - add this agent_response to current agent turn
+                    current_turn["events"].append(facet)
+                    logger.debug(f"Added consecutive agent_response to existing agent turn {current_turn['turn_index']}")
+                else:
+                    # Switch from user turn to agent turn
+                    
+                    # End current user turn if it has content
+                    if current_turn["status"] or current_turn["ambient"] or current_turn["events"]:
+                        turn_structure.append(current_turn)
+                    
+                    # Start new agent turn for this agent response
+                    current_turn = {
+                        "type": "agent_turn",
+                        "status": [],
+                        "ambient": [],
+                        "events": [facet],  # Add the agent response event
+                        "turn_index": len(turn_structure)
+                    }
+                    logger.debug(f"Started new agent turn {current_turn['turn_index']} for agent_response")
             else:
-                # Add facet to current user turn based on type
+                # Non-agent-response facet
+                if current_turn["type"] == "agent_turn":
+                    # Switch from agent turn to user turn
+                    
+                    # End current agent turn
+                    turn_structure.append(current_turn)
+                    
+                    # Start fresh user turn for this content
+                    current_turn = {
+                        "type": "user_turn", 
+                        "status": [],
+                        "ambient": [],
+                        "events": [],
+                        "turn_index": len(turn_structure)
+                    }
+                    logger.debug(f"Started new user turn {current_turn['turn_index']} after agent turn")
+                
+                # Add facet to current turn based on type
                 if facet.facet_type == VEILFacetType.STATUS:
                     current_turn["status"].append(facet)
                 elif facet.facet_type == VEILFacetType.AMBIENT:
@@ -348,7 +398,7 @@ class FacetAwareHUDComponent(Component):
                 elif facet.facet_type == VEILFacetType.EVENT:
                     current_turn["events"].append(facet)
         
-        # Add final user turn if it has content
+        # Add final turn if it has content
         if current_turn["status"] or current_turn["ambient"] or current_turn["events"]:
             turn_structure.append(current_turn)
         
@@ -363,11 +413,10 @@ class FacetAwareHUDComponent(Component):
         """
         PHASE 2: Apply processing logic to turn structure.
         
-        This includes:
-        - Retroactive ambient de-rendering
-        - Status facet processing for system state updates
-        - Ambient threshold logic application
-        - Any other turn-level processing
+        NEW APPROACH: Additive ambient placement instead of filtering.
+        - Collect all available ambient facets
+        - Add ambient facets to turns that have triggers (status changes, thresholds)
+        - Never filter out ambient facets (they can only be moved, not lost)
         
         Args:
             turn_structure: List of turn dictionaries with facets
@@ -380,6 +429,17 @@ class FacetAwareHUDComponent(Component):
         """
         try:
             processed_turns = []
+            
+            # Collect all ambient facets from all turns for triggered placement
+            all_ambient_facets = set()
+            for turn_data in turn_structure:
+                for ambient_facet in turn_data["ambient"]:
+                    all_ambient_facets.add(ambient_facet.facet_id)
+            
+            all_ambient_facets_dict = {}
+            for turn_data in turn_structure:
+                for ambient_facet in turn_data["ambient"]:
+                    all_ambient_facets_dict[ambient_facet.facet_id] = ambient_facet
             
             # Process each turn to update system state and apply logic
             for turn_data in turn_structure:
@@ -401,23 +461,28 @@ class FacetAwareHUDComponent(Component):
                     self._update_system_state(system_state, status_facet, options)
                     self._update_status_message_tracking(system_state, status_facet)
                 
-                # Apply ambient threshold logic - determine which ambient facets should render
-                if turn_data["ambient"]:
-                    processed_ambient = self._apply_ambient_threshold_logic(
-                        turn_data["ambient"], 
-                        turn_data["turn_index"], 
-                        turn_specific_system_state,  # Use turn-specific state
-                        bool(turn_data["status"]),  # has_status_changes
-                        tools
-                    )
-                    processed_turn["ambient"] = processed_ambient
+                # NEW APPROACH: Additive ambient placement based on triggers
+                triggered_ambient_facets = self._get_triggered_ambient_facets_for_turn(
+                    turn_data,
+                    all_ambient_facets_dict,
+                    turn_specific_system_state,
+                    options
+                )
+                
+                # Combine natural ambient facets with triggered ambient facets
+                combined_ambient = list(turn_data["ambient"])  # Start with natural placement
+                for triggered_facet in triggered_ambient_facets:
+                    if triggered_facet not in combined_ambient:
+                        combined_ambient.append(triggered_facet)
+                
+                processed_turn["ambient"] = combined_ambient
                 
                 processed_turns.append(processed_turn)
             
-            # Apply retroactive ambient de-rendering (backwards pass)
-            self._apply_retroactive_ambient_derendering_to_structure(processed_turns)
+            # Apply retroactive ambient de-rendering (backwards pass) - keep latest only
+            self._apply_simple_retroactive_deduplication(processed_turns)
             
-            logger.debug(f"Processed {len(processed_turns)} turns with retroactive de-rendering")
+            logger.debug(f"Processed {len(processed_turns)} turns with new additive ambient approach")
             return processed_turns
             
         except Exception as e:
@@ -816,92 +881,24 @@ class FacetAwareHUDComponent(Component):
                                      has_status_changes: bool,
                                      tools: Optional[List[Dict[str, Any]]]) -> List[VEILFacet]:
         """
-        Apply ambient threshold logic to determine which ambient facets should render.
-        
-        Args:
-            ambient_facets: List of ambient facets in this turn
-            turn_index: Current turn index
-            system_state: Current system state
-            has_status_changes: Whether this turn has status changes
-            tools: Enhanced tool definitions
-            
-        Returns:
-            Filtered list of ambient facets that should render
+        DEPRECATED: This method has been replaced by the new additive ambient approach.
+        Use _get_triggered_ambient_facets_for_turn() instead.
         """
-        try:
-            facets_to_render = []
-            
-            for ambient_facet in ambient_facets:
-                if self._should_render_ambient_facet(ambient_facet, system_state, turn_index, has_status_changes):
-                    facets_to_render.append(ambient_facet)
-                    # Mark as rendered for retroactive de-rendering
-                    self._mark_ambient_as_rendered(ambient_facet, system_state, turn_index)
-            
-            logger.debug(f"Ambient threshold logic: {len(facets_to_render)}/{len(ambient_facets)} facets passed threshold in turn {turn_index}")
-            return facets_to_render
-            
-        except Exception as e:
-            logger.error(f"Error applying ambient threshold logic: {e}", exc_info=True)
-            return ambient_facets  # Return all on error
-    
+        logger.warning("_apply_ambient_threshold_logic() is deprecated - use new additive ambient approach")
+        return ambient_facets  # Return unchanged for compatibility
+
     def _apply_retroactive_ambient_derendering_to_structure(self, processed_turns: List[Dict[str, Any]]) -> None:
         """
-        FIXED: Apply retroactive ambient de-rendering to the clean turn structure.
-        
-        CORRECTED RULE: Each ambient facet should appear only ONCE in the entire context.
-        Keep ambient facets in the LATEST turn where they qualify, remove from earlier turns.
-        
-        Args:
-            processed_turns: List of processed turn dictionaries with facets
+        DEPRECATED: This method has been replaced by _apply_simple_retroactive_deduplication().
+        The new approach is simpler and doesn't lose ambient facets.
         """
-        try:
-            # Step 1: Find the latest turn for each ambient facet ID
-            latest_turn_for_facet = {}  # facet_id -> turn_index
-            
-            for turn_data in processed_turns:
-                turn_index = turn_data.get("turn_index", 0)
-                current_ambient_facets = turn_data.get("ambient", [])
-                
-                for facet in current_ambient_facets:
-                    facet_id = facet.facet_id
-                    # Always update to latest turn where this facet appears
-                    latest_turn_for_facet[facet_id] = max(
-                        latest_turn_for_facet.get(facet_id, -1), 
-                        turn_index
-                    )
-            
-            # Step 2: Remove ambient facets from turns that are NOT the latest for that facet
-            removed_count = 0
-            for turn_data in processed_turns:
-                turn_index = turn_data.get("turn_index", 0)
-                current_ambient_facets = turn_data.get("ambient", [])
-                
-                if current_ambient_facets:
-                    # Keep only facets where this turn is the latest turn for that facet
-                    filtered_ambient = []
-                    for facet in current_ambient_facets:
-                        facet_id = facet.facet_id
-                        latest_turn = latest_turn_for_facet.get(facet_id)
-                        
-                        if turn_index == latest_turn:
-                            # Keep in latest turn
-                            filtered_ambient.append(facet)
-                        else:
-                            # Remove from earlier turn
-                            removed_count += 1
-                            logger.debug(f"Retroactive de-rendering: Removed ambient facet {facet_id} from turn {turn_index} "
-                                       f"(will render in latest turn {latest_turn})")
-                    
-                    turn_data["ambient"] = filtered_ambient
-            
-            logger.debug(f"Retroactive ambient de-rendering complete: {removed_count} facets moved to latest qualifying turns")
-            
-        except Exception as e:
-            logger.error(f"Error in retroactive ambient de-rendering: {e}", exc_info=True)
+        logger.warning("_apply_retroactive_ambient_derendering_to_structure() is deprecated - use _apply_simple_retroactive_deduplication()")
+        # Do nothing - let the new method handle it
     
     def _render_agent_workspace_wrapper(self, system_state: Dict[str, Any]) -> str:
         """Render opening agent workspace wrapper with metadata."""
         agent_name = system_state["agent_name"]
+        self._agent_name = agent_name
         agent_description = system_state["agent_description"]
         
         if agent_name and agent_name != "Unknown Agent":
@@ -1361,7 +1358,7 @@ class FacetAwareHUDComponent(Component):
                 return f"{msg_tag}{message_content}</msg>"
                 
             elif event_type == "agent_response":
-                agent_name = facet.get_property("agent_name", "Agent")
+                agent_name = facet.get_property("agent_name", self._agent_name)
                 tool_calls_count = facet.get_property("tool_calls_count", 0)
                 
                 tool_info = f' tool_calls="{tool_calls_count}"' if tool_calls_count > 0 else ""
@@ -1708,7 +1705,7 @@ class FacetAwareHUDComponent(Component):
                         "channels": []
                     }
                 
-                # Add channel info
+                # Add channel info with deduplication
                 channel_info = {
                     "conversation_name": conversation_name,
                     "element_id": element_id,
@@ -1718,7 +1715,19 @@ class FacetAwareHUDComponent(Component):
                     "available_tools": []
                 }
                 
-                system_state["adapter_groups"][group_key]["channels"].append(channel_info)
+                # FIXED: Deduplicate channels based on conversation_name
+                existing_channels = system_state["adapter_groups"][group_key]["channels"]
+                channel_exists = any(
+                    ch.get("conversation_name") == conversation_name 
+                    for ch in existing_channels
+                )
+                
+                if not channel_exists:
+                    system_state["adapter_groups"][group_key]["channels"].append(channel_info)
+                    logger.debug(f"Added new channel '{conversation_name}' to adapter group '{group_key}'")
+                else:
+                    logger.debug(f"Channel '{conversation_name}' already exists in adapter group '{group_key}' - skipping duplicate")
+                
                 system_state["active_channels"][element_id] = channel_info
         
         # Update timestamp tracking
@@ -1756,50 +1765,19 @@ class FacetAwareHUDComponent(Component):
     def _should_render_ambient_facet(self, ambient_facet: VEILFacet, system_state: Dict[str, Any], 
                                    turn_index: int, has_status_changes: bool) -> bool:
         """
-        Determine if ambient facet should render based on threshold logic.
-        
-        Args:
-            ambient_facet: Ambient facet to check
-            system_state: Current system state
-            turn_index: Current turn index
-            has_status_changes: Whether this turn has status changes
-            
-        Returns:
-            True if facet should render
+        DEPRECATED: This method was part of the old filtering approach.
+        The new additive approach doesn't filter ambient facets.
         """
-        # Always render on first turn
-        if turn_index == 0:
-            return True
-        
-        # FIXED: Always render when status changes occur (scene changes should re-show tools)
-        if has_status_changes:
-            logger.debug(f"Rendering ambient facet {ambient_facet.facet_id} due to status changes in turn {turn_index}")
-            return True
-        
-        # Check if content length threshold is exceeded
-        facet_threshold = getattr(ambient_facet, 'trigger_threshold', 1500)
-        if system_state["content_length_total"] >= facet_threshold:
-            logger.debug(f"Rendering ambient facet {ambient_facet.facet_id} due to content threshold ({system_state['content_length_total']} >= {facet_threshold})")
-            return True
-        
-        # Don't check rendered_ambient_ids when status changes - allow re-rendering
-        # Check if facet was already rendered only for non-status-change turns
-        if ambient_facet.facet_id in system_state["rendered_ambient_ids"]:
-            logger.debug(f"Skipping ambient facet {ambient_facet.facet_id} - already rendered and no status changes")
-            return False
-        
-        return False
+        logger.warning("_should_render_ambient_facet() is deprecated - new approach doesn't filter")
+        return True  # Always return True for compatibility
     
     def _mark_ambient_as_rendered(self, ambient_facet: VEILFacet, system_state: Dict[str, Any], turn_index: int) -> None:
         """
-        Mark ambient facet as rendered for retroactive de-rendering.
-        
-        Args:
-            ambient_facet: Ambient facet that was rendered
-            system_state: System state to update
-            turn_index: Turn index where it was rendered
+        DEPRECATED: This method was part of the old filtering approach.
+        The new approach doesn't need render tracking.
         """
-        system_state["rendered_ambient_ids"].add(ambient_facet.facet_id)
+        logger.warning("_mark_ambient_as_rendered() is deprecated - new approach doesn't need render tracking")
+        # Do nothing
     
     def _render_repeated_status_messages(self, system_state: Dict[str, Any], turn_index: int) -> str:
         """
@@ -1881,12 +1859,12 @@ To call tools, use this ultra-concise XML format:
 
 Examples:
 <tool_calls>
-<send_message text="Hello, world!" target_element="scaffold-6">
+<send_message text="Hello, world!" target_element="discord_chat">
 </tool_calls>
 
 <tool_calls>
-<execute_command command="ls -la" target_element="Terminal bash-1">
-<send_message text="Command executed!" target_element="scaffold-6">
+<execute_command command="ls -la" target_element="Terminal">
+<send_message text="Command executed!" target_element="zulip_chat">
 </tool_calls>
 
 Use the actual tool name as the XML element name. You can make multiple tool calls in one <tool_calls> block. The target_element parameter specifies which conversation or element to use - choose from the targets listed for each tool type."""
@@ -1979,3 +1957,103 @@ Use the actual tool name as the XML element name. You can make multiple tool cal
         except Exception as e:
             logger.error(f"Error getting connection timestamp for '{conversation_name}': {e}", exc_info=True)
             return None
+
+    def _get_triggered_ambient_facets_for_turn(self, 
+                                             turn_data: Dict[str, Any],
+                                             all_ambient_facets_dict: Dict[str, VEILFacet],
+                                             system_state: Dict[str, Any],
+                                             options: Dict[str, Any]) -> List[VEILFacet]:
+        """
+        NEW: Determine which ambient facets should be added to this turn based on triggers.
+        
+        Triggers:
+        1. First turn (turn 0) - add all ambient facets
+        2. Status changes - add all ambient facets (scene changes re-show tools)
+        3. Content threshold exceeded - add all ambient facets
+        
+        Args:
+            turn_data: Current turn data
+            all_ambient_facets_dict: Dictionary of all available ambient facets
+            system_state: Current system state
+            options: Rendering options
+            
+        Returns:
+            List of ambient facets to add to this turn (additive, no filtering)
+        """
+        try:
+            triggered_facets = []
+            turn_index = turn_data.get("turn_index", 0)
+            has_status_changes = bool(turn_data.get("status", []))
+            
+            # Trigger 1: Always add all ambient facets on first turn
+            if turn_index == 0:
+                triggered_facets = list(all_ambient_facets_dict.values())
+                logger.debug(f"Turn {turn_index}: Adding all {len(triggered_facets)} ambient facets (first turn)")
+                return triggered_facets
+            
+            # Trigger 2: Status changes - add all ambient facets (scene changes re-show tools)
+            if has_status_changes:
+                triggered_facets = list(all_ambient_facets_dict.values())
+                logger.debug(f"Turn {turn_index}: Adding all {len(triggered_facets)} ambient facets (status changes)")
+                return triggered_facets
+            
+            # Trigger 3: Content threshold exceeded - add all ambient facets
+            content_threshold = system_state.get("ambient_threshold", 500)
+            if system_state.get("content_length_total", 0) >= content_threshold:
+                triggered_facets = list(all_ambient_facets_dict.values())
+                logger.debug(f"Turn {turn_index}: Adding all {len(triggered_facets)} ambient facets (content threshold {system_state['content_length_total']} >= {content_threshold})")
+                return triggered_facets
+            
+            # No triggers - return empty list (natural placement only)
+            return []
+            
+        except Exception as e:
+            logger.error(f"Error getting triggered ambient facets: {e}", exc_info=True)
+            return []
+    
+    def _apply_simple_retroactive_deduplication(self, processed_turns: List[Dict[str, Any]]) -> None:
+        """
+        NEW: Simple reverse-iteration deduplication to keep only latest occurrence of each ambient facet.
+        
+        Algorithm:
+        1. Iterate backwards through turns (latest to earliest)  
+        2. Track seen ambient facet IDs
+        3. Keep ambient facet only if not seen before (i.e., this is its latest occurrence)
+        4. Remove ambient facet if seen before (i.e., later occurrence exists)
+        
+        This ensures each ambient facet appears exactly once in its latest qualifying turn.
+        
+        Args:
+            processed_turns: List of processed turn dictionaries with facets
+        """
+        try:
+            seen_ambient_ids = set()
+            removed_count = 0
+            
+            # Iterate backwards through turns (latest to earliest)
+            for turn_data in reversed(processed_turns):
+                turn_index = turn_data.get("turn_index", 0)
+                current_ambient_facets = turn_data.get("ambient", [])
+                
+                if current_ambient_facets:
+                    # Keep only ambient facets not seen in later turns
+                    filtered_ambient = []
+                    for facet in current_ambient_facets:
+                        facet_id = facet.facet_id
+                        
+                        if facet_id not in seen_ambient_ids:
+                            # First time seeing this facet (latest occurrence) - keep it
+                            filtered_ambient.append(facet)
+                            seen_ambient_ids.add(facet_id)
+                            logger.debug(f"Keeping ambient facet {facet_id} in turn {turn_index} (latest occurrence)")
+                        else:
+                            # Already seen in later turn - remove this earlier occurrence
+                            removed_count += 1
+                            logger.debug(f"Removing ambient facet {facet_id} from turn {turn_index} (later occurrence exists)")
+                    
+                    turn_data["ambient"] = filtered_ambient
+            
+            logger.debug(f"Simple retroactive deduplication complete: {removed_count} earlier occurrences removed, each ambient facet appears once in latest qualifying turn")
+            
+        except Exception as e:
+            logger.error(f"Error in simple retroactive deduplication: {e}", exc_info=True)

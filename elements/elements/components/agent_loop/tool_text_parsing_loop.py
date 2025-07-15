@@ -138,8 +138,7 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
 
             agent_response_text = llm_response_obj.content or ""
             logger.info(f"LLM response: {len(agent_response_text)} chars")
-            logger.critical(f"LLM RESPONSE: {agent_response_text}")
-
+            
             # 4. Parse tool calls from text response
             parsed_tool_calls = self._parse_tool_calls_from_response(agent_response_text)
             logger.info(f"Parsed {len(parsed_tool_calls)} tool calls from response")
@@ -235,7 +234,6 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
             if not xml_calls:
                 json_calls = self._parse_json_tool_calls(response_text)
                 parsed_calls.extend(json_calls)
-            logger.critical(f"Parsed {len(parsed_calls)} tool calls from response (XML: {len(xml_calls)}, JSON: {len(parsed_calls) - len(xml_calls)})")
             
             logger.debug(f"Parsed {len(parsed_calls)} tool calls from response (XML: {len(xml_calls)}, JSON: {len(parsed_calls) - len(xml_calls)})")
             return parsed_calls
@@ -375,7 +373,6 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
                     target_element_name=tool_call.target_element_name,
                     raw_text=tool_call.raw_text
                 )
-                logger.critical(f"Resolved call: {tool_call.tool_name} with params: {tool_call.parameters} and target_element_name: {tool_call.target_element_name}")
                 # Resolve target_element name to element_id
                 if tool_call.target_element_name:
                     # FIXED: Always remove target_element parameter to prevent it from being passed to tools
@@ -385,7 +382,6 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
                         logger.debug(f"After removal: {resolved_call.parameters}")
                     
                     element_id = self._element_name_to_id_mapping.get(tool_call.target_element_name)
-                    logger.critical(f"Element ID: {element_id}, target_element_name: {tool_call.target_element_name}, element_name_to_id_mapping: {self._element_name_to_id_mapping}")
                     if element_id:
                         resolved_call.target_element_id = element_id
                         logger.debug(f"Resolved '{tool_call.target_element_name}' -> '{element_id}'")
