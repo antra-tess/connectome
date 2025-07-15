@@ -65,6 +65,7 @@ class FacetAwareHUDComponent(Component):
             "memory_context_renders": 0
         }
         logger.debug(f"FacetAwareHUDComponent initialized for Element {self.owner.id}")
+        logger.info("Turn-based rendering with sophisticated status repetition and ambient threshold rules is active")
 
     def _get_space_veil_producer(self) -> Optional[SpaceVeilProducer]:
         """Get the SpaceVeilProducer from the owning InnerSpace."""
@@ -74,18 +75,18 @@ class FacetAwareHUDComponent(Component):
 
     async def get_agent_context_via_compression_engine(self, 
                                                  options: Optional[Dict[str, Any]] = None,
-                                                 tools: Optional[List[Dict[str, Any]]] = None) -> Union[str, Dict[str, Any]]:
+                                                 tools: Optional[List[Dict[str, Any]]] = None) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
         """
-        INTERFACE PRESERVED: Main entry point for agent loops to get context.
+        INTERFACE UPDATED: Main entry point for agent loops to get turn-based context.
         
-        NEW IMPLEMENTATION: Pass VEILFacetCache to CompressionEngine instead of flat VEIL cache.
+        NEW IMPLEMENTATION: Returns turn-based message format by splitting temporal stream at agent responses.
         
         Args:
             options: Rendering options (unchanged interface)
             tools: Enhanced tool definitions from VEIL (unchanged interface)
             
         Returns:
-            Rendered context string or multimodal dict (unchanged interface)
+            Turn-based message list or multimodal dict with turn-based messages
         """
         try:
             self._rendering_stats["total_renders"] += 1
@@ -103,7 +104,7 @@ class FacetAwareHUDComponent(Component):
             compression_engine = self.get_sibling_component("VEILFacetCompressionEngine") 
             if not compression_engine:
                 logger.warning(f"[{self.owner.id}] VEILFacetCompressionEngine not available, using direct rendering")
-                return await self._render_temporal_facet_stream_direct(facet_cache, options, tools)
+                return await self._process_facets_into_turns_direct(facet_cache, options, tools)
             
             # NEW: Pass VEILFacetCache to CompressionEngine (Option A from clarification)
             processed_facets = await compression_engine.process_facet_cache_with_compression(
@@ -111,15 +112,22 @@ class FacetAwareHUDComponent(Component):
                 focus_context=options.get('focus_context')
             )
             
-            # NEW: Render processed facets using temporal stream rendering
-            context_string = await self._render_temporal_facet_stream(processed_facets, options, tools)
+            # NEW: Process facets into turn-based messages
+            turn_based_messages = await self._process_facets_into_turns(processed_facets, options, tools)
             
             # Check for multimodal content if focus element provided
             focus_element_id = options.get('focus_context', {}).get('focus_element_id')
-            if focus_element_id:
-                return await self._detect_and_extract_multimodal_content(context_string, options, focus_element_id)
+            if focus_element_id and self._has_multimodal_content(processed_facets, focus_element_id):
+                return {
+                    "messages": turn_based_messages,
+                    "multimodal_content": {
+                        "has_attachments": True,
+                        "attachment_count": self._count_multimodal_content(processed_facets, focus_element_id),
+                        "supported_types": ["image", "document"]
+                    }
+                }
             
-            return context_string
+            return turn_based_messages
             
         except Exception as e:
             logger.error(f"Error in facet-aware context generation: {e}", exc_info=True)
@@ -212,280 +220,685 @@ class FacetAwareHUDComponent(Component):
             logger.error(f"Error applying native memorization exclusions: {e}", exc_info=True)
             return facet_cache  # Return unfiltered cache on error
 
-    async def _render_temporal_facet_stream(self, 
-                                          facet_cache: VEILFacetCache, 
-                                          options: Dict[str, Any],
-                                          tools: Optional[List[Dict[str, Any]]] = None) -> str:
+    # --- NEW: Turn-Based Message Processing ---
+    
+    async def _process_facets_into_turns(self, 
+                                       facet_cache: VEILFacetCache, 
+                                       options: Dict[str, Any],
+                                       tools: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         """
-        Render complete temporal stream with stateful consolidated structural logic.
+        ENHANCED: Clean three-phase approach for turn-based rendering.
         
-        NEW APPROACH: Instead of facet-by-facet rendering, we maintain system state
-        and render consolidated structural sections when status changes occur.
-        
-        Key Features:
-        - Agent workspace wrapper with metadata
-        - Focus state tracking and updates after agent turns
-        - Consolidated chat_info sections showing all active channels
-        - Proper ambient tool positioning (status changes + content thresholds)
-        - System message generation for key events
-        - Status facet metadata tracking
+        Phase 1: Collect turn structure with facets as objects (no rendering yet)
+        Phase 2: Apply retroactive de-rendering and other processing logic  
+        Phase 3: Render turns to final content
         
         Args:
-            facet_cache: VEILFacetCache with facets to render
-            options: Rendering options and configuration
-            tools: Optional enhanced tool definitions
+            facet_cache: Processed VEILFacetCache from compression engine
+            options: Rendering options
+            tools: Enhanced tool definitions
             
         Returns:
-            Rendered temporal stream as consolidated structural format
+            List of turn-based message dictionaries
         """
         try:
-            render_opts = RenderingOptions(**{k: v for k, v in options.items() if hasattr(RenderingOptions, k)})
-            
-            # Get chronologically ordered facets (all types)
+            # Get chronological temporal stream
             temporal_stream = facet_cache.get_chronological_stream(include_ambient=True)
             
             if not temporal_stream:
-                return self._render_empty_context(render_opts)
+                return [{"role": "user", "content": "[AGENT WORKSPACE]\nNo content available", "turn_metadata": {"turn_index": 0, "facet_count": 0}}]
             
-            # Validate temporal consistency
-            violations = TemporalConsistencyValidator.validate_temporal_stream(temporal_stream)
-            if violations:
-                logger.warning(f"Temporal violations detected: {violations}")
-            
-            # Initialize system state tracking
+            # Initialize system state for processing
             system_state = self._initialize_system_state(temporal_stream, options)
-            rendered_sections = []
-            content_since_last_status = []
-            content_symbols_since_ambient = 0
             
-            # Track facets processed for stats
-            self._rendering_stats["facets_processed"] += len(temporal_stream)
+            # PHASE 1: Collect clean turn structure with facets as objects
+            turn_structure = self._collect_turn_structure_with_facets(temporal_stream)
             
-            # 1. Render initial agent workspace wrapper
-            workspace_section = self._render_agent_workspace_wrapper(system_state)
-            if workspace_section:
-                rendered_sections.append(workspace_section)
+            # PHASE 2: Apply processing logic (retroactive de-rendering, etc.)
+            processed_turns = self._process_turn_structure(turn_structure, system_state, options, tools)
             
-            # 2. Process temporal stream with state tracking
-            for i, facet in enumerate(temporal_stream):
-                
-                # Update system state based on facet
-                state_changed = self._update_system_state(system_state, facet, options)
-                
-                if facet.facet_type == VEILFacetType.STATUS:
-                    # Status change: render consolidated system state
-                    if state_changed:
-                        # First render any accumulated content
-                        if content_since_last_status:
-                            content_section = "\n".join(content_since_last_status)
-                            rendered_sections.append(content_section)
-                            content_since_last_status = []
-                        
-                        # Render consolidated chat_info with current system state
-                        chat_info_section = self._render_consolidated_chat_info(system_state, tools)
-                        if chat_info_section:
-                            rendered_sections.append(chat_info_section)
-                        
-                        # Check if we should render ambient tools after status change
-                        if not render_opts.exclude_ambient:
-                            ambient_section = self._render_ambient_tools_section(facet_cache, system_state)
-                            if ambient_section:
-                                rendered_sections.append(ambient_section)
-                                content_symbols_since_ambient = 0
-                                self._rendering_stats["ambient_renders"] += 1
-                        
-                        # Generate system message for status change
-                        system_message = self._generate_system_message_for_status(facet, system_state)
-                        if system_message:
-                            content_since_last_status.append(system_message)
-                
-                elif facet.facet_type == VEILFacetType.EVENT:
-                    # Event facet: render as content and track focus changes
-                    event_content = self._render_event_facet_with_system_context(facet, system_state, render_opts)
-                    if event_content:
-                        content_since_last_status.append(event_content)
-                        content_symbols_since_ambient += len(event_content)
-                        
-                        # Check for focus changes after agent responses
-                        if facet.get_property("event_type") == "agent_response":
-                            focus_changed = self._update_focus_after_agent_turn(system_state, facet)
-                            if focus_changed:
-                                # Re-render consolidated state after focus change
-                                if content_since_last_status:
-                                    content_section = "\n".join(content_since_last_status)
-                                    rendered_sections.append(content_section)
-                                    content_since_last_status = []
-                                
-                                chat_info_section = self._render_consolidated_chat_info(system_state, tools)
-                                if chat_info_section:
-                                    rendered_sections.append(chat_info_section)
-                        
-                        # Check ambient threshold trigger
-                        if (content_symbols_since_ambient >= render_opts.ambient_text_threshold and 
-                            not render_opts.exclude_ambient):
-                            ambient_section = self._render_ambient_tools_section(facet_cache, system_state)
-                            if ambient_section:
-                                content_since_last_status.append(ambient_section)
-                                content_symbols_since_ambient = 0
-                                self._rendering_stats["ambient_renders"] += 1
-                
-                elif facet.facet_type == VEILFacetType.AMBIENT:
-                    # Ambient facets are rendered via _render_ambient_tools_section, skip individual rendering
-                    continue
+            # PHASE 3: Render processed turns to final content
+            turn_messages = await self._render_turn_structure_to_messages(processed_turns, system_state, options, tools)
             
-            # 3. Render any remaining content
-            if content_since_last_status:
-                content_section = "\n".join(content_since_last_status)
-                rendered_sections.append(content_section)
-            
-            # 4. Final ambient render if needed
-            if not render_opts.exclude_ambient and content_symbols_since_ambient > 0:
-                final_ambient = self._render_ambient_tools_section(facet_cache, system_state)
-                if final_ambient:
-                    rendered_sections.append(final_ambient)
-                    self._rendering_stats["ambient_renders"] += 1
-            
-            # 5. Close agent workspace wrapper
-            rendered_sections.append("</inner_space>")
-            
-            # Combine all sections
-            full_context = "\n\n".join(filter(None, rendered_sections))
-            
-            logger.debug(f"Rendered structural temporal stream: {len(full_context)} chars, {len(rendered_sections)} sections")
-            return full_context
+            logger.debug(f"Processed {len(temporal_stream)} facets into {len(turn_messages)} turns using clean turn structure")
+            return turn_messages
             
         except Exception as e:
-            logger.error(f"Error rendering temporal facet stream: {e}", exc_info=True)
-            return "Error: Failed to render temporal facet stream"
-
-    def _initialize_system_state(self, temporal_stream: List[VEILFacet], options: Dict[str, Any]) -> Dict[str, Any]:
+            logger.error(f"Error processing facets into turns: {e}", exc_info=True)
+            return [{"role": "user", "content": f"Error: {e}", "turn_metadata": {"turn_index": 0, "facet_count": 0, "error": True}}]
+    
+    async def _process_facets_into_turns_direct(self, 
+                                              facet_cache: VEILFacetCache,
+                                              options: Dict[str, Any],
+                                              tools: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         """
-        Initialize system state tracking from temporal stream and options.
+        Direct turn processing without compression engine (fallback).
+        """
+        try:
+            return await self._process_facets_into_turns(facet_cache, options, tools)
+        except Exception as e:
+            logger.error(f"Error in direct turn processing: {e}", exc_info=True)
+            return [{"role": "user", "content": "Error: Direct turn processing failed", "turn_metadata": {"turn_index": 0, "facet_count": 0, "error": True}}]
+    
+    def _collect_turn_structure_with_facets(self, temporal_stream: List[VEILFacet]) -> List[Dict[str, Any]]:
+        """
+        PHASE 1: Collect clean turn structure with facets as objects.
         
-        Extracts agent info, active channels, adapters, and initial focus state.
+        Creates the clean structure suggested: 
+        [
+          {"type": "user_turn", "status": [StatusFacet_1], "ambient": [AmbientFacet_1], "events": [EventFacet_1, EventFacet_2]},
+          {"type": "agent_turn", "status": [], "ambient": [], "events": [EventFacet_3]},
+          ...
+        ]
+        
+        Args:
+            temporal_stream: Chronologically ordered list of VEILFacet instances
+            
+        Returns:
+            List of turn dictionaries with facets as objects
         """
-        system_state = {
-            # Agent workspace info
-            "agent_name": "Unknown Agent",
-            "agent_description": "Agent workspace",
-            "workspace_element_id": None,
-            
-            # Active channels by element_id
-            "active_channels": {},  # element_id -> channel_info
-            
-            # Adapter groups for chat_info rendering
-            "adapter_groups": {},  # "adapter_type:server_name" -> group_info
-            
-            # Focus tracking
-            "focused_element_id": options.get('focus_context', {}).get('focus_element_id'),
-            "last_agent_response_container": None,
-            
-            # Timing and state
-            "last_status_timestamp": 0,
-            "system_initialized": False
+        if not temporal_stream:
+            return []
+        
+        turn_structure = []
+        current_turn = {
+            "type": "user_turn",
+            "status": [],
+            "ambient": [], 
+            "events": [],
+            "turn_index": 0
         }
         
-        # Extract agent and workspace info from space_created status facets
         for facet in temporal_stream:
-            if (facet.facet_type == VEILFacetType.STATUS and 
-                facet.get_property("status_type") == "space_created"):
-                current_state = facet.get_property("current_state", {})
-                system_state["agent_name"] = current_state.get("agent_name", system_state["agent_name"])
-                system_state["agent_description"] = current_state.get("agent_description", system_state["agent_description"])
-                system_state["workspace_element_id"] = current_state.get("element_id")
-                break
-        
-        return system_state
-
-    def _update_system_state(self, system_state: Dict[str, Any], facet: VEILFacet, options: Dict[str, Any]) -> bool:
-        """
-        Update system state based on facet. Returns True if structural state changed.
-        """
-        state_changed = False
-        
-        if facet.facet_type == VEILFacetType.STATUS:
-            status_type = facet.get_property("status_type")
-            current_state = facet.get_property("current_state", {})
+            # Check if this facet triggers a new agent turn
+            is_agent_response = (
+                facet.facet_type == VEILFacetType.EVENT and 
+                facet.get_property("event_type") == "agent_response"
+            )
             
-            if status_type == "container_created" and current_state.get("conversation_name"):
-                # New chat container created
-                element_id = current_state.get("element_id")
-                conversation_name = current_state.get("conversation_name")
+            if is_agent_response:
+                # End current user turn if it has content
+                if current_turn["status"] or current_turn["ambient"] or current_turn["events"]:
+                    turn_structure.append(current_turn)
                 
-                channel_info = {
-                    "element_id": element_id,
-                    "conversation_name": conversation_name,
-                    "adapter_type": current_state.get("adapter_type", "unknown"),
-                    "server_name": current_state.get("server_name", "default"),
-                    "alias": current_state.get("alias", "unknown"),
-                    "message_count": current_state.get("message_count", 0),
-                    "is_focused": element_id == system_state["focused_element_id"],
-                    "available_tools": current_state.get("available_tools", []),
-                    "tool_target_element_id": current_state.get("tool_target_element_id")
+                # Start new agent turn for this agent response
+                agent_turn = {
+                    "type": "agent_turn",
+                    "status": [],
+                    "ambient": [],
+                    "events": [facet],  # Add the agent response event
+                    "turn_index": len(turn_structure)
+                }
+                turn_structure.append(agent_turn)
+                
+                # Start fresh user turn for next content
+                current_turn = {
+                    "type": "user_turn", 
+                    "status": [],
+                    "ambient": [],
+                    "events": [],
+                    "turn_index": len(turn_structure)
+                }
+            else:
+                # Add facet to current user turn based on type
+                if facet.facet_type == VEILFacetType.STATUS:
+                    current_turn["status"].append(facet)
+                elif facet.facet_type == VEILFacetType.AMBIENT:
+                    current_turn["ambient"].append(facet)
+                elif facet.facet_type == VEILFacetType.EVENT:
+                    current_turn["events"].append(facet)
+        
+        # Add final user turn if it has content
+        if current_turn["status"] or current_turn["ambient"] or current_turn["events"]:
+            turn_structure.append(current_turn)
+        
+        logger.debug(f"Collected turn structure: {len(turn_structure)} turns from {len(temporal_stream)} facets")
+        return turn_structure
+    
+    def _process_turn_structure(self, 
+                              turn_structure: List[Dict[str, Any]], 
+                              system_state: Dict[str, Any],
+                              options: Dict[str, Any],
+                              tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        """
+        PHASE 2: Apply processing logic to turn structure.
+        
+        This includes:
+        - Retroactive ambient de-rendering
+        - Status facet processing for system state updates
+        - Ambient threshold logic application
+        - Any other turn-level processing
+        
+        Args:
+            turn_structure: List of turn dictionaries with facets
+            system_state: Current system state tracking
+            options: Rendering options
+            tools: Enhanced tool definitions
+            
+        Returns:
+            Processed turn structure ready for rendering
+        """
+        try:
+            processed_turns = []
+            
+            # Process each turn to update system state and apply logic
+            for turn_data in turn_structure:
+                processed_turn = dict(turn_data)  # Copy turn data
+                
+                # FIXED: Create turn-specific system state to avoid retroactive changes
+                turn_specific_system_state = dict(system_state)  # Copy current state
+                
+                # Update turn-specific state based on status facets in this turn
+                for status_facet in turn_data["status"]:
+                    self._update_system_state(turn_specific_system_state, status_facet, options)
+                    self._update_status_message_tracking(turn_specific_system_state, status_facet)
+                
+                # Store turn-specific state for rendering (don't modify global state)
+                turn_data["system_state"] = turn_specific_system_state
+                
+                # Update global state for next turn's baseline
+                for status_facet in turn_data["status"]:
+                    self._update_system_state(system_state, status_facet, options)
+                    self._update_status_message_tracking(system_state, status_facet)
+                
+                # Apply ambient threshold logic - determine which ambient facets should render
+                if turn_data["ambient"]:
+                    processed_ambient = self._apply_ambient_threshold_logic(
+                        turn_data["ambient"], 
+                        turn_data["turn_index"], 
+                        turn_specific_system_state,  # Use turn-specific state
+                        bool(turn_data["status"]),  # has_status_changes
+                        tools
+                    )
+                    processed_turn["ambient"] = processed_ambient
+                
+                processed_turns.append(processed_turn)
+            
+            # Apply retroactive ambient de-rendering (backwards pass)
+            self._apply_retroactive_ambient_derendering_to_structure(processed_turns)
+            
+            logger.debug(f"Processed {len(processed_turns)} turns with retroactive de-rendering")
+            return processed_turns
+            
+        except Exception as e:
+            logger.error(f"Error processing turn structure: {e}", exc_info=True)
+            return turn_structure  # Return unprocessed on error
+    
+    async def _render_turn_structure_to_messages(self, 
+                                               processed_turns: List[Dict[str, Any]],
+                                               system_state: Dict[str, Any],
+                                               options: Dict[str, Any],
+                                               tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        """
+        PHASE 3: Render processed turn structure to final messages.
+        
+        Args:
+            processed_turns: Processed turn structure with facets
+            system_state: Current system state tracking
+            options: Rendering options  
+            tools: Enhanced tool definitions
+            
+        Returns:
+            List of final turn message dictionaries
+        """
+        try:
+            turn_messages = []
+            
+            for turn_data in processed_turns:
+                # Render each section: Status → Ambient → Events
+                content_sections = []
+                
+                # REFINED: Render full status section when there are status changes, minimal when not
+                # Get turn-specific system state for historically accurate rendering
+                turn_system_state = turn_data.get("system_state", system_state)
+                
+                if turn_data["status"] or turn_data["turn_index"] == 0:
+                    # Full status section for status changes or first turn
+                    status_content = await self._render_status_section_from_facets(
+                        turn_data["status"], 
+                        turn_data["turn_index"], 
+                        turn_system_state,  # Use turn-specific state
+                        tools,
+                        bool(turn_data["status"])
+                    )
+                    if status_content:
+                        content_sections.append(status_content)
+                else:
+                    # FIXED: Don't render focus status on agent turns (Issue 3)
+                    if turn_data["type"] != "agent_turn":
+                        # Minimal status section - only focused element status on user turns
+                        focused_status = self._render_focused_element_status(turn_system_state, turn_data["turn_index"])
+                        if focused_status:
+                            content_sections.append(focused_status)
+                
+                # Render Ambient section
+                if turn_data["ambient"]:
+                    ambient_content = await self._render_ambient_section_from_facets(
+                        turn_data["ambient"],
+                        turn_system_state,  # Use turn-specific state
+                        tools
+                    )
+                    if ambient_content:
+                        content_sections.append(ambient_content)
+                
+                # Render Events section
+                if turn_data["events"]:
+                    events_content = await self._render_events_section_from_facets(
+                        turn_data["events"],
+                        system_state,
+                        options
+                    )
+                    if events_content:
+                        content_sections.append(events_content)
+                
+                # Build final turn message
+                turn_content = "\n\n".join(filter(None, content_sections))
+                
+                # Calculate turn metadata
+                all_facets = turn_data["status"] + turn_data["ambient"] + turn_data["events"] 
+                turn_metadata = {
+                    "turn_index": turn_data["turn_index"],
+                    "facet_count": len(all_facets),
+                    "has_status_changes": bool(turn_data["status"]),
+                    "has_agent_response": turn_data["type"] == "agent_turn",
+                    "timestamp_range": [
+                        min(f.veil_timestamp for f in all_facets),
+                        max(f.veil_timestamp for f in all_facets)
+                    ] if all_facets else [0.0, 0.0]
                 }
                 
-                system_state["active_channels"][element_id] = channel_info
+                # Determine role
+                role = "assistant" if turn_data["type"] == "agent_turn" else "user"
                 
-                # Update adapter groups
-                adapter_key = f"{channel_info['adapter_type']}:{channel_info['server_name']}"
-                if adapter_key not in system_state["adapter_groups"]:
-                    system_state["adapter_groups"][adapter_key] = {
-                        "adapter_type": channel_info["adapter_type"],
-                        "server_name": channel_info["server_name"],
-                        "alias": channel_info["alias"],
-                        "channels": []
-                    }
+                turn_message = {
+                    "role": role,
+                    "content": turn_content,
+                    "turn_metadata": turn_metadata
+                }
                 
-                system_state["adapter_groups"][adapter_key]["channels"].append(channel_info)
-                state_changed = True
-                
-            system_state["last_status_timestamp"] = facet.veil_timestamp
-        
-        return state_changed
+                turn_messages.append(turn_message)
+            
+            return turn_messages
+            
+        except Exception as e:
+            logger.error(f"Error rendering turn structure to messages: {e}", exc_info=True)
+            return []
 
-    def _update_focus_after_agent_turn(self, system_state: Dict[str, Any], facet: EventFacet) -> bool:
+    def _update_system_state_for_turn(self, turn_container: Dict[str, Any], system_state: Dict[str, Any]) -> None:
         """
-        Update focus state after agent response. Returns True if focus changed.
+        Update system state after processing a turn container.
+        
+        Args:
+            turn_container: The turn container that was processed
+            system_state: System state to update
         """
-        if facet.get_property("event_type") != "agent_response":
-            return False
-        
-        # Determine which container this response was sent to
-        links_to = getattr(facet, 'links_to', None)
-        target_container = None
-        
-        if links_to:
-            # Find the container this response links to
-            for element_id, channel_info in system_state["active_channels"].items():
-                if element_id in links_to:
-                    target_container = element_id
-                    break
-        
-        if not target_container:
-            # Fallback: use owner_element_id
-            target_container = facet.owner_element_id
-        
-        # Update focus if it changed
-        previous_focus = system_state["focused_element_id"]
-        if target_container != previous_focus and target_container in system_state["active_channels"]:
-            # Update focus state
-            if previous_focus and previous_focus in system_state["active_channels"]:
-                system_state["active_channels"][previous_focus]["is_focused"] = False
+        try:
+            # Process status facets to update system state
+            for status_facet in turn_container.get("status_facets", []):
+                self._update_system_state(system_state, status_facet, {})
+                self._update_status_message_tracking(system_state, status_facet)
             
-            system_state["active_channels"][target_container]["is_focused"] = True
-            system_state["focused_element_id"] = target_container
-            system_state["last_agent_response_container"] = target_container
+            # Update content length tracking
+            events_content_length = len(turn_container.get("events_section", ""))
+            self._update_content_length_tracking(system_state, events_content_length)
             
-            # Update adapter groups
-            for adapter_group in system_state["adapter_groups"].values():
-                for channel in adapter_group["channels"]:
-                    channel["is_focused"] = (channel["element_id"] == target_container)
-            
-            logger.debug(f"Focus changed to {target_container} after agent response")
-            return True
+        except Exception as e:
+            logger.error(f"Error updating system state for turn {turn_container.get('turn_index', 'unknown')}: {e}", exc_info=True)
+    
+    def _apply_retroactive_ambient_derendering(self, turn_containers: List[Dict[str, Any]]) -> None:
+        """
+        PASS 2: Apply retroactive ambient de-rendering by going backwards and removing 
+        ambient content that appeared in later turns.
         
-        return False
+        RULE: Each ambient message/group should appear only ONCE in the entire context.
+        When rendered in a later turn, remove it from all earlier turns.
+        
+        Args:
+            turn_containers: List of turn containers to process
+        """
+        try:
+            rendered_ambient_ids = set()
+            
+            # Go backwards through turns (from latest to earliest)
+            for turn_container in reversed(turn_containers):
+                current_ambient_content = turn_container.get("ambient_section", "")
+                
+                if current_ambient_content:
+                    # Track which ambient facets are rendered in this turn
+                    ambient_facets = turn_container.get("ambient_facets", [])
+                    current_turn_ambient_ids = {f.facet_id for f in ambient_facets}
+                    
+                    # If any of these ambient facets were already rendered in later turns, remove them
+                    conflicting_ids = current_turn_ambient_ids.intersection(rendered_ambient_ids)
+                    if conflicting_ids:
+                        logger.debug(f"Retroactive de-rendering: Removing {len(conflicting_ids)} ambient facets from turn {turn_container['turn_index']} "
+                                   f"(already rendered in later turns): {conflicting_ids}")
+                        
+                        # Remove conflicting ambient content
+                        turn_container["ambient_section"] = self._remove_conflicting_ambient_content(
+                            current_ambient_content, conflicting_ids, ambient_facets
+                        )
+                    
+                    # Add current turn's ambient IDs to the rendered set
+                    rendered_ambient_ids.update(current_turn_ambient_ids)
+            
+            logger.debug(f"Retroactive ambient de-rendering complete: {len(rendered_ambient_ids)} unique ambient facets rendered")
+            
+        except Exception as e:
+            logger.error(f"Error in retroactive ambient de-rendering: {e}", exc_info=True)
+    
+    def _remove_conflicting_ambient_content(self, 
+                                          ambient_content: str, 
+                                          conflicting_ids: set, 
+                                          ambient_facets: List[VEILFacet]) -> str:
+        """
+        Remove ambient content that conflicts with later turns.
+        
+        For now, this is a simple implementation that removes all ambient content if any conflicts.
+        Could be enhanced to remove only specific conflicting sections.
+        
+        Args:
+            ambient_content: Original ambient content string
+            conflicting_ids: Set of ambient facet IDs that conflict
+            ambient_facets: List of ambient facets in this turn
+            
+        Returns:
+            Modified ambient content with conflicts removed
+        """
+        try:
+            # Simple approach: if any ambient facets conflict, remove entire ambient section
+            # This ensures retroactive de-rendering while being safe
+            
+            non_conflicting_facets = [f for f in ambient_facets if f.facet_id not in conflicting_ids]
+            
+            if not non_conflicting_facets:
+                # All ambient content conflicts - remove everything
+                return ""
+            
+            # Some ambient content is safe - would need more sophisticated parsing to preserve only non-conflicting parts
+            # For now, use conservative approach and remove all if any conflicts
+            logger.debug(f"Removing entire ambient section due to conflicts (conservative approach)")
+            return ""
+            
+        except Exception as e:
+            logger.error(f"Error removing conflicting ambient content: {e}", exc_info=True)
+            return ambient_content  # Return original on error
+    
+    def _render_turn_container_to_content(self, turn_container: Dict[str, Any]) -> str:
+        """
+        Convert a turn container to final rendered content string.
+        
+        Args:
+            turn_container: Turn container with rendered sections
+            
+        Returns:
+            Final turn content string
+        """
+        try:
+            content_sections = []
+            
+            # Add sections in proper order: Status → Ambient → Events
+            status_section = turn_container.get("status_section", "")
+            if status_section:
+                content_sections.append(status_section)
+            
+            ambient_section = turn_container.get("ambient_section", "")
+            if ambient_section:
+                content_sections.append(ambient_section)
+            
+            events_section = turn_container.get("events_section", "")
+            if events_section:
+                content_sections.append(events_section)
+            
+            return "\n\n".join(filter(None, content_sections))
+            
+        except Exception as e:
+            logger.error(f"Error rendering turn container to content: {e}", exc_info=True)
+            return f"Error rendering turn {turn_container.get('turn_index', 'unknown')}: {e}"
 
+    async def _render_status_section_from_facets(self, 
+                                               status_facets: List[VEILFacet],
+                                               turn_index: int, 
+                                               system_state: Dict[str, Any],
+                                               tools: Optional[List[Dict[str, Any]]],
+                                               has_status_changes: bool) -> str:
+        """
+        Render Status section from status facets.
+        
+        Args:
+            status_facets: List of status facets to render
+            turn_index: Current turn index
+            system_state: Current system state
+            tools: Enhanced tool definitions
+            has_status_changes: Whether this turn has status changes
+            
+        Returns:
+            Rendered status section string
+        """
+        try:
+            status_parts = []
+            
+            # Add workspace wrapper on first turn
+            if turn_index == 0:
+                workspace_section = self._render_agent_workspace_wrapper(system_state)
+                if workspace_section:
+                    status_parts.append(workspace_section)
+            
+            # Render consolidated chat_info after all status updates
+            if has_status_changes or turn_index == 0:
+                chat_info_section = self._render_consolidated_chat_info(system_state, tools)
+                if chat_info_section:
+                    status_parts.append(chat_info_section)
+            
+            # Render repeated status messages if status changes occurred
+            if has_status_changes or turn_index == 0:
+                repeated_status = self._render_repeated_status_messages(system_state, turn_index)
+                if repeated_status:
+                    status_parts.append(repeated_status)
+            
+            # Always render focused element status every turn
+            focused_status = self._render_focused_element_status(system_state, turn_index)
+            if focused_status:
+                status_parts.append(focused_status)
+            
+            # Generate system messages for status changes
+            for status_facet in status_facets:
+                system_message = self._generate_system_message_for_status(status_facet, system_state)
+                if system_message:
+                    status_parts.append(system_message)
+            
+            return "\n".join(status_parts) if status_parts else ""
+            
+        except Exception as e:
+            logger.error(f"Error rendering status section from facets: {e}", exc_info=True)
+            return ""
+    
+    async def _render_ambient_section_from_facets(self, 
+                                                ambient_facets: List[VEILFacet],
+                                                system_state: Dict[str, Any],
+                                                tools: Optional[List[Dict[str, Any]]]) -> str:
+        """
+        Render Ambient section from ambient facets.
+        
+        Args:
+            ambient_facets: List of ambient facets to render
+            system_state: Current system state
+            tools: Enhanced tool definitions
+            
+        Returns:
+            Rendered ambient section string
+        """
+        try:
+            if not ambient_facets:
+                return ""
+            
+            # Group and render ambient facets
+            ambient_sections = []
+            
+            # Separate tool-type ambient facets for family grouping
+            tool_ambient_facets = [f for f in ambient_facets if f.get_property("ambient_type") in ["tool_instructions", "messaging_tools", "terminal_tools", "file_tools", "scratchpad_tools"]]
+            other_ambient_facets = [f for f in ambient_facets if f not in tool_ambient_facets]
+            
+            # Render tool ambient facets with consolidation
+            if tool_ambient_facets:
+                tool_families = self._group_ambient_facets_by_family(tool_ambient_facets)
+                
+                tool_sections = []
+                for family, facets in tool_families.items():
+                    if len(facets) == 1:
+                        consolidated = self._render_single_family_tools(family, facets)
+                        if consolidated:
+                            tool_sections.append(consolidated)
+                    else:
+                        consolidated = self._render_tools_consolidated_by_family(family, facets)
+                        if consolidated:
+                            tool_sections.append(consolidated)
+                
+                if tool_sections:
+                    # Add XML format instructions at the beginning
+                    xml_instructions = self._generate_xml_tool_call_format_instructions()
+                    tool_content = xml_instructions + "\n\n" + "\n\n".join(tool_sections)
+                    ambient_sections.append("<tool_instructions>\n" + tool_content + "\n</tool_instructions>")
+            
+            # Render other ambient facets individually
+            for ambient_facet in other_ambient_facets:
+                ambient_content = self._render_ambient_facet_individual(ambient_facet)
+                if ambient_content:
+                    ambient_sections.append(ambient_content)
+            
+            return "\n\n".join(ambient_sections)
+            
+        except Exception as e:
+            logger.error(f"Error rendering ambient section from facets: {e}", exc_info=True)
+            return ""
+    
+    async def _render_events_section_from_facets(self, 
+                                               event_facets: List[VEILFacet],
+                                               system_state: Dict[str, Any],
+                                               options: Dict[str, Any]) -> str:
+        """
+        Render Events section from event facets.
+        
+        Args:
+            event_facets: List of event facets to render
+            system_state: Current system state
+            options: Rendering options
+            
+        Returns:
+            Rendered events section string
+        """
+        try:
+            if not event_facets:
+                return ""
+            
+            render_opts = RenderingOptions(**{k: v for k, v in options.items() if hasattr(RenderingOptions, k)})
+            event_parts = []
+            
+            for event_facet in event_facets:
+                event_content = self._render_event_facet_with_system_context(event_facet, system_state, render_opts)
+                if event_content:
+                    event_parts.append(event_content)
+                
+                # Update content length tracking for ambient threshold logic
+                if event_content:
+                    self._update_content_length_tracking(system_state, len(event_content))
+            
+            return "\n".join(event_parts) if event_parts else ""
+            
+        except Exception as e:
+            logger.error(f"Error rendering events section from facets: {e}", exc_info=True)
+            return ""
+
+    def _apply_ambient_threshold_logic(self, 
+                                     ambient_facets: List[VEILFacet],
+                                     turn_index: int,
+                                     system_state: Dict[str, Any],
+                                     has_status_changes: bool,
+                                     tools: Optional[List[Dict[str, Any]]]) -> List[VEILFacet]:
+        """
+        Apply ambient threshold logic to determine which ambient facets should render.
+        
+        Args:
+            ambient_facets: List of ambient facets in this turn
+            turn_index: Current turn index
+            system_state: Current system state
+            has_status_changes: Whether this turn has status changes
+            tools: Enhanced tool definitions
+            
+        Returns:
+            Filtered list of ambient facets that should render
+        """
+        try:
+            facets_to_render = []
+            
+            for ambient_facet in ambient_facets:
+                if self._should_render_ambient_facet(ambient_facet, system_state, turn_index, has_status_changes):
+                    facets_to_render.append(ambient_facet)
+                    # Mark as rendered for retroactive de-rendering
+                    self._mark_ambient_as_rendered(ambient_facet, system_state, turn_index)
+            
+            logger.debug(f"Ambient threshold logic: {len(facets_to_render)}/{len(ambient_facets)} facets passed threshold in turn {turn_index}")
+            return facets_to_render
+            
+        except Exception as e:
+            logger.error(f"Error applying ambient threshold logic: {e}", exc_info=True)
+            return ambient_facets  # Return all on error
+    
+    def _apply_retroactive_ambient_derendering_to_structure(self, processed_turns: List[Dict[str, Any]]) -> None:
+        """
+        FIXED: Apply retroactive ambient de-rendering to the clean turn structure.
+        
+        CORRECTED RULE: Each ambient facet should appear only ONCE in the entire context.
+        Keep ambient facets in the LATEST turn where they qualify, remove from earlier turns.
+        
+        Args:
+            processed_turns: List of processed turn dictionaries with facets
+        """
+        try:
+            # Step 1: Find the latest turn for each ambient facet ID
+            latest_turn_for_facet = {}  # facet_id -> turn_index
+            
+            for turn_data in processed_turns:
+                turn_index = turn_data.get("turn_index", 0)
+                current_ambient_facets = turn_data.get("ambient", [])
+                
+                for facet in current_ambient_facets:
+                    facet_id = facet.facet_id
+                    # Always update to latest turn where this facet appears
+                    latest_turn_for_facet[facet_id] = max(
+                        latest_turn_for_facet.get(facet_id, -1), 
+                        turn_index
+                    )
+            
+            # Step 2: Remove ambient facets from turns that are NOT the latest for that facet
+            removed_count = 0
+            for turn_data in processed_turns:
+                turn_index = turn_data.get("turn_index", 0)
+                current_ambient_facets = turn_data.get("ambient", [])
+                
+                if current_ambient_facets:
+                    # Keep only facets where this turn is the latest turn for that facet
+                    filtered_ambient = []
+                    for facet in current_ambient_facets:
+                        facet_id = facet.facet_id
+                        latest_turn = latest_turn_for_facet.get(facet_id)
+                        
+                        if turn_index == latest_turn:
+                            # Keep in latest turn
+                            filtered_ambient.append(facet)
+                        else:
+                            # Remove from earlier turn
+                            removed_count += 1
+                            logger.debug(f"Retroactive de-rendering: Removed ambient facet {facet_id} from turn {turn_index} "
+                                       f"(will render in latest turn {latest_turn})")
+                    
+                    turn_data["ambient"] = filtered_ambient
+            
+            logger.debug(f"Retroactive ambient de-rendering complete: {removed_count} facets moved to latest qualifying turns")
+            
+        except Exception as e:
+            logger.error(f"Error in retroactive ambient de-rendering: {e}", exc_info=True)
+    
     def _render_agent_workspace_wrapper(self, system_state: Dict[str, Any]) -> str:
         """Render opening agent workspace wrapper with metadata."""
         agent_name = system_state["agent_name"]
@@ -550,25 +963,336 @@ class FacetAwareHUDComponent(Component):
 
     def _render_ambient_tools_section(self, facet_cache: VEILFacetCache, system_state: Dict[str, Any]) -> str:
         """
-        Render ambient tools section when triggered by status changes or content thresholds.
+        NEW: Render ambient tools section with intelligent consolidation by tool family.
+        
+        Processes structured ambient facets and groups them by tool family for
+        consolidated rendering with target parameter injection.
         """
         ambient_facets = facet_cache.get_ambient_facets()
         
         if not ambient_facets:
             return ""
         
-        tool_sections = []
-        for ambient_facet in ambient_facets:
-            ambient_type = ambient_facet.get_property("ambient_type")
-            content = ambient_facet.get_property("content", "")
-            
-            if ambient_type == "tool_instructions" and content:
-                tool_sections.append(content)
+        # Group ambient facets by tool family
+        tool_families = self._group_ambient_facets_by_family(ambient_facets)
         
-        if tool_sections:
-            return "<tool_use_instructions>\n" + "\n".join(tool_sections) + "\n</tool_use_instructions>"
+        # Render each family with appropriate consolidation
+        sections = []
+        for family, facets in tool_families.items():
+            if len(facets) == 1:
+                # Single element - render normally but check for structured data
+                consolidated = self._render_single_family_tools(family, facets)
+                if consolidated:
+                    sections.append(consolidated)
+            else:
+                # Multiple elements - consolidate by family type
+                consolidated = self._render_tools_consolidated_by_family(family, facets)
+                if consolidated:
+                    sections.append(consolidated)
+        
+        if sections:
+            # Add XML format instructions at the beginning
+            xml_instructions = self._generate_xml_tool_call_format_instructions()
+            tool_content = xml_instructions + "\n\n" + "\n\n".join(sections)
+            return "<tool_instructions>\n" + tool_content + "\n</tool_instructions>"
         
         return ""
+    
+    def _group_ambient_facets_by_family(self, ambient_facets: List[VEILFacet]) -> Dict[str, List[VEILFacet]]:
+        """Group ambient facets by their tool family type."""
+        families = {}
+        for facet in ambient_facets:
+            # Check if this is a structured ambient facet
+            if facet.get_property("data_format") == "structured":
+                content = facet.get_property("content", {})
+                if isinstance(content, dict):
+                    family = content.get("tool_family", facet.get_property("ambient_type", "unknown_tools"))
+                else:
+                    family = facet.get_property("ambient_type", "unknown_tools")
+            else:
+                # Fallback for non-structured facets
+                family = facet.get_property("ambient_type", "unknown_tools")
+            
+            if family not in families:
+                families[family] = []
+            families[family].append(facet)
+        
+        return families
+    
+    def _render_single_family_tools(self, family: str, facets: List[VEILFacet]) -> str:
+        """Render tools for a single element (no consolidation needed)."""
+        try:
+            facet = facets[0]
+            
+            # Check if it's structured data
+            if facet.get_property("data_format") == "structured":
+                content = facet.get_property("content", {})
+                if isinstance(content, dict):
+                    tools = content.get("tools", [])
+                    element_context = content.get("element_context", {})
+                    
+                    return self._render_structured_tools_for_element(tools, element_context, family)
+            
+            # Fallback for string content
+            return facet.get_property("content", "")
+            
+        except Exception as e:
+            logger.error(f"Error rendering single family tools: {e}", exc_info=True)
+            return ""
+    
+    def _render_tools_consolidated_by_family(self, family: str, facets: List[VEILFacet]) -> str:
+        """Render consolidated tools for a specific family."""
+        try:
+            if family == "messaging_tools":
+                return self._render_messaging_tools_consolidated(facets)
+            elif family == "terminal_tools":
+                return self._render_terminal_tools_consolidated(facets)
+            elif family == "file_tools":
+                return self._render_file_tools_consolidated(facets)
+            elif family == "scratchpad_tools":
+                return self._render_scratchpad_tools_consolidated(facets)
+            else:
+                return self._render_generic_tools_consolidated(family, facets)
+                
+        except Exception as e:
+            logger.error(f"Error rendering consolidated tools for family {family}: {e}", exc_info=True)
+            return ""
+    
+    def _render_messaging_tools_consolidated(self, facets: List[VEILFacet]) -> str:
+        """Render messaging tools with conversation target selection."""
+        try:
+            conversations = []
+            all_tools = {}
+            
+            for facet in facets:
+                content = facet.get_property("content", {})
+                if isinstance(content, dict):
+                    tools = content.get("tools", [])
+                    element_context = content.get("element_context", {})
+                    
+                    # Collect conversation info
+                    conv_name = element_context.get("conversation_name") or element_context.get("element_name", "Unknown")
+                    conversations.append({
+                        "name": conv_name,
+                        "element_id": element_context.get("element_id"),
+                        "adapter_type": element_context.get("adapter_type"),
+                        "server_name": element_context.get("server_name")
+                    })
+                    
+                    # Collect unique tools
+                    for tool in tools:
+                        tool_name = tool.get("name", "unknown")
+                        if tool_name not in all_tools:
+                            all_tools[tool_name] = tool
+            
+            # Build conversation list for target parameter
+            conv_list = ", ".join([f'"{c["name"]}"' for c in conversations])
+            
+            # FIXED: Render tools with XML examples instead of plain descriptions
+            tool_lines = []
+            for tool_name, tool_def in all_tools.items():
+                description = tool_def.get("description", "No description")
+                
+                # Create XML example for messaging tools
+                if tool_name in ["send_message", "send_msg", "reply"]:
+                    example_target = conversations[0]["name"] if conversations else "target"
+                    xml_example = f'<{tool_name} text="message text" target_element="{example_target}">'
+                    tool_lines.append(f"{xml_example} - {description}")
+                else:
+                    tool_lines.append(f"<{tool_name} ...> - {description}")
+            
+            return f"Messaging Tools (targets: {conv_list})\n" + "\n".join(tool_lines)
+            
+        except Exception as e:
+            logger.error(f"Error rendering messaging tools: {e}", exc_info=True)
+            return ""
+    
+    def _render_terminal_tools_consolidated(self, facets: List[VEILFacet]) -> str:
+        """Render terminal tools with terminal target selection."""
+        try:
+            terminals = []
+            all_tools = {}
+            
+            for facet in facets:
+                content = facet.get_property("content", {})
+                if isinstance(content, dict):
+                    tools = content.get("tools", [])
+                    element_context = content.get("element_context", {})
+                    
+                    # Collect terminal info
+                    term_name = element_context.get("element_name", "Unknown Terminal")
+                    terminals.append({
+                        "name": term_name,
+                        "element_id": element_context.get("element_id")
+                    })
+                    
+                    # Collect unique tools
+                    for tool in tools:
+                        tool_name = tool.get("name", "unknown")
+                        if tool_name not in all_tools:
+                            all_tools[tool_name] = tool
+            
+            term_list = ", ".join([f'"{t["name"]}"' for t in terminals])
+            
+            # FIXED: Render tools with XML examples instead of plain descriptions
+            tool_lines = []
+            for tool_name, tool_def in all_tools.items():
+                description = tool_def.get("description", "No description")
+                
+                # Create XML example for terminal tools
+                if tool_name in ["execute_command", "change_directory", "kill_process"]:
+                    example_target = terminals[0]["name"] if terminals else "Terminal"
+                    if tool_name == "execute_command":
+                        xml_example = f'<{tool_name} command="ls -la" target_element="{example_target}">'
+                    elif tool_name == "change_directory":
+                        xml_example = f'<{tool_name} path="/home/user" target_element="{example_target}">'
+                    else:
+                        xml_example = f'<{tool_name} process_id="1234" target_element="{example_target}">'
+                    tool_lines.append(f"{xml_example} - {description}")
+                else:
+                    tool_lines.append(f"<{tool_name} ...> - {description}")
+            
+            return f"Terminal Tools (targets: {term_list})\n" + "\n".join(tool_lines)
+            
+        except Exception as e:
+            logger.error(f"Error rendering terminal tools: {e}", exc_info=True)
+            return ""
+    
+    def _render_file_tools_consolidated(self, facets: List[VEILFacet]) -> str:
+        """Render file tools consolidated."""
+        try:
+            all_tools = {}
+            
+            for facet in facets:
+                content = facet.get_property("content", {})
+                if isinstance(content, dict):
+                    tools = content.get("tools", [])
+                    
+                    # Collect unique tools
+                    for tool in tools:
+                        tool_name = tool.get("name", "unknown")
+                        if tool_name not in all_tools:
+                            all_tools[tool_name] = tool
+            
+            # FIXED: Render tools with XML examples instead of plain descriptions
+            tool_lines = []
+            for tool_name, tool_def in all_tools.items():
+                description = tool_def.get("description", "No description")
+                
+                # Create XML examples for common file tools
+                if tool_name == "read_file":
+                    xml_example = f'<{tool_name} file_path="path/to/file.txt">'
+                elif tool_name == "write_file":
+                    xml_example = f'<{tool_name} file_path="path/to/file.txt" content="file content">'
+                elif tool_name == "list_directory":
+                    xml_example = f'<{tool_name} directory_path="path/to/directory">'
+                else:
+                    xml_example = f'<{tool_name} ...>'
+                    
+                tool_lines.append(f"{xml_example} - {description}")
+            
+            return f"File Tools\n" + "\n".join(tool_lines)
+            
+        except Exception as e:
+            logger.error(f"Error rendering file tools: {e}", exc_info=True)
+            return ""
+    
+    def _render_scratchpad_tools_consolidated(self, facets: List[VEILFacet]) -> str:
+        """Render scratchpad tools consolidated."""
+        try:
+            scratchpads = []
+            all_tools = {}
+            
+            for facet in facets:
+                content = facet.get_property("content", {})
+                if isinstance(content, dict):
+                    tools = content.get("tools", [])
+                    element_context = content.get("element_context", {})
+                    
+                    # Collect scratchpad info
+                    scratchpad_name = element_context.get("element_name", "Unknown Scratchpad")
+                    scratchpads.append({
+                        "name": scratchpad_name,
+                        "element_id": element_context.get("element_id")
+                    })
+                    
+                    # Collect unique tools
+                    for tool in tools:
+                        tool_name = tool.get("name", "unknown")
+                        if tool_name not in all_tools:
+                            all_tools[tool_name] = tool
+            
+            scratchpad_list = ", ".join([f'"{s["name"]}"' for s in scratchpads])
+            
+            # FIXED: Render tools with XML examples instead of plain descriptions
+            tool_lines = []
+            for tool_name, tool_def in all_tools.items():
+                description = tool_def.get("description", "No description")
+                
+                # Create XML examples for scratchpad tools
+                if tool_name == "add_note_to_scratchpad":
+                    xml_example = f'<{tool_name} note_text="Note content">'
+                elif tool_name == "get_notes_from_scratchpad":
+                    xml_example = f'<{tool_name}>'
+                elif tool_name == "clear_all_scratchpad_notes":
+                    xml_example = f'<{tool_name}>'
+                else:
+                    xml_example = f'<{tool_name} ...>'
+                    
+                tool_lines.append(f"{xml_example} - {description}")
+            
+            return f"Scratchpad Tools (targets: {scratchpad_list})\n" + "\n".join(tool_lines)
+            
+        except Exception as e:
+            logger.error(f"Error rendering scratchpad tools: {e}", exc_info=True)
+            return ""
+    
+    def _render_generic_tools_consolidated(self, tool_family: str, facets: List[VEILFacet]) -> str:
+        """Render generic tools consolidated."""
+        try:
+            all_tools = {}
+            
+            for facet in facets:
+                content = facet.get_property("content", {})
+                if isinstance(content, dict):
+                    tools = content.get("tools", [])
+                    
+                    # Collect unique tools
+                    for tool in tools:
+                        tool_name = tool.get("name", "unknown")
+                        if tool_name not in all_tools:
+                            all_tools[tool_name] = tool
+            
+            # FIXED: Render tools with XML examples instead of plain descriptions
+            tool_lines = []
+            for tool_name, tool_def in all_tools.items():
+                description = tool_def.get("description", "No description")
+                xml_example = f'<{tool_name} ...>'
+                tool_lines.append(f"{xml_example} - {description}")
+            
+            return f"{tool_family.replace('_', ' ').title()}\n" + "\n".join(tool_lines)
+            
+        except Exception as e:
+            logger.error(f"Error rendering generic tools: {e}", exc_info=True)
+            return ""
+    
+    def _render_structured_tools_for_element(self, tools: List[Dict[str, Any]], element_context: Dict[str, Any], family: str) -> str:
+        """Render structured tools for a single element."""
+        try:
+            element_name = element_context.get("conversation_name") or element_context.get("element_name", "Unknown")
+            
+            tool_lines = []
+            for tool in tools:
+                tool_name = tool.get("name", "unknown")
+                description = tool.get("description", "No description")
+                xml_example = f'<{tool_name} ...>'
+                tool_lines.append(f"{xml_example} - {description}")
+            
+            return f"Tools for {element_name}\n" + "\n".join(tool_lines)
+            
+        except Exception as e:
+            logger.error(f"Error rendering structured tools: {e}", exc_info=True)
+            return ""
 
     def _generate_system_message_for_status(self, status_facet: StatusFacet, system_state: Dict[str, Any]) -> str:
         """Generate system messages for status changes."""
@@ -594,6 +1318,15 @@ class FacetAwareHUDComponent(Component):
             content = facet.get_property("content", "")
             
             if event_type == "message_added":
+                # ENHANCED: Intelligent agent message rendering based on timestamp context
+                is_from_current_agent = facet.get_property("is_from_current_agent", False)
+                
+                if is_from_current_agent:
+                    # Check if this agent message should be rendered or skipped
+                    if not self._should_render_agent_message(facet, system_state):
+                        logger.debug(f"Skipping agent message from {facet.get_property('timestamp_iso')}: tool call context available")
+                        return ""  # Skip rendering - tool call context is available
+                
                 sender = facet.get_property("sender_name", "Unknown")
                 
                 # Determine conversation from links or owner
@@ -634,12 +1367,13 @@ class FacetAwareHUDComponent(Component):
                 tool_info = f' tool_calls="{tool_calls_count}"' if tool_calls_count > 0 else ""
                 response_content = f'<agent_response agent="{agent_name}"{tool_info}>{content}</agent_response>'
                 
-                # Add system message for successful delivery if needed
+                # FIXED: Issue 1 - Removed delivery messages, using "shoot-and-forget" mode
+                # Only show error messages if actual failures occur
                 message_status = facet.get_property("message_status", "sent")
-                if message_status == "sent":
+                if message_status == "failed_to_send":
                     conversation_name = self._determine_conversation_for_event(facet, system_state)
-                    delivery_message = f"<system>Message delivered to {conversation_name}</system>"
-                    return f"{response_content}\n{delivery_message}"
+                    error_message = f"<system>FAILED to deliver message to {conversation_name}</system>"
+                    return f"{response_content}\n{error_message}"
                 
                 return response_content
                 
@@ -875,3 +1609,373 @@ class FacetAwareHUDComponent(Component):
             Dictionary with rendering statistics
         """
         return self._rendering_stats.copy() 
+
+    # --- MISSING HELPER METHODS IMPLEMENTATION ---
+    
+    def _initialize_system_state(self, temporal_stream: List[VEILFacet], options: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Initialize system state for turn-based processing.
+        
+        Args:
+            temporal_stream: Chronologically ordered list of VEILFacet instances
+            options: Rendering options
+            
+        Returns:
+            Initial system state dictionary
+        """
+        # Get agent and space info from the owner
+        agent_name = "Unknown Agent"
+        agent_description = "Agent workspace"
+        if self.owner and hasattr(self.owner, 'get_parent_object'):
+            parent_space = self.owner.get_parent_object()
+            if parent_space:
+                agent_name = getattr(parent_space, 'agent_name', agent_name)
+                agent_description = getattr(parent_space, 'agent_description', agent_description)
+        
+        # Get focus context to identify focused element
+        focus_context = options.get('focus_context', {})
+        focus_element_id = focus_context.get('focus_element_id')
+        
+        return {
+            "agent_name": agent_name,
+            "agent_description": agent_description,
+            "adapter_groups": {},  # Will be populated by status facets
+            "active_channels": {},  # Channel tracking
+            "focus_element_id": focus_element_id,  # Track focused element
+            "last_status_timestamp": 0,
+            "content_length_total": 0,
+            "ambient_threshold": options.get("ambient_text_threshold", 500),
+            "rendered_ambient_ids": set(),
+            "status_message_history": []
+        }
+    
+    def _has_multimodal_content(self, facet_cache: VEILFacetCache, focus_element_id: str) -> bool:
+        """
+        Check if facets contain multimodal content.
+        
+        Args:
+            facet_cache: VEILFacetCache to check
+            focus_element_id: Element ID to focus on
+            
+        Returns:
+            True if multimodal content is present
+        """
+        # For now, return False as multimodal support will be added later
+        # This can be enhanced to scan facets for attachment content
+        return False
+    
+    def _count_multimodal_content(self, facet_cache: VEILFacetCache, focus_element_id: str) -> int:
+        """
+        Count multimodal attachments in facets.
+        
+        Args:
+            facet_cache: VEILFacetCache to check
+            focus_element_id: Element ID to focus on
+            
+        Returns:
+            Number of multimodal attachments
+        """
+        # For now, return 0 as multimodal support will be added later
+        return 0
+    
+    def _update_system_state(self, system_state: Dict[str, Any], status_facet: VEILFacet, options: Dict[str, Any]) -> None:
+        """
+        Update system state based on status facets.
+        
+        Args:
+            system_state: System state to update
+            status_facet: Status facet to process
+            options: Rendering options
+        """
+        status_type = status_facet.get_property("status_type")
+        current_state = status_facet.get_property("current_state", {})
+        
+        if status_type == "container_created":
+            # Update adapter groups and channels
+            adapter_type = current_state.get("adapter_type")
+            server_name = current_state.get("server_name")
+            alias = current_state.get("alias", "")
+            conversation_name = current_state.get("conversation_name")
+            element_id = current_state.get("element_id")
+            
+            if adapter_type and server_name:
+                group_key = f"{adapter_type}_{server_name}"
+                if group_key not in system_state["adapter_groups"]:
+                    system_state["adapter_groups"][group_key] = {
+                        "adapter_type": adapter_type,
+                        "server_name": server_name,
+                        "alias": alias,
+                        "channels": []
+                    }
+                
+                # Add channel info
+                channel_info = {
+                    "conversation_name": conversation_name,
+                    "element_id": element_id,
+                    "adapter_type": adapter_type,
+                    "server_name": server_name,
+                    "is_focused": element_id == system_state.get("focus_element_id"),  # Set based on focus context
+                    "available_tools": []
+                }
+                
+                system_state["adapter_groups"][group_key]["channels"].append(channel_info)
+                system_state["active_channels"][element_id] = channel_info
+        
+        # Update timestamp tracking
+        system_state["last_status_timestamp"] = max(
+            system_state["last_status_timestamp"],
+            status_facet.veil_timestamp
+        )
+    
+    def _update_status_message_tracking(self, system_state: Dict[str, Any], status_facet: VEILFacet) -> None:
+        """
+        Track status messages for repetition logic.
+        
+        Args:
+            system_state: System state to update
+            status_facet: Status facet to track
+        """
+        status_entry = {
+            "facet_id": status_facet.facet_id,
+            "status_type": status_facet.get_property("status_type"),
+            "timestamp": status_facet.veil_timestamp,
+            "current_state": status_facet.get_property("current_state", {})
+        }
+        system_state["status_message_history"].append(status_entry)
+    
+    def _update_content_length_tracking(self, system_state: Dict[str, Any], content_length: int) -> None:
+        """
+        Update content length tracking for ambient threshold logic.
+        
+        Args:
+            system_state: System state to update
+            content_length: Length of content to add
+        """
+        system_state["content_length_total"] += content_length
+    
+    def _should_render_ambient_facet(self, ambient_facet: VEILFacet, system_state: Dict[str, Any], 
+                                   turn_index: int, has_status_changes: bool) -> bool:
+        """
+        Determine if ambient facet should render based on threshold logic.
+        
+        Args:
+            ambient_facet: Ambient facet to check
+            system_state: Current system state
+            turn_index: Current turn index
+            has_status_changes: Whether this turn has status changes
+            
+        Returns:
+            True if facet should render
+        """
+        # Always render on first turn
+        if turn_index == 0:
+            return True
+        
+        # FIXED: Always render when status changes occur (scene changes should re-show tools)
+        if has_status_changes:
+            logger.debug(f"Rendering ambient facet {ambient_facet.facet_id} due to status changes in turn {turn_index}")
+            return True
+        
+        # Check if content length threshold is exceeded
+        facet_threshold = getattr(ambient_facet, 'trigger_threshold', 1500)
+        if system_state["content_length_total"] >= facet_threshold:
+            logger.debug(f"Rendering ambient facet {ambient_facet.facet_id} due to content threshold ({system_state['content_length_total']} >= {facet_threshold})")
+            return True
+        
+        # Don't check rendered_ambient_ids when status changes - allow re-rendering
+        # Check if facet was already rendered only for non-status-change turns
+        if ambient_facet.facet_id in system_state["rendered_ambient_ids"]:
+            logger.debug(f"Skipping ambient facet {ambient_facet.facet_id} - already rendered and no status changes")
+            return False
+        
+        return False
+    
+    def _mark_ambient_as_rendered(self, ambient_facet: VEILFacet, system_state: Dict[str, Any], turn_index: int) -> None:
+        """
+        Mark ambient facet as rendered for retroactive de-rendering.
+        
+        Args:
+            ambient_facet: Ambient facet that was rendered
+            system_state: System state to update
+            turn_index: Turn index where it was rendered
+        """
+        system_state["rendered_ambient_ids"].add(ambient_facet.facet_id)
+    
+    def _render_repeated_status_messages(self, system_state: Dict[str, Any], turn_index: int) -> str:
+        """
+        Render repeated status messages when status changes occur.
+        
+        Args:
+            system_state: Current system state
+            turn_index: Current turn index
+            
+        Returns:
+            Rendered status messages string
+        """
+        # For now, return empty - this can be enhanced to show repeated status
+        return ""
+    
+    def _render_focused_element_status(self, system_state: Dict[str, Any], turn_index: int) -> str:
+        """
+        Render focused element status every turn.
+        
+        Args:
+            system_state: Current system state  
+            turn_index: Current turn index
+            
+        Returns:
+            Rendered focused status string
+        """
+        # Find focused channel
+        for channel in system_state.get("active_channels", {}).values():
+            if channel.get("is_focused", False):
+                conversation_name = channel.get("conversation_name", "Unknown")
+                return f"<status>Currently focused: {conversation_name}</status>"
+        
+        # Fallback: if no channels marked as focused but we have a focus_element_id, try to find it
+        focus_element_id = system_state.get("focus_element_id")
+        if focus_element_id and focus_element_id in system_state.get("active_channels", {}):
+            channel = system_state["active_channels"][focus_element_id]
+            conversation_name = channel.get("conversation_name", "Unknown")
+            return f"<status>Currently focused: {conversation_name}</status>"
+        
+        return ""
+    
+    def _render_ambient_facet_individual(self, ambient_facet: VEILFacet) -> str:
+        """
+        Render individual ambient facet.
+        
+        Args:
+            ambient_facet: Ambient facet to render
+            
+        Returns:
+            Rendered ambient facet string
+        """
+        ambient_type = ambient_facet.get_property("ambient_type")
+        content = ambient_facet.get_property("content", "")
+        
+        # Handle structured content
+        if ambient_facet.get_property("data_format") == "structured" and isinstance(content, dict):
+            # This would be handled by the consolidated rendering
+            return ""
+        
+        # Handle string content
+        if ambient_type == "tool_instructions":
+            return f"<ambient_tools>{content}</ambient_tools>"
+        else:
+            return f"<ambient type=\"{ambient_type}\">{content}</ambient>"
+    
+    def _generate_xml_tool_call_format_instructions(self) -> str:
+        """
+        Generate XML tool call format instructions.
+        
+        Returns:
+            XML format instruction string
+        """
+        return """TOOL CALL FORMAT: Use XML format for all tool calls. Do NOT use JSON format.
+
+To call tools, use this ultra-concise XML format:
+<tool_calls>
+<tool_name param1="value1" param2="value2" target_element="element_name">
+</tool_calls>
+
+Examples:
+<tool_calls>
+<send_message text="Hello, world!" target_element="scaffold-6">
+</tool_calls>
+
+<tool_calls>
+<execute_command command="ls -la" target_element="Terminal bash-1">
+<send_message text="Command executed!" target_element="scaffold-6">
+</tool_calls>
+
+Use the actual tool name as the XML element name. You can make multiple tool calls in one <tool_calls> block. The target_element parameter specifies which conversation or element to use - choose from the targets listed for each tool type."""
+
+    def _should_render_agent_message(self, message_facet: VEILFacet, system_state: Dict[str, Any]) -> bool:
+        """
+        ENHANCED: Intelligent decision on whether to render agent messages.
+        
+        Agent messages are rendered when:
+        1. The message timestamp is older than the connection event (historical data, tool calls lost)
+        2. The message is in a failed/pending state (tool call didn't complete)
+        3. Explicit override flag is set
+        
+        Agent messages are skipped when:
+        1. Recent agent messages where tool call context is available
+        2. Successfully sent messages where agent_response facets exist
+        
+        Args:
+            message_facet: The message_added EventFacet from current agent
+            system_state: Current system state tracking
+            
+        Returns:
+            True if agent message should be rendered, False to skip
+        """
+        try:
+            # Get message timestamp
+            message_timestamp = message_facet.get_property("timestamp_iso")
+            if not message_timestamp:
+                # No timestamp - default to rendering for safety
+                logger.debug("Agent message has no timestamp - rendering for safety")
+                return True
+            
+            # Check message status - always render failed/pending messages
+            message_status = message_facet.get_property("message_status", "received")
+            if message_status in ["failed_to_send", "pending_send", "pending_edit", "pending_delete"]:
+                logger.debug(f"Agent message has status '{message_status}' - rendering")
+                return True
+            
+            # Get connection timestamp for this conversation
+            conversation_name = message_facet.get_property("conversation_name")
+            connection_timestamp = self._get_connection_timestamp_for_conversation(conversation_name, system_state)
+            
+            if connection_timestamp is None:
+                # No connection timestamp found - this might be historical data, render it
+                logger.debug(f"No connection timestamp found for '{conversation_name}' - rendering agent message (likely historical)")
+                return True
+            
+            # Compare timestamps - if message is older than connection, tool call context is likely lost
+            if message_timestamp < connection_timestamp:
+                logger.debug(f"Agent message ({message_timestamp}) is older than connection ({connection_timestamp}) - rendering (tool calls lost)")
+                return True
+            
+            # Message is newer than connection - tool call context should be available, skip rendering
+            logger.debug(f"Agent message ({message_timestamp}) is newer than connection ({connection_timestamp}) - skipping (tool call available)")
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error determining agent message rendering: {e}", exc_info=True)
+            # Default to rendering on error for safety
+            return True
+    
+    def _get_connection_timestamp_for_conversation(self, conversation_name: str, system_state: Dict[str, Any]) -> Optional[float]:
+        """
+        Get the connection timestamp for a specific conversation.
+        
+        This helps determine when the agent connected to the conversation,
+        which is used to decide if tool call context is available.
+        
+        Args:
+            conversation_name: Name of the conversation
+            system_state: Current system state tracking
+            
+        Returns:
+            Connection timestamp or None if not found
+        """
+        try:
+            # Look for connection timestamp in active channels
+            active_channels = system_state.get("active_channels", {})
+            
+            for channel_info in active_channels.values():
+                if channel_info.get("conversation_name") == conversation_name:
+                    # Return the earliest status timestamp as connection time
+                    # Could be enhanced to track specific connection events
+                    return system_state.get("last_status_timestamp", 0)
+            
+            # If not found in active channels, check if this conversation was just connected
+            # Could be enhanced to maintain per-conversation connection timestamps
+            return system_state.get("last_status_timestamp", 0)
+            
+        except Exception as e:
+            logger.error(f"Error getting connection timestamp for '{conversation_name}': {e}", exc_info=True)
+            return None

@@ -14,6 +14,7 @@ from ..veil import (
     EventFacet, StatusFacet, AmbientFacet, ConnectomeEpoch,
     FacetOperationBuilder
 )
+from ..veil.facet_types import create_agent_response_facet
 
 logger = logging.getLogger(__name__)
 
@@ -303,3 +304,78 @@ class SpaceVeilProducer(VeilProducer):
     # - All flat cache management methods
     
     # The VEILFacet architecture replaces all of this complexity with clean facet operations
+
+    def emit_agent_response(self, 
+                           agent_response_text: str, 
+                           tool_calls_data: Optional[List[Dict[str, Any]]] = None,
+                           agent_loop_component_id: Optional[str] = None,
+                           parsing_mode: str = "text",
+                           links_to: Optional[str] = None) -> str:
+        """
+        Centralized agent response VEILFacet Event creation for reuse across agent loop implementations.
+        
+        This method handles the creation and emission of agent response EventFacets,
+        providing a consistent interface for all agent loop types.
+        
+        Args:
+            agent_response_text: The agent's full text response from LLM
+            tool_calls_data: Optional list of tool call dictionaries
+            agent_loop_component_id: ID of the agent loop component that generated the response
+            parsing_mode: The parsing mode used ("text", "tool_call", etc.)
+            links_to: Optional container to link the response to
+            
+        Returns:
+            The response_id of the created agent response facet
+        """
+        try:
+            if not self.owner:
+                logger.error("SpaceVeilProducer has no owner element, cannot emit agent response")
+                return ""
+                
+            current_time = time.time()
+            
+            # Create unique response ID for this agent response
+            response_id = f"agent_response_{self.owner.id}_{int(current_time * 1000)}"
+            
+            # Auto-link to space root if no explicit links_to provided
+            if links_to is None:
+                space_root_facet_id = f"{self.owner.id}_space_root"
+                links_to = space_root_facet_id
+                logger.debug(f"Auto-linking agent response {response_id} to space root {space_root_facet_id}")
+            
+            # Create agent response EventFacet using utility function
+            agent_response_facet = create_agent_response_facet(
+                response_id=response_id,
+                owner_element_id=self.owner.id,
+                content=agent_response_text,
+                tool_calls=tool_calls_data or [],
+                links_to=links_to
+            )
+            
+            # Add additional properties specific to this agent loop
+            agent_response_facet.properties.update({
+                "parsing_mode": parsing_mode,
+                "operation_index": int(current_time * 1000),  # For chronological ordering
+                "timestamp": current_time
+            })
+            
+            # Add agent loop component ID if provided
+            if agent_loop_component_id:
+                agent_response_facet.properties["agent_loop_component_id"] = agent_loop_component_id
+            
+            # Create VEILFacetOperation
+            facet_operation = FacetOperationBuilder.add_facet(agent_response_facet)
+            
+            # Apply operation to our facet cache
+            self._facet_cache.apply_operations([facet_operation])
+            
+            # Accumulate for frame-end dispatch to uplinks
+            self._accumulated_facet_operations.append(facet_operation)
+            
+            logger.debug(f"Emitted agent response VEILFacet Event {response_id} with {len(tool_calls_data or [])} tool calls")
+            
+            return response_id
+                
+        except Exception as e:
+            logger.error(f"Error emitting agent response VEILFacet Event: {e}", exc_info=True)
+            return ""

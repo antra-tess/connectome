@@ -204,7 +204,7 @@ def main():
     print("\n" + "="*60)
     print("🔧 LLM Testing Scaffolding Server")
     print("="*60)
-    print(f"📍 Web Interface: http://localhost:5000")
+    print(f"📍 Web Interface: http://localhost:6200")
     print(f"📁 Templates Directory: {templates_dir}")
     print("\n✅ To use with Connectome:")
     print("   CONNECTOME_LLM_TYPE=scaffolding python host/main.py")
@@ -216,7 +216,7 @@ def main():
     print("="*60 + "\n")
     
     try:
-        app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
+        app.run(host='0.0.0.0', port=6200, debug=True, threaded=True)
     except KeyboardInterrupt:
         print("\n👋 Scaffolding server stopped")
     except Exception as e:

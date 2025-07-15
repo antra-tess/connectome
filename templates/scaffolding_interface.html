@@ -352,12 +352,49 @@
             color: #4a5568;
             margin-top: 4px;
         }
+
+        .turn-boundary {
+            border-left: 4px solid #667eea;
+            margin: 15px 0;
+            padding-left: 15px;
+            background: rgba(102, 126, 234, 0.05);
+            border-radius: 0 8px 8px 0;
+        }
+
+        .turn-header {
+            font-weight: 600;
+            color: #4a5568;
+            font-size: 0.9em;
+            margin-bottom: 8px;
+            padding: 5px 10px;
+            background: rgba(102, 126, 234, 0.1);
+            border-radius: 4px;
+            font-family: monospace;
+        }
+
+        .turn-metadata {
+            font-size: 0.8em;
+            color: #718096;
+            margin-bottom: 10px;
+            font-family: monospace;
+        }
+
+        .message-role-user {
+            border-left-color: #38b2ac;
+            background: rgba(56, 178, 172, 0.05);
+        }
+
+        .message-role-assistant {
+            border-left-color: #9f7aea;
+            background: rgba(159, 122, 234, 0.05);
+        }
     </style>
 </head>
 <body>
     <div class="header">
         <h1>🔧 LLM Testing Scaffolding Interface</h1>
         <p>Manual LLM response interface for cost-free agent testing and debugging</p>
+        <p style="font-size: 0.9em; opacity: 0.8;">✨ Enhanced with turn-based messaging and ultra-concise XML tool call support</p>
     </div>
 
     <div class="container">
@@ -420,7 +457,7 @@
                     <textarea 
                         id="response-input" 
                         class="response-input" 
-                        placeholder="Enter your response as if you were the LLM...&#10;&#10;You can include tool calls in JSON format:&#10;&lt;tool_calls&gt;&#10;[{&quot;tool&quot;: &quot;tool_name&quot;, &quot;parameters&quot;: {...}}]&#10;&lt;/tool_calls&gt;&#10;&#10;Or just provide a conversational response."
+                        placeholder="Enter your response as if you were the LLM...&#10;&#10;You can include tool calls in ultra-concise XML format:&#10;&lt;tool_calls&gt;&#10;&lt;tool_name param1=&quot;value1&quot; target_element=&quot;element_name&quot;&gt;&#10;&lt;/tool_calls&gt;&#10;&#10;Or just provide a conversational response."
                         disabled
                     ></textarea>
                     
@@ -433,6 +470,9 @@
                         </button>
                         <button id="example-btn" class="btn btn-secondary" onclick="insertExampleResponse()">
                             💡 Example Response
+                        </button>
+                        <button id="help-btn" class="btn btn-secondary" onclick="showXMLHelp()">
+                            ❓ XML Format Help
                         </button>
                     </div>
                 </div>
@@ -461,6 +501,66 @@
     <script>
         let currentContext = null;
         let refreshInterval = null;
+
+        function formatTurnBasedMessages(messages) {
+            let html = '';
+            
+            messages.forEach((msg, index) => {
+                const roleClass = `message-role-${msg.role}`;
+                const turnMeta = msg.turn_metadata || {};
+                
+                // Create turn boundary container
+                html += `<div class="turn-boundary ${roleClass}">`;
+                
+                // Turn header with role and metadata
+                let headerText = `${msg.role.toUpperCase()} MESSAGE`;
+                if (turnMeta.turn_index !== undefined) {
+                    headerText += ` (Turn ${turnMeta.turn_index})`;
+                }
+                html += `<div class="turn-header">${headerText}</div>`;
+                
+                // Turn metadata if available
+                if (Object.keys(turnMeta).length > 0) {
+                    let metaText = '';
+                    if (turnMeta.facet_count !== undefined) metaText += `Facets: ${turnMeta.facet_count} • `;
+                    if (turnMeta.has_status_changes) metaText += 'Status Changes • ';
+                    if (turnMeta.has_ambient_triggers) metaText += 'Ambient Triggers • ';
+                    if (turnMeta.tool_calls_count > 0) metaText += `Tool Calls: ${turnMeta.tool_calls_count} • `;
+                    if (turnMeta.timestamp_range) {
+                        const start = new Date(turnMeta.timestamp_range[0] * 1000).toLocaleTimeString();
+                        const end = new Date(turnMeta.timestamp_range[1] * 1000).toLocaleTimeString();
+                        metaText += `Time: ${start}-${end}`;
+                    }
+                    metaText = metaText.replace(/ • $/, ''); // Remove trailing separator
+                    
+                    if (metaText) {
+                        html += `<div class="turn-metadata">${metaText}</div>`;
+                    }
+                }
+                
+                // Message content length info
+                let lengthInfo = '';
+                if (msg.is_multimodal) {
+                    lengthInfo = `[MULTIMODAL: ${msg.text_length} chars text + ${msg.attachment_count} attachments]`;
+                } else {
+                    lengthInfo = `[${msg.text_length} chars]`;
+                }
+                html += `<div class="turn-metadata">${lengthInfo}</div>`;
+                
+                // Message content (escaped for HTML)
+                const content = msg.content.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                html += `<pre style="margin: 0; white-space: pre-wrap; font-family: inherit;">${content}</pre>`;
+                
+                html += '</div>'; // Close turn boundary
+                
+                // Add spacing between turns
+                if (index < messages.length - 1) {
+                    html += '<div style="height: 10px;"></div>';
+                }
+            });
+            
+            return html;
+        }
 
         // Start auto-refresh when page loads
         document.addEventListener('DOMContentLoaded', function() {
@@ -523,25 +623,32 @@
                 document.getElementById('metadata-timestamp').textContent = date.toLocaleString();
             }
             
-            // Display messages
+            // Display messages with enhanced turn-based formatting
             const contextDisplay = document.getElementById('context-display');
-            let contextText = '';
             
             if (context.messages && context.messages.length > 0) {
-                contextText = context.messages.map(msg => {
-                    let header = `=== ${msg.role.toUpperCase()} MESSAGE ===`;
-                    if (msg.is_multimodal) {
-                        header += ` [MULTIMODAL: ${msg.text_length} chars text + ${msg.attachment_count} attachments]`;
-                    } else {
-                        header += ` [${msg.text_length} chars]`;
-                    }
-                    return header + '\n' + msg.content + '\n';
-                }).join('\n');
+                // Check if messages have turn metadata (turn-based format)
+                const hasTurnMetadata = context.messages.some(msg => msg.turn_metadata);
+                
+                if (hasTurnMetadata) {
+                    // Enhanced turn-based display
+                    contextDisplay.innerHTML = formatTurnBasedMessages(context.messages);
+                } else {
+                    // Fallback to legacy display
+                    let contextText = context.messages.map(msg => {
+                        let header = `=== ${msg.role.toUpperCase()} MESSAGE ===`;
+                        if (msg.is_multimodal) {
+                            header += ` [MULTIMODAL: ${msg.text_length} chars text + ${msg.attachment_count} attachments]`;
+                        } else {
+                            header += ` [${msg.text_length} chars]`;
+                        }
+                        return header + '\n' + msg.content + '\n';
+                    }).join('\n');
+                    contextDisplay.textContent = contextText;
+                }
             } else {
-                contextText = 'No messages in context';
+                contextDisplay.innerHTML = '<div class="no-context-message">No messages in context</div>';
             }
-            
-            contextDisplay.textContent = contextText;
             
             // Display tools
             const toolsSection = document.getElementById('tools-section');
@@ -663,10 +770,48 @@
             responseInput.value = `I understand you want me to help with this task. Let me analyze the available tools and provide a response.
 
 <tool_calls>
-[{"tool": "example_tool", "parameters": {"message": "This is an example tool call"}}]
+<send_message text="Hello! I'm starting to work on your request." target_element="Discord #general">
+<execute_command command="ls -la" target_element="Terminal bash-1">
 </tool_calls>
 
-I've executed the appropriate tool call above. Is there anything else you'd like me to help you with?`;
+I've executed the appropriate tool calls above. The message has been sent and I've listed the directory contents. Is there anything else you'd like me to help you with?`;
+        }
+
+        function showXMLHelp() {
+            const helpText = `Ultra-Concise XML Tool Call Format Help:
+
+BASIC FORMAT:
+<tool_calls>
+<tool_name param1="value1" param2="value2" target_element="element_name">
+</tool_calls>
+
+EXAMPLES:
+
+1. Send Message:
+<tool_calls>
+<send_message text="Hello world!" target_element="Discord #general">
+</tool_calls>
+
+2. Execute Command:
+<tool_calls>
+<execute_command command="pwd" target_element="Terminal bash-1">
+</tool_calls>
+
+3. Multiple Tool Calls:
+<tool_calls>
+<send_message text="Starting task..." target_element="Slack #updates">
+<execute_command command="git status" target_element="Terminal main">
+<add_note content="Task started" target_element="Scratchpad notes">
+</tool_calls>
+
+KEY POINTS:
+• Use tool names directly as XML element names
+• All parameters are XML attributes
+• Always include target_element when specified
+• Multiple calls go in one <tool_calls> block
+• No JSON format - pure XML only`;
+
+            alert(helpText);
         }
 
         async function refreshHistory() {

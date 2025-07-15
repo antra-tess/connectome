@@ -938,8 +938,7 @@ class VEILFacetCompressionEngine(Component):
     def _get_hud_component(self):
         """Get HUD component for compression context rendering."""
         try:
-            # Get FacetAwareHUDComponent from sibling components  
-            return self.get_sibling_component("FacetAwareHUDComponent")
+            return self.owner.get_hud()
         except Exception as e:
             logger.warning(f"Error getting HUD component: {e}")
             return None

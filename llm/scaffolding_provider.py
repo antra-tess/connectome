@@ -28,7 +28,7 @@ class ScaffoldingLLMProvider(LLMProvider):
     - Edge case testing with specific response scenarios
     """
     
-    def __init__(self, web_server_url: str = "http://localhost:5000", timeout: int = 300, **kwargs):
+    def __init__(self, web_server_url: str = "http://localhost:6200", timeout: int = 300, **kwargs):
         """
         Initialize the scaffolding provider.
         
@@ -67,9 +67,27 @@ class ScaffoldingLLMProvider(LLMProvider):
         try:
             logger.info(f"Intercepting LLM call with {len(messages)} messages")
             
-            # Format context data for display
+            # Format context data for display with enhanced turn-based support
+            formatted_messages = []
+            
+            # Try to preserve turn-based structure if available
+            # Check if we have turn-based context in kwargs (passed from agent loop)
+            original_context = kwargs.get('original_context_data')
+            
+            if original_context and isinstance(original_context, list) and len(original_context) == len(messages):
+                # We have turn-based context - preserve metadata
+                for i, (msg, turn_data) in enumerate(zip(messages, original_context)):
+                    formatted_msg = self._format_message_for_display(msg)
+                    # Add turn metadata from original context
+                    if isinstance(turn_data, dict) and 'turn_metadata' in turn_data:
+                        formatted_msg['turn_metadata'] = turn_data['turn_metadata']
+                    formatted_messages.append(formatted_msg)
+            else:
+                # Fallback to standard message formatting
+                formatted_messages = [self._format_message_for_display(msg) for msg in messages]
+            
             context_data = {
-                "messages": [self._format_message_for_display(msg) for msg in messages],
+                "messages": formatted_messages,
                 "tools": [self._format_tool_for_display(tool) for tool in (tools or [])],
                 "session_id": self.session_id,
                 "model": model or "unspecified",
@@ -144,6 +162,10 @@ class ScaffoldingLLMProvider(LLMProvider):
             else:
                 formatted["is_multimodal"] = False
                 formatted["text_length"] = len(str(message.content))
+            
+            # Preserve turn metadata if present (for turn-based messaging)
+            if hasattr(message, 'turn_metadata') and message.turn_metadata:
+                formatted["turn_metadata"] = message.turn_metadata
             
             return formatted
             

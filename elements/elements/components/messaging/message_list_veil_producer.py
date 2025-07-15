@@ -21,6 +21,8 @@ from ..veil.facet_types import (create_message_event_facet,
 
 logger = logging.getLogger(__name__)
 
+# NEW: Removed centralized tool families - each VeilProducer sets arbitrary tool_family string
+
 # VEIL Node Structure Constants (Example)
 VEIL_CONTAINER_TYPE = "message_list"
 VEIL_MESSAGE_NODE_TYPE = "message"
@@ -147,6 +149,7 @@ class MessageListVeilProducer(VeilProducer):
                     "server_name": conversation_metadata.get("server_name"),
                     "conversation_name": conversation_metadata.get("conversation_name"),
                     "error_details": msg_data.get('error_details', None),
+                    "is_from_current_agent": msg_data.get('is_from_current_agent', False),  # For HUD rendering decisions
                     VEIL_ATTACHMENT_METADATA_PROP: [
                         {k: v for k, v in att.items() if k != 'content'}
                         for att in processed_attachments_from_mlc
@@ -261,6 +264,9 @@ class MessageListVeilProducer(VeilProducer):
         # 1. Handle message list container (StatusFacet)
         container_facet_exists = self._state.get('_has_produced_list_root_add_before', False)
         
+        # FIXED: Get enhanced tools for StatusFacet
+        enhanced_tools = self._get_enhanced_tools_for_element()
+        
         # Get current container state
         current_container_state = {
             "element_id": owner_id,
@@ -271,7 +277,9 @@ class MessageListVeilProducer(VeilProducer):
             "server_name": conversation_metadata.get("server_name"),
             "adapter_id": conversation_metadata.get("adapter_id"),
             "external_conversation_id": conversation_metadata.get("external_conversation_id"),
-            "alias": conversation_metadata.get("alias")
+            "alias": conversation_metadata.get("alias"),
+            # FIXED: Include enhanced tools in StatusFacet current_state
+            "available_tools": enhanced_tools
         }
         
         if not container_facet_exists:
@@ -329,6 +337,8 @@ class MessageListVeilProducer(VeilProducer):
                     "adapter_type": conversation_metadata.get("adapter_type"),
                     "server_name": conversation_metadata.get("server_name"),
                     "conversation_name": conversation_metadata.get("conversation_name"),
+                    "is_agent": msg_data.get('sender_name', 'Unknown') == self.owner.get_parent_object().agent_name,
+                    "is_from_current_agent": msg_data.get('is_from_current_agent', False),  # For HUD rendering decisions
                     "error_details": msg_data.get('error_details', None),
                     "attachment_metadata": [
                         {k: v for k, v in att.items() if k != 'content'}
@@ -381,21 +391,12 @@ class MessageListVeilProducer(VeilProducer):
             # Update content tracking for next frame
             self._update_message_content_tracking(current_messages)
 
-        # 6. Generate tool availability ambient facets (when container state changes)
-        if facet_operations and any(op.operation_type in ["add_facet", "update_facet"] for op in facet_operations):
-            enhanced_tools = self._get_enhanced_tools_for_element()
-            if enhanced_tools:
-                tools_content = self._format_tools_for_ambient_facet(enhanced_tools)
-                tools_ambient_facet = AmbientFacet(
-                    facet_id=f"{owner_id}_tools_ambient",
-                    owner_element_id=owner_id,
-                    ambient_type="tool_instructions",
-                    content=tools_content,
-                    trigger_threshold=500  # Re-render after 500 symbols
-                )
-                
+        # 6. Generate tool availability ambient facets (when appropriate)
+        if self._should_emit_tools_ambient_facet():
+            tools_ambient_facet = self._create_tools_ambient_facet()
+            if tools_ambient_facet:
                 facet_operations.append(FacetOperationBuilder.add_facet(tools_ambient_facet))
-                logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] Generated ambient facet for tools")
+                logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] Generated structured ambient facet for tools")
 
         # Update state after generating operations
         if not container_facet_exists and any(
@@ -632,4 +633,92 @@ class MessageListVeilProducer(VeilProducer):
         except Exception as e:
             logger.error(f"Error formatting tools for ambient facet: {e}", exc_info=True)
             return "Error formatting tool information"
+
+    # --- NEW: Enhanced Structured Ambient Facet Methods ---
+    
+    def _should_emit_tools_ambient_facet(self) -> bool:
+        """
+        Determine whether to emit tools ambient facet for this element.
+        
+        Returns:
+            True if tools ambient facet should be emitted
+        """
+        enhanced_tools = self._get_enhanced_tools_for_element()
+        return bool(enhanced_tools)
+    
+    def _create_tools_ambient_facet(self) -> Optional[AmbientFacet]:
+        """
+        Create enhanced AmbientFacet for available tools with structured data.
+        
+        This creates structured data that HUD can consolidate and render appropriately,
+        rather than pre-rendered strings.
+        
+        Returns:
+            AmbientFacet with structured tool data for HUD consolidation
+        """
+        enhanced_tools = self._get_enhanced_tools_for_element()
+        if not enhanced_tools:
+            return None
+        
+        # Determine tool family for this element
+        tool_family = self._classify_tool_family(enhanced_tools)
+        
+        # Create structured content instead of pre-rendered strings
+        structured_content = {
+            "tools": enhanced_tools,
+            "element_context": self._get_element_context_metadata(),
+            "tool_family": tool_family
+        }
+        
+        ambient_facet = AmbientFacet(
+            facet_id=f"{self.owner.id}_tools_ambient",
+            owner_element_id=self.owner.id,
+            ambient_type=tool_family,  # Tool family classification for HUD grouping
+            content=structured_content,  # Structured data instead of string
+            trigger_threshold=1500  # Element-specific threshold
+        )
+        
+        # Add additional properties for HUD processing
+        ambient_facet.properties.update({
+            "data_format": "structured",
+            "tools_count": len(enhanced_tools),
+            "element_type": "messaging"
+        })
+        
+        return ambient_facet
+    
+    def _classify_tool_family(self, enhanced_tools: List[Dict[str, Any]]) -> str:
+        """
+        Get tool family for this messaging element.
+        
+        Args:
+            enhanced_tools: List of enhanced tool definitions (unused - family is element-based)
+            
+        Returns:
+            Tool family string for this element type
+        """
+        # Each element type sets its own arbitrary tool_family string
+        # Messaging elements use "messaging_tools" by default
+        return "messaging_tools"
+    
+    def _get_element_context_metadata(self) -> Dict[str, Any]:
+        """
+        Get element context metadata for HUD consolidation.
+        
+        Returns:
+            Dictionary with element context information
+        """
+        conversation_metadata = self._get_conversation_metadata()
+        
+        return {
+            "element_id": self.owner.id,
+            "element_name": self.owner.name,
+            "conversation_name": conversation_metadata.get("conversation_name"),
+            "element_type": "messaging",
+            "adapter_type": conversation_metadata.get("adapter_type"),
+            "server_name": conversation_metadata.get("server_name"),
+            "adapter_id": conversation_metadata.get("adapter_id"),
+            "external_conversation_id": conversation_metadata.get("external_conversation_id"),
+            "alias": conversation_metadata.get("alias")
+        }
 

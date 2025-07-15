@@ -2865,21 +2865,7 @@ class CompressionEngineComponent(Component):
         try:
             if not self.owner:
                 return None
-                
-            # Look for HUD component in owner's components
-            if hasattr(self.owner, '_components'):
-                for component in self.owner._components:
-                    if hasattr(component, 'COMPONENT_TYPE') and component.COMPONENT_TYPE == "HUDComponent":
-                        return component
-            
-            # Alternative: check if owner has direct HUD access
-            if hasattr(self.owner, '_hud_component'):
-                return self.owner._hud_component
-            elif hasattr(self.owner, 'get_hud_component'):
-                return self.owner.get_hud_component()
-                
-            return None
-            
+            return self.owner.get_hud()
         except Exception as e:
             logger.debug(f"Error accessing HUD component: {e}")
             return None

@@ -19,6 +19,8 @@ from ..veil import (
 
 logger = logging.getLogger(__name__)
 
+# NEW: Removed centralized tool families - each VeilProducer sets arbitrary tool_family string
+
 # VEIL Node Structure Constants (Example)
 VEIL_SCRATCHPAD_ROOT_TYPE = "scratchpad_root"
 VEIL_NOTE_ITEM_TYPE = "note_item"
@@ -156,12 +158,17 @@ class ScratchpadVeilProducer(VeilProducer):
         # 1. Handle scratchpad container (StatusFacet)
         container_facet_exists = self._state.get('_has_produced_scratchpad_root_add_before', False)
         
+        # FIXED: Get enhanced tools for StatusFacet
+        enhanced_tools = self._get_enhanced_tools_for_element()
+        
         # Get current container state
         current_container_state = {
             "element_id": owner_id,
             "element_name": self.owner.name,
             "note_count": len(current_notes_list),
-            "content_nature": "scratchpad_summary"
+            "content_nature": "scratchpad_summary",
+            # FIXED: Include enhanced tools in StatusFacet current_state
+            "available_tools": enhanced_tools
         }
         
         if not container_facet_exists:
@@ -251,6 +258,13 @@ class ScratchpadVeilProducer(VeilProducer):
             facet_operations.append(FacetOperationBuilder.remove_facet(note_facet_id))
             logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] Generated remove_facet for note {note_facet_id}")
 
+        # 3. Generate tool availability ambient facets (when appropriate)
+        if self._should_emit_tools_ambient_facet():
+            tools_ambient_facet = self._create_tools_ambient_facet()
+            if tools_ambient_facet:
+                facet_operations.append(FacetOperationBuilder.add_facet(tools_ambient_facet))
+                logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] Generated structured ambient facet for scratchpad tools")
+
         # Update state after generating operations
         if not container_facet_exists and any(
             op.operation_type == "add_facet" and 
@@ -268,3 +282,107 @@ class ScratchpadVeilProducer(VeilProducer):
             logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] No scratchpad facet operations calculated")
 
         return facet_operations if facet_operations else None
+
+    # --- NEW: Enhanced Structured Ambient Facet Methods ---
+    
+    def _get_available_tools_for_element(self) -> List[str]:
+        """Get list of available tool names for this scratchpad element."""
+        from ..tool_provider import ToolProviderComponent
+
+        tool_provider = self.get_sibling_component(ToolProviderComponent)
+        if tool_provider:
+            return tool_provider.list_tools()
+        return []
+
+    def _get_enhanced_tools_for_element(self) -> List[Dict[str, Any]]:
+        """
+        Get enhanced tool definitions with complete metadata for scratchpad element.
+        
+        Returns rich tool information needed for tool aggregation and rendering.
+        """
+        from ..tool_provider import ToolProviderComponent
+
+        tool_provider = self.get_sibling_component(ToolProviderComponent)
+        if tool_provider:
+            return tool_provider.get_enhanced_tool_definitions()
+        return []
+    
+    def _should_emit_tools_ambient_facet(self) -> bool:
+        """
+        Determine whether to emit tools ambient facet for this scratchpad element.
+        
+        Returns:
+            True if tools ambient facet should be emitted
+        """
+        enhanced_tools = self._get_enhanced_tools_for_element()
+        return bool(enhanced_tools)
+    
+    def _create_tools_ambient_facet(self) -> Optional[AmbientFacet]:
+        """
+        Create enhanced AmbientFacet for available scratchpad tools with structured data.
+        
+        This creates structured data that HUD can consolidate and render appropriately,
+        rather than pre-rendered strings.
+        
+        Returns:
+            AmbientFacet with structured tool data for HUD consolidation
+        """
+        enhanced_tools = self._get_enhanced_tools_for_element()
+        if not enhanced_tools:
+            return None
+        
+        # Determine tool family for this element
+        tool_family = self._classify_tool_family(enhanced_tools)
+        
+        # Create structured content instead of pre-rendered strings
+        structured_content = {
+            "tools": enhanced_tools,
+            "element_context": self._get_element_context_metadata(),
+            "tool_family": tool_family
+        }
+        
+        ambient_facet = AmbientFacet(
+            facet_id=f"{self.owner.id}_tools_ambient",
+            owner_element_id=self.owner.id,
+            ambient_type=tool_family,  # Tool family classification for HUD grouping
+            content=structured_content,  # Structured data instead of string
+            trigger_threshold=1500  # Element-specific threshold
+        )
+        
+        # Add additional properties for HUD processing
+        ambient_facet.properties.update({
+            "data_format": "structured",
+            "tools_count": len(enhanced_tools),
+            "element_type": "scratchpad"
+        })
+        
+        return ambient_facet
+    
+    def _classify_tool_family(self, enhanced_tools: List[Dict[str, Any]]) -> str:
+        """
+        Get tool family for this scratchpad element.
+        
+        Args:
+            enhanced_tools: List of enhanced tool definitions (unused - family is element-based)
+            
+        Returns:
+            Tool family string for this element type
+        """
+        # Each element type sets its own arbitrary tool_family string
+        # Scratchpad elements use "scratchpad_tools" by default
+        return "scratchpad_tools"
+    
+    def _get_element_context_metadata(self) -> Dict[str, Any]:
+        """
+        Get element context metadata for HUD consolidation.
+        
+        Returns:
+            Dictionary with element context information
+        """
+        return {
+            "element_id": self.owner.id,
+            "element_name": self.owner.name,
+            "element_type": "scratchpad",
+            "note_count": len(self._state.get('_last_generated_notes', [])),
+            "content_nature": "scratchpad_summary"
+        }
