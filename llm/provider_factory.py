@@ -43,6 +43,9 @@ class LLMProviderFactory:
                     "LiteLLM provider requires the litellm package. "
                     "Please install it with: pip install litellm"
                 )
+        elif provider_type.lower() == "scaffolding":
+            from llm.scaffolding_provider import ScaffoldingLLMProvider
+            return ScaffoldingLLMProvider(**config)
         else:
             logger.error(f"Unsupported provider type: {provider_type}")
             raise ValueError(f"Unsupported provider type: {provider_type}")

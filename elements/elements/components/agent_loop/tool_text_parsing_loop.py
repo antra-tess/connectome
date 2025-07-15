@@ -11,7 +11,6 @@ Phase 3 of the Tool Use Refactor.
 import logging
 import json
 import re
-import time
 from typing import Dict, Any, Optional, List, Union
 from dataclasses import dataclass
 
@@ -56,7 +55,7 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
         super().__init__(parent_inner_space=parent_inner_space, agent_loop_name=agent_loop_name, **kwargs)
         # Cache for element name to element_id mapping
         self._element_name_to_id_mapping: Dict[str, str] = {}
-        logger.info(f"ToolTextParsingLoopComponent initialized for '{self.parent_inner_space.name}'")
+        logger.info(f"ToolTextParsingLoopComponent initialized for '{self.parent_inner_space.name}' (ultra-concise XML tool call format)")
 
     async def trigger_cycle(self, focus_context: Optional[Dict[str, Any]] = None):
         """
@@ -83,6 +82,9 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
             # 1. Aggregate tools and build element name mapping
             aggregated_tools = await self.aggregate_tools()
             enhanced_tools_from_veil = self._extract_enhanced_tools_from_veil()
+            logger.debug(f"Enhanced tools from VEIL: {len(enhanced_tools_from_veil)} tools")
+            for i, tool in enumerate(enhanced_tools_from_veil[:3]):  # Log first 3 tools for debugging
+                logger.debug(f"Enhanced tool {i}: keys={list(tool.keys()) if isinstance(tool, dict) else 'not_dict'}")
             self._build_element_name_mapping(enhanced_tools_from_veil)
 
             # 2. Send tools + context to HUD for rendering with aggregation
@@ -96,38 +98,39 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
                 options=pipeline_options,
                 tools=enhanced_tools_from_veil
             )
-            logger.info(f"Using full tool rendering mode for text parsing")
+            logger.info(f"Using full tool rendering mode for ultra-concise XML text parsing")
 
             if not context_data:
                 logger.warning(f"{self.agent_loop_name} ({self.id}): No context data received. Aborting cycle.")
                 return
 
-            # --- HUD automatically detects and returns appropriate format ---
-            has_multimodal_content = isinstance(context_data, dict) and 'attachments' in context_data
-            if has_multimodal_content:
-                attachment_count = len(context_data.get('attachments', []))
-                text_length = len(context_data.get('text', ''))
-                logger.info(f"HUD returned multimodal content: {text_length} chars text + {attachment_count} attachments")
-            else:
-                # Context is text-only string
-                logger.debug(f"HUD returned text-only context: {len(str(context_data))} chars")
-
-            # --- Build Message for LLM (with multimodal support) ---
-            user_message = create_multimodal_llm_message("user", context_data)
-            logger.critical(f"USER MESSAGE: {user_message.content}")
-            messages = [user_message]
-
+            # --- NEW: Process Turn-Based Context from HUD ---
+            self._log_context_format(context_data)
+            messages = self._process_context_to_messages(context_data)
+            
             # Log message details
-            if user_message.is_multimodal():
-                attachment_count = user_message.get_attachment_count()
-                text_length = len(user_message.get_text_content())
-                logger.info(f"Built multimodal message: {text_length} chars text + {attachment_count} attachments")
+            if self._is_turn_based_context(context_data):
+                logger.info(f"Built {len(messages)} turn-based messages for LLM")
+            elif self._is_multimodal_turn_based_context(context_data):
+                multimodal_info = context_data.get("multimodal_content", {})
+                attachment_count = multimodal_info.get("attachment_count", 0)
+                logger.info(f"Built {len(messages)} messages with multimodal turn-based content: {attachment_count} attachments")
             else:
-                logger.debug(f"Built text-only message: {len(user_message.get_text_content())} chars")
+                logger.warning(f"Processing legacy context format - this should not happen with new HUD")
+
+            # Log final message details for debugging
+            for i, msg in enumerate(messages):
+                if msg.is_multimodal():
+                    attachment_count = msg.get_attachment_count()
+                    text_length = len(msg.get_text_content())
+                    logger.debug(f"Message {i} ({msg.role}): {text_length} chars text + {attachment_count} attachments")
+                else:
+                    logger.debug(f"Message {i} ({msg.role}): {len(msg.get_text_content())} chars")
 
             # 3. Send rendered context to LLM (no separate tool definitions - they're in the context)
             # NOTE: We don't pass tools parameter to LLM since they're already rendered in the context
-            llm_response_obj = llm_provider.complete(messages=messages, tools=[])
+            # Pass original context data for scaffolding provider to preserve turn metadata
+            llm_response_obj = llm_provider.complete(messages=messages, tools=[], original_context_data=context_data)
 
             if not llm_response_obj:
                 logger.warning(f"{self.agent_loop_name} ({self.id}): LLM returned no response. Aborting cycle.")
@@ -135,8 +138,7 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
 
             agent_response_text = llm_response_obj.content or ""
             logger.info(f"LLM response: {len(agent_response_text)} chars")
-            logger.critical(f"LLM RESPONSE: {agent_response_text}")
-
+            
             # 4. Parse tool calls from text response
             parsed_tool_calls = self._parse_tool_calls_from_response(agent_response_text)
             logger.info(f"Parsed {len(parsed_tool_calls)} tool calls from response")
@@ -185,18 +187,26 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
         """
         try:
             self._element_name_to_id_mapping.clear()
+            logger.debug(f"Building element name mapping from {len(enhanced_tools)} enhanced tools")
             
-            for tool_def in enhanced_tools:
+            for i, tool_def in enumerate(enhanced_tools):
                 element_id = tool_def.get("target_element_id")
                 element_name = tool_def.get("element_name")
+                tool_name = tool_def.get("name", "unknown")
+                
+                logger.debug(f"Tool {i} ({tool_name}): element_id='{element_id}', element_name='{element_name}', keys={list(tool_def.keys())}")
                 
                 if element_id and element_name:
                     # Avoid overwriting if multiple tools from same element
                     if element_name not in self._element_name_to_id_mapping:
                         self._element_name_to_id_mapping[element_name] = element_id
                         logger.debug(f"Mapped element name '{element_name}' -> '{element_id}'")
+                    else:
+                        logger.debug(f"Element name '{element_name}' already mapped to '{self._element_name_to_id_mapping[element_name]}'")
+                else:
+                    logger.warning(f"Tool {tool_name} missing required metadata: element_id='{element_id}', element_name='{element_name}'")
             
-            logger.debug(f"Built element name mapping with {len(self._element_name_to_id_mapping)} entries")
+            logger.debug(f"Built element name mapping with {len(self._element_name_to_id_mapping)} entries: {self._element_name_to_id_mapping}")
             
         except Exception as e:
             logger.error(f"Error building element name mapping: {e}", exc_info=True)
@@ -205,7 +215,7 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
         """
         Parse tool calls from LLM response text.
         
-        Supports both JSON blocks and XML format as described in the refactor document.
+        Primary format is ultra-concise XML (tool names as elements), with JSON as fallback.
         
         Args:
             response_text: Raw text response from LLM
@@ -216,15 +226,16 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
         try:
             parsed_calls = []
             
-            # First try JSON blocks format (Option A from refactor doc)
-            json_calls = self._parse_json_tool_calls(response_text)
-            parsed_calls.extend(json_calls)
-            
-            # Then try XML format (Option B from refactor doc)
+            # First try XML format (Primary format - as instructed by HUD)
             xml_calls = self._parse_xml_tool_calls(response_text)
             parsed_calls.extend(xml_calls)
             
-            logger.debug(f"Parsed {len(parsed_calls)} tool calls from response")
+            # Fallback to JSON blocks format for backward compatibility
+            if not xml_calls:
+                json_calls = self._parse_json_tool_calls(response_text)
+                parsed_calls.extend(json_calls)
+            
+            logger.debug(f"Parsed {len(parsed_calls)} tool calls from response (XML: {len(xml_calls)}, JSON: {len(parsed_calls) - len(xml_calls)})")
             return parsed_calls
             
         except Exception as e:
@@ -233,10 +244,11 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
 
     def _parse_json_tool_calls(self, response_text: str) -> List[ParsedToolCall]:
         """
-        Parse JSON-format tool calls from response.
+        Parse JSON-format tool calls from response (FALLBACK FORMAT).
         
         Looks for <tool_calls> JSON blocks with format:
         [{"tool": "name", "parameters": {...}}]
+        Only used when XML parsing yields no results.
         """
         try:
             parsed_calls = []
@@ -276,49 +288,69 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
 
     def _parse_xml_tool_calls(self, response_text: str) -> List[ParsedToolCall]:
         """
-        Parse XML-format tool calls from response.
+        Parse XML-format tool calls from response (PRIMARY FORMAT).
         
-        Looks for <tool_call> XML blocks as described in the refactor document.
+        Looks for <tool_calls> blocks with ultra-concise format:
+        <tool_calls>
+        <tool_name param1="value1" target_element="element_name">
+        </tool_calls>
         """
         try:
             parsed_calls = []
             
-            # Find <tool_call> blocks
-            tool_call_pattern = r'<tool_call\s+tool="([^"]+)"[^>]*>(.*?)</tool_call>'
-            matches = re.findall(tool_call_pattern, response_text, re.DOTALL)
+            # Find <tool_calls> blocks
+            tool_calls_pattern = r'<tool_calls>(.*?)</tool_calls>'
+            tool_calls_matches = re.findall(tool_calls_pattern, response_text, re.DOTALL)
             
-            for tool_name, parameters_block in matches:
-                try:
-                    # Parse parameters from the block
-                    parameters = {}
-                    param_pattern = r'<parameter\s+name="([^"]+)"[^>]*>(.*?)</parameter>'
-                    param_matches = re.findall(param_pattern, parameters_block, re.DOTALL)
-                    
-                    for param_name, param_value in param_matches:
-                        # Try to parse as JSON, fall back to string
-                        try:
-                            parameters[param_name] = json.loads(param_value.strip())
-                        except:
-                            parameters[param_name] = param_value.strip()
-                    
-                    if tool_name:
-                        parsed_call = ParsedToolCall(
-                            tool_name=tool_name,
-                            parameters=parameters,
-                            target_element_name=parameters.get("target_element"),
-                            raw_text=f'<tool_call tool="{tool_name}">{parameters_block}</tool_call>'
-                        )
-                        parsed_calls.append(parsed_call)
-                        logger.debug(f"Parsed XML tool call: {tool_name}")
+            for tool_calls_block in tool_calls_matches:
+                # Find all XML elements within the block: <element_name attributes>
+                # This regex captures any valid XML element with attributes
+                element_pattern = r'<([a-zA-Z_][a-zA-Z0-9_]*)\s+([^>]*)>'
+                element_matches = re.findall(element_pattern, tool_calls_block)
+                
+                for tool_name, attributes_str in element_matches:
+                    try:
+                        # Parse attributes from the attributes string
+                        parameters = {}
                         
-                except Exception as e:
-                    logger.warning(f"Failed to parse XML tool call parameters: {e}")
-                    continue
+                        # Extract all attribute="value" pairs
+                        attr_pattern = r'(\w+)="([^"]*)"'
+                        attr_matches = re.findall(attr_pattern, attributes_str)
+                        
+                        for attr_name, attr_value in attr_matches:
+                            # Try to parse as JSON/number, fall back to string
+                            try:
+                                # Try parsing as number first
+                                if attr_value.isdigit():
+                                    parameters[attr_name] = int(attr_value)
+                                elif attr_value.replace('.', '').replace('-', '').isdigit():
+                                    parameters[attr_name] = float(attr_value)
+                                # Try parsing as JSON for complex types
+                                elif attr_value.startswith(('[', '{')):
+                                    parameters[attr_name] = json.loads(attr_value)
+                                else:
+                                    parameters[attr_name] = attr_value
+                            except:
+                                parameters[attr_name] = attr_value
+                        
+                        if tool_name:
+                            parsed_call = ParsedToolCall(
+                                tool_name=tool_name,
+                                parameters=parameters,
+                                target_element_name=parameters.get("target_element"),
+                                raw_text=f'<{tool_name} {attributes_str}>'
+                            )
+                            parsed_calls.append(parsed_call)
+                            logger.info(f"Parsed ultra-concise XML tool call: {tool_name} with params: {list(parameters.keys())}")
+                            
+                    except Exception as e:
+                        logger.warning(f"Failed to parse ultra-concise XML tool call '{tool_name}': {e}")
+                        continue
             
             return parsed_calls
             
         except Exception as e:
-            logger.error(f"Error parsing XML tool calls: {e}", exc_info=True)
+            logger.error(f"Error parsing ultra-concise XML tool calls: {e}", exc_info=True)
             return []
 
     def _resolve_target_element_names(self, tool_calls: List[ParsedToolCall]) -> List[ParsedToolCall]:
@@ -341,19 +373,21 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
                     target_element_name=tool_call.target_element_name,
                     raw_text=tool_call.raw_text
                 )
-                
                 # Resolve target_element name to element_id
                 if tool_call.target_element_name:
+                    # FIXED: Always remove target_element parameter to prevent it from being passed to tools
+                    if "target_element" in resolved_call.parameters:
+                        logger.debug(f"Removing 'target_element' parameter from {tool_call.tool_name} tool call. Before: {resolved_call.parameters}")
+                        del resolved_call.parameters["target_element"]
+                        logger.debug(f"After removal: {resolved_call.parameters}")
+                    
                     element_id = self._element_name_to_id_mapping.get(tool_call.target_element_name)
                     if element_id:
-                        # Remove target_element from parameters and store element_id separately
-                        if "target_element" in resolved_call.parameters:
-                            del resolved_call.parameters["target_element"]
                         resolved_call.target_element_id = element_id
                         logger.debug(f"Resolved '{tool_call.target_element_name}' -> '{element_id}'")
                     else:
-                        logger.warning(f"Could not resolve target element name '{tool_call.target_element_name}'")
-                        # Keep the original call but mark as unresolved
+                        logger.warning(f"Could not resolve target element name '{tool_call.target_element_name}' - will use fallback routing")
+                        # Mark as unresolved but still remove the target_element parameter
                         resolved_call.target_element_id = None
                 else:
                     # No target element specified, will use default resolution
@@ -391,6 +425,7 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
 
             # Execute tool
             calling_context = {"loop_component_id": self.id, "parsing_mode": "text"}
+            logger.debug(f"Executing tool '{tool_call.tool_name}' on element '{target_element_id}' with parameters: {tool_call.parameters}")
             tool_result = await self.parent_inner_space.execute_action_on_element(
                 element_id=target_element_id,
                 action_name=tool_call.tool_name,
@@ -424,10 +459,10 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
         try:
             cleaned_text = response_text
             
-            # Remove <tool_calls> JSON blocks
+            # Remove <tool_calls> XML blocks (ultra-concise format)
             cleaned_text = re.sub(r'<tool_calls>.*?</tool_calls>', '', cleaned_text, flags=re.DOTALL)
             
-            # Remove <tool_call> XML blocks
+            # Remove old-style <tool_call> XML blocks (backward compatibility)
             cleaned_text = re.sub(r'<tool_call\s+[^>]*>.*?</tool_call>', '', cleaned_text, flags=re.DOTALL)
             
             # Clean up extra whitespace
@@ -475,45 +510,45 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
 
     async def _emit_agent_response_delta(self, agent_response_text: str, tool_calls: List[ParsedToolCall]) -> None:
         """
-        Emit a VEIL delta containing the agent's response for chronological rendering.
+        Emit agent response via SpaceVeilProducer for centralized, reusable VEILFacet Event creation.
         
         Args:
             agent_response_text: The agent's full text response from LLM
             tool_calls: List of parsed tool calls
         """
         try:
-            current_time = time.time()
+            # Get the SpaceVeilProducer for centralized agent response emission
+            space_veil_producer = self._get_space_veil_producer()
+            if not space_veil_producer:
+                logger.error(f"{self.agent_loop_name} ({self.id}): No SpaceVeilProducer available for agent response emission")
+                return
             
-            # Create unique VEIL ID for this agent response
-            response_veil_id = f"agent_response_{self.parent_inner_space.id}_{int(current_time * 1000)}"
-            
-            # Build agent response delta
-            agent_response_delta = {
-                "op": "add_node",
-                "node": {
-                    "veil_id": response_veil_id,
-                    "node_type": "agent_response",
-                    "properties": {
-                        "structural_role": "list_item",
-                        "content_nature": "agent_response",
-                        "agent_response_text": agent_response_text,
-                        "tool_calls_count": len(tool_calls),
-                        "has_tool_calls": len(tool_calls) > 0,
-                        "agent_name": getattr(self.parent_inner_space, 'agent_name', 'Agent'),
-                        "agent_loop_component_id": self.id,
-                        "timestamp": current_time,
-                        "parsing_mode": "text",  # Distinguish from tool_call API mode
-                        # Add operation index for chronological ordering
-                        "operation_index": int(current_time * 1000)
-                    }
+            # Convert ParsedToolCall objects to dictionaries
+            tool_calls_data = []
+            for tool_call in tool_calls:
+                tool_call_dict = {
+                    "tool_name": tool_call.tool_name,
+                    "parameters": tool_call.parameters,
+                    "target_element_name": tool_call.target_element_name,
+                    "raw_text": tool_call.raw_text
                 }
-            }
+                if hasattr(tool_call, 'target_element_id'):
+                    tool_call_dict["target_element_id"] = tool_call.target_element_id
+                tool_calls_data.append(tool_call_dict)
             
-            # Add owner tracking to the delta
-            if self.parent_inner_space:
-                agent_response_delta["node"]["properties"]["owner_element_id"] = self.parent_inner_space.id
+            # Use centralized agent response emission
+            response_id = space_veil_producer.emit_agent_response(
+                agent_response_text=agent_response_text,
+                tool_calls_data=tool_calls_data,
+                agent_loop_component_id=self.id,
+                parsing_mode="text",
+                links_to=None  # Could link to conversation container if available
+            )
             
-            self.parent_inner_space.receive_delta([agent_response_delta])
+            if response_id:
+                logger.debug(f"Successfully emitted agent response {response_id} via SpaceVeilProducer with {len(tool_calls)} tool calls")
+            else:
+                logger.warning(f"Failed to emit agent response via SpaceVeilProducer")
                 
         except Exception as e:
-            logger.error(f"Error emitting agent response delta: {e}", exc_info=True) 
+            logger.error(f"Error emitting agent response via SpaceVeilProducer: {e}", exc_info=True)

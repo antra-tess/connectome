@@ -121,12 +121,8 @@ class Space(BaseElement):
             self.add_component(ChatManagerComponent)
             
         # assert  False, self._element_factory
-        # NEW: Initialize uplink listeners set and delta cache
-        self._uplink_listeners: Set[Callable[[List[Dict[str, Any]]], None]] = set()
-        self._cached_deltas: List[Dict[str, Any]] = []
-        
-        # NEW: For accumulating deltas from children in the "emit on change" model
-        self._deltas_accumulated_this_frame: List[Dict[str, Any]] = []
+        # NEW: Initialize uplink listeners set for VEILFacet operations
+        self._uplink_listeners: Set[Callable[[List], None]] = set()  # Now handles VEILFacetOperations
         self._ensure_own_veil_presence_initialized()
         
         if not self._container or not self._timeline:
@@ -474,15 +470,15 @@ class Space(BaseElement):
         # --- End handle action_request_for_remote ---
 
     # NEW methods for listener registration
-    def register_uplink_listener(self, callback: Callable[[List[Dict[str, Any]]], None]):
-        """Registers a callback function to be notified when new VEIL deltas are generated."""
+    def register_uplink_listener(self, callback: Callable[[List], None]):
+        """Registers a callback function to be notified when new VEILFacet operations are generated."""
         if callable(callback):
             self._uplink_listeners.add(callback)
             logger.debug(f"[{self.id}] Registered uplink listener: {callback}")
         else:
             logger.warning(f"[{self.id}] Attempted to register non-callable uplink listener: {callback}")
 
-    def unregister_uplink_listener(self, callback: Callable[[List[Dict[str, Any]]], None]):
+    def unregister_uplink_listener(self, callback: Callable[[List], None]):
         """Unregisters a previously registered uplink listener callback."""
         self._uplink_listeners.discard(callback)
         logger.debug(f"[{self.id}] Unregistered uplink listener: {callback}")
@@ -491,39 +487,41 @@ class Space(BaseElement):
     def on_frame_end(self) -> None:
         """
         Called by the HostEventLoop (or owning Space) after its processing frame.
-        In the new "emit on change" model:
-        1. Triggers its own SpaceVeilProducer to emit deltas (which will be cached via receive_delta).
-        2. Sends all deltas accumulated in _deltas_accumulated_this_frame to uplink listeners.
+        In the new VEILFacet model:
+        1. Triggers its own SpaceVeilProducer to emit VEILFacet operations.
+        2. Sends accumulated VEILFacet operations to uplink listeners.
         """
-        # 1. Trigger this Space's own VeilProducer to emit its delta
-        # This ensures the Space's own root node state is up-to-date in the cache and accumulated deltas.
+        # 1. Trigger this Space's own VeilProducer to emit VEILFacet operations
         if not self.IS_UPLINK_SPACE and self._veil_producer and hasattr(self._veil_producer, 'emit_delta'):
             try:
                 logger.debug(f"[{self.id}] on_frame_end: Triggering emit_delta for own SpaceVeilProducer.")
-                self._veil_producer.emit_delta() # This will call calculate_delta and then self.receive_delta
+                self._veil_producer.emit_delta()  # This calls calculate_delta and then self.receive_delta
             except Exception as e:
                 logger.error(f"[{self.id}] on_frame_end: Error triggering emit_delta for SpaceVeilProducer: {e}", exc_info=True)
 
-        # 2. Send accumulated deltas to listeners
-        if self._deltas_accumulated_this_frame:
-            logger.debug(f"[{self.id}] on_frame_end: Sending {len(self._deltas_accumulated_this_frame)} accumulated deltas to {len(self._uplink_listeners)} listeners.")
-            
-            # Create a copy for sending, as listeners might modify it or processing might take time.
-            deltas_to_send = list(self._deltas_accumulated_this_frame) 
-            
-            all_listeners_notified_successfully = True
-            for listener_callback in self._uplink_listeners:
-                try:
-                    listener_callback(deltas_to_send)
-                except Exception as e:
-                    all_listeners_notified_successfully = False
-                    logger.error(f"[{self.id}] Error calling uplink listener {listener_callback}: {e}", exc_info=True)
-            
-            # Clear the accumulated deltas for the next frame, regardless of listener success for now.
-            # If listener success is critical for not clearing, that logic would be more complex (e.g., retry, dead-letter queue for deltas).
-            self._deltas_accumulated_this_frame.clear()
-        else:
-            logger.debug(f"[{self.id}] on_frame_end: No accumulated deltas to send.")
+        # 2. Send accumulated VEILFacet operations to listeners
+        if not self.IS_UPLINK_SPACE and self._veil_producer:
+            try:
+                accumulated_operations = self._veil_producer.get_accumulated_facet_operations()
+                
+                if accumulated_operations:
+                    logger.debug(f"[{self.id}] on_frame_end: Sending {len(accumulated_operations)} accumulated VEILFacet operations to {len(self._uplink_listeners)} listeners.")
+                    
+                    # Create a copy for sending
+                    operations_to_send = list(accumulated_operations)
+                    
+                    all_listeners_notified_successfully = True
+                    for listener_callback in self._uplink_listeners:
+                        try:
+                            listener_callback(operations_to_send)
+                        except Exception as e:
+                            all_listeners_notified_successfully = False
+                            logger.error(f"[{self.id}] Error calling uplink listener {listener_callback}: {e}", exc_info=True)
+                else:
+                    logger.debug(f"[{self.id}] on_frame_end: No accumulated VEILFacet operations to send.")
+                    
+            except Exception as e:
+                logger.error(f"[{self.id}] on_frame_end: Error processing accumulated VEILFacet operations: {e}", exc_info=True)
             
     # --- Uplink Support Methods ---
     def get_space_metadata_for_uplink(self) -> Dict[str, Any]:
@@ -633,108 +631,83 @@ class Space(BaseElement):
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(id={self.id}, name={self.name}, description={self.description})"
 
-    # Optional: Method for listeners to pull cached deltas if needed
-    def get_cached_deltas(self) -> List[Dict[str, Any]]:
-        """Returns the VEIL deltas calculated in the last frame."""
-        # Consider clearing cache after retrieval? Or timestamping?
-        return list(self._cached_deltas) # Return a copy
+    # Optional: Method for listeners to pull cached VEILFacet operations if needed
+    def get_cached_facet_operations(self) -> List:
+        """Returns the VEILFacet operations calculated in the last frame."""
+        if self._veil_producer:
+            return self._veil_producer.get_accumulated_facet_operations()
+        return []
 
-    def receive_delta(self, delta_operations: List[Dict[str, Any]]) -> None:
+    def receive_delta(self, facet_operations: List) -> None:
         """
-        ARCHITECTURAL REQUIREMENT: Space continues to receive deltas from external systems.
-        SIMPLIFIED PROCESSING: Delegate all VEIL operations to SpaceVeilProducer.
+        NEW: Pure VEILFacet operation processing.
         
-        Space maintains its role as the delta receiver but delegates processing.
+        Space now only handles VEILFacetOperations from child producers.
+        All legacy delta operation complexity has been removed.
+        
+        Args:
+            facet_operations: List of VEILFacetOperation instances from child producers
         """
-        if not isinstance(delta_operations, list) or not delta_operations:
-            logger.debug(f"[{self.id}] Space.receive_delta called with no valid delta operations.")
+        if not isinstance(facet_operations, list) or not facet_operations:
+            logger.debug(f"[{self.id}] Space.receive_delta called with no valid facet operations.")
             return
 
-        logger.debug(f"[{self.id}] Space.receive_delta: Received {len(delta_operations)} operations, delegating to SpaceVeilProducer.")
+        # Validate that these are VEILFacetOperation instances
+        if not (facet_operations and hasattr(facet_operations[0], 'operation_type')):
+            logger.error(f"[{self.id}] Space.receive_delta received non-VEILFacetOperation objects. Legacy deltas are no longer supported.")
+            return
 
-        # STEP 1: Delegate all VEIL processing to SpaceVeilProducer
+        logger.debug(f"[{self.id}] Space.receive_delta: Received {len(facet_operations)} VEILFacetOperations, routing to SpaceVeilProducer.")
+
+        # Route VEILFacetOperations to SpaceVeilProducer
         veil_producer = self._veil_producer
         if veil_producer:
-            # Use asyncio to handle the async method call
             import asyncio
             try:
-                # Try to call the async method
-                if asyncio.iscoroutinefunction(veil_producer.receive_delta_operations):
-                    # Create a task to run the async method
-                    asyncio.create_task(veil_producer.receive_delta_operations(delta_operations))
+                if asyncio.iscoroutinefunction(veil_producer.receive_facet_operations):
+                    asyncio.create_task(veil_producer.receive_facet_operations(facet_operations))
                 else:
-                    # If it's not async, call it directly
-                    veil_producer.receive_delta_operations(delta_operations)
+                    veil_producer.receive_facet_operations(facet_operations)
             except Exception as e:
-                logger.error(f"[{self.id}] Error delegating to SpaceVeilProducer: {e}", exc_info=True)
+                logger.error(f"[{self.id}] Error delegating VEILFacetOperations to SpaceVeilProducer: {e}", exc_info=True)
         else:
-            logger.error(f"{delta_operations}")
-            logger.error(f"[{self.id}] SpaceVeilProducer not available for delta processing")
-        
-        # STEP 2: Continue with other Space-specific logic
-        # - Timeline event recording (high-level events only)
-        # - Space-level state management (non-VEIL)
-        # - Component coordination
-        
-        # STEP 3: Accumulate for frame-end processing coordination
-        self._deltas_accumulated_this_frame.extend(delta_operations)
-        logger.debug(f"[{self.id}] Space.receive_delta: Added {len(delta_operations)} operations to _deltas_accumulated_this_frame. Total accumulated: {len(self._deltas_accumulated_this_frame)}")
+            logger.error(f"[{self.id}] SpaceVeilProducer not available for facet operation processing")
 
-        # Optional: Record an event to the timeline (as before, but maybe less critical now that cache is updated)
-        # This might be too noisy if every producer emitting causes an event here.
-        # Consider if this specific event is still needed or if the cache changes are sufficient.
-        # For now, let's keep it to see its utility.
+        # Record VEILFacet operation event to timeline
         event_payload = {
-            "event_type": "veil_delta_operations_received_by_space", 
+            "event_type": "veil_facet_operations_received_by_space", 
             "payload": { 
-                "source": "child_producer_emission", # Indicates source
-                "delta_operation_count": len(delta_operations)
+                "source": "child_producer_emission",
+                "facet_operation_count": len(facet_operations),
+                "operation_types": [op.operation_type for op in facet_operations[:5]]  # Sample first 5 for logging
             }
         }
-        timeline_context = {} # TODO: ensure this gets proper context from caller if needed
+        timeline_context = {}
         primary_timeline = self.get_primary_timeline()
         if primary_timeline:
             timeline_context['timeline_id'] = primary_timeline
         try:
-            self.add_event_to_timeline(event_payload, timeline_context) # Commented out to reduce noise, can be re-enabled if useful for debugging.
+            self.add_event_to_timeline(event_payload, timeline_context)
         except Exception as e:
             logger.error(f"[{self.id}] Space.receive_delta: Error adding event to timeline: {e}", exc_info=True)
 
-    def get_flat_veil_snapshot(self) -> Dict[str, Any]:
+    # REMOVED: get_flat_veil_snapshot(), get_flat_veil_cache_snapshot() 
+    # Flat cache methods removed after VEILFacet architecture completion
+    # Use get_facet_cache_snapshot() for native VEILFacet access
+
+    def get_facet_cache_snapshot(self) -> 'VEILFacetCache':
         """
-        UPDATED: Get flat VEIL cache via SpaceVeilProducer.
+        NEW: Get VEILFacetCache snapshot directly.
+        
+        Returns:
+            Copy of the VEILFacetCache from SpaceVeilProducer
         """
         veil_producer = self._veil_producer
         if veil_producer:
-            return veil_producer.get_flat_veil_cache()
-        logger.warning(f"[{self.id}] Cannot get flat VEIL snapshot: SpaceVeilProducer not available")
-        return {}
-
-    def get_flat_veil_cache_snapshot(self) -> Dict[str, Any]:
-        """
-        UPDATED: Get flat VEIL cache snapshot via SpaceVeilProducer.
-        """
-        return self.get_flat_veil_snapshot()
-
-    async def get_flat_veil_cache_at_delta_index(self, delta_index: int) -> Optional[Dict[str, Any]]:
-        """
-        NEW: Get flat VEIL cache at specific point in history via SpaceVeilProducer.
-        """
-        veil_producer = self._veil_producer
-        if veil_producer:
-            return await veil_producer.reconstruct_veil_state_at_delta_index(delta_index)
-        return None
-
-    async def get_temporal_context_for_compression(self, element_id: str, memory_formation_index: int) -> str:
-        """
-        NEW: Get temporally consistent context for memory compression.
-        """
-        veil_producer = self._veil_producer
-        if veil_producer:
-            return await veil_producer.render_temporal_context_for_compression(
-                element_id, memory_formation_index
-            )
-        return ""
+            return veil_producer.get_facet_cache_copy()
+        logger.warning(f"[{self.id}] Cannot get VEILFacetCache snapshot: SpaceVeilProducer not available")
+        from ..components.veil import VEILFacetCache
+        return VEILFacetCache()  # Return empty cache
 
     # --- Action Execution --- 
     async def execute_action_on_element(self, element_id: str, action_name: str, parameters: Dict[str, Any], calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -963,7 +936,7 @@ class Space(BaseElement):
             
             # Clear the existing VEIL cache to force regeneration
             if self._veil_producer:
-                self._veil_producer.clear_flat_veil_cache()
+                self._veil_producer.clear_facet_cache()
             
             # Ensure own VEIL presence is initialized
             self._ensure_own_veil_presence_initialized()
@@ -1010,7 +983,7 @@ class Space(BaseElement):
             if hasattr(self, 'on_frame_end') and callable(self.on_frame_end):
                 self.on_frame_end()
                 
-            cache_size = self._veil_producer.get_flat_veil_cache_size() if self._veil_producer else 0
+            cache_size = self._veil_producer.get_facet_cache_size() if self._veil_producer else 0
             logger.info(f"[{self.id}] VEIL state regeneration completed. Cache size: {cache_size}")
             return True
             
@@ -1270,7 +1243,7 @@ class Space(BaseElement):
             success = await self._timeline._storage.store_system_state(storage_key, snapshot_data)
             
             if success:
-                cache_size = self._veil_producer.get_flat_veil_cache_size() if self._veil_producer else 0
+                cache_size = self._veil_producer.get_facet_cache_size() if self._veil_producer else 0
                 logger.info(f"[{self.id}] VEIL snapshot stored successfully. Cache size: {cache_size}")
             else:
                 logger.error(f"[{self.id}] Failed to store VEIL snapshot")
@@ -1544,22 +1517,22 @@ class Space(BaseElement):
             logger.warning(f"[{self.id}] Cannot provide VEIL cache snapshot: SpaceVeilProducer not available")
             return {}
     
-    def get_veil_nodes_by_owner(self, owner_id: str) -> Dict[str, Any]:
+    def get_facets_by_owner(self, owner_id: str) -> Dict[str, 'VEILFacet']:
         """
-        Get all VEIL nodes belonging to a specific owner element.
+        Get all VEILFacets belonging to a specific owner element.
         
-        This enables efficient granular access without full VEIL tree reconstruction.
+        This enables efficient granular access to facets by owner.
         
         Args:
             owner_id: Element ID to filter by
             
         Returns:
-            Dictionary of {veil_id: veil_node} for nodes owned by the specified element
+            Dictionary of {facet_id: VEILFacet} for facets owned by the specified element
         """
         if self._veil_producer:
-            return self._veil_producer.get_veil_nodes_by_owner(owner_id)
+            return self._veil_producer.get_facets_by_owner(owner_id)
         else:
-            logger.warning(f"[{self.id}] Cannot filter VEIL nodes by owner: SpaceVeilProducer not available")
+            logger.warning(f"[{self.id}] Cannot filter VEILFacets by owner: SpaceVeilProducer not available")
             return {}
     
     def get_veil_nodes_by_type(self, node_type: str, owner_id: Optional[str] = None) -> Dict[str, Any]:

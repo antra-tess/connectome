@@ -129,8 +129,17 @@ class LiteLLMProvider(LLMProvider):
             if litellm_functions:
                 params["tools"] = litellm_functions
             
-            # Add any additional kwargs
-            params.update(kwargs)
+            # Add any additional kwargs, but filter out scaffolding-specific parameters
+            # that are not meant for the underlying LLM provider
+            scaffolding_params = {'original_context_data'}
+            filtered_kwargs = {k: v for k, v in kwargs.items() if k not in scaffolding_params}
+            
+            # Log filtered parameters for debugging
+            if scaffolding_params.intersection(kwargs.keys()):
+                filtered_out = scaffolding_params.intersection(kwargs.keys())
+                self.logger.debug(f"Filtered out scaffolding-specific parameters: {filtered_out}")
+            
+            params.update(filtered_kwargs)
             
             try:
                 # Add request data to the span

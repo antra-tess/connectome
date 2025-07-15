@@ -71,35 +71,33 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
                 logger.warning(f"{self.agent_loop_name} ({self.id}): No context data received. Aborting cycle.")
                 return
 
-            # --- HUD automatically detects and returns appropriate format ---
-            has_multimodal_content = isinstance(context_data, dict) and 'attachments' in context_data
-            if has_multimodal_content:
-                attachment_count = len(context_data.get('attachments', []))
-                text_length = len(context_data.get('text', ''))
-                logger.info(f"HUD returned multimodal content: {text_length} chars text + {attachment_count} attachments")
-            else:
-                # Context is text-only string
-                logger.debug(f"HUD returned text-only context: {len(str(context_data))} chars")
-
-
-            # --- Build Message for LLM (with multimodal support) ---
-            user_message = create_multimodal_llm_message("user", context_data)
-            logger.critical(f"USER MESSAGE: {user_message}")
-            messages = [user_message]
-
+            # --- NEW: Process Turn-Based Context from HUD ---
+            self._log_context_format(context_data)
+            messages = self._process_context_to_messages(context_data)
+            
             # Log message details
-            if user_message.is_multimodal():
-                attachment_count = user_message.get_attachment_count()
-                text_length = len(user_message.get_text_content())
-                logger.info(f"Built multimodal message: {text_length} chars text + {attachment_count} attachments")
+            if self._is_turn_based_context(context_data):
+                logger.info(f"Built {len(messages)} turn-based messages for LLM")
+            elif self._is_multimodal_turn_based_context(context_data):
+                multimodal_info = context_data.get("multimodal_content", {})
+                attachment_count = multimodal_info.get("attachment_count", 0)
+                logger.info(f"Built {len(messages)} messages with multimodal turn-based content: {attachment_count} attachments")
             else:
-                logger.debug(f"Built text-only message: {len(user_message.get_text_content())} chars")
+                logger.warning(f"Processing legacy context format - this should not happen with new HUD")
 
-            # --- Get Available Tools ---
+            # Log final message details for debugging
+            for i, msg in enumerate(messages):
+                if msg.is_multimodal():
+                    attachment_count = msg.get_attachment_count()
+                    text_length = len(msg.get_text_content())
+                    logger.debug(f"Message {i} ({msg.role}): {text_length} chars text + {attachment_count} attachments")
+                else:
+                    logger.debug(f"Message {i} ({msg.role}): {len(msg.get_text_content())} chars")
+
+            # Get aggregated tools and send to LLM
             aggregated_tools = await self.aggregate_tools()
-
-            # --- Send to LLM ---
-            llm_response_obj = llm_provider.complete(messages=messages, tools=aggregated_tools)
+            # Pass original context data for scaffolding provider to preserve turn metadata
+            llm_response_obj = llm_provider.complete(messages=messages, tools=aggregated_tools, original_context_data=context_data)
 
             if not llm_response_obj:
                 logger.warning(f"{self.agent_loop_name} ({self.id}): LLM returned no response. Aborting cycle.")

@@ -17,12 +17,29 @@ from llm.provider_interface import LLMMessage
 from llm.provider_interface import LLMToolDefinition, LLMToolCall, LLMResponse
 from ...components.tool_provider import ToolProviderComponent
 from elements.elements.components.uplink.remote_tool_provider import UplinkRemoteToolProviderComponent
-from elements.elements.components.compression_engine_component import CompressionEngineComponent  # NEW: Import CompressionEngine
+from elements.elements.components.veil_facet_compression_engine import VEILFacetCompressionEngine  # NEW: Import VEILFacet CompressionEngine
+from elements.elements.components.veil import VEILFacetType  # NEW: Import VEILFacetType for facet filtering
+
+# NEW: Import turn-based message utilities
+from .utils import create_multimodal_llm_message
+
+# NEW: Turn-based messaging configuration
+TURN_BASED_CONFIG = {
+    "max_turn_length": 4000,  # Max characters per turn
+    "default_ambient_threshold_chars": 2000,  # Default re-render ambient every N characters
+    "status_repetition_enabled": True,
+    "focused_element_status_every_turn": True,
+    "include_turn_metadata": True,
+    # Per-facet ambient thresholds (can override default)
+    "ambient_facet_thresholds": {
+        "tool_instructions": 1500,  # Tools need frequent updates
+        "general_instructions": 3000,  # General instructions less frequent
+    }
+}
 
 if TYPE_CHECKING:
     from ...inner_space import InnerSpace
     from llm.provider_interface import LLMProvider
-    from ...components.hud.hud_component import HUDComponent # Assuming HUDComponent is in .components.hud
     from host.event_loop import OutgoingActionCallback
 
 
@@ -191,10 +208,10 @@ class BaseAgentLoopComponent(Component):
             self._outgoing_action_callback = self.parent_inner_space._outgoing_action_callback
         return self._outgoing_action_callback
 
-    def _get_compression_engine(self) -> Optional[CompressionEngineComponent]:
-        """Get the CompressionEngineComponent from parent InnerSpace."""
+    def _get_compression_engine(self) -> Optional[VEILFacetCompressionEngine]:
+        """Get the VEILFacetCompressionEngine from parent InnerSpace."""
         if not hasattr(self, '_compression_engine'):
-            self._compression_engine = self.get_sibling_component(CompressionEngineComponent)
+            self._compression_engine = self.get_sibling_component("VEILFacetCompressionEngine")
         return self._compression_engine
 
     def _create_short_element_prefix(self, element_id: str) -> str:
@@ -465,10 +482,10 @@ class BaseAgentLoopComponent(Component):
 
     def _extract_enhanced_tools_from_veil(self) -> List[Dict[str, Any]]:
         """
-        NEW: Extract enhanced tool definitions from VEIL for Phase 2 integration.
+        NEW: Extract enhanced tool definitions from VEILFacetCache for Phase 2 integration.
         
-        This method gets enhanced tool metadata from the VEIL structure that was
-        populated during Phase 1 VEIL enhancement.
+        This method gets enhanced tool metadata from StatusFacets that represent
+        container creation events with available_tools metadata.
         
         Returns:
             List of enhanced tool definitions with complete metadata
@@ -481,34 +498,216 @@ class BaseAgentLoopComponent(Component):
                 logger.debug(f"No HUD available for extracting enhanced tools from VEIL")
                 return []
             
-            # Get flat VEIL cache from HUD
-            flat_veil_cache = hud.get_flat_veil_cache_via_producer()
-            if not flat_veil_cache:
-                logger.debug(f"No flat VEIL cache available for enhanced tool extraction")
+            # Get VEILFacetCache directly from SpaceVeilProducer via HUD
+            veil_producer = hud._get_space_veil_producer()
+            if not veil_producer:
+                logger.debug(f"No SpaceVeilProducer available for enhanced tool extraction")
+                return []
+                
+            facet_cache = veil_producer.get_facet_cache()
+            if not facet_cache:
+                logger.debug(f"No VEILFacetCache available for enhanced tool extraction")
                 return []
             
-            # Extract enhanced tools from VEIL nodes
-            for veil_id, veil_node in flat_veil_cache.items():
-                if not isinstance(veil_node, dict):
-                    continue
-                
-                properties = veil_node.get("properties", {})
-                
-                # Look for enhanced tool definitions in container nodes
-                if properties.get("structural_role") == "container":
-                    veil_enhanced_tools = properties.get("available_tools", [])
-                    if isinstance(veil_enhanced_tools, list) and veil_enhanced_tools:
-                        # Check if these are enhanced tool definitions (not just names)
-                        for tool in veil_enhanced_tools:
-                            if isinstance(tool, dict) and "name" in tool and "parameters" in tool:
-                                enhanced_tools.append(tool)
+            # Extract enhanced tools from StatusFacets representing container creation
+            for facet in facet_cache.facets.values():
+                if facet.facet_type == VEILFacetType.STATUS:  # StatusFacet
+                    # Look for container creation status facets
+                    logger.critical(f"Facet: {facet}")
+                    logger.critical(f"Facet dict: {facet.to_veil_dict()}")
+                    if facet.get_property("status_type") == "container_created":
+                        current_state = facet.get_property("current_state")
+                        if isinstance(current_state, dict):
+                            # Extract element metadata from the status facet
+                            element_id = current_state.get("element_id")
+                            element_name = current_state.get("element_name") or current_state.get("conversation_name")
+                            
+                            # Extract available_tools from current_state
+                            available_tools = current_state.get("available_tools", [])
+                            if isinstance(available_tools, list) and available_tools:
+                                # Check if these are enhanced tool definitions (not just names)
+                                for tool in available_tools:
+                                    if isinstance(tool, dict) and "name" in tool and "parameters" in tool:
+                                        # FIXED: Add element metadata to each tool
+                                        enhanced_tool = dict(tool)  # Copy the tool
+                                        enhanced_tool["target_element_id"] = element_id
+                                        enhanced_tool["element_name"] = element_name
+                                        enhanced_tools.append(enhanced_tool)
+                                        
+                    # Also check general status facets with available_tools in properties
+                    elif facet.properties:
+                        properties = facet.properties
+                        if isinstance(properties, dict):
+                            # Extract element metadata from properties
+                            element_id = properties.get("element_id")
+                            element_name = properties.get("element_name") or properties.get("conversation_name")
+                            
+                            available_tools = properties.get("available_tools", [])
+                            if isinstance(available_tools, list) and available_tools:
+                                for tool in available_tools:
+                                    if isinstance(tool, dict) and "name" in tool and "parameters" in tool:
+                                        # FIXED: Add element metadata to each tool
+                                        enhanced_tool = dict(tool)  # Copy the tool
+                                        enhanced_tool["target_element_id"] = element_id
+                                        enhanced_tool["element_name"] = element_name
+                                        enhanced_tools.append(enhanced_tool)
             
-            logger.debug(f"Extracted {len(enhanced_tools)} enhanced tools from VEIL")
+            logger.debug(f"Extracted {len(enhanced_tools)} enhanced tools from VEILFacetCache")
+            
+            # Debug logging to help troubleshoot
+            if not enhanced_tools:
+                logger.warning(f"No enhanced tools extracted from VEILFacetCache. Checking facet count...")
+                total_facets = len(facet_cache.facets) if facet_cache and facet_cache.facets else 0
+                status_facets = sum(1 for f in facet_cache.facets.values() if f.facet_type == VEILFacetType.STATUS) if facet_cache and facet_cache.facets else 0
+                logger.warning(f"Total facets: {total_facets}, Status facets: {status_facets}")
+            else:
+                logger.debug(f"Sample enhanced tool: {enhanced_tools[0] if enhanced_tools else 'none'}")
+            
             return enhanced_tools
             
         except Exception as e:
-            logger.error(f"Error extracting enhanced tools from VEIL: {e}", exc_info=True)
+            logger.error(f"Error extracting enhanced tools from VEILFacetCache: {e}", exc_info=True)
             return []
+
+    # --- NEW: Turn-Based Message Processing Utilities ---
+    
+    def _is_turn_based_context(self, context_data: Union[str, Dict[str, Any], List[Dict[str, Any]]]) -> bool:
+        """
+        Check if context data is in turn-based format.
+        
+        Args:
+            context_data: Context from HUD
+            
+        Returns:
+            True if context is turn-based message array, False otherwise
+        """
+        return isinstance(context_data, list) and all(
+            isinstance(item, dict) and "role" in item and "content" in item 
+            for item in context_data
+        )
+    
+    def _is_multimodal_turn_based_context(self, context_data: Union[str, Dict[str, Any], List[Dict[str, Any]]]) -> bool:
+        """
+        Check if context data contains multimodal turn-based content.
+        
+        Args:
+            context_data: Context from HUD
+            
+        Returns:
+            True if context contains multimodal turn-based data, False otherwise
+        """
+        if isinstance(context_data, dict):
+            return 'messages' in context_data and 'multimodal_content' in context_data
+        return False
+    
+    def _build_messages_from_turn_based_context(self, context_data: List[Dict[str, Any]]) -> List[LLMMessage]:
+        """
+        Convert turn-based context to LLM messages.
+        
+        Args:
+            context_data: Turn-based message array from HUD
+            
+        Returns:
+            List of LLMMessage objects for LLM provider
+        """
+        messages = []
+        
+        for turn_data in context_data:
+            role = turn_data.get("role", "user")
+            content = turn_data.get("content", "")
+            
+            # Create LLM message using existing utility
+            message = create_multimodal_llm_message(role, content)
+            messages.append(message)
+            
+        logger.debug(f"Built {len(messages)} messages from turn-based context")
+        return messages
+    
+    def _build_messages_from_multimodal_turn_based_context(self, context_data: Dict[str, Any]) -> List[LLMMessage]:
+        """
+        Convert multimodal context with turn-based messages to LLM messages.
+        
+        Args:
+            context_data: Multimodal context dict with 'messages' array
+            
+        Returns:
+            List of LLMMessage objects for LLM provider
+        """
+        turn_messages = context_data.get("messages", [])
+        messages = []
+        
+        for turn_data in turn_messages:
+            role = turn_data.get("role", "user")
+            content = turn_data.get("content", "")
+            
+            # For multimodal content, we may need to handle attachments
+            # The create_multimodal_llm_message should handle this
+            message = create_multimodal_llm_message(role, content)
+            messages.append(message)
+            
+        logger.debug(f"Built {len(messages)} messages from multimodal turn-based context")
+        return messages
+    
+    def _process_context_to_messages(self, context_data: Union[str, Dict[str, Any], List[Dict[str, Any]]]) -> List[LLMMessage]:
+        """
+        Universal context processor that handles all context formats.
+        
+        This method processes the new turn-based format from HUD and converts it to LLM messages.
+        
+        Args:
+            context_data: Context from HUD in turn-based format
+            
+        Returns:
+            List of LLMMessage objects for LLM provider
+        """
+        try:
+            if self._is_turn_based_context(context_data):
+                # New turn-based format from HUD
+                return self._build_messages_from_turn_based_context(context_data)
+            
+            elif self._is_multimodal_turn_based_context(context_data):
+                # Multimodal format with turn-based messages
+                return self._build_messages_from_multimodal_turn_based_context(context_data)
+                
+        except Exception as e:
+            logger.error(f"Error processing context to messages: {e}", exc_info=True)
+            # Fallback: treat as legacy
+            return self._build_messages_from_legacy_context(context_data)
+    
+    def _log_context_format(self, context_data: Union[str, Dict[str, Any], List[Dict[str, Any]]]) -> None:
+        """
+        Log detailed information about the context format received.
+        
+        Args:
+            context_data: Context from HUD
+        """
+        if self._is_turn_based_context(context_data):
+            turn_count = len(context_data)
+            turn_roles = [turn.get("role", "unknown") for turn in context_data]
+            logger.info(f"Received turn-based context: {turn_count} turns with roles {turn_roles}")
+            
+            # Log turn metadata if available
+            for i, turn in enumerate(context_data):
+                metadata = turn.get("turn_metadata", {})
+                if metadata:
+                    logger.debug(f"Turn {i}: {metadata}")
+            
+        elif self._is_multimodal_turn_based_context(context_data):
+            turn_count = len(context_data.get("messages", []))
+            multimodal_info = context_data.get("multimodal_content", {})
+            attachment_count = multimodal_info.get("attachment_count", 0)
+            logger.info(f"Received multimodal turn-based context: {turn_count} turns, {attachment_count} attachments")
+            
+        else:
+            # Legacy format (should be rare with new HUD)
+            if isinstance(context_data, dict) and 'attachments' in context_data:
+                # Legacy multimodal format
+                attachment_count = len(context_data.get('attachments', []))
+                text_length = len(context_data.get('text', ''))
+                logger.warning(f"Received legacy multimodal context: {text_length} chars text + {attachment_count} attachments")
+            else:
+                # Legacy string format
+                logger.warning(f"Received legacy string context: {len(str(context_data))} chars")
 
     async def _try_smart_chat_fallback(self, agent_text: str, focus_context: Optional[Dict[str, Any]]) -> bool:
         """
@@ -593,3 +792,16 @@ class BaseAgentLoopComponent(Component):
         except Exception as e:
             logger.warning(f"Smart chat fallback failed: {e}", exc_info=True)
             return False 
+
+    def _get_space_veil_producer(self):
+        """
+        Get the SpaceVeilProducer from the parent InnerSpace.
+        
+        Returns:
+            SpaceVeilProducer instance or None if not available
+        """
+        producer = self.get_sibling_component("SpaceVeilProducer")
+        if not producer:
+            logger.error(f"{self.agent_loop_name} ({self.id}): No SpaceVeilProducer available for agent response emission")
+            return None
+        return producer

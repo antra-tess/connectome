@@ -830,7 +830,8 @@ class MessageListComponent(Component):
                             timestamp: float,
                             attachments: Optional[List[Dict[str, Any]]] = None,
                             reply_to_external_id: Optional[str] = None, # If agent is replying
-                            adapter_id: Optional[str] = None # The adapter this message is going to
+                            adapter_id: Optional[str] = None, # The adapter this message is going to
+                            is_from_current_agent: bool = False # FIXED: Whether this message is from the current agent
                            ) -> Optional[str]:
         """
         Adds a new message initiated by the local agent to the list with 'pending_send' status.
@@ -869,7 +870,8 @@ class MessageListComponent(Component):
             'attachments': processed_attachments,
             'status': "pending_send", # Key change for outgoing messages
             'internal_request_id': internal_request_id, # For matching confirmation
-            'error_details': None
+            'error_details': None,
+            'is_from_current_agent': is_from_current_agent  # FIXED: Store agent flag for deduplication
         }
         self._state['_messages'].append(new_message)
         self._state['_message_map'][internal_message_id] = len(self._state['_messages']) - 1
@@ -1136,7 +1138,8 @@ class MessageListComponent(Component):
             'status': "sent",  # Agent messages are confirmed as sent
             'internal_request_id': agent_message_content.get('internal_request_id'),
             'error_details': None,
-            'message_source': "agent_outgoing"  # Mark as agent-originated for debugging
+            'message_source': "agent_outgoing",  # Mark as agent-originated for debugging
+            'is_from_current_agent': True  # FIXED: Agent messages during replay are from current agent
         }
 
         self._state['_messages'].append(agent_message)
