@@ -248,7 +248,13 @@ class Component:
             return False
             
         # Check if this component handles this event type
+        # FIXED: Handle both direct event_type and nested payload.event_type
         event_type = event.get("event_type")
+        if not event_type:
+            # Try getting from payload (common structure from Space)
+            event_payload = event.get("payload", {})
+            event_type = event_payload.get("event_type")
+            
         if event_type not in self.HANDLED_EVENT_TYPES:
             return False
             

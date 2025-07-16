@@ -434,51 +434,46 @@ class BaseAgentLoopComponent(Component):
 
     async def _emit_agent_response_delta(self, agent_response_text: str, agent_tool_calls: List) -> None:
         """
-        NEW: Emit a VEIL delta containing the agent's response for chronological rendering.
-        
-        This allows the agent to see its own previous responses in the HUD context.
+        Emit agent response via SpaceVeilProducer for centralized, reusable VEILFacet Event creation.
+        Also persists to timeline for replay capability.
         
         Args:
             agent_response_text: The agent's text response from LLM
             agent_tool_calls: List of tool calls the agent made
         """
         try:
-            import time
-            current_time = time.time()
+            # Get the SpaceVeilProducer for centralized agent response emission
+            space_veil_producer = self._get_space_veil_producer()
+            if not space_veil_producer:
+                logger.error(f"{self.agent_loop_name} ({self.id}): No SpaceVeilProducer available")
+                return
             
-            # Create unique VEIL ID for this agent response
-            response_veil_id = f"agent_response_{self.parent_inner_space.id}_{int(current_time * 1000)}"
+            # Convert tool calls to serializable format
+            tool_calls_data = self._convert_tool_calls_to_data(agent_tool_calls)
             
-            # Build agent response delta
-            agent_response_delta = {
-                "op": "add_node",
-                "node": {
-                    "veil_id": response_veil_id,
-                    "node_type": "agent_response",
-                    "properties": {
-                        "structural_role": "content",
-                        "content_nature": "agent_response", 
-                        "owner_id": self.parent_inner_space.id,  # Owned by InnerSpace
-                        "element_id": self.parent_inner_space.id,
-                        "agent_response_text": agent_response_text or "",
-                        "tool_calls_count": len(agent_tool_calls),
-                        "has_tool_calls": len(agent_tool_calls) > 0,
-                        "timestamp": current_time,
-                        "timestamp_iso": time.strftime('%Y-%m-%dT%H:%M:%S.%fZ', time.gmtime(current_time)),
-                        "agent_loop_component_id": self.id,
-                        "agent_name": getattr(self.parent_inner_space, 'agent_name', 'Unknown Agent')
-                    },
-                    "children": []
-                }
-            }
+            # Use centralized agent response emission
+            response_id = space_veil_producer.emit_agent_response(
+                agent_response_text=agent_response_text,
+                tool_calls_data=tool_calls_data,
+                agent_loop_component_id=self.id,
+                parsing_mode=self._get_parsing_mode(),
+                links_to=None
+            )
             
-            # Send delta to InnerSpace for processing
-            self.parent_inner_space.receive_delta([agent_response_delta])
-            
-            logger.debug(f"Emitted agent response delta: {response_veil_id} ({len(agent_response_text or '')} chars, {len(agent_tool_calls)} tool calls)")
-            
+            if response_id:
+                logger.debug(f"Successfully emitted agent response {response_id}")
+                
+                # Persist to timeline for replay
+                await self._persist_agent_response_to_timeline(
+                    response_id=response_id,
+                    agent_response_text=agent_response_text,
+                    tool_calls_data=tool_calls_data
+                )
+            else:
+                logger.warning(f"Failed to emit agent response via SpaceVeilProducer")
+                
         except Exception as e:
-            logger.error(f"Error emitting agent response delta: {e}", exc_info=True)
+            logger.error(f"Error emitting agent response: {e}", exc_info=True)
 
     def _extract_enhanced_tools_from_veil(self) -> List[Dict[str, Any]]:
         """
@@ -513,8 +508,6 @@ class BaseAgentLoopComponent(Component):
             for facet in facet_cache.facets.values():
                 if facet.facet_type == VEILFacetType.STATUS:  # StatusFacet
                     # Look for container creation status facets
-                    logger.critical(f"Facet: {facet}")
-                    logger.critical(f"Facet dict: {facet.to_veil_dict()}")
                     if facet.get_property("status_type") == "container_created":
                         current_state = facet.get_property("current_state")
                         if isinstance(current_state, dict):
@@ -805,3 +798,81 @@ class BaseAgentLoopComponent(Component):
             logger.error(f"{self.agent_loop_name} ({self.id}): No SpaceVeilProducer available for agent response emission")
             return None
         return producer
+    
+    def _get_parsing_mode(self) -> str:
+        """Get parsing mode for this loop type. Override in subclasses if needed."""
+        # Default implementation based on class type
+        if self.__class__.__name__ == "ToolTextParsingLoopComponent":
+            return "text"
+        elif self.__class__.__name__ == "SimpleRequestResponseLoopComponent":
+            return "tool_call"
+        else:
+            return "unknown"
+    
+    def _convert_tool_calls_to_data(self, agent_tool_calls: List) -> List[Dict[str, Any]]:
+        """Convert tool calls to serializable format. Override if needed."""
+        tool_calls_data = []
+        
+        for tool_call in agent_tool_calls:
+            if hasattr(tool_call, '__dict__'):  # ParsedToolCall objects
+                tool_call_dict = {
+                    "tool_name": getattr(tool_call, 'tool_name', ''),
+                    "parameters": getattr(tool_call, 'parameters', {}),
+                    "target_element_name": getattr(tool_call, 'target_element_name', None),
+                    "raw_text": getattr(tool_call, 'raw_text', '')
+                }
+                if hasattr(tool_call, 'target_element_id'):
+                    tool_call_dict["target_element_id"] = tool_call.target_element_id
+                tool_calls_data.append(tool_call_dict)
+            elif isinstance(tool_call, dict):  # Already a dict
+                tool_calls_data.append(tool_call)
+            else:  # LLMToolCall objects
+                tool_call_dict = {
+                    "tool_name": getattr(tool_call, 'tool_name', ''),
+                    "parameters": getattr(tool_call, 'parameters', {})
+                }
+                tool_calls_data.append(tool_call_dict)
+        
+        return tool_calls_data
+    
+    async def _persist_agent_response_to_timeline(
+        self, 
+        response_id: str,
+        agent_response_text: str, 
+        tool_calls_data: List[Dict[str, Any]]
+    ) -> None:
+        """Persist agent response to timeline for replay capability."""
+        try:
+            import time
+            
+            # Create timeline event
+            agent_response_event = {
+                "event_type": "agent_response_generated",
+                "target_element_id": self.parent_inner_space.id,
+                "is_replayable": True,
+                "payload": {
+                    "response_id": response_id,
+                    "agent_response_text": agent_response_text,
+                    "tool_calls_data": tool_calls_data,
+                    "agent_loop_component_id": self.id,
+                    "agent_loop_type": self.__class__.__name__,
+                    "parsing_mode": self._get_parsing_mode(),
+                    "timestamp": time.time(),
+                    "agent_name": getattr(self.parent_inner_space, 'agent_name', 'Unknown Agent')
+                }
+            }
+            
+            # Add to timeline
+            timeline_context = {"timeline_id": self.parent_inner_space.get_primary_timeline()}
+            event_id = self.parent_inner_space.add_event_to_timeline(
+                agent_response_event, 
+                timeline_context
+            )
+            
+            if event_id:
+                logger.debug(f"Persisted agent response to timeline: {event_id}")
+            else:
+                logger.warning(f"Failed to persist agent response to timeline")
+                
+        except Exception as e:
+            logger.error(f"Error persisting agent response to timeline: {e}", exc_info=True)
