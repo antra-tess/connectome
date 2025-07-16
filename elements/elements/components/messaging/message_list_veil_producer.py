@@ -355,21 +355,46 @@ class MessageListVeilProducer(VeilProducer):
             facet_operations.append(FacetOperationBuilder.remove_facet(removed_id))
             logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] Generated remove_facet for message {removed_id}")
 
-        # 4. Handle message edits (EventFacets for edit operations)
+        # 4. Handle message edits/deletes with dual operations (update content + add audit event)
         # Check for edit/delete operations from MessageListComponent
         if message_list_comp:
             pending_operations = message_list_comp.get_pending_veil_operations()
             
             for operation in pending_operations:
                 if operation["operation_type"] == "edit":
-                    # Create EventFacet for edit operation
+                    # DUAL OPERATION: Update original message facet + add edit audit event
+                    original_message_id = operation["veil_id"]
+                    edit_details = operation.get("edit_details", {})
+                    new_text = edit_details.get("new_text", "")
+                    edit_timestamp = edit_details.get("edit_timestamp", time.time())
+                    
+                    # 1. Update the original message facet with new content
+                    facet_operations.append(FacetOperationBuilder.update_facet(
+                        original_message_id,
+                        {
+                            "content": new_text,
+                            "is_edited": True,
+                            "last_edited_timestamp": edit_timestamp,
+                            "original_content": edit_details.get("original_text", "")  # Preserve for history
+                        }
+                    ))
+                    
+                    # 2. Add audit EventFacet for the edit operation
                     edit_facet = self._create_message_edit_facet(operation, conversation_metadata)
                     if edit_facet:
                         facet_operations.append(FacetOperationBuilder.add_facet(edit_facet))
                         
                 elif operation["operation_type"] == "delete":
-                    # For deletes, we use remove_facet operation
-                    facet_operations.append(FacetOperationBuilder.remove_facet(operation["veil_id"]))
+                    # DUAL OPERATION: Remove original message facet + add delete audit event
+                    original_message_id = operation["veil_id"]
+                    
+                    # 1. Remove the original message facet
+                    facet_operations.append(FacetOperationBuilder.remove_facet(original_message_id))
+                    
+                    # 2. Add audit EventFacet for the delete operation
+                    delete_facet = self._create_message_delete_facet(operation, conversation_metadata)
+                    if delete_facet:
+                        facet_operations.append(FacetOperationBuilder.add_facet(delete_facet))
 
         # 5. Detect content changes via fallback comparison
         if message_list_comp:
@@ -534,7 +559,8 @@ class MessageListVeilProducer(VeilProducer):
                 veil_timestamp=ConnectomeEpoch.get_veil_timestamp(),
                 owner_element_id=self.owner.id,
                 event_type="message_edited",
-                content=f"Message edited: {edit_details.get('new_preview', {}).get('preview', 'Unknown')}"
+                content=f"Message edited: {edit_details.get('new_preview', {}).get('preview', 'Unknown')}",
+                links_to=f"{self.owner.id}_message_list_container"
             )
             
             # Add edit-specific properties
@@ -560,6 +586,53 @@ class MessageListVeilProducer(VeilProducer):
         except Exception as e:
             logger.error(f"Error creating message edit facet: {e}", exc_info=True)
             return None
+
+    def _create_message_delete_facet(self, operation: Dict[str, Any], conversation_metadata: Dict[str, Any]) -> Optional[EventFacet]:
+        """
+        Create EventFacet for message delete operations.
+        
+        Args:
+            operation: Delete operation data from MessageListComponent
+            conversation_metadata: Conversation context metadata
+            
+        Returns:
+            EventFacet for the delete operation
+        """
+        try:
+            delete_details = operation.get("delete_details", {})
+            sender_info = operation.get("sender_info", {})
+            
+            delete_facet = EventFacet(
+                facet_id=f"delete_{operation['veil_id']}_{int(time.time() * 1000)}",
+                veil_timestamp=ConnectomeEpoch.get_veil_timestamp(),
+                owner_element_id=self.owner.id,
+                event_type="message_deleted",
+                content=f"Message deleted: {delete_details.get('original_preview', {}).get('preview', 'Unknown')}",
+                links_to=f"{self.owner.id}_message_list_container"
+            )
+            
+            # Add delete-specific properties
+            delete_facet.properties.update({
+                "original_message_id": operation["veil_id"],
+                "delete_timestamp": delete_details.get("delete_timestamp"),
+                "sender_name": sender_info.get("sender_name"),
+                "sender_id": sender_info.get("sender_id"),
+                "conversation_name": conversation_metadata.get("conversation_name"),
+                "adapter_type": conversation_metadata.get("adapter_type"),
+                "server_name": conversation_metadata.get("server_name"),
+                "original_preview": delete_details.get("original_preview", {}).get("preview"),
+                "deletion_source": delete_details.get("deletion_source", "external"),
+                "delete_context": {
+                    "original_truncated": delete_details.get("original_preview", {}).get("truncated", False),
+                    "delete_type": "message_removal"
+                }
+            })
+            
+            return delete_facet
+            
+        except Exception as e:
+            logger.error(f"Error creating message delete facet: {e}", exc_info=True)
+            return None
     
     def _create_content_change_edit_facet(self, msg: Dict[str, Any], last_content: str, conversation_metadata: Dict[str, Any]) -> Optional[EventFacet]:
         """
@@ -579,7 +652,8 @@ class MessageListVeilProducer(VeilProducer):
                 veil_timestamp=ConnectomeEpoch.get_veil_timestamp(),
                 owner_element_id=self.owner.id,
                 event_type="message_edited",
-                content=f"Message content changed: {msg.get('text', '')[:50]}{'...' if len(msg.get('text', '')) > 50 else ''}"
+                content=f"Message content changed: {msg.get('text', '')[:50]}{'...' if len(msg.get('text', '')) > 50 else ''}",
+                links_to=f"{self.owner.id}_message_list_container"
             )
             
             # Add edit-specific properties
