@@ -27,8 +27,12 @@ class SpaceVeilProducer(VeilProducer):
     - StatusFacet for space creation/updates
     - Coordinates with child VeilProducers through VEILFacetCache
     - Provides facet-based VEIL context for HUD rendering
+    - Handles agent response replay for conversation history
     """
     COMPONENT_TYPE = "SpaceVeilProducer"
+    
+    # Events this component handles for replay
+    HANDLED_EVENT_TYPES = ['agent_response_generated']
 
     def initialize(self, **kwargs) -> None:
         """Initialize the VEILFacet-based space producer."""
@@ -379,3 +383,54 @@ class SpaceVeilProducer(VeilProducer):
         except Exception as e:
             logger.error(f"Error emitting agent response VEILFacet Event: {e}", exc_info=True)
             return ""
+    
+    def handle_event(self, event_node: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
+        """
+        Handle timeline events, specifically agent response replay.
+        
+        Args:
+            event_node: The event node from the timeline
+            timeline_context: The timeline context for the event
+            
+        Returns:
+            True if event was handled, False otherwise
+        """
+        # NEW: Debug logging to see if this method is being called
+        logger.debug(f"[{self.owner.id if self.owner else 'Unknown'}] SpaceVeilProducer.handle_event called with event_node keys: {list(event_node.keys())}")
+        logger.debug(f"[{self.owner.id if self.owner else 'Unknown'}] Timeline context: replay_mode={timeline_context.get('replay_mode')}")
+        
+        event_payload = event_node.get('payload', {})
+        event_type = event_payload.get('event_type')
+        
+        logger.debug(f"[{self.owner.id if self.owner else 'Unknown'}] Event type from payload: {event_type}")
+        
+        if event_type not in self.HANDLED_EVENT_TYPES:
+            return False
+        
+        if event_type == 'agent_response_generated':
+            # Replay agent response
+            inner_payload = event_payload.get('payload', {})
+            
+            # Check if this is a replay to prevent double emission
+            if timeline_context.get('replay_mode', False):
+                # Re-emit the agent response VEILFacet
+                response_id = self.emit_agent_response(
+                    agent_response_text=inner_payload.get('agent_response_text', ''),
+                    tool_calls_data=inner_payload.get('tool_calls_data', []),
+                    agent_loop_component_id=inner_payload.get('agent_loop_component_id'),
+                    parsing_mode=inner_payload.get('parsing_mode', 'text'),
+                    links_to=None  # Will auto-link to space root
+                )
+                
+                if response_id:
+                    logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] Replayed agent response from {inner_payload.get('agent_name')} - {response_id}")
+                    
+                    # NEW: Verify the facet was added to cache
+                    cache_size = self.get_facet_cache_size()
+                    logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] Facet cache size after replay: {cache_size}")
+                else:
+                    logger.warning(f"[{self.owner.id if self.owner else 'Unknown'}] Failed to replay agent response")
+                
+                return True
+            
+        return False

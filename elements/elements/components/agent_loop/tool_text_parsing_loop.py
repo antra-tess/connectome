@@ -508,47 +508,4 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
         except Exception as e:
             logger.error(f"Error sending conversational response: {e}", exc_info=True)
 
-    async def _emit_agent_response_delta(self, agent_response_text: str, tool_calls: List[ParsedToolCall]) -> None:
-        """
-        Emit agent response via SpaceVeilProducer for centralized, reusable VEILFacet Event creation.
-        
-        Args:
-            agent_response_text: The agent's full text response from LLM
-            tool_calls: List of parsed tool calls
-        """
-        try:
-            # Get the SpaceVeilProducer for centralized agent response emission
-            space_veil_producer = self._get_space_veil_producer()
-            if not space_veil_producer:
-                logger.error(f"{self.agent_loop_name} ({self.id}): No SpaceVeilProducer available for agent response emission")
-                return
-            
-            # Convert ParsedToolCall objects to dictionaries
-            tool_calls_data = []
-            for tool_call in tool_calls:
-                tool_call_dict = {
-                    "tool_name": tool_call.tool_name,
-                    "parameters": tool_call.parameters,
-                    "target_element_name": tool_call.target_element_name,
-                    "raw_text": tool_call.raw_text
-                }
-                if hasattr(tool_call, 'target_element_id'):
-                    tool_call_dict["target_element_id"] = tool_call.target_element_id
-                tool_calls_data.append(tool_call_dict)
-            
-            # Use centralized agent response emission
-            response_id = space_veil_producer.emit_agent_response(
-                agent_response_text=agent_response_text,
-                tool_calls_data=tool_calls_data,
-                agent_loop_component_id=self.id,
-                parsing_mode="text",
-                links_to=None  # Could link to conversation container if available
-            )
-            
-            if response_id:
-                logger.debug(f"Successfully emitted agent response {response_id} via SpaceVeilProducer with {len(tool_calls)} tool calls")
-            else:
-                logger.warning(f"Failed to emit agent response via SpaceVeilProducer")
-                
-        except Exception as e:
-            logger.error(f"Error emitting agent response via SpaceVeilProducer: {e}", exc_info=True)
+

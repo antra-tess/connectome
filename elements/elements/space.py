@@ -48,6 +48,9 @@ DEFAULT_REPLAYABLE_EVENTS = {
     'message_received', 'historical_message_received', 'agent_message_confirmed', 'connectome_message_deleted', 'connectome_message_updated', 
     'connectome_reaction_added', 'connectome_reaction_removed', 'attachment_content_available',
     'connectome_message_send_confirmed', 'connectome_message_send_failed',
+    
+    # Agent response events - for conversation history
+    'agent_response_generated',
 }
 
 DEFAULT_NON_REPLAYABLE_EVENTS = {
@@ -893,6 +896,10 @@ class Space(BaseElement):
                     
             logger.info(f"[{self.id}] Event replay completed: {replayed_count} replayed, {skipped_count} skipped")
             
+            # NEW: Debug - check cache size before regeneration
+            pre_regen_cache_size = self._veil_producer.get_facet_cache_size() if self._veil_producer else 0
+            logger.info(f"[{self.id}] Facet cache size BEFORE regeneration: {pre_regen_cache_size}")
+            
             # NEW: For VEIL snapshot mode, restore VEIL cache after structural replay
             if self._event_replay_mode == EventReplayMode.ENABLED_WITH_VEIL_SNAPSHOT:
                 logger.info(f"[{self.id}] Attempting VEIL cache restoration after structural replay")
@@ -934,9 +941,9 @@ class Space(BaseElement):
         try:
             logger.info(f"[{self.id}] Regenerating VEIL state after event replay")
             
-            # Clear the existing VEIL cache to force regeneration
-            if self._veil_producer:
-                self._veil_producer.clear_facet_cache()
+            # FIXED: Don't clear the entire cache - agent responses were already replayed!
+            # Only regenerate VEIL for mounted elements that might not have been replayed
+            # (e.g., status facets for containers)
             
             # Ensure own VEIL presence is initialized
             self._ensure_own_veil_presence_initialized()
