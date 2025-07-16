@@ -873,27 +873,6 @@ class FacetAwareHUDComponent(Component):
         except Exception as e:
             logger.error(f"Error rendering events section from facets: {e}", exc_info=True)
             return ""
-
-    def _apply_ambient_threshold_logic(self, 
-                                     ambient_facets: List[VEILFacet],
-                                     turn_index: int,
-                                     system_state: Dict[str, Any],
-                                     has_status_changes: bool,
-                                     tools: Optional[List[Dict[str, Any]]]) -> List[VEILFacet]:
-        """
-        DEPRECATED: This method has been replaced by the new additive ambient approach.
-        Use _get_triggered_ambient_facets_for_turn() instead.
-        """
-        logger.warning("_apply_ambient_threshold_logic() is deprecated - use new additive ambient approach")
-        return ambient_facets  # Return unchanged for compatibility
-
-    def _apply_retroactive_ambient_derendering_to_structure(self, processed_turns: List[Dict[str, Any]]) -> None:
-        """
-        DEPRECATED: This method has been replaced by _apply_simple_retroactive_deduplication().
-        The new approach is simpler and doesn't lose ambient facets.
-        """
-        logger.warning("_apply_retroactive_ambient_derendering_to_structure() is deprecated - use _apply_simple_retroactive_deduplication()")
-        # Do nothing - let the new method handle it
     
     def _render_agent_workspace_wrapper(self, system_state: Dict[str, Any]) -> str:
         """Render opening agent workspace wrapper with metadata."""
@@ -1325,6 +1304,7 @@ class FacetAwareHUDComponent(Component):
                         return ""  # Skip rendering - tool call context is available
                 
                 sender = facet.get_property("sender_name", "Unknown")
+                is_edited = facet.get_property("is_edited", False)
                 
                 # Determine conversation from links or owner
                 conversation_name = self._determine_conversation_for_event(facet, system_state)
@@ -1335,7 +1315,8 @@ class FacetAwareHUDComponent(Component):
                     msg_attrs.append(f'source="{conversation_name}"')
                 if sender:
                     msg_attrs.append(f'sender="{sender}"')
-                
+                if is_edited:
+                    msg_attrs.append('edited')
                 msg_tag = f'<msg {" ".join(msg_attrs)}>' if msg_attrs else '<msg>'
                 
                 # Handle reactions and status
@@ -1376,14 +1357,10 @@ class FacetAwareHUDComponent(Component):
                 
             elif event_type == "note_created":
                 return f"<note>{content}</note>"
-                
-            elif event_type == "message_edited":
-                original_msg_id = facet.get_property("original_message_id", "unknown")
-                sender = facet.get_property("sender_name", "Unknown")
-                return f"<system>Message from {sender} (ID: {original_msg_id}) was edited: {content}</system>"
-                
+                                
             else:
-                return f"<event type=\"{event_type}\">{content}</event>"
+                return ""
+                # return f"<event type=\"{event_type}\">{content}</event>"
                 
         except Exception as e:
             logger.error(f"Error rendering event facet: {e}", exc_info=True)
@@ -1475,11 +1452,6 @@ class FacetAwareHUDComponent(Component):
                 
                 tool_info = f' tool_calls="{tool_calls_count}"' if tool_calls_count > 0 else ""
                 return f'<agent_response agent="{agent_name}"{tool_info}>{content}</agent_response>'
-                
-            elif event_type == "message_edited":
-                original_msg_id = facet.get_property("original_message_id", "unknown")
-                sender = facet.get_property("sender_name", "Unknown")
-                return f"<system>Message from {sender} (ID: {original_msg_id}) was edited: {content}</system>"
                 
             else:
                 return f"<event type=\"{event_type}\">{content}</event>"
