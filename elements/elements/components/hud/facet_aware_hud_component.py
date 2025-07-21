@@ -342,7 +342,6 @@ class FacetAwareHUDComponent(Component):
             "events": [],
             "turn_index": 0
         }
-        
         for facet in temporal_stream:
             # Check if this facet triggers agent turn logic
             is_agent_response = (
@@ -351,27 +350,19 @@ class FacetAwareHUDComponent(Component):
             )
             
             if is_agent_response:
-                # ENHANCED: Handle consecutive agent_response events
-                if current_turn["type"] == "agent_turn":
-                    # Already in agent turn - add this agent_response to current agent turn
-                    current_turn["events"].append(facet)
-                    logger.debug(f"Added consecutive agent_response to existing agent turn {current_turn['turn_index']}")
-                else:
-                    # Switch from user turn to agent turn
-                    
-                    # End current user turn if it has content
-                    if current_turn["status"] or current_turn["ambient"] or current_turn["events"]:
-                        turn_structure.append(current_turn)
-                    
-                    # Start new agent turn for this agent response
-                    current_turn = {
-                        "type": "agent_turn",
-                        "status": [],
-                        "ambient": [],
-                        "events": [facet],  # Add the agent response event
-                        "turn_index": len(turn_structure)
-                    }
-                    logger.debug(f"Started new agent turn {current_turn['turn_index']} for agent_response")
+                # End current user turn if it has content
+                if current_turn["status"] or current_turn["ambient"] or current_turn["events"]:
+                    turn_structure.append(current_turn)
+                
+                # Start new agent turn for this agent response
+                current_turn = {
+                    "type": "agent_turn",
+                    "status": [],
+                    "ambient": [],
+                    "events": [facet],  # Add the agent response event
+                    "turn_index": len(turn_structure)
+                }
+                logger.debug(f"Started new agent turn {current_turn['turn_index']} for agent_response")
             else:
                 # Non-agent-response facet
                 if current_turn["type"] == "agent_turn":
@@ -1339,21 +1330,7 @@ class FacetAwareHUDComponent(Component):
                 return f"{msg_tag}{message_content}</msg>"
                 
             elif event_type == "agent_response":
-                agent_name = facet.get_property("agent_name", self._agent_name)
-                tool_calls_count = facet.get_property("tool_calls_count", 0)
-                
-                tool_info = f' tool_calls="{tool_calls_count}"' if tool_calls_count > 0 else ""
-                response_content = f'<agent_response agent="{agent_name}"{tool_info}>{content}</agent_response>'
-                
-                # FIXED: Issue 1 - Removed delivery messages, using "shoot-and-forget" mode
-                # Only show error messages if actual failures occur
-                message_status = facet.get_property("message_status", "sent")
-                if message_status == "failed_to_send":
-                    conversation_name = self._determine_conversation_for_event(facet, system_state)
-                    error_message = f"<system>FAILED to deliver message to {conversation_name}</system>"
-                    return f"{response_content}\n{error_message}"
-                
-                return response_content
+                return content
                 
             elif event_type == "note_created":
                 return f"<note>{content}</note>"
@@ -1447,11 +1424,8 @@ class FacetAwareHUDComponent(Component):
                 return f"<note>{content}</note>"
                 
             elif event_type == "agent_response":
-                agent_name = facet.get_property("agent_name", "Agent")
-                tool_calls_count = facet.get_property("tool_calls_count", 0)
-                
-                tool_info = f' tool_calls="{tool_calls_count}"' if tool_calls_count > 0 else ""
-                return f'<agent_response agent="{agent_name}"{tool_info}>{content}</agent_response>'
+                logger.critical(f"Agent response: {content}, facet: {facet}, facet_properties: {facet.properties}")
+                return f'{content}'
                 
             else:
                 return f"<event type=\"{event_type}\">{content}</event>"

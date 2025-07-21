@@ -143,7 +143,8 @@ class MessageActionHandler(Component):
                     # attachments=final_attachments,
                     # reply_to_external_id=reply_to_external_id,
                     adapter_id=retrieved_adapter_id, # Should be correct for DM context
-                    is_from_current_agent=True  # FIXED: Mark messages from current agent for deduplication
+                    is_from_current_agent=True,  # FIXED: Mark messages from current agent for deduplication
+                    is_internal_origin=True  # NEW: Mark as tool-generated to prevent synthetic agent responses
                 )
                 logger.info(f"[{self.owner.id}] Added pending message (req_id: {internal_request_id}) to MessageListComponent for direct send.")
             else:

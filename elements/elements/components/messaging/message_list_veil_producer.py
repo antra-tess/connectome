@@ -232,7 +232,7 @@ class MessageListVeilProducer(VeilProducer):
 
     def calculate_delta(self) -> Optional[List[VEILFacetOperation]]:
         """
-        NEW: Calculate VEILFacet operations for message list management.
+        NEW: Calculate VEILFacet operations for message list management with phase awareness.
         
         This replaces the old delta operation system with VEILFacet operations, generating:
         - StatusFacet for message list container creation/updates
@@ -240,9 +240,16 @@ class MessageListVeilProducer(VeilProducer):
         - EventFacet for message edits/deletes
         - AmbientFacet for tool availability (when appropriate)
         
+        NEW: Phase-aware processing - defers content processing during structural phase.
+        
         Returns:
             List of VEILFacetOperation instances for the message list
         """
+        # NEW: Check if we're in structural replay phase and should defer content processing
+        if self._should_defer_content_processing():
+            logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Deferring content processing during structural phase")
+            return None
+            
         message_list_comp = self._get_message_list_component()
         if not message_list_comp:
             logger.error(f"[{self.owner.id}] Cannot calculate facet operations: MessageListComponent not found.")
@@ -325,6 +332,22 @@ class MessageListVeilProducer(VeilProducer):
                     links_to=list_root_facet_id
                 )
                 
+                # NEW: Create synthetic agent_response facet for external agent messages
+                # Only create synthetic for messages that don't have internal origin (tool calls)
+                if self._should_create_synthetic_agent_response(msg_data, owner_id):
+                    synthetic_response_facet = self._create_synthetic_agent_response_facet(msg_data, conversation_metadata)
+                    if synthetic_response_facet:
+                        facet_operations.append(FacetOperationBuilder.add_facet(synthetic_response_facet))
+                        
+                        # IMMEDIATE MARKING: Mark message as internal origin to prevent future synthetics
+                        self._mark_message_as_internal_origin(msg_data)
+                        facet_operations.append(FacetOperationBuilder.update_facet(
+                            internal_id,
+                            {"is_internal_origin": True}
+                        ))
+                        
+                        logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] Generated synthetic agent_response and marked message {internal_id} as internal origin")
+
                 # Add message-specific properties
                 message_facet.properties.update({
                     "sender_name": msg_data.get('sender_name', 'Unknown'),
@@ -339,6 +362,7 @@ class MessageListVeilProducer(VeilProducer):
                     "conversation_name": conversation_metadata.get("conversation_name"),
                     "is_agent": msg_data.get('sender_name', 'Unknown') == self.owner.get_parent_object().agent_name,
                     "is_from_current_agent": msg_data.get('is_from_current_agent', False),  # For HUD rendering decisions
+                    "is_internal_origin": msg_data.get('is_internal_origin', False),  # NEW: Track message origin for synthetic response logic
                     "error_details": msg_data.get('error_details', None),
                     "attachment_metadata": [
                         {k: v for k, v in att.items() if k != 'content'}
@@ -395,21 +419,53 @@ class MessageListVeilProducer(VeilProducer):
                     delete_facet = self._create_message_delete_facet(operation, conversation_metadata)
                     if delete_facet:
                         facet_operations.append(FacetOperationBuilder.add_facet(delete_facet))
+                        
+                elif operation["operation_type"] == "reaction_added":
+                    # Update the original message facet with new reaction data
+                    original_message_id = operation["veil_id"]
+                    
+                    # Get the updated message data to extract current reactions
+                    updated_message = self._get_message_by_id(original_message_id)
+                    if updated_message:
+                        facet_operations.append(FacetOperationBuilder.update_facet(
+                            original_message_id,
+                            {
+                                "reactions": updated_message.get('reactions', {}),
+                                "last_reaction_timestamp": operation["reaction_details"]["timestamp"]
+                            }
+                        ))
+                        logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] Generated update_facet for reaction_added on message {original_message_id}")
+                        
+                elif operation["operation_type"] == "reaction_removed":
+                    # Update the original message facet with new reaction data
+                    original_message_id = operation["veil_id"]
+                    
+                    # Get the updated message data to extract current reactions
+                    updated_message = self._get_message_by_id(original_message_id)
+                    if updated_message:
+                        facet_operations.append(FacetOperationBuilder.update_facet(
+                            original_message_id,
+                            {
+                                "reactions": updated_message.get('reactions', {}),
+                                "last_reaction_timestamp": operation["reaction_details"]["timestamp"]
+                            }
+                        ))
+                        logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] Generated update_facet for reaction_removed on message {original_message_id}")
 
         # 5. Detect content changes via fallback comparison
         if message_list_comp:
             current_messages = message_list_comp.get_messages()
             last_message_content = self._state.get('_last_message_content_map', {})
             
-            for msg in current_messages:
-                internal_id = msg.get('internal_id')
+            for msg_data in current_messages:
+                internal_id = msg_data.get('internal_id')
                 if internal_id in last_message_content:
                     last_content = last_message_content[internal_id]
-                    current_content = msg.get('text', '')
+                    current_content = msg_data.get('text', '')
                     
-                    if last_content != current_content and msg.get('is_edited', False):
+                    if last_content != current_content and msg_data.get('is_edited', False):
                         # Create EventFacet for detected edit
-                        edit_facet = self._create_content_change_edit_facet(msg, last_content, conversation_metadata)
+                        edit_facet = self._create_content_change_edit_facet(msg_data, last_content, conversation_metadata)
                         if edit_facet:
                             facet_operations.append(FacetOperationBuilder.add_facet(edit_facet))
             
@@ -438,7 +494,6 @@ class MessageListVeilProducer(VeilProducer):
             logger.info(f"[{owner_id}/{self.COMPONENT_TYPE}] Calculated {len(facet_operations)} facet operations")
         else:
             logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] No facet operations calculated")
-
         return facet_operations if facet_operations else None
 
     # --- NEW: Rich Delta Generation Methods ---
@@ -633,13 +688,102 @@ class MessageListVeilProducer(VeilProducer):
         except Exception as e:
             logger.error(f"Error creating message delete facet: {e}", exc_info=True)
             return None
+
+    def _create_synthetic_agent_response_facet(self, msg_data: Dict[str, Any], conversation_metadata: Dict[str, Any]) -> Optional[EventFacet]:
+        """
+        Create synthetic agent_response EventFacet for historical agent messages.
+        
+        This ensures consistent turn structure when processing historical agent messages
+        that don't have corresponding agent_response facets from the original sending.
+        
+        Args:
+            msg_data: Message data from MessageListComponent
+            conversation_metadata: Conversation context metadata
+            
+        Returns:
+            EventFacet for the synthetic agent response
+        """
+        try:
+            # Get agent info from parent space
+            agent_name = "Agent"  # Default fallback
+            if self.owner and hasattr(self.owner, 'get_parent_object'):
+                parent_space = self.owner.get_parent_object()
+                if parent_space and hasattr(parent_space, 'agent_name'):
+                    agent_name = parent_space.agent_name
+            
+            # Create synthetic agent response facet with current processing timestamp
+            response_facet = EventFacet(
+                facet_id=f"synthetic_response_{msg_data.get('internal_id')}_{int(time.time() * 1000)}",
+                veil_timestamp=ConnectomeEpoch.get_veil_timestamp(),  # Use current processing time like other facets
+                owner_element_id=self.owner.id,
+                event_type="agent_response",
+                content=msg_data.get('text', ''),
+                links_to=f"{self.owner.get_parent_object().id}_space_root" if hasattr(self.owner, 'get_parent_object') else None
+            )
+            
+            # Add response-specific properties
+            response_facet.properties.update({
+                "agent_name": agent_name,
+                "tool_calls_count": 0,  # Historical messages don't have tool call data
+                "message_status": "sent",  # Historical messages are always sent
+                "conversation_name": conversation_metadata.get("conversation_name"),
+                "adapter_type": conversation_metadata.get("adapter_type"),
+                "server_name": conversation_metadata.get("server_name"),
+                "synthetic": True,  # Mark as synthetic for debugging
+                "original_message_id": msg_data.get('internal_id'),
+                "original_message_timestamp": msg_data.get('timestamp'),  # Preserve historical timestamp as metadata
+                "historical_reconstruction": True,  # Flag for audit purposes
+                "parsing_mode": "historical_text"  # Indicate this was reconstructed from historical message
+            })
+            
+            return response_facet
+            
+        except Exception as e:
+            logger.error(f"Error creating synthetic agent response facet: {e}", exc_info=True)
+            return None
+
+    def _should_create_synthetic_agent_response(self, msg_data: Dict[str, Any], owner_id: str) -> bool:
+        """
+        Determine if we should create a synthetic agent_response facet for this message.
+        
+        NEW LOGIC:
+        - Only agent messages need synthetic responses
+        - Messages with internal_origin=True already have tool call context - no synthetic needed
+        - Messages with internal_origin=False are external and need synthetic if from our agent
+        
+        Args:
+            msg_data: Message data from MessageListComponent
+            owner_id: Owner element ID
+            
+        Returns:
+            True if synthetic agent_response should be created
+        """
+        try:
+            # Must be from current agent to need synthetic response
+            if not msg_data.get('is_from_current_agent', False):
+                logger.debug(f"[{owner_id}] Message not from current agent - skipping synthetic")
+                return False
+            
+            # If already marked as internal origin, no synthetic needed
+            if msg_data.get('is_internal_origin', False):
+                logger.debug(f"[{owner_id}] Message {msg_data.get('internal_id')} already marked as internal origin - skipping synthetic")
+                return False
+            
+            # This is an external agent message that needs synthetic response
+            logger.debug(f"[{owner_id}] Message {msg_data.get('internal_id')} is external agent message - creating synthetic response")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error determining synthetic agent response need: {e}", exc_info=True)
+            # Safe default: don't create synthetic if unsure
+            return False
     
-    def _create_content_change_edit_facet(self, msg: Dict[str, Any], last_content: str, conversation_metadata: Dict[str, Any]) -> Optional[EventFacet]:
+    def _create_content_change_edit_facet(self, msg_data: Dict[str, Any], last_content: str, conversation_metadata: Dict[str, Any]) -> Optional[EventFacet]:
         """
         Create EventFacet for content changes detected by fallback comparison.
         
         Args:
-            msg: Message data
+            msg_data: Message data
             last_content: Previous content for comparison
             conversation_metadata: Conversation context metadata
             
@@ -648,27 +792,27 @@ class MessageListVeilProducer(VeilProducer):
         """
         try:
             edit_facet = EventFacet(
-                facet_id=f"edit_fallback_{msg.get('internal_id')}_{int(time.time() * 1000)}",
+                facet_id=f"edit_fallback_{msg_data.get('internal_id')}_{int(time.time() * 1000)}",
                 veil_timestamp=ConnectomeEpoch.get_veil_timestamp(),
                 owner_element_id=self.owner.id,
                 event_type="message_edited",
-                content=f"Message content changed: {msg.get('text', '')[:50]}{'...' if len(msg.get('text', '')) > 50 else ''}",
+                content=f"Message content changed: {msg_data.get('text', '')[:50]}{'...' if len(msg_data.get('text', '')) > 50 else ''}",
                 links_to=f"{self.owner.id}_message_list_container"
             )
             
             # Add edit-specific properties
             edit_facet.properties.update({
-                "original_message_id": msg.get('internal_id'),
-                "edit_timestamp": msg.get('last_edited_timestamp', time.time()),
-                "sender_name": msg.get('sender_name'),
+                "original_message_id": msg_data.get('internal_id'),
+                "edit_timestamp": msg_data.get('last_edited_timestamp', time.time()),
+                "sender_name": msg_data.get('sender_name'),
                 "conversation_name": conversation_metadata.get("conversation_name"),
                 "adapter_type": conversation_metadata.get("adapter_type"), 
                 "server_name": conversation_metadata.get("server_name"),
                 "original_preview": last_content[:50] if last_content else "",
-                "new_preview": msg.get('text', '')[:50],
+                "new_preview": msg_data.get('text', '')[:50],
                 "edit_context": {
                     "original_truncated": len(last_content) > 50 if last_content else False,
-                    "new_truncated": len(msg.get('text', '')) > 50,
+                    "new_truncated": len(msg_data.get('text', '')) > 50,
                     "edit_type": "content_change_fallback",
                     "detection_method": "content_comparison"
                 }
@@ -795,4 +939,79 @@ class MessageListVeilProducer(VeilProducer):
             "external_conversation_id": conversation_metadata.get("external_conversation_id"),
             "alias": conversation_metadata.get("alias")
         }
+
+    def _get_message_by_id(self, internal_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get message data by internal ID from the MessageListComponent.
+        
+        Args:
+            internal_id: Internal message ID
+            
+        Returns:
+            Message data dictionary or None if not found
+        """
+        message_list_comp = self._get_message_list_component()
+        if not message_list_comp:
+            return None
+            
+        return message_list_comp.get_message_by_internal_id(internal_id)
+
+    def _mark_message_as_internal_origin(self, msg_data: Dict[str, Any]) -> None:
+        """
+        Mark a message as having internal origin to prevent future synthetic generation.
+        
+        Updates the message data in-place within MessageListComponent to ensure
+        immediate consistency and prevent infinite synthetic generation loops.
+        
+        Args:
+            msg_data: Message data dictionary to mark
+        """
+        try:
+            # Update the message data in-place
+            msg_data['is_internal_origin'] = True
+            logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Marked message {msg_data.get('internal_id')} as internal origin in MessageListComponent")
+        except Exception as e:
+            logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Failed to mark message as internal origin: {e}", exc_info=True)
+
+    def _should_defer_content_processing(self) -> bool:
+        """
+        NEW: Determine if content processing should be deferred during structural replay phase.
+        
+        UPDATED: Only defer during structural phase. During content phase, allow VEIL emission
+        for real-time chronological VEIL building.
+        
+        Returns:
+            True if content processing should be deferred, False otherwise
+        """
+        try:
+            # Check if owner space is in structural replay phase (ONLY defer during structural)
+            if self.owner and hasattr(self.owner, '_replay_in_progress'):
+                if self.owner._replay_in_progress:
+                    current_phase = getattr(self.owner, '_current_replay_phase', None)
+                    if current_phase == 'structural':
+                        logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Structural phase - deferring content processing")
+                        return True
+                    elif current_phase == 'content':
+                        logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Content phase - allowing VEIL emission for chronological order")
+                        return False  # NEW: Allow processing during content phase for real-time VEIL emission
+                        
+            # Check if parent space is in structural replay phase (for nested elements)
+            if self.owner and hasattr(self.owner, 'get_parent_object'):
+                parent_space = self.owner.get_parent_object()
+                if parent_space and hasattr(parent_space, '_replay_in_progress'):
+                    if parent_space._replay_in_progress:
+                        current_phase = getattr(parent_space, '_current_replay_phase', None)
+                        if current_phase == 'structural':
+                            logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Parent in structural phase - deferring content")
+                            return True
+                        elif current_phase == 'content':
+                            logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Parent in content phase - allowing VEIL emission")
+                            return False  # NEW: Allow processing during content phase
+                            
+            return False  # Normal operation - no deferral
+            
+        except Exception as e:
+            logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Error checking replay phase: {e}")
+            # Safe default: don't defer if unsure
+            return False
 
