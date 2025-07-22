@@ -105,19 +105,16 @@ class MessageListComponent(Component):
                 return False # Event type not handled by this component
 
             # Emit VEIL delta after handling the event (only during normal operation, not replay)
+            if event_type == "message_received":
+                self._activation_check(event_type, actual_content_payload, event_node, timeline_context, is_replay_mode)
             veil_producer = self.get_sibling_component("MessageListVeilProducer")
             if veil_producer:
                 veil_producer.emit_delta()
-            if not is_replay_mode:
-                # Check if agent activation is needed after processing the event (only during normal operation)
-                # NEW: Only check activation for fresh message_received events, not historical ones
-                if event_type == "message_received":
-                    self._activation_check(event_type, actual_content_payload, event_node, timeline_context)
             return True
 
         return False # Event type not in HANDLED_EVENT_TYPES
 
-    def _activation_check(self, event_type: str, content_payload: Dict[str, Any], event_node: Dict[str, Any], timeline_context: Dict[str, Any]) -> None:
+    def _activation_check(self, event_type: str, content_payload: Dict[str, Any], event_node: Dict[str, Any], timeline_context: Dict[str, Any], is_replay_mode: bool) -> None:
         """
         Decides if agent activation is needed after processing an event.
         If needed, emits an "activation_call" event to the timeline.
@@ -159,10 +156,14 @@ class MessageListComponent(Component):
         # elif event_type == "message_received":
         #     # Check for keywords, urgent flags, etc.
         if activation_needed:
-            self._emit_activation_call(activation_reason, event_type, content_payload)
+            self._signal_focus_change_to_veil_producer()
+            if not is_replay_mode:
+                self._emit_activation_call(activation_reason, event_type, content_payload)
 
     def _emit_activation_call(self, reason: str, triggering_event_type: str, triggering_payload: Dict[str, Any]) -> None:
         """
+        Enhanced to signal focus change to VeilProducer for historical focus tracking.
+        
         Emits an "activation_call" event to the parent space's timeline.
         This is a non-replayable event that signals AgentLoop to consider running a cycle.
 
@@ -171,6 +172,7 @@ class MessageListComponent(Component):
             triggering_event_type: The event type that caused this activation
             triggering_payload: The payload of the triggering event
         """
+        # STEP 2: Continue with existing activation_call logic
         if not self.owner:
             logger.warning(f"[MessageListComponent] Cannot emit activation_call: No owner element")
             return
@@ -228,6 +230,44 @@ class MessageListComponent(Component):
             logger.info(f"[{self.owner.id}] Emitted focused activation_call event to parent space. Reason: {reason}, Focus: {self.owner.id}")
         except Exception as e:
             logger.error(f"[{self.owner.id}] Error emitting activation_call event: {e}", exc_info=True)
+
+    def _signal_focus_change_to_veil_producer(self) -> None:
+        """
+        NEW: Signal focus change to sibling VeilProducer for StatusFacet creation.
+        
+        This method is enhanced to work during both replay and live operation,
+        allowing historical focus context reconstruction.
+        """
+        if not self.owner:
+            return
+            
+        # Check if we're in replay mode
+        parent_space = self.owner.get_parent_object()
+        is_replay = (parent_space and 
+                    hasattr(parent_space, '_replay_in_progress') and 
+                    parent_space._replay_in_progress)
+        
+        # Get the sibling VeilProducer
+        veil_producer = self.get_sibling_component("MessageListVeilProducer")
+        if not veil_producer:
+            logger.warning(f"[{self.owner.id}] MessageListVeilProducer not found for focus signal")
+            return
+        
+        # Signal focus change with element details
+        focus_details = {
+            "focused_element_id": self.owner.id,
+            "focused_element_type": self.owner.__class__.__name__,
+            "focused_element_name": getattr(self.owner, 'name', 'Unknown'),
+            "conversation_name": getattr(self.owner, 'conversation_name', 'Unknown'),
+            "adapter_type": getattr(self.owner, 'adapter_type', 'Unknown'),
+            "timestamp": time.time(),
+            "replay_mode": is_replay  # Include replay context
+        }
+        
+        # Signal the VeilProducer to create focus StatusFacet
+        veil_producer.signal_focus_changed(focus_details)
+        
+        logger.debug(f"[{self.owner.id}] Signaled focus change to VeilProducer (replay: {is_replay})")
 
     def _handle_new_message(self, message_content: Dict[str, Any]) -> bool:
         """Adds a new message to the list. message_content is the actual message data (e.g., adapter_data)."""

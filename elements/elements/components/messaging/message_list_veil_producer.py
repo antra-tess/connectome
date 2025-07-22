@@ -249,6 +249,32 @@ class MessageListVeilProducer(VeilProducer):
         if self._should_defer_content_processing():
             logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Deferring content processing during structural phase")
             return None
+        
+        # NEW: Handle pending focus change signal
+        facet_operations = []
+        pending_focus = self._state.get('_pending_focus_change')
+        if pending_focus:
+            focus_facet = StatusFacet(
+                facet_id=f"focus_{pending_focus['focused_element_id']}_{int(time.time() * 1000)}",
+                veil_timestamp=ConnectomeEpoch.get_veil_timestamp(),
+                owner_element_id=pending_focus['focused_element_id'],
+                status_type="focus_changed",
+                current_state={
+                    "focused_element_id": pending_focus['focused_element_id'],
+                    "focused_element_type": pending_focus['focused_element_type'],
+                    "focused_element_name": pending_focus['focused_element_name'],
+                    "conversation_name": pending_focus['conversation_name'],
+                    "adapter_type": pending_focus['adapter_type'],
+                    "timestamp": pending_focus['timestamp']
+                },
+                links_to=f"{self.owner.id}_message_list_container"  # Link to container
+            )
+            
+            facet_operations.append(FacetOperationBuilder.add_facet(focus_facet))
+            logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Generated focus_changed StatusFacet")
+            
+            # Clear the pending signal
+            del self._state['_pending_focus_change']
             
         message_list_comp = self._get_message_list_component()
         if not message_list_comp:
@@ -259,7 +285,7 @@ class MessageListVeilProducer(VeilProducer):
             logger.error(f"[{self.COMPONENT_TYPE}] Owner not set, cannot calculate facet operations.")
             return None
 
-        facet_operations = []
+        # Continue with existing facet operations logic
         owner_id = self.owner.id
         list_root_facet_id = f"{owner_id}_message_list_container"
         
@@ -1014,4 +1040,28 @@ class MessageListVeilProducer(VeilProducer):
             logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Error checking replay phase: {e}")
             # Safe default: don't defer if unsure
             return False
+
+    def signal_focus_changed(self, focus_details: Dict[str, Any]) -> None:
+        """
+        NEW: Signal that focus has changed to this element.
+        
+        This sets a pending signal that will be processed in the next calculate_delta() call
+        to create a focus_changed StatusFacet. Enhanced to respect replay phases.
+        
+        Args:
+            focus_details: Details about the focus change
+        """
+        # Check if we're in structural replay phase and should defer
+        if self._should_defer_content_processing():
+            logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Deferring focus StatusFacet during structural phase")
+            return
+        
+        # Store pending focus change for next delta calculation
+        self._state['_pending_focus_change'] = focus_details.copy()
+        
+        # Trigger immediate delta emission to create StatusFacet
+        self.emit_delta()
+        
+        replay_mode = focus_details.get('replay_mode', False)
+        logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Scheduled focus_changed StatusFacet (replay: {replay_mode})")
 

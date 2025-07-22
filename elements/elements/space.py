@@ -1320,6 +1320,11 @@ class Space(BaseElement):
                 'original_timestamp': event_node.get('timestamp')
             }
             
+            # Handle activation_call events during replay (extract focus context)
+            if event_type == "activation_call":
+                self._handle_activation_call_during_replay(event_node)
+                return True  # Don't replay the activation_call itself, just extract focus
+
             # Use receive_event for most replay scenarios
             # This ensures components get the chance to handle replayed events with phase awareness
             logger.debug(f"[{self.id}] Replaying {phase} event {event_type} via receive_event mechanism")
@@ -1347,6 +1352,37 @@ class Space(BaseElement):
         except Exception as e:
             logger.error(f"[{self.id}] Error replaying {event_type} event in {phase} phase: {e}", exc_info=True)
             return False
+
+    def _handle_activation_call_during_replay(self, event_node: Dict[str, Any]) -> None:
+        """
+        NEW: Extract and signal focus StatusFacet from activation_call during replay.
+        
+        Args:
+            event_node: The activation_call event node containing focus context
+        """
+        try:
+            focus_context = event_node.get('focus_context', {})
+            focus_element_id = focus_context.get('focus_element_id')
+            
+            if focus_element_id:
+                # Find the target element and trigger focus signal
+                target_element = self.get_element_by_id(focus_element_id)
+                if target_element:
+                    # Get the MessageList component and trigger focus signal
+                    message_list_component = target_element.get_component("MessageListComponent")
+                    if message_list_component:
+                        # Call the focus signal method (which is replay-aware)
+                        message_list_component._signal_focus_change_to_veil_producer()
+                        logger.debug(f"[REPLAY] Signaled focus change for {focus_element_id}")
+                    else:
+                        logger.debug(f"[REPLAY] MessageListComponent not found for element {focus_element_id}")
+                else:
+                    logger.debug(f"[REPLAY] Element {focus_element_id} not found for focus signal")
+            else:
+                logger.debug(f"[REPLAY] No focus_element_id in activation_call focus_context")
+                
+        except Exception as e:
+            logger.error(f"[{self.id}] Error handling activation_call during replay: {e}", exc_info=True)
     
     async def _replay_element_mounted(self, event_data: Dict[str, Any]) -> bool:
         """Replay element_mounted event - recreate the mounted element if possible."""
