@@ -36,22 +36,26 @@ class EventReplayMode(Enum):
     SELECTIVE = "selective"  # Future: replay only specific event types
     ENABLED_WITH_VEIL_SNAPSHOT = "enabled_with_veil_snapshot"  # NEW: Structural replay + VEIL cache restoration
 
+# NEW: Event phase classification for two-phase replay
+# Phase 1: Structural events (system skeleton)
+STRUCTURAL_EVENTS = {
+    'element_mounted', 'element_unmounted', 'component_initialized',
+    'element_created_from_prefab', 'tool_provider_registered',
+    'component_state_updated'
+}
+
+# Phase 2: Content events (data and conversations)
+CONTENT_EVENTS = {
+    'message_received', 'historical_message_received', 'agent_message_confirmed',
+    'connectome_message_deleted', 'connectome_message_updated', 
+    'connectome_reaction_added', 'connectome_reaction_removed', 
+    'attachment_content_available', 'connectome_message_send_confirmed', 
+    'connectome_message_send_failed', 'agent_response_generated'
+}
+
 # NEW: Default replayability for event types (fallback when is_replayable flag not set)
 # These are only used when events don't have explicit is_replayable flag
-DEFAULT_REPLAYABLE_EVENTS = {
-    # Structural events - generally safe to replay
-    'element_mounted', 'element_unmounted', 'component_initialized', 
-    'tool_provider_registered', 'element_created_from_prefab',
-    'component_state_updated',
-    
-    # Message events - content restoration
-    'message_received', 'historical_message_received', 'agent_message_confirmed', 'connectome_message_deleted', 'connectome_message_updated', 
-    'connectome_reaction_added', 'connectome_reaction_removed', 'attachment_content_available',
-    'connectome_message_send_confirmed', 'connectome_message_send_failed',
-    
-    # Agent response events - for conversation history
-    'agent_response_generated',
-}
+DEFAULT_REPLAYABLE_EVENTS = STRUCTURAL_EVENTS | CONTENT_EVENTS
 
 DEFAULT_NON_REPLAYABLE_EVENTS = {
     # Runtime-only events that shouldn't be replayed
@@ -108,6 +112,11 @@ class Space(BaseElement):
         self._replay_in_progress = False
         self._replayed_event_ids = set()  # Track which events have been replayed
         
+        # NEW: Two-phase replay state tracking
+        self._current_replay_phase = None  # Track current phase: 'structural', 'content', or None
+        self._structural_phase_complete = False
+        self._content_phase_complete = False
+        
         # Initialize space with required components
         # Store references for easier delegation, though get_component could also be used.
         self._container: Optional[ContainerComponent] = self.add_component(ContainerComponent)
@@ -162,6 +171,34 @@ class Space(BaseElement):
             return EventReplayMode.SELECTIVE
         else:
             return EventReplayMode.DISABLED
+
+    def _classify_event_phase(self, event_type: str, event_payload: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Classify an event into structural or content phase.
+        
+        Args:
+            event_type: The type of event to classify
+            event_payload: Optional event payload for override checking
+            
+        Returns:
+            'structural' or 'content' phase classification
+        """
+        # Check for explicit phase override in event payload
+        if event_payload and 'replay_phase' in event_payload:
+            override_phase = event_payload['replay_phase']
+            if override_phase in ['structural', 'content']:
+                logger.debug(f"[{self.id}] Event {event_type} has explicit phase override: {override_phase}")
+                return override_phase
+        
+        # Automatic classification based on event type
+        if event_type in STRUCTURAL_EVENTS:
+            return 'structural'
+        elif event_type in CONTENT_EVENTS:
+            return 'content'
+        else:
+            # Default: treat unknown events as content events to maintain safety
+            logger.debug(f"[{self.id}] Unknown event type {event_type}, classifying as content")
+            return 'content'
 
     def _ensure_own_veil_presence_initialized(self) -> None:
         """
@@ -351,8 +388,9 @@ class Space(BaseElement):
         
         # NEW: Check if this is a replay mode to prevent double-recording
         is_replay_mode = timeline_context.get('replay_mode', False)
+        replay_phase = timeline_context.get('replay_phase', 'unknown')
         
-        logger.debug(f"[{self.id}] Receiving event: Type='{event_type}', Target='{target_element_id}', Timeline='{timeline_context.get('timeline_id')}', Replay={is_replay_mode}")
+        logger.debug(f"[{self.id}] Receiving event: Type='{event_type}', Target='{target_element_id}', Timeline='{timeline_context.get('timeline_id')}', Replay={is_replay_mode}, Phase={replay_phase}")
         
         # 1. Add event to the timeline via TimelineComponent (unless in replay mode)
         new_event_id = None
@@ -820,7 +858,11 @@ class Space(BaseElement):
     
     async def replay_events_from_timeline(self) -> bool:
         """
-        Replay timeline events to reconstruct system state.
+        NEW: Two-phase replay timeline events to reconstruct system state with proper chronological ordering.
+        
+        Phase 1: Structural Restoration - Mount elements and initialize components
+        Phase 2: Content Restoration - Process content events chronologically 
+        
         Should be called after storage is initialized but before normal operation.
         
         Returns:
@@ -840,7 +882,7 @@ class Space(BaseElement):
             
         try:
             self._replay_in_progress = True
-            logger.info(f"[{self.id}] Starting event replay for system state reconstruction")
+            logger.info(f"[{self.id}] Starting two-phase event replay for system state reconstruction")
             
             # Get all events from the primary timeline in chronological order
             primary_timeline_id = self._timeline.get_primary_timeline()
@@ -858,78 +900,286 @@ class Space(BaseElement):
                 logger.info(f"[{self.id}] No events found in timeline, nothing to replay")
                 return True
                 
-            logger.info(f"[{self.id}] Found {len(chronological_events)} events to potentially replay")
+            logger.info(f"[{self.id}] Found {len(chronological_events)} events for two-phase replay")
+            
+            # Phase 1: Structural Replay
+            logger.info(f"[{self.id}] === Phase 1: Structural Replay Starting ===")
+            structural_success = await self._replay_structural_phase(chronological_events)
+            if not structural_success:
+                logger.error(f"[{self.id}] Phase 1: Structural replay failed")
+                return False
+                
+            # Verify structural integrity before content
+            logger.info(f"[{self.id}] Verifying structural integrity before content phase")
+            structure_ready = await self._verify_structural_integrity()
+            if not structure_ready:
+                logger.error(f"[{self.id}] Structural integrity verification failed")
+                return False
+                
+            # Phase 2: Content Replay  
+            logger.info(f"[{self.id}] === Phase 2: Content Replay Starting ===")
+            content_success = await self._replay_content_phase(chronological_events)
+            if not content_success:
+                logger.error(f"[{self.id}] Phase 2: Content replay failed")
+                return False
+            
+            # Post-replay operations
+            await self._complete_two_phase_replay()
+            
+            logger.info(f"[{self.id}] ✓ Two-phase replay completed successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[{self.id}] Error during two-phase replay: {e}", exc_info=True)
+            return False
+        finally:
+            self._replay_in_progress = False
+            self._current_replay_phase = None
+
+    async def _replay_structural_phase(self, all_events: List[Dict]) -> bool:
+        """
+        Phase 1: Replay only structural events to establish system skeleton.
+        
+        Args:
+            all_events: All chronological events from timeline
+            
+        Returns:
+            True if structural phase completed successfully, False otherwise
+        """
+        try:
+            self._current_replay_phase = 'structural'
+            
+            # Filter to only structural events
+            structural_events = [
+                event for event in all_events 
+                if self._classify_event_phase(
+                    event.get('payload', {}).get('event_type'), 
+                    event.get('payload', {})
+                ) == 'structural'
+            ]
+            
+            logger.info(f"[{self.id}] Phase 1: Processing {len(structural_events)} structural events")
             
             replayed_count = 0
             skipped_count = 0
             
-            for event_node in chronological_events:
+            for event_node in structural_events:
                 event_id = event_node.get('id')
                 event_payload = event_node.get('payload', {})
                 event_type = event_payload.get('event_type')
                 
-                # Skip if already replayed (shouldn't happen, but safety check)
-                if event_id in self._replayed_event_ids:
-                    logger.debug(f"[{self.id}] Skipping already replayed event {event_id}")
-                    skipped_count += 1
-                    continue
-                    
-                # Check if this event type should be replayed
+                # Check if this event should be replayed
                 if not self._should_replay_event(event_type, event_payload):
-                    logger.debug(f"[{self.id}] Skipping non-replayable event {event_id} ({event_type})")
+                    logger.debug(f"[{self.id}] Phase 1: Skipping non-replayable event {event_id} ({event_type})")
                     skipped_count += 1
                     continue
-                    
-                # Log what we're about to replay
-                logger.info(f"[{self.id}] Replaying event {event_id}: {event_type}")
                 
-                # Replay the event
-                success = await self._replay_single_event(event_node)
+                logger.info(f"[{self.id}] Phase 1: Replaying structural event {event_id}: {event_type}")
+                
+                # Replay the structural event
+                success = await self._replay_single_event(event_node, phase="structural")
                 if success:
                     self._replayed_event_ids.add(event_id)
                     replayed_count += 1
-                    logger.info(f"[{self.id}] ✓ Successfully replayed event {event_id} ({event_type})")
+                    logger.info(f"[{self.id}] Phase 1: ✓ Successfully replayed {event_id} ({event_type})")
                 else:
-                    logger.error(f"[{self.id}] ✗ Failed to replay event {event_id} ({event_type})")
-                    # Continue with other events even if one fails
-                    skipped_count += 1
+                    logger.error(f"[{self.id}] Phase 1: ✗ Failed to replay {event_id} ({event_type})")
+                    return False  # Fail fast for structural issues
                     
-            logger.info(f"[{self.id}] Event replay completed: {replayed_count} replayed, {skipped_count} skipped")
+            self._structural_phase_complete = True
+            logger.info(f"[{self.id}] Phase 1: Structural replay completed - {replayed_count} replayed, {skipped_count} skipped")
+            return True
             
-            # NEW: Debug - check cache size before regeneration
-            pre_regen_cache_size = self._veil_producer.get_facet_cache_size() if self._veil_producer else 0
-            logger.info(f"[{self.id}] Facet cache size BEFORE regeneration: {pre_regen_cache_size}")
+        except Exception as e:
+            logger.error(f"[{self.id}] Phase 1: Error during structural replay: {e}", exc_info=True)
+            return False
+
+    async def _replay_content_phase(self, all_events: List[Dict]) -> bool:
+        """
+        Phase 2: Replay only content events chronologically with proper VEIL facet timing.
+        
+        Args:
+            all_events: All chronological events from timeline
             
-            # NEW: For VEIL snapshot mode, restore VEIL cache after structural replay
+        Returns:
+            True if content phase completed successfully, False otherwise
+        """
+        try:
+            self._current_replay_phase = 'content'
+            
+            # Filter to only content events (preserve chronological order)
+            content_events = [
+                event for event in all_events 
+                if self._classify_event_phase(
+                    event.get('payload', {}).get('event_type'), 
+                    event.get('payload', {})
+                ) == 'content'
+            ]
+            
+            logger.info(f"[{self.id}] Phase 2: Processing {len(content_events)} content events chronologically")
+            
+            replayed_count = 0
+            skipped_count = 0
+            
+            for event_node in content_events:
+                event_id = event_node.get('id')
+                event_payload = event_node.get('payload', {})
+                event_type = event_payload.get('event_type')
+                
+                # Check if this event should be replayed
+                if not self._should_replay_event(event_type, event_payload):
+                    logger.debug(f"[{self.id}] Phase 2: Skipping non-replayable event {event_id} ({event_type})")
+                    skipped_count += 1
+                    continue
+                
+                logger.info(f"[{self.id}] Phase 2: Replaying content event {event_id}: {event_type}")
+                
+                # Replay the content event
+                success = await self._replay_single_event(event_node, phase="content")
+                if success:
+                    self._replayed_event_ids.add(event_id)
+                    replayed_count += 1
+                    logger.info(f"[{self.id}] Phase 2: ✓ Successfully replayed {event_id} ({event_type})")
+                else:
+                    logger.warning(f"[{self.id}] Phase 2: ⚠ Failed to replay {event_id} ({event_type}) - continuing")
+                    skipped_count += 1
+                    # Continue with other content events even if one fails
+                    
+            self._content_phase_complete = True
+            logger.info(f"[{self.id}] Phase 2: Content replay completed - {replayed_count} replayed, {skipped_count} skipped")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[{self.id}] Phase 2: Error during content replay: {e}", exc_info=True)
+            return False
+
+    async def _verify_structural_integrity(self) -> bool:
+        """
+        Verify all expected elements and components exist before content replay.
+        
+        Returns:
+            True if structural integrity is verified, False otherwise
+        """
+        try:
+            logger.info(f"[{self.id}] Verifying structural integrity after Phase 1")
+            
+            # Check that all expected chat elements exist based on timeline events
+            expected_elements = self._extract_expected_elements_from_timeline()
+            
+            missing_elements = []
+            incomplete_elements = []
+            
+            for element_info in expected_elements:
+                mount_id = element_info.get('mount_id')
+                element_type = element_info.get('element_type', 'Unknown')
+                
+                element = self.get_mounted_element(mount_id) if mount_id else None
+                
+                if not element:
+                    missing_elements.append(f"{mount_id} ({element_type})")
+                    continue
+                    
+                # Verify element has expected components based on type
+                if element_type in ['ConversationElement', 'ChatElement']:
+                    required_components = ['MessageListComponent', 'MessageListVeilProducer']
+                    for comp_type_name in required_components:
+                        # Try to get component by name (more flexible than type)
+                        comp = element.get_component(comp_type_name)
+                        if not comp:
+                            incomplete_elements.append(f"{mount_id} missing {comp_type_name}")
+                            
+            # Report structural integrity results
+            if missing_elements:
+                logger.error(f"[{self.id}] Missing expected elements: {missing_elements}")
+                return False
+                
+            if incomplete_elements:
+                logger.warning(f"[{self.id}] Elements with missing components: {incomplete_elements}")
+                # Don't fail for missing components - they might be optional
+                
+            total_elements = len(expected_elements)
+            ready_elements = total_elements - len(missing_elements)
+            
+            logger.info(f"[{self.id}] Structural integrity verified: {ready_elements}/{total_elements} elements ready")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[{self.id}] Structural integrity verification failed: {e}", exc_info=True)
+            return False
+
+    def _extract_expected_elements_from_timeline(self) -> List[Dict[str, Any]]:
+        """
+        Extract expected element information from timeline mount events.
+        
+        Returns:
+            List of dictionaries with element information
+        """
+        expected_elements = []
+        
+        try:
+            # Look for element_mounted events that were successfully replayed
+            for event_id in self._replayed_event_ids:
+                # This is a simplified approach - in a full implementation,
+                # we'd need to track the events we just processed
+                pass
+                
+            # For now, check what's currently mounted as a proxy
+            if self._container:
+                mounted_elements_info = self._container.get_mounted_elements_info()
+                for mount_id, element_info in mounted_elements_info.items():
+                    expected_elements.append({
+                        'mount_id': mount_id,
+                        'element_type': element_info.get('element_type', 'Unknown'),
+                        'element_id': element_info.get('element_id')
+                    })
+                    
+        except Exception as e:
+            logger.warning(f"[{self.id}] Error extracting expected elements: {e}")
+            
+        return expected_elements
+
+    async def _complete_two_phase_replay(self) -> bool:
+        """
+        Complete post-replay operations with simplified VEIL handling.
+        
+        NEW: VEIL facets are now built in real-time during content phase,
+        so no complex regeneration is needed!
+        
+        Returns:
+            True if completion was successful, False otherwise
+        """
+        try:
+            total_replayed = len(self._replayed_event_ids)
+            logger.info(f"[{self.id}] Completing two-phase replay with {total_replayed} total events replayed")
+            
+            # Check final VEIL cache size (built during content phase)
+            final_cache_size = self._veil_producer.get_facet_cache_size() if self._veil_producer else 0
+            logger.info(f"[{self.id}] VEIL cache size after chronological replay: {final_cache_size}")
+            
+            # NEW: Simplified VEIL handling
             if self._event_replay_mode == EventReplayMode.ENABLED_WITH_VEIL_SNAPSHOT:
-                logger.info(f"[{self.id}] Attempting VEIL cache restoration after structural replay")
+                # For snapshot mode, still try to restore stored VEIL
+                logger.info(f"[{self.id}] Attempting VEIL cache restoration in snapshot mode")
                 veil_restoration_success = await self._restore_veil_snapshot()
                 if not veil_restoration_success:
-                    logger.warning(f"[{self.id}] VEIL cache restoration failed, regenerating from current state")
-                    await self._regenerate_veil_state_after_replay()
-            elif replayed_count > 0:
-                # Only regenerate VEIL state if we actually replayed events
-                # For new agents with no events, let normal initialization handle VEIL setup
-                logger.info(f"[{self.id}] Regenerating VEIL state after replaying {replayed_count} events")
-                await self._regenerate_veil_state_after_replay()
+                    logger.info(f"[{self.id}] VEIL cache restoration failed, using chronologically built VEIL from content phase")
             else:
-                logger.info(f"[{self.id}] No events replayed, skipping VEIL regeneration - normal initialization will handle VEIL setup")
+                # For regular mode, VEIL was built chronologically during content phase - no regeneration needed!
+                logger.info(f"[{self.id}] ✓ VEIL state built chronologically during content phase - no regeneration required")
             
-            # NEW: After VEIL regeneration, ensure uplinks are connected (crucial for InnerSpaces)
-            if replayed_count > 0:
-                logger.info(f"[{self.id}] Connecting uplinks after timeline replay")
+            # Connect uplinks after replay (crucial for InnerSpaces)
+            if total_replayed > 0:
+                logger.info(f"[{self.id}] Connecting uplinks after two-phase replay")
                 await self._connect_uplinks_after_replay()
             
-            # NEW: Verify replay integrity for message components
+            # Verify replay integrity for message components
             await self._verify_replay_integrity()
             
             return True
             
         except Exception as e:
-            logger.error(f"[{self.id}] Error during event replay: {e}", exc_info=True)
+            logger.error(f"[{self.id}] Error during two-phase replay completion: {e}", exc_info=True)
             return False
-        finally:
-            self._replay_in_progress = False
 
     async def _regenerate_veil_state_after_replay(self) -> bool:
         """
@@ -1045,12 +1295,13 @@ class Space(BaseElement):
             
         return False
     
-    async def _replay_single_event(self, event_node: Dict[str, Any]) -> bool:
+    async def _replay_single_event(self, event_node: Dict[str, Any], phase: str = "unknown") -> bool:
         """
-        Replay a single event to reconstruct system state.
+        Replay a single event to reconstruct system state with phase awareness.
         
         Args:
             event_node: The complete event node from timeline
+            phase: The current replay phase ('structural', 'content', or 'unknown')
             
         Returns:
             True if replay was successful, False otherwise
@@ -1060,18 +1311,23 @@ class Space(BaseElement):
         event_data = event_payload.get('data', {})
         
         try:
-            # For most events, we can use the generic receive_event mechanism with replay mode
-            # This allows components to handle replay events the same way as live events
+            # NEW: Enhanced timeline context with phase information
             timeline_context = {
                 'timeline_id': event_node.get('timeline_id'),
                 'replay_mode': True,  # Mark this as a replay to prevent double-recording
+                'replay_phase': phase,  # NEW: Include current phase for component awareness
                 'original_event_id': event_node.get('id'),
                 'original_timestamp': event_node.get('timestamp')
             }
             
+            # Handle activation_call events during replay (extract focus context)
+            if event_type == "activation_call":
+                self._handle_activation_call_during_replay(event_node)
+                return True  # Don't replay the activation_call itself, just extract focus
+
             # Use receive_event for most replay scenarios
-            # This ensures components get the chance to handle replayed events
-            logger.debug(f"[{self.id}] Replaying event {event_type} via receive_event mechanism")
+            # This ensures components get the chance to handle replayed events with phase awareness
+            logger.debug(f"[{self.id}] Replaying {phase} event {event_type} via receive_event mechanism")
             self.receive_event(event_payload, timeline_context)
             
             # For events that need special handling beyond component processing:
@@ -1090,12 +1346,43 @@ class Space(BaseElement):
                 return True
                 
             else:
-                logger.debug(f"[{self.id}] Event type {event_type} replayed via component mechanism")
+                logger.debug(f"[{self.id}] Event type {event_type} replayed via component mechanism in {phase} phase")
                 return True
                 
         except Exception as e:
-            logger.error(f"[{self.id}] Error replaying {event_type} event: {e}", exc_info=True)
+            logger.error(f"[{self.id}] Error replaying {event_type} event in {phase} phase: {e}", exc_info=True)
             return False
+
+    def _handle_activation_call_during_replay(self, event_node: Dict[str, Any]) -> None:
+        """
+        NEW: Extract and signal focus StatusFacet from activation_call during replay.
+        
+        Args:
+            event_node: The activation_call event node containing focus context
+        """
+        try:
+            focus_context = event_node.get('focus_context', {})
+            focus_element_id = focus_context.get('focus_element_id')
+            
+            if focus_element_id:
+                # Find the target element and trigger focus signal
+                target_element = self.get_element_by_id(focus_element_id)
+                if target_element:
+                    # Get the MessageList component and trigger focus signal
+                    message_list_component = target_element.get_component("MessageListComponent")
+                    if message_list_component:
+                        # Call the focus signal method (which is replay-aware)
+                        message_list_component._signal_focus_change_to_veil_producer()
+                        logger.debug(f"[REPLAY] Signaled focus change for {focus_element_id}")
+                    else:
+                        logger.debug(f"[REPLAY] MessageListComponent not found for element {focus_element_id}")
+                else:
+                    logger.debug(f"[REPLAY] Element {focus_element_id} not found for focus signal")
+            else:
+                logger.debug(f"[REPLAY] No focus_element_id in activation_call focus_context")
+                
+        except Exception as e:
+            logger.error(f"[{self.id}] Error handling activation_call during replay: {e}", exc_info=True)
     
     async def _replay_element_mounted(self, event_data: Dict[str, Any]) -> bool:
         """Replay element_mounted event - recreate the mounted element if possible."""

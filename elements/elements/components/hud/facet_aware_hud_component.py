@@ -9,6 +9,7 @@ maintaining interface compatibility with existing systems.
 import logging
 import json
 import time
+import copy
 from typing import Dict, Any, Optional, List, Union
 from dataclasses import dataclass
 
@@ -22,6 +23,17 @@ from ..veil.facet_cache import TemporalConsistencyValidator
 from ..space.space_veil_producer import SpaceVeilProducer
 
 logger = logging.getLogger(__name__)
+
+# NEW: Define minor status types that don't trigger ambient facets
+MINOR_STATUS_TYPES = {
+    "focus_changed",           # UI state change, not structural
+    "message_count_updated",   # Count changes, same capabilities  
+    "connection_status_updated", # Network state, same functionality
+    "read_status_updated",     # Read/unread markers, same context
+    "activity_status_updated", # Typing indicators, transient
+    "user_presence_updated",   # Online/offline status, not structural
+    "notification_received"    # Notifications, not capabilities
+}
 
 @dataclass
 class RenderingOptions:
@@ -259,7 +271,7 @@ class FacetAwareHUDComponent(Component):
                                        options: Dict[str, Any],
                                        tools: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         """
-        ENHANCED: Clean three-phase approach for turn-based rendering.
+        ENHANCED: Clean three-phase approach for turn-based rendering with historical focus tracking.
         
         Phase 1: Collect turn structure with facets as objects (no rendering yet)
         Phase 2: Apply retroactive de-rendering and other processing logic  
@@ -276,9 +288,11 @@ class FacetAwareHUDComponent(Component):
         try:
             # Get chronological temporal stream
             temporal_stream = facet_cache.get_chronological_stream(include_ambient=True)
-            
             if not temporal_stream:
                 return [{"role": "user", "content": "[AGENT WORKSPACE]\nNo content available", "turn_metadata": {"turn_index": 0, "facet_count": 0}}]
+            
+            # NEW: Build historical focus map from StatusFacets
+            historical_focus_map = self._build_historical_focus_map(temporal_stream)
             
             # Initialize system state for processing
             system_state = self._initialize_system_state(temporal_stream, options)
@@ -289,10 +303,20 @@ class FacetAwareHUDComponent(Component):
             # PHASE 2: Apply processing logic (retroactive de-rendering, etc.)
             processed_turns = self._process_turn_structure(turn_structure, system_state, options, tools)
             
+            # NEW: Add historical focus to each turn
+            for turn_data in processed_turns:
+                # Calculate turn timestamp (using first facet's timestamp as approximation)
+                all_facets = turn_data["status"] + turn_data["ambient"] + turn_data["events"]
+                turn_timestamp = min(f.veil_timestamp for f in all_facets) if all_facets else 0.0
+                
+                # Get historical focus for this turn
+                historical_focus_id = self._get_historical_focus_for_turn(turn_timestamp, historical_focus_map)
+                turn_data["historical_focus_id"] = historical_focus_id
+            
             # PHASE 3: Render processed turns to final content
             turn_messages = await self._render_turn_structure_to_messages(processed_turns, system_state, options, tools)
             
-            logger.debug(f"Processed {len(temporal_stream)} facets into {len(turn_messages)} turns using clean turn structure")
+            logger.debug(f"Processed {len(temporal_stream)} facets into {len(turn_messages)} turns using clean turn structure with historical focus")
             return turn_messages
             
         except Exception as e:
@@ -342,7 +366,6 @@ class FacetAwareHUDComponent(Component):
             "events": [],
             "turn_index": 0
         }
-        
         for facet in temporal_stream:
             # Check if this facet triggers agent turn logic
             is_agent_response = (
@@ -351,27 +374,19 @@ class FacetAwareHUDComponent(Component):
             )
             
             if is_agent_response:
-                # ENHANCED: Handle consecutive agent_response events
-                if current_turn["type"] == "agent_turn":
-                    # Already in agent turn - add this agent_response to current agent turn
-                    current_turn["events"].append(facet)
-                    logger.debug(f"Added consecutive agent_response to existing agent turn {current_turn['turn_index']}")
-                else:
-                    # Switch from user turn to agent turn
-                    
-                    # End current user turn if it has content
-                    if current_turn["status"] or current_turn["ambient"] or current_turn["events"]:
-                        turn_structure.append(current_turn)
-                    
-                    # Start new agent turn for this agent response
-                    current_turn = {
-                        "type": "agent_turn",
-                        "status": [],
-                        "ambient": [],
-                        "events": [facet],  # Add the agent response event
-                        "turn_index": len(turn_structure)
-                    }
-                    logger.debug(f"Started new agent turn {current_turn['turn_index']} for agent_response")
+                # End current user turn if it has content
+                if current_turn["status"] or current_turn["ambient"] or current_turn["events"]:
+                    turn_structure.append(current_turn)
+                
+                # Start new agent turn for this agent response
+                current_turn = {
+                    "type": "agent_turn",
+                    "status": [],
+                    "ambient": [],
+                    "events": [facet],  # Add the agent response event
+                    "turn_index": len(turn_structure)
+                }
+                logger.debug(f"Started new agent turn {current_turn['turn_index']} for agent_response")
             else:
                 # Non-agent-response facet
                 if current_turn["type"] == "agent_turn":
@@ -430,6 +445,13 @@ class FacetAwareHUDComponent(Component):
         try:
             processed_turns = []
             
+            # PHASE 2: Initialize scene-context collection for historical replay
+            scene_context = {
+                "scene_status_messages": [],  # Store scene-related status messages
+                "scene_status_by_type": {},   # Group by status type for deduplication
+                "last_scene_change_turn": -1  # Track when last scene change occurred
+            }
+            
             # Collect all ambient facets from all turns for triggered placement
             all_ambient_facets = set()
             for turn_data in turn_structure:
@@ -446,12 +468,26 @@ class FacetAwareHUDComponent(Component):
                 processed_turn = dict(turn_data)  # Copy turn data
                 
                 # FIXED: Create turn-specific system state to avoid retroactive changes
-                turn_specific_system_state = dict(system_state)  # Copy current state
+                turn_specific_system_state = copy.deepcopy(system_state)  # Deep copy to avoid shared references
                 
                 # Update turn-specific state based on status facets in this turn
                 for status_facet in turn_data["status"]:
                     self._update_system_state(turn_specific_system_state, status_facet, options)
                     self._update_status_message_tracking(turn_specific_system_state, status_facet)
+                
+                # PHASE 2: Collect scene-related status messages for historical replay
+                scene_changing_status_facets = [
+                    facet for facet in turn_data["status"]
+                    if self._is_scene_changing_status(facet)
+                ]
+                
+                if scene_changing_status_facets:
+                    # This turn has scene changes - collect all scene-related status messages
+                    for status_facet in scene_changing_status_facets:
+                        self._collect_scene_status_message(status_facet, scene_context, turn_data["turn_index"])
+                    
+                    # Mark this as a scene change turn
+                    scene_context["last_scene_change_turn"] = turn_data["turn_index"]
                 
                 # Store turn-specific state for rendering (don't modify global state)
                 turn_data["system_state"] = turn_specific_system_state
@@ -477,6 +513,9 @@ class FacetAwareHUDComponent(Component):
                 
                 processed_turn["ambient"] = combined_ambient
                 
+                # PHASE 2: Attach scene context for historical replay
+                processed_turn["scene_context"] = scene_context
+                
                 processed_turns.append(processed_turn)
             
             # Apply retroactive ambient de-rendering (backwards pass) - keep latest only
@@ -488,6 +527,41 @@ class FacetAwareHUDComponent(Component):
         except Exception as e:
             logger.error(f"Error processing turn structure: {e}", exc_info=True)
             return turn_structure  # Return unprocessed on error
+    
+    def _collect_scene_status_message(self, status_facet: VEILFacet, scene_context: Dict[str, Any], turn_index: int) -> None:
+        """
+        PHASE 2: Collect scene-related status message for historical replay.
+        
+        Args:
+            status_facet: Scene-changing status facet to collect
+            scene_context: Scene context collection dictionary
+            turn_index: Current turn index
+        """
+        try:
+            status_type = status_facet.get_property("status_type")
+            current_state = status_facet.get_property("current_state", {})
+            
+            # Create scene status entry
+            scene_status_entry = {
+                "facet": status_facet,
+                "status_type": status_type,
+                "current_state": current_state,
+                "collected_at_turn": turn_index,
+                "timestamp": status_facet.veil_timestamp
+            }
+            
+            # Add to scene status messages list
+            scene_context["scene_status_messages"].append(scene_status_entry)
+            
+            # Group by type for deduplication (keep latest of each type)
+            if status_type not in scene_context["scene_status_by_type"]:
+                scene_context["scene_status_by_type"][status_type] = []
+            scene_context["scene_status_by_type"][status_type].append(scene_status_entry)
+            
+            logger.debug(f"Collected scene status message: {status_type} at turn {turn_index}")
+            
+        except Exception as e:
+            logger.error(f"Error collecting scene status message: {e}", exc_info=True)
     
     async def _render_turn_structure_to_messages(self, 
                                                processed_turns: List[Dict[str, Any]],
@@ -522,19 +596,21 @@ class FacetAwareHUDComponent(Component):
                     status_content = await self._render_status_section_from_facets(
                         turn_data["status"], 
                         turn_data["turn_index"], 
-                        turn_system_state,  # Use turn-specific state
+                        system_state,       # Global state (for focus fallback)
+                        turn_system_state,  # Turn-specific historical state
                         tools,
-                        bool(turn_data["status"])
+                        bool(turn_data["status"]),
+                        turn_data.get("scene_context")  # PHASE 4: Pass scene context for historical replay
                     )
                     if status_content:
                         content_sections.append(status_content)
                 else:
-                    # FIXED: Don't render focus status on agent turns (Issue 3)
-                    if turn_data["type"] != "agent_turn":
-                        # Minimal status section - only focused element status on user turns
-                        focused_status = self._render_focused_element_status(turn_system_state, turn_data["turn_index"])
-                        if focused_status:
-                            content_sections.append(focused_status)
+                    # No status changes this turn - render each status message from this turn (if any)
+                    if turn_data["status"] and turn_data["type"] != "agent_turn":
+                        for status_facet in turn_data["status"]:
+                            system_message = self._generate_system_message_for_status(status_facet)
+                            if system_message:
+                                content_sections.append(system_message)
                 
                 # Render Ambient section
                 if turn_data["ambient"]:
@@ -725,17 +801,21 @@ class FacetAwareHUDComponent(Component):
                                                status_facets: List[VEILFacet],
                                                turn_index: int, 
                                                system_state: Dict[str, Any],
+                                               turn_system_state: Dict[str, Any],
                                                tools: Optional[List[Dict[str, Any]]],
-                                               has_status_changes: bool) -> str:
+                                               has_status_changes: bool,
+                                               scene_context: Optional[Dict[str, Any]] = None) -> str:
         """
-        Render Status section from status facets.
+        Render Status section from status facets with historical accuracy.
         
         Args:
             status_facets: List of status facets to render
             turn_index: Current turn index
-            system_state: Current system state
+            system_state: Global system state (for focus fallback)
+            turn_system_state: Turn-specific historical system state
             tools: Enhanced tool definitions
             has_status_changes: Whether this turn has status changes
+            scene_context: Scene context for historical replay (PHASE 4)
             
         Returns:
             Rendered status section string
@@ -743,40 +823,141 @@ class FacetAwareHUDComponent(Component):
         try:
             status_parts = []
             
-            # Add workspace wrapper on first turn
-            if turn_index == 0:
-                workspace_section = self._render_agent_workspace_wrapper(system_state)
+            # SIMPLIFIED: Expand status list with previous scene messages if this turn has scene changes
+            expanded_status_facets = list(status_facets)  # Start with current turn's status messages
+            
+            # If this turn has scene changes, add all previous scene-related status messages
+            has_scene_changes = any(self._is_scene_changing_status(facet) for facet in status_facets)
+            if has_scene_changes and scene_context:
+                previous_scene_messages = [
+                    msg["facet"] for msg in scene_context.get("scene_status_messages", [])
+                    if msg["collected_at_turn"] < turn_index
+                ]
+                expanded_status_facets = previous_scene_messages + expanded_status_facets
+            logger.critical(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Expanded status facets: {[x.to_veil_dict() for x in expanded_status_facets]} for turn {turn_index}")
+            # Extract specific facet types for consolidated rendering
+            workspace_facets = [facet for facet in expanded_status_facets if facet.get_property("status_type") == "space_created"]
+            chat_facets = [facet for facet in expanded_status_facets if facet.get_property("status_type") in ["container_created", "chat_joined"]]
+            
+            # Render consolidated sections based on actual facets collected
+            if workspace_facets:
+                workspace_section = self._render_agent_workspace_wrapper_from_facets(workspace_facets)
                 if workspace_section:
                     status_parts.append(workspace_section)
             
-            # Render consolidated chat_info after all status updates
-            if has_status_changes or turn_index == 0:
-                chat_info_section = self._render_consolidated_chat_info(system_state, tools)
+            if chat_facets:
+                chat_info_section = self._render_consolidated_chat_info_from_facets(chat_facets, tools)
                 if chat_info_section:
                     status_parts.append(chat_info_section)
             
-            # Render repeated status messages if status changes occurred
-            if has_status_changes or turn_index == 0:
-                repeated_status = self._render_repeated_status_messages(system_state, turn_index)
-                if repeated_status:
-                    status_parts.append(repeated_status)
+            # Render remaining individual status messages (excluding those already rendered in consolidated sections)
+            already_rendered_facets = set(workspace_facets + chat_facets)
             
-            # Always render focused element status every turn
-            focused_status = self._render_focused_element_status(system_state, turn_index)
-            if focused_status:
-                status_parts.append(focused_status)
-            
-            # Generate system messages for status changes
-            for status_facet in status_facets:
-                system_message = self._generate_system_message_for_status(status_facet, system_state)
-                if system_message:
-                    status_parts.append(system_message)
+            for status_facet in expanded_status_facets:
+                if status_facet not in already_rendered_facets:
+                    system_message = self._generate_system_message_for_status(status_facet)
+                    if system_message:
+                        status_parts.append(system_message)
             
             return "\n".join(status_parts) if status_parts else ""
             
         except Exception as e:
             logger.error(f"Error rendering status section from facets: {e}", exc_info=True)
             return ""
+    
+    def _render_agent_workspace_wrapper_from_facets(self, workspace_facets: List[VEILFacet]) -> str:
+        """Render opening agent workspace wrapper from space_created facets."""
+        if not workspace_facets:
+            return ""
+        
+        # Use the latest workspace facet (should only be one, but just in case)
+        workspace_facet = workspace_facets[-1]
+        current_state = workspace_facet.get_property("current_state", {})
+        
+        agent_name = current_state.get("agent_name", "Unknown Agent")
+        agent_description = current_state.get("agent_description", "Agent workspace")
+        
+        if agent_name and agent_name != "Unknown Agent":
+            opening_tag = f'<inner_space agent_name="{agent_name}"'
+            if agent_description and agent_description != "Agent workspace":
+                opening_tag += f' agent_description="{agent_description}"'
+            opening_tag += '>'
+        else:
+            opening_tag = '<inner_space>'
+        
+        return opening_tag
+
+    def _render_consolidated_chat_info_from_facets(self, chat_facets: List[VEILFacet], tools: Optional[List[Dict[str, Any]]] = None) -> str:
+        """Render consolidated chat_info sections from container_created/chat_joined facets."""
+        if not chat_facets:
+            return ""
+        
+        # Group facets by adapter
+        adapter_groups = {}
+        
+        for facet in chat_facets:
+            current_state = facet.get_property("current_state", {})
+            adapter_type = current_state.get("adapter_type")
+            server_name = current_state.get("server_name")
+            
+            if adapter_type and server_name:
+                group_key = f"{adapter_type}_{server_name}"
+                if group_key not in adapter_groups:
+                    adapter_groups[group_key] = {
+                        "adapter_type": adapter_type,
+                        "server_name": server_name,
+                        "alias": current_state.get("alias", ""),
+                        "channels": []
+                    }
+                
+                # Avoid duplicates - check if this conversation already exists
+                conversation_name = current_state.get("conversation_name")
+                existing_channels = adapter_groups[group_key]["channels"]
+                channel_exists = any(ch.get("conversation_name") == conversation_name for ch in existing_channels)
+                
+                if not channel_exists:
+                    channel_info = {
+                        "conversation_name": conversation_name,
+                        "available_tools": current_state.get("available_tools", [])
+                    }
+                    adapter_groups[group_key]["channels"].append(channel_info)
+        
+        # Render each adapter group
+        info_sections = []
+        for adapter_group in adapter_groups.values():
+            adapter_type = adapter_group["adapter_type"]
+            server_name = adapter_group["server_name"]
+            alias = adapter_group["alias"]
+            channels = adapter_group["channels"]
+            
+            if not channels:
+                continue
+            
+            # Build chat_info opening tag
+            info_section = f'<chat_info type="{adapter_type}" server="{server_name}" alias="{alias}">'
+            channel_lines = []
+            
+            # Add all channels in this adapter group
+            for channel in channels:
+                conversation_name = channel["conversation_name"]
+                available_tools = channel.get("available_tools", [])
+                
+                # Build tool list for this channel
+                if available_tools:
+                    tool_names = [tool.get("name", tool.get("tool_name", "unknown")) for tool in available_tools]
+                    tools_attr = f' tools="({", ".join(tool_names)})"'
+                else:
+                    tools_attr = ''
+                
+                # Build channel line (no focused attribute - handled separately)
+                channel_line = f'<channel conversation_name="{conversation_name}"{tools_attr}>'
+                channel_lines.append(channel_line)
+            
+            info_section += "\n" + "\n".join(channel_lines) + "\n</chat_info>"
+            info_sections.append(info_section)
+        
+        return "\n\n".join(info_sections)
+
     
     async def _render_ambient_section_from_facets(self, 
                                                 ambient_facets: List[VEILFacet],
@@ -873,69 +1054,6 @@ class FacetAwareHUDComponent(Component):
         except Exception as e:
             logger.error(f"Error rendering events section from facets: {e}", exc_info=True)
             return ""
-    
-    def _render_agent_workspace_wrapper(self, system_state: Dict[str, Any]) -> str:
-        """Render opening agent workspace wrapper with metadata."""
-        agent_name = system_state["agent_name"]
-        self._agent_name = agent_name
-        agent_description = system_state["agent_description"]
-        
-        if agent_name and agent_name != "Unknown Agent":
-            opening_tag = f'<inner_space agent_name="{agent_name}"'
-            if agent_description and agent_description != "Agent workspace":
-                opening_tag += f' agent_description="{agent_description}"'
-            opening_tag += '>'
-        else:
-            opening_tag = '<inner_space>'
-        
-        return opening_tag
-
-    def _render_consolidated_chat_info(self, system_state: Dict[str, Any], tools: Optional[List[Dict[str, Any]]] = None) -> str:
-        """
-        Render consolidated chat_info sections with all active channels and focus states.
-        
-        Groups channels by adapter and renders complete system state at this moment.
-        """
-        if not system_state["adapter_groups"]:
-            return ""
-        
-        info_sections = []
-        
-        for adapter_group in system_state["adapter_groups"].values():
-            adapter_type = adapter_group["adapter_type"]
-            server_name = adapter_group["server_name"]
-            alias = adapter_group["alias"]
-            channels = adapter_group["channels"]
-            
-            if not channels:
-                continue
-            
-            # Build chat_info opening tag
-            info_section = f'<chat_info type="{adapter_type}" server="{server_name}" alias="{alias}">'
-            channel_lines = []
-            
-            # Add all channels in this adapter group
-            for channel in channels:
-                conversation_name = channel["conversation_name"]
-                is_focused = channel["is_focused"]
-                available_tools = channel.get("available_tools", [])
-                
-                # Build tool list for this channel
-                if available_tools:
-                    tool_names = [tool.get("name", tool.get("tool_name", "unknown")) for tool in available_tools]
-                    tools_attr = f' tools="({", ".join(tool_names)})"'
-                else:
-                    tools_attr = ''
-                
-                # Build channel line
-                focused_attr = ' focused="True"' if is_focused else ' focused="False"'
-                channel_line = f'<channel conversation_name="{conversation_name}"{focused_attr}{tools_attr}>'
-                channel_lines.append(channel_line)
-            
-            info_section += "\n" + "\n".join(channel_lines) + "\n</chat_info>"
-            info_sections.append(info_section)
-        
-        return "\n\n".join(info_sections)
 
     def _render_ambient_tools_section(self, facet_cache: VEILFacetCache, system_state: Dict[str, Any]) -> str:
         """
@@ -994,6 +1112,49 @@ class FacetAwareHUDComponent(Component):
             families[family].append(facet)
         
         return families
+
+    def _build_historical_focus_map(self, temporal_stream: List[VEILFacet]) -> Dict[float, str]:
+        """NEW: Build map of timestamp -> focused_element_id from StatusFacets"""
+        
+        focus_map = {}
+        
+        for facet in temporal_stream:
+            if (facet.facet_type == VEILFacetType.STATUS and 
+                facet.get_property("status_type") == "focus_changed"):
+                
+                timestamp = facet.veil_timestamp
+                focused_element_id = facet.get_property("current_state", {}).get("focused_element_id")
+                
+                if focused_element_id:
+                    focus_map[timestamp] = focused_element_id
+                    
+        logger.debug(f"Built historical focus map with {len(focus_map)} focus changes")
+        return focus_map
+
+    def _get_historical_focus_for_turn(self, turn_timestamp: float, focus_map: Dict[float, str]) -> Optional[str]:
+        """NEW: Get what was focused at a specific timestamp"""
+        
+        # Find the latest focus change before or at this turn's timestamp
+        relevant_focus_changes = [
+            (ts, element_id) for ts, element_id in focus_map.items() 
+            if ts <= turn_timestamp
+        ]
+        
+        if relevant_focus_changes:
+            # Return the most recent focus change
+            latest_change = max(relevant_focus_changes, key=lambda x: x[0])
+            return latest_change[1]
+        
+        return None
+
+    def _is_minor_status_change(self, status_facet: StatusFacet) -> bool:
+        """Determine if this is a minor status change that shouldn't trigger ambient facets"""
+        status_type = status_facet.get_property("status_type")
+        return status_type in MINOR_STATUS_TYPES
+
+    def _is_scene_changing_status(self, status_facet: StatusFacet) -> bool:
+        """Determine if this is a major scene change that should trigger ambient facets"""
+        return not self._is_minor_status_change(status_facet)
     
     def _render_single_family_tools(self, family: str, facets: List[VEILFacet]) -> str:
         """Render tools for a single element (no consolidation needed)."""
@@ -1270,8 +1431,8 @@ class FacetAwareHUDComponent(Component):
             logger.error(f"Error rendering structured tools: {e}", exc_info=True)
             return ""
 
-    def _generate_system_message_for_status(self, status_facet: StatusFacet, system_state: Dict[str, Any]) -> str:
-        """Generate system messages for status changes."""
+    def _generate_system_message_for_status(self, status_facet: StatusFacet) -> str:
+        """Generate individual system messages for status changes from facet data only."""
         status_type = status_facet.get_property("status_type")
         current_state = status_facet.get_property("current_state", {})
         
@@ -1284,7 +1445,9 @@ class FacetAwareHUDComponent(Component):
         elif status_type == "chat_joined":
             chat_name = current_state.get("conversation_name", "Unknown")
             return f"<system>Joined conversation: {chat_name}</system>"
-        
+        elif status_type == "focus_changed":
+            focused_element_name = current_state.get("focused_element_name", "Unknown")
+            return f"<system>Currently focused on: {focused_element_name}</system>"
         return ""
 
     def _render_event_facet_with_system_context(self, facet: EventFacet, system_state: Dict[str, Any], options: RenderingOptions) -> str:
@@ -1339,21 +1502,7 @@ class FacetAwareHUDComponent(Component):
                 return f"{msg_tag}{message_content}</msg>"
                 
             elif event_type == "agent_response":
-                agent_name = facet.get_property("agent_name", self._agent_name)
-                tool_calls_count = facet.get_property("tool_calls_count", 0)
-                
-                tool_info = f' tool_calls="{tool_calls_count}"' if tool_calls_count > 0 else ""
-                response_content = f'<agent_response agent="{agent_name}"{tool_info}>{content}</agent_response>'
-                
-                # FIXED: Issue 1 - Removed delivery messages, using "shoot-and-forget" mode
-                # Only show error messages if actual failures occur
-                message_status = facet.get_property("message_status", "sent")
-                if message_status == "failed_to_send":
-                    conversation_name = self._determine_conversation_for_event(facet, system_state)
-                    error_message = f"<system>FAILED to deliver message to {conversation_name}</system>"
-                    return f"{response_content}\n{error_message}"
-                
-                return response_content
+                return content
                 
             elif event_type == "note_created":
                 return f"<note>{content}</note>"
@@ -1447,11 +1596,7 @@ class FacetAwareHUDComponent(Component):
                 return f"<note>{content}</note>"
                 
             elif event_type == "agent_response":
-                agent_name = facet.get_property("agent_name", "Agent")
-                tool_calls_count = facet.get_property("tool_calls_count", 0)
-                
-                tool_info = f' tool_calls="{tool_calls_count}"' if tool_calls_count > 0 else ""
-                return f'<agent_response agent="{agent_name}"{tool_info}>{content}</agent_response>'
+                return f'{content}'
                 
             else:
                 return f"<event type=\"{event_type}\">{content}</event>"
@@ -1764,33 +1909,7 @@ class FacetAwareHUDComponent(Component):
         """
         # For now, return empty - this can be enhanced to show repeated status
         return ""
-    
-    def _render_focused_element_status(self, system_state: Dict[str, Any], turn_index: int) -> str:
-        """
-        Render focused element status every turn.
-        
-        Args:
-            system_state: Current system state  
-            turn_index: Current turn index
-            
-        Returns:
-            Rendered focused status string
-        """
-        # Find focused channel
-        for channel in system_state.get("active_channels", {}).values():
-            if channel.get("is_focused", False):
-                conversation_name = channel.get("conversation_name", "Unknown")
-                return f"<status>Currently focused: {conversation_name}</status>"
-        
-        # Fallback: if no channels marked as focused but we have a focus_element_id, try to find it
-        focus_element_id = system_state.get("focus_element_id")
-        if focus_element_id and focus_element_id in system_state.get("active_channels", {}):
-            channel = system_state["active_channels"][focus_element_id]
-            conversation_name = channel.get("conversation_name", "Unknown")
-            return f"<status>Currently focused: {conversation_name}</status>"
-        
-        return ""
-    
+
     def _render_ambient_facet_individual(self, ambient_facet: VEILFacet) -> str:
         """
         Render individual ambient facet.
@@ -1963,10 +2082,18 @@ Use the actual tool name as the XML element name. You can make multiple tool cal
                 logger.debug(f"Turn {turn_index}: Adding all {len(triggered_facets)} ambient facets (first turn)")
                 return triggered_facets
             
-            # Trigger 2: Status changes - add all ambient facets (scene changes re-show tools)
-            if has_status_changes:
+            # NEW: Check for scene-changing status facets (ignore minor ones like focus_changed)
+            scene_changing_status_facets = [
+                facet for facet in turn_data.get("status", [])
+                if self._is_scene_changing_status(facet)
+            ]
+            
+            # Trigger 2: Major scene changes trigger ambient facets
+            if scene_changing_status_facets:
+                scene_types = [f.get_property("status_type") for f in scene_changing_status_facets]
+                logger.debug(f"Turn {turn_index}: Scene changes detected: {scene_types}")
                 triggered_facets = list(all_ambient_facets_dict.values())
-                logger.debug(f"Turn {turn_index}: Adding all {len(triggered_facets)} ambient facets (status changes)")
+                logger.debug(f"Turn {turn_index}: Adding all {len(triggered_facets)} ambient facets (scene changes)")
                 return triggered_facets
             
             # Trigger 3: Content threshold exceeded - add all ambient facets
@@ -1976,7 +2103,7 @@ Use the actual tool name as the XML element name. You can make multiple tool cal
                 logger.debug(f"Turn {turn_index}: Adding all {len(triggered_facets)} ambient facets (content threshold {system_state['content_length_total']} >= {content_threshold})")
                 return triggered_facets
             
-            # No triggers - return empty list (natural placement only)
+            # No significant triggers - focus_changed and other minor status updates won't trigger ambient facets
             return []
             
         except Exception as e:

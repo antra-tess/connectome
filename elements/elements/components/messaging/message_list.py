@@ -105,25 +105,16 @@ class MessageListComponent(Component):
                 return False # Event type not handled by this component
 
             # Emit VEIL delta after handling the event (only during normal operation, not replay)
-            if not is_replay_mode:
-                veil_producer = self.get_sibling_component("MessageListVeilProducer")
-                if veil_producer:
-                    veil_producer.emit_delta()
-
-                # Check if agent activation is needed after processing the event (only during normal operation)
-                # NEW: Only check activation for fresh message_received events, not historical ones
-                if event_type == "message_received":
-                    self._activation_check(event_type, actual_content_payload, event_node, timeline_context)
-            else:
-                # During replay, log message restoration but don't trigger activation
-                if event_type in ["message_received", "historical_message_received", "agent_message_confirmed"]:
-                    logger.info(f"[{self.owner.id}] REPLAY: Restored message from {actual_content_payload.get('sender_display_name', 'unknown')} ({len(self._state.get('_messages', []))} total messages)")
-
+            if event_type == "message_received":
+                self._activation_check(event_type, actual_content_payload, event_node, timeline_context, is_replay_mode)
+            veil_producer = self.get_sibling_component("MessageListVeilProducer")
+            if veil_producer:
+                veil_producer.emit_delta()
             return True
 
         return False # Event type not in HANDLED_EVENT_TYPES
 
-    def _activation_check(self, event_type: str, content_payload: Dict[str, Any], event_node: Dict[str, Any], timeline_context: Dict[str, Any]) -> None:
+    def _activation_check(self, event_type: str, content_payload: Dict[str, Any], event_node: Dict[str, Any], timeline_context: Dict[str, Any], is_replay_mode: bool) -> None:
         """
         Decides if agent activation is needed after processing an event.
         If needed, emits an "activation_call" event to the timeline.
@@ -165,10 +156,14 @@ class MessageListComponent(Component):
         # elif event_type == "message_received":
         #     # Check for keywords, urgent flags, etc.
         if activation_needed:
-            self._emit_activation_call(activation_reason, event_type, content_payload)
+            self._signal_focus_change_to_veil_producer()
+            if not is_replay_mode:
+                self._emit_activation_call(activation_reason, event_type, content_payload)
 
     def _emit_activation_call(self, reason: str, triggering_event_type: str, triggering_payload: Dict[str, Any]) -> None:
         """
+        Enhanced to signal focus change to VeilProducer for historical focus tracking.
+        
         Emits an "activation_call" event to the parent space's timeline.
         This is a non-replayable event that signals AgentLoop to consider running a cycle.
 
@@ -177,6 +172,7 @@ class MessageListComponent(Component):
             triggering_event_type: The event type that caused this activation
             triggering_payload: The payload of the triggering event
         """
+        # STEP 2: Continue with existing activation_call logic
         if not self.owner:
             logger.warning(f"[MessageListComponent] Cannot emit activation_call: No owner element")
             return
@@ -235,6 +231,44 @@ class MessageListComponent(Component):
         except Exception as e:
             logger.error(f"[{self.owner.id}] Error emitting activation_call event: {e}", exc_info=True)
 
+    def _signal_focus_change_to_veil_producer(self) -> None:
+        """
+        NEW: Signal focus change to sibling VeilProducer for StatusFacet creation.
+        
+        This method is enhanced to work during both replay and live operation,
+        allowing historical focus context reconstruction.
+        """
+        if not self.owner:
+            return
+            
+        # Check if we're in replay mode
+        parent_space = self.owner.get_parent_object()
+        is_replay = (parent_space and 
+                    hasattr(parent_space, '_replay_in_progress') and 
+                    parent_space._replay_in_progress)
+        
+        # Get the sibling VeilProducer
+        veil_producer = self.get_sibling_component("MessageListVeilProducer")
+        if not veil_producer:
+            logger.warning(f"[{self.owner.id}] MessageListVeilProducer not found for focus signal")
+            return
+        
+        # Signal focus change with element details
+        focus_details = {
+            "focused_element_id": self.owner.id,
+            "focused_element_type": self.owner.__class__.__name__,
+            "focused_element_name": getattr(self.owner, 'name', 'Unknown'),
+            "conversation_name": getattr(self.owner, 'conversation_name', 'Unknown'),
+            "adapter_type": getattr(self.owner, 'adapter_type', 'Unknown'),
+            "timestamp": time.time(),
+            "replay_mode": is_replay  # Include replay context
+        }
+        
+        # Signal the VeilProducer to create focus StatusFacet
+        veil_producer.signal_focus_changed(focus_details)
+        
+        logger.debug(f"[{self.owner.id}] Signaled focus change to VeilProducer (replay: {is_replay})")
+
     def _handle_new_message(self, message_content: Dict[str, Any]) -> bool:
         """Adds a new message to the list. message_content is the actual message data (e.g., adapter_data)."""
 
@@ -256,6 +290,9 @@ class MessageListComponent(Component):
             else:
                 logger.warning(f"[{self.owner.id}] Skipping non-dict attachment data: {att_data}")
 
+        # NEW: Determine if this message was sent by the current agent
+        is_from_current_agent = self._is_message_from_current_agent(message_content)
+
         new_message: MessageType = {
             'internal_id': internal_message_id,
             'timestamp': message_content.get('timestamp', time.time()),
@@ -270,7 +307,9 @@ class MessageListComponent(Component):
             'attachments': processed_attachments,
             'status': "received", # Default for incoming messages
             'internal_request_id': None, # Not applicable for incoming
-            'error_details': None # Not applicable for incoming
+            'error_details': None, # Not applicable for incoming
+            'is_from_current_agent': is_from_current_agent,  # NEW: Set agent flag for historical detection
+            'is_internal_origin': False  # NEW: External messages are not from internal tool calls
         }
 
         self._state['_messages'].append(new_message)
@@ -521,6 +560,20 @@ class MessageListComponent(Component):
             logger.warning(f"[{self.owner.id}] Could not add reaction: Message with external ID '{original_external_id}' not found.")
             return False
 
+        # NEW: Record reaction addition for VEIL generation BEFORE making changes
+        self._record_veil_operation({
+            "operation_type": "reaction_added",
+            "veil_id": message_to_update['internal_id'],
+            "conversation_context": self._get_conversation_metadata(),
+            "reaction_details": {
+                "emoji": emoji,
+                "user_id": user_id,
+                "user_name": user_name,
+                "timestamp": reaction_content.get('timestamp', time.time()),
+                "original_message_id": original_external_id
+            }
+        })
+
         if 'reactions' not in message_to_update:
             message_to_update['reactions'] = {}
 
@@ -598,6 +651,20 @@ class MessageListComponent(Component):
         if not message_to_update or 'reactions' not in message_to_update or emoji not in message_to_update['reactions']:
             logger.warning(f"[{self.owner.id}] Could not remove reaction: Message '{original_external_id}' not found or no such reaction '{emoji}'.")
             return False
+
+        # NEW: Record reaction removal for VEIL generation BEFORE making changes
+        self._record_veil_operation({
+            "operation_type": "reaction_removed",
+            "veil_id": message_to_update['internal_id'],
+            "conversation_context": self._get_conversation_metadata(),
+            "reaction_details": {
+                "emoji": emoji,
+                "user_id": user_id,
+                "user_name": user_name,
+                "timestamp": reaction_content.get('timestamp', time.time()),
+                "original_message_id": original_external_id
+            }
+        })
 
         # Check if this is confirmation of a pending reaction removal
         pending_removals = message_to_update.get('pending_reaction_removals', {})
@@ -831,7 +898,8 @@ class MessageListComponent(Component):
                             attachments: Optional[List[Dict[str, Any]]] = None,
                             reply_to_external_id: Optional[str] = None, # If agent is replying
                             adapter_id: Optional[str] = None, # The adapter this message is going to
-                            is_from_current_agent: bool = False # FIXED: Whether this message is from the current agent
+                            is_from_current_agent: bool = False, # FIXED: Whether this message is from the current agent
+                            is_internal_origin: bool = False # NEW: Whether this message originated from internal tool calls
                            ) -> Optional[str]:
         """
         Adds a new message initiated by the local agent to the list with 'pending_send' status.
@@ -871,7 +939,8 @@ class MessageListComponent(Component):
             'status': "pending_send", # Key change for outgoing messages
             'internal_request_id': internal_request_id, # For matching confirmation
             'error_details': None,
-            'is_from_current_agent': is_from_current_agent  # FIXED: Store agent flag for deduplication
+            'is_from_current_agent': is_from_current_agent,  # FIXED: Store agent flag for deduplication
+            'is_internal_origin': is_internal_origin  # NEW: Track if message originated from internal tool calls
         }
         self._state['_messages'].append(new_message)
         self._state['_message_map'][internal_message_id] = len(self._state['_messages']) - 1
@@ -1031,6 +1100,7 @@ class MessageListComponent(Component):
             "attachments": confirmed_message.get('attachments', []),
             "internal_request_id": confirmed_message.get('internal_request_id'),
             "message_source": "agent_outgoing",  # Mark as agent-originated
+            "is_internal_origin": confirmed_message.get('is_internal_origin', True),  # NEW: Preserve internal origin flag for replay
             "original_adapter_data": confirm_content  # Store original confirmation data
         }
 
@@ -1139,7 +1209,8 @@ class MessageListComponent(Component):
             'internal_request_id': agent_message_content.get('internal_request_id'),
             'error_details': None,
             'message_source': "agent_outgoing",  # Mark as agent-originated for debugging
-            'is_from_current_agent': True  # FIXED: Agent messages during replay are from current agent
+            'is_from_current_agent': True,  # FIXED: Agent messages during replay are from current agent
+            'is_internal_origin': agent_message_content.get('is_internal_origin', True)  # NEW: Preserve internal origin flag (default True for agent messages)
         }
 
         self._state['_messages'].append(agent_message)
@@ -2132,6 +2203,67 @@ class MessageListComponent(Component):
                 "original_length": len(text),
                 "truncated_count": truncated_count
             }
+
+    def _is_message_from_current_agent(self, message_content: Dict[str, Any]) -> bool:
+        """
+        Determine if a message was sent by the current agent.
+        
+        This is crucial for historical message processing to identify agent messages
+        that need synthetic agent_response facets for proper turn structure.
+        
+        Args:
+            message_content: Message content from adapter/history
+            
+        Returns:
+            True if message was sent by current agent, False otherwise
+        """
+        try:
+            # Get agent information from parent space
+            parent_space = self.owner.get_parent_object() if hasattr(self.owner, 'get_parent_object') else None
+            if not parent_space:
+                logger.debug(f"[{self.owner.id}] No parent space found - cannot determine agent identity")
+                return False
+            
+            agent_name = getattr(parent_space, 'agent_name', None)
+            agent_external_id = getattr(parent_space, 'agent_external_id', None)  # If available
+            alias = getattr(self.owner, 'alias', None)
+            
+            # Get sender information from message
+            sender_name = message_content.get('sender_display_name', '')
+            sender_id = message_content.get('sender_external_id', '')
+            
+            # Method 1: Compare sender_id with agent_external_id (most reliable)
+            if agent_external_id and sender_id:
+                if sender_id == agent_external_id:
+                    logger.debug(f"[{self.owner.id}] Message from current agent (matched external ID: {sender_id})")
+                    return True
+            
+            # Method 2: Compare sender_name with agent_name (fallback)
+            if agent_name and sender_name:
+                if sender_name == agent_name:
+                    logger.debug(f"[{self.owner.id}] Message from current agent (matched name: {sender_name})")
+                    return True
+            
+            if alias and sender_name:
+                if sender_name == alias:
+                    logger.debug(f"[{self.owner.id}] Message from current agent (matched alias: {sender_name})")
+                    return True
+            
+            # Method 3: Check for agent-specific markers in message metadata
+            # Some adapters might include additional metadata about message source
+            message_source = message_content.get('message_source')
+            if message_source == "agent_outgoing":
+                logger.debug(f"[{self.owner.id}] Message from current agent (marked as agent_outgoing)")
+                return True
+            
+            # Not from current agent
+            logger.debug(f"[{self.owner.id}] Message NOT from current agent (sender: {sender_name}, agent: {agent_name})")
+            return False
+            
+        except Exception as e:
+            logger.error(f"[{self.owner.id}] Error determining if message is from current agent: {e}", exc_info=True)
+            # Safe default: assume not from agent to avoid false positives
+            return False
 
     def _get_conversation_metadata(self) -> Dict[str, Any]:
         """Get conversation metadata from the owner element."""

@@ -132,16 +132,23 @@ class ScratchpadVeilProducer(VeilProducer):
 
     def calculate_delta(self) -> Optional[List[VEILFacetOperation]]:
         """
-        NEW: Calculate VEILFacet operations for scratchpad note management.
+        NEW: Calculate VEILFacet operations for scratchpad note management with phase awareness.
         
         This replaces the old delta operation system with VEILFacet operations, generating:
         - StatusFacet for scratchpad container creation/updates
         - EventFacet for note additions and removals
         - Uses content-based hash identification for note tracking
         
+        NEW: Phase-aware processing - defers content processing during structural phase.
+        
         Returns:
             List of VEILFacetOperation instances for the scratchpad
         """
+        # NEW: Check if we're in structural replay phase and should defer content processing
+        if self._should_defer_content_processing():
+            logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Deferring content processing during structural phase")
+            return None
+            
         current_notes_list, is_error = self._get_current_notes_from_owner()
         if is_error:
             logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Error getting notes from owner, cannot calculate facet operations.")
@@ -386,3 +393,45 @@ class ScratchpadVeilProducer(VeilProducer):
             "note_count": len(self._state.get('_last_generated_notes', [])),
             "content_nature": "scratchpad_summary"
         }
+
+    def _should_defer_content_processing(self) -> bool:
+        """
+        NEW: Determine if content processing should be deferred during structural replay phase.
+        
+        UPDATED: Only defer during structural phase. During content phase, allow VEIL emission
+        for real-time chronological VEIL building.
+        
+        Returns:
+            True if content processing should be deferred, False otherwise
+        """
+        try:
+            # Check if owner space is in structural replay phase (ONLY defer during structural)
+            if self.owner and hasattr(self.owner, '_replay_in_progress'):
+                if self.owner._replay_in_progress:
+                    current_phase = getattr(self.owner, '_current_replay_phase', None)
+                    if current_phase == 'structural':
+                        logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Structural phase - deferring content processing")
+                        return True
+                    elif current_phase == 'content':
+                        logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Content phase - allowing VEIL emission for chronological order")
+                        return False  # NEW: Allow processing during content phase for real-time VEIL emission
+                        
+            # Check if parent space is in structural replay phase (for nested elements)
+            if self.owner and hasattr(self.owner, 'get_parent_object'):
+                parent_space = self.owner.get_parent_object()
+                if parent_space and hasattr(parent_space, '_replay_in_progress'):
+                    if parent_space._replay_in_progress:
+                        current_phase = getattr(parent_space, '_current_replay_phase', None)
+                        if current_phase == 'structural':
+                            logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Parent in structural phase - deferring content")
+                            return True
+                        elif current_phase == 'content':
+                            logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Parent in content phase - allowing VEIL emission")
+                            return False  # NEW: Allow processing during content phase
+                            
+            return False  # Normal operation - no deferral
+            
+        except Exception as e:
+            logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Error checking replay phase: {e}")
+            # Safe default: don't defer if unsure
+            return False

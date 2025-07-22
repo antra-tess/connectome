@@ -386,51 +386,92 @@ class SpaceVeilProducer(VeilProducer):
     
     def handle_event(self, event_node: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
         """
-        Handle timeline events, specifically agent response replay.
+        NEW: Phase-aware timeline event handling, specifically agent response replay.
         
         Args:
             event_node: The event node from the timeline
-            timeline_context: The timeline context for the event
+            timeline_context: The timeline context for the event (includes phase information)
             
         Returns:
             True if event was handled, False otherwise
         """
-        # NEW: Debug logging to see if this method is being called
-        logger.debug(f"[{self.owner.id if self.owner else 'Unknown'}] SpaceVeilProducer.handle_event called with event_node keys: {list(event_node.keys())}")
-        logger.debug(f"[{self.owner.id if self.owner else 'Unknown'}] Timeline context: replay_mode={timeline_context.get('replay_mode')}")
-        
         event_payload = event_node.get('payload', {})
         event_type = event_payload.get('event_type')
+        is_replay_mode = timeline_context.get('replay_mode', False)
+        replay_phase = timeline_context.get('replay_phase', 'unknown')
         
-        logger.debug(f"[{self.owner.id if self.owner else 'Unknown'}] Event type from payload: {event_type}")
+        logger.debug(f"[{self.owner.id if self.owner else 'Unknown'}] SpaceVeilProducer.handle_event: {event_type}, replay={is_replay_mode}, phase={replay_phase}")
         
         if event_type not in self.HANDLED_EVENT_TYPES:
             return False
         
         if event_type == 'agent_response_generated':
-            # Replay agent response
-            inner_payload = event_payload.get('payload', {})
-            
-            # Check if this is a replay to prevent double emission
-            if timeline_context.get('replay_mode', False):
-                # Re-emit the agent response VEILFacet
-                response_id = self.emit_agent_response(
-                    agent_response_text=inner_payload.get('agent_response_text', ''),
-                    tool_calls_data=inner_payload.get('tool_calls_data', []),
-                    agent_loop_component_id=inner_payload.get('agent_loop_component_id'),
-                    parsing_mode=inner_payload.get('parsing_mode', 'text'),
-                    links_to=None  # Will auto-link to space root
-                )
-                
-                if response_id:
-                    logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] Replayed agent response from {inner_payload.get('agent_name')} - {response_id}")
-                    
-                    # NEW: Verify the facet was added to cache
-                    cache_size = self.get_facet_cache_size()
-                    logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] Facet cache size after replay: {cache_size}")
-                else:
-                    logger.warning(f"[{self.owner.id if self.owner else 'Unknown'}] Failed to replay agent response")
-                
-                return True
+            return self._handle_agent_response_event(event_node, timeline_context, event_payload)
             
         return False
+
+    def _handle_agent_response_event(self, event_node: Dict[str, Any], timeline_context: Dict[str, Any], event_payload: Dict[str, Any]) -> bool:
+        """
+        Handle agent_response_generated events with phase awareness.
+        
+        Args:
+            event_node: The complete event node
+            timeline_context: Timeline context with phase information
+            event_payload: The event payload
+            
+        Returns:
+            True if event was handled appropriately for the current phase
+        """
+        is_replay_mode = timeline_context.get('replay_mode', False)
+        replay_phase = timeline_context.get('replay_phase', 'unknown')
+        inner_payload = event_payload.get('payload', {})
+        
+        if not is_replay_mode:
+            # Live event - process normally (this shouldn't happen as we handle these differently)
+            logger.debug(f"[{self.owner.id if self.owner else 'Unknown'}] Processing live agent_response_generated event")
+            return False
+            
+        # Replay mode - handle based on phase
+        if replay_phase == "structural":
+            # Phase 1: DEFER agent response processing to content phase
+            logger.debug(f"[{self.owner.id if self.owner else 'Unknown'}] PHASE 1: Deferring agent response {event_node.get('id')} to content phase")
+            return True  # Mark as handled to prevent further processing
+            
+        elif replay_phase == "content":
+            # Phase 2: Process agent response with real-time VEIL emission for chronological ordering
+            logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] PHASE 2: Processing agent response {event_node.get('id')} with real-time VEIL emission")
+            
+            # Emit the agent response VEILFacet in real-time during content phase
+            response_id = self.emit_agent_response(
+                agent_response_text=inner_payload.get('agent_response_text', ''),
+                tool_calls_data=inner_payload.get('tool_calls_data', []),
+                agent_loop_component_id=inner_payload.get('agent_loop_component_id'),
+                parsing_mode=inner_payload.get('parsing_mode', 'text'),
+                links_to=None  # Will auto-link to space root
+            )
+            
+            if response_id:
+                agent_name = inner_payload.get('agent_name', 'Unknown')
+                logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] ✓ Real-time VEIL emission: agent response from {agent_name} - {response_id}")
+                
+                # Verify the facet was added to cache
+                cache_size = self.get_facet_cache_size()
+                logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] VEIL cache size after real-time emission: {cache_size}")
+            else:
+                logger.warning(f"[{self.owner.id if self.owner else 'Unknown'}] ✗ Failed to emit agent response VEIL during content phase")
+            
+            return True
+            
+        else:
+            # Unknown phase - process with caution
+            logger.warning(f"[{self.owner.id if self.owner else 'Unknown'}] Agent response event in unknown phase '{replay_phase}' - processing normally")
+            
+            response_id = self.emit_agent_response(
+                agent_response_text=inner_payload.get('agent_response_text', ''),
+                tool_calls_data=inner_payload.get('tool_calls_data', []),
+                agent_loop_component_id=inner_payload.get('agent_loop_component_id'),
+                parsing_mode=inner_payload.get('parsing_mode', 'text'),
+                links_to=None
+            )
+            
+            return bool(response_id)
