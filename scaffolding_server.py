@@ -10,7 +10,7 @@ Usage:
     python scaffolding_server.py
 
 Then configure the agent with:
-    CONNECTOME_LLM_TYPE=scaffolding python host/main.py
+    CONNECTOME_LLM_TYPE=scaffolding
 """
 
 import os
@@ -207,7 +207,7 @@ def main():
     print(f"📍 Web Interface: http://localhost:6200")
     print(f"📁 Templates Directory: {templates_dir}")
     print("\n✅ To use with Connectome:")
-    print("   CONNECTOME_LLM_TYPE=scaffolding python host/main.py")
+    print("   CONNECTOME_LLM_TYPE=scaffolding")
     print("\n🌐 Interface Features:")
     print("   • View agent context in real-time")
     print("   • Manually provide LLM responses")  
