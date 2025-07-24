@@ -50,6 +50,7 @@ class LiteLLMProvider(LLMProvider):
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
         self.default_model = default_model
         self.config = kwargs
+        self.observer = ScaffoldingObserver()
 
         # Apply any custom configuration
         for key, value in kwargs.items():
@@ -141,8 +142,6 @@ class LiteLLMProvider(LLMProvider):
 
             params.update(filtered_kwargs)
 
-            observer = ScaffoldingObserver()
-
             try:
                 # Add request data to the span
                 span.add_event(
@@ -151,7 +150,7 @@ class LiteLLMProvider(LLMProvider):
                 )
 
                 # Call ScaffoldingObserver to record a request to LLM
-                observer.observe_request(
+                self.observer.observe_request(
                     messages,
                     model_to_use,
                     temperature,
@@ -177,7 +176,7 @@ class LiteLLMProvider(LLMProvider):
                 )
 
                 # Call ScaffoldingObserver to record a response from LLM
-                observer.observe_response(parsed_response.content)
+                self.observer.observe_response(parsed_response.content)
 
                 # Add response attributes to the span
                 if parsed_response.usage:
