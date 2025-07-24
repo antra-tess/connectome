@@ -124,16 +124,18 @@
         }
 
         .metadata-item {
-            display: flex;
+            padding: 5px;
             justify-content: space-between;
         }
 
         .metadata-label {
+            display: block;
             font-weight: 600;
             color: #4a5568;
         }
 
         .metadata-value {
+            display: block;
             color: #2d3748;
             font-family: monospace;
         }
@@ -320,7 +322,7 @@
                 grid-template-columns: 1fr;
                 grid-template-rows: auto auto;
             }
-            
+
             .sidebar {
                 position: static;
                 order: 2;
@@ -402,11 +404,11 @@
             <!-- Current Context Display -->
             <div class="card">
                 <h2>
-                    Current Agent Context 
+                    Current Agent Context
                     <span id="status-indicator" class="status-indicator status-no-context">No Context</span>
                     <span id="refresh-indicator" class="refresh-indicator">Auto-refreshing...</span>
                 </h2>
-                
+
                 <div id="context-metadata" class="context-metadata" style="display: none;">
                     <div class="metadata-item">
                         <span class="metadata-label">Model:</span>
@@ -449,18 +451,19 @@
 
             <!-- Response Input -->
             <div class="card">
-                <h2>Your Response (as LLM)</h2>
-                
+                {% if observer %}
+                    <h2>LLM Response</h2>
+                {% else %}
+                    <h2>Your Response (as LLM)</h2>
+                {% endif %}
+
                 <div id="alert-container"></div>
-                
+
                 <div class="response-section">
-                    <textarea 
-                        id="response-input" 
-                        class="response-input" 
+                    <textarea id="response-input" class="response-input"
                         placeholder="Enter your response as if you were the LLM...&#10;&#10;You can include tool calls in ultra-concise XML format:&#10;&lt;tool_calls&gt;&#10;&lt;tool_name param1=&quot;value1&quot; target_element=&quot;element_name&quot;&gt;&#10;&lt;/tool_calls&gt;&#10;&#10;Or just provide a conversational response."
-                        disabled
-                    ></textarea>
-                    
+                        disabled></textarea>
+
                     <div class="button-group">
                         <button id="submit-btn" class="btn btn-primary" onclick="submitResponse()" disabled>
                             🚀 Submit Response to Agent
@@ -482,7 +485,7 @@
         <!-- Sidebar -->
         <div class="sidebar">
             <h2>Session History</h2>
-            
+
             <div class="button-group" style="margin-bottom: 15px;">
                 <button id="refresh-btn" class="btn btn-secondary" onclick="refreshHistory()">
                     🔄 Refresh
@@ -491,7 +494,7 @@
                     🗑️ Clear History
                 </button>
             </div>
-            
+
             <div id="history-list" class="history-list">
                 <div class="no-context-message">No history yet</div>
             </div>
@@ -500,25 +503,27 @@
 
     <script>
         let currentContext = null;
-        let refreshInterval = null;
+        let contextRefreshInterval = null;
+        let historyRefreshInterval = null;
+        let observer = {{ 'true' if observer else 'false' }};
 
         function formatTurnBasedMessages(messages) {
             let html = '';
-            
+
             messages.forEach((msg, index) => {
                 const roleClass = `message-role-${msg.role}`;
                 const turnMeta = msg.turn_metadata || {};
-                
+
                 // Create turn boundary container
                 html += `<div class="turn-boundary ${roleClass}">`;
-                
+
                 // Turn header with role and metadata
                 let headerText = `${msg.role.toUpperCase()} MESSAGE`;
                 if (turnMeta.turn_index !== undefined) {
                     headerText += ` (Turn ${turnMeta.turn_index})`;
                 }
                 html += `<div class="turn-header">${headerText}</div>`;
-                
+
                 // Turn metadata if available
                 if (Object.keys(turnMeta).length > 0) {
                     let metaText = '';
@@ -532,12 +537,12 @@
                         metaText += `Time: ${start}-${end}`;
                     }
                     metaText = metaText.replace(/ • $/, ''); // Remove trailing separator
-                    
+
                     if (metaText) {
                         html += `<div class="turn-metadata">${metaText}</div>`;
                     }
                 }
-                
+
                 // Message content length info
                 let lengthInfo = '';
                 if (msg.is_multimodal) {
@@ -546,19 +551,19 @@
                     lengthInfo = `[${msg.text_length} chars]`;
                 }
                 html += `<div class="turn-metadata">${lengthInfo}</div>`;
-                
+
                 // Message content (escaped for HTML)
                 const content = msg.content.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
                 html += `<pre style="margin: 0; white-space: pre-wrap; font-family: inherit;">${content}</pre>`;
-                
+
                 html += '</div>'; // Close turn boundary
-                
+
                 // Add spacing between turns
                 if (index < messages.length - 1) {
                     html += '<div style="height: 10px;"></div>';
                 }
             });
-            
+
             return html;
         }
 
@@ -570,13 +575,22 @@
 
         function startAutoRefresh() {
             // Refresh every 2 seconds
-            refreshInterval = setInterval(checkForNewContext, 2000);
+            contextRefreshInterval = setInterval(checkForNewContext, observer ? 1000 : 2000);
+
+            if (observer) {
+                historyRefreshInterval = setInterval(refreshHistory, 500);
+            }
         }
 
         function stopAutoRefresh() {
-            if (refreshInterval) {
-                clearInterval(refreshInterval);
-                refreshInterval = null;
+            if (contextRefreshInterval) {
+                clearInterval(contextRefreshInterval);
+                contextRefreshInterval = null;
+            }
+
+            if (historyRefreshInterval) {
+                clearInterval(historyRefreshInterval);
+                historyRefreshInterval = null;
             }
         }
 
@@ -584,11 +598,14 @@
             try {
                 const response = await fetch('/get-current-context');
                 const data = await response.json();
-                
+
                 if (data.status === 'success') {
                     if (data.has_context && data.context) {
                         displayContext(data.context);
-                        enableResponseInput();
+
+                        if (!observer) {
+                            enableResponseInput();
+                        }
                     } else {
                         showNoContext();
                         disableResponseInput();
@@ -602,34 +619,40 @@
 
         function displayContext(context) {
             currentContext = context;
-            
+
             // Update status indicator
             const statusIndicator = document.getElementById('status-indicator');
-            statusIndicator.textContent = 'Waiting for Response';
-            statusIndicator.className = 'status-indicator status-waiting';
-            
+            if (observer) {
+                statusIndicator.textContent = 'In Observer Mode';
+                statusIndicator.className = 'status-indicator status-no-context';
+            }
+            else {
+                statusIndicator.textContent = 'Waiting for Response';
+                statusIndicator.className = 'status-indicator status-waiting';
+            }
+
             // Show and populate metadata
             const metadataDiv = document.getElementById('context-metadata');
             metadataDiv.style.display = 'grid';
-            
+
             document.getElementById('metadata-model').textContent = context.model || 'unspecified';
             document.getElementById('metadata-messages').textContent = context.messages ? context.messages.length : 0;
             document.getElementById('metadata-tools').textContent = context.tools ? context.tools.length : 0;
             document.getElementById('metadata-session').textContent = context.session_id || '-';
             document.getElementById('metadata-call-number').textContent = context.call_number || '-';
-            
+
             if (context.timestamp) {
                 const date = new Date(context.timestamp * 1000);
                 document.getElementById('metadata-timestamp').textContent = date.toLocaleString();
             }
-            
+
             // Display messages with enhanced turn-based formatting
             const contextDisplay = document.getElementById('context-display');
-            
+
             if (context.messages && context.messages.length > 0) {
                 // Check if messages have turn metadata (turn-based format)
                 const hasTurnMetadata = context.messages.some(msg => msg.turn_metadata);
-                
+
                 if (hasTurnMetadata) {
                     // Enhanced turn-based display
                     contextDisplay.innerHTML = formatTurnBasedMessages(context.messages);
@@ -649,11 +672,11 @@
             } else {
                 contextDisplay.innerHTML = '<div class="no-context-message">No messages in context</div>';
             }
-            
+
             // Display tools
             const toolsSection = document.getElementById('tools-section');
             const toolsList = document.getElementById('tools-list');
-            
+
             if (context.tools && context.tools.length > 0) {
                 toolsSection.style.display = 'block';
                 toolsList.innerHTML = context.tools.map(tool => `
@@ -671,10 +694,10 @@
             const statusIndicator = document.getElementById('status-indicator');
             statusIndicator.textContent = 'No Context';
             statusIndicator.className = 'status-indicator status-no-context';
-            
+
             const metadataDiv = document.getElementById('context-metadata');
             metadataDiv.style.display = 'none';
-            
+
             const contextDisplay = document.getElementById('context-display');
             contextDisplay.innerHTML = `
                 <div class="no-context-message">
@@ -682,7 +705,7 @@
                     <small>Start the Connectome system with CONNECTOME_LLM_TYPE=scaffolding</small>
                 </div>
             `;
-            
+
             const toolsSection = document.getElementById('tools-section');
             toolsSection.style.display = 'none';
         }
@@ -690,10 +713,10 @@
         function enableResponseInput() {
             const responseInput = document.getElementById('response-input');
             const submitBtn = document.getElementById('submit-btn');
-            
+
             responseInput.disabled = false;
             submitBtn.disabled = false;
-            
+
             // Focus on input for immediate use
             responseInput.focus();
         }
@@ -701,7 +724,7 @@
         function disableResponseInput() {
             const responseInput = document.getElementById('response-input');
             const submitBtn = document.getElementById('submit-btn');
-            
+
             responseInput.disabled = true;
             submitBtn.disabled = true;
         }
@@ -709,23 +732,23 @@
         async function submitResponse() {
             const responseInput = document.getElementById('response-input');
             const response = responseInput.value.trim();
-            
+
             if (!response) {
                 showAlert('Please enter a response', 'error');
                 return;
             }
-            
+
             if (!currentContext) {
                 showAlert('No active context to respond to', 'error');
                 return;
             }
-            
+
             try {
                 // Disable input while submitting
                 const submitBtn = document.getElementById('submit-btn');
                 submitBtn.disabled = true;
                 submitBtn.innerHTML = '<span class="loading-spinner"></span> Submitting...';
-                
+
                 const result = await fetch('/submit-response', {
                     method: 'POST',
                     headers: {
@@ -733,18 +756,18 @@
                     },
                     body: JSON.stringify({ response: response })
                 });
-                
+
                 const data = await result.json();
-                
+
                 if (data.status === 'success') {
                     showAlert('Response submitted successfully!', 'success');
                     responseInput.value = '';
-                    
+
                     // Update status
                     const statusIndicator = document.getElementById('status-indicator');
                     statusIndicator.textContent = 'Response Sent';
                     statusIndicator.className = 'status-indicator status-ready';
-                    
+
                     // Refresh history
                     setTimeout(refreshHistory, 500);
                 } else {
@@ -818,7 +841,7 @@ KEY POINTS:
             try {
                 const response = await fetch('/get-history');
                 const data = await response.json();
-                
+
                 if (data.status === 'success') {
                     displayHistory(data.history);
                 }
@@ -829,30 +852,30 @@ KEY POINTS:
 
         function displayHistory(history) {
             const historyList = document.getElementById('history-list');
-            
+
             if (!history || history.length === 0) {
                 historyList.innerHTML = '<div class="no-context-message">No history yet</div>';
                 return;
             }
-            
+
             historyList.innerHTML = history.reverse().map(item => {
                 const timestamp = new Date(item.received_at).toLocaleString();
                 const messageCount = item.messages ? item.messages.length : 0;
                 const toolCount = item.tools ? item.tools.length : 0;
-                
+
                 let statusClass = 'status-no-context';
                 let statusText = item.status;
-                
+
                 if (item.status === 'completed') {
                     statusClass = 'status-ready';
                 } else if (item.status === 'waiting_for_response') {
                     statusClass = 'status-waiting';
                 }
-                
-                const firstMessage = item.messages && item.messages.length > 0 
+
+                const firstMessage = item.messages && item.messages.length > 0
                     ? item.messages[0].content.substring(0, 100) + '...'
                     : 'No messages';
-                
+
                 return `
                     <div class="history-item" onclick="loadHistoryItem(${JSON.stringify(item).replace(/"/g, '&quot;')})">
                         <div class="history-header">
@@ -872,12 +895,12 @@ KEY POINTS:
             displayContext(item);
             // Don't enable input for historical items
             disableResponseInput();
-            
+
             // Update status to show it's historical
             const statusIndicator = document.getElementById('status-indicator');
             statusIndicator.textContent = 'Historical Item';
             statusIndicator.className = 'status-indicator status-no-context';
-            
+
             if (item.response) {
                 document.getElementById('response-input').value = item.response;
             }
@@ -887,11 +910,11 @@ KEY POINTS:
             if (!confirm('Are you sure you want to clear the session history?')) {
                 return;
             }
-            
+
             try {
                 const response = await fetch('/clear-history', { method: 'POST' });
                 const data = await response.json();
-                
+
                 if (data.status === 'success') {
                     showAlert('History cleared', 'success');
                     refreshHistory();
@@ -907,13 +930,13 @@ KEY POINTS:
         function showAlert(message, type) {
             const alertContainer = document.getElementById('alert-container');
             const alertClass = type === 'error' ? 'alert-error' : 'alert-success';
-            
+
             alertContainer.innerHTML = `
                 <div class="alert ${alertClass}">
                     ${message}
                 </div>
             `;
-            
+
             // Auto-remove after 5 seconds
             setTimeout(() => {
                 alertContainer.innerHTML = '';
@@ -936,4 +959,4 @@ KEY POINTS:
         });
     </script>
 </body>
-</html> 
+</html>

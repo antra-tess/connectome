@@ -6,10 +6,17 @@ A Flask web server that provides a manual interface for LLM testing.
 This server receives LLM contexts from the ScaffoldingLLMProvider and allows
 manual response input through a web interface.
 
-Usage:
-    python scaffolding_server.py
+Can be also used with LiteLLMProvider in Observer mode. In this case, the server
+will receive the context from the LiteLLMProvider and LLM responses. There will be
+no possibility to submit a manual response.
 
-Then configure the agent with:
+Usage:
+    - With ScaffoldingLLMProvider:
+        python scaffolding_server.py
+    - With LiteLLMProvider in Observer mode:
+        OBSERVER=true python scaffolding_server.py
+
+Then configure the agent with (only for ScaffoldingLLMProvider):
     CONNECTOME_LLM_TYPE=scaffolding
 """
 
@@ -37,21 +44,26 @@ context_history: List[Dict[str, Any]] = []
 # Lock for thread safety
 state_lock = threading.Lock()
 
+# Keep track of Observer Mode
+observer = False
+
 @app.route('/')
 def index():
     """Redirect to the test interface."""
-    return render_template('scaffolding_interface.html')
+    global observer
+    return render_template('scaffolding_interface.html', observer=observer)
 
 @app.route('/test-interface')
 def test_interface():
     """Serve the main testing interface."""
-    return render_template('scaffolding_interface.html')
+    global observer
+    return render_template('scaffolding_interface.html', observer=observer)
 
 @app.route('/submit-context', methods=['POST'])
 def submit_context():
     """
     Receive context from ScaffoldingLLMProvider and wait for manual response.
-    
+
     This endpoint:
     1. Receives the context data from the LLM provider
     2. Stores it globally for the web interface to display
@@ -59,28 +71,28 @@ def submit_context():
     4. Returns the manual response to the LLM provider
     """
     global current_context, pending_response, context_history
-    
+
     try:
         context_data = request.json
-        
+
         with state_lock:
             current_context = context_data
             pending_response = None
             response_ready.clear()
-            
+
             # Add to history
             context_history.append({
                 **context_data,
                 "received_at": datetime.now().isoformat(),
                 "status": "waiting_for_response"
             })
-            
+
             # Keep only last 10 entries in history
             if len(context_history) > 10:
                 context_history = context_history[-10:]
-        
+
         logger.info(f"Received context with {len(context_data.get('messages', []))} messages")
-        
+
         # Wait for manual response (with timeout)
         timeout = 300  # 5 minutes
         if response_ready.wait(timeout=timeout):
@@ -97,12 +109,12 @@ def submit_context():
             with state_lock:
                 if context_history:
                     context_history[-1]["status"] = "timeout"
-        
+
         return jsonify({
             "status": "success",
             "manual_response": manual_response
         })
-        
+
     except Exception as e:
         logger.error(f"Error in submit_context: {e}", exc_info=True)
         return jsonify({
@@ -123,7 +135,7 @@ def get_current_context():
             })
         else:
             return jsonify({
-                "status": "success", 
+                "status": "success",
                 "context": None,
                 "has_context": False
             })
@@ -132,32 +144,32 @@ def get_current_context():
 def submit_response():
     """Receive manual response from the web interface."""
     global pending_response
-    
+
     try:
         data = request.json
         manual_response = data.get('response', '').strip()
-        
+
         if not manual_response:
             return jsonify({
                 "status": "error",
                 "message": "Response cannot be empty"
             }), 400
-        
+
         with state_lock:
             pending_response = manual_response
             response_ready.set()
-        
+
         logger.info(f"Received manual response: {len(manual_response)} characters")
-        
+
         return jsonify({
             "status": "success",
             "message": "Response submitted successfully"
         })
-        
+
     except Exception as e:
         logger.error(f"Error in submit_response: {e}", exc_info=True)
         return jsonify({
-            "status": "error", 
+            "status": "error",
             "message": str(e)
         }), 500
 
@@ -174,10 +186,10 @@ def get_history():
 def clear_history():
     """Clear the context/response history."""
     global context_history
-    
+
     with state_lock:
         context_history.clear()
-    
+
     return jsonify({
         "status": "success",
         "message": "History cleared"
@@ -206,16 +218,17 @@ def main():
     print("="*60)
     print(f"📍 Web Interface: http://localhost:6200")
     print(f"📁 Templates Directory: {templates_dir}")
-    print("\n✅ To use with Connectome:")
-    print("   CONNECTOME_LLM_TYPE=scaffolding")
     print("\n🌐 Interface Features:")
     print("   • View agent context in real-time")
-    print("   • Manually provide LLM responses")  
+    print("   • Manually provide LLM responses")
     print("   • Session history and replay")
     print("   • Zero LLM API costs")
     print("="*60 + "\n")
-    
+
     try:
+        global observer
+
+        observer = os.getenv('OBSERVER', 'false').lower() == 'true'
         app.run(host='0.0.0.0', port=6200, debug=True, threaded=True)
     except KeyboardInterrupt:
         print("\n👋 Scaffolding server stopped")
@@ -223,4 +236,4 @@ def main():
         logger.error(f"Error starting server: {e}", exc_info=True)
 
 if __name__ == '__main__':
-    main() 
+    main()
