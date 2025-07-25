@@ -290,53 +290,6 @@ class VEILFacetCompressionEngine(Component):
             logger.error(f"Error identifying containers from VEILFacetCache: {e}", exc_info=True)
             return {}
 
-    def _detect_focus_from_status_messages(self, facet_cache: VEILFacetCache) -> Optional[str]:
-        """
-        DEPRECATED: Detect current focus from StatusFacets with status_type="focus_changed".
-        
-        This method is no longer used since focus extraction is now handled by HUD
-        and passed to CompressionEngine via focus_info parameter.
-        
-        Args:
-            facet_cache: VEILFacetCache to examine for focus StatusFacets
-            
-        Returns:
-            None (focus detection is now done by HUD)
-        """
-        logger.warning("_detect_focus_from_status_messages is deprecated - focus extraction moved to HUD")
-        return None  # Focus is now passed from HUD
-        try:
-            focus_facets = []
-            
-            # Find all focus_changed StatusFacets
-            for facet in facet_cache.facets.values():
-                if (facet.facet_type == VEILFacetType.STATUS and 
-                    facet.get_property("status_type") == "focus_changed"):
-                    focus_facets.append(facet)
-            
-            if not focus_facets:
-                logger.debug("No focus_changed StatusFacets found")
-                return None
-            
-            # Sort by timestamp to get the most recent focus change
-            focus_facets.sort(key=lambda f: f.veil_timestamp, reverse=True)
-            latest_focus_facet = focus_facets[0]
-            
-            # Extract focused_element_id from current_state
-            current_state = latest_focus_facet.get_property("current_state", {})
-            focused_element_id = current_state.get("focused_element_id")
-            
-            if focused_element_id:
-                logger.debug(f"Detected focus from StatusFacet {latest_focus_facet.facet_id}: {focused_element_id}")
-                return focused_element_id
-            else:
-                logger.warning(f"Focus StatusFacet found but no focused_element_id in current_state: {current_state}")
-                return None
-                
-        except Exception as e:
-            logger.error(f"Error detecting focus from status messages: {e}", exc_info=True)
-            return None
-
     def _determine_container_rules(self, container_id: str) -> Dict[str, Any]:
         """
         Determine compression and rendering rules for a container.
@@ -561,16 +514,19 @@ class VEILFacetCompressionEngine(Component):
     
     async def _event_facets_to_n_chunks(self, event_facets: List[EventFacet]) -> List[Dict[str, Any]]:
         """
-        Convert EventFacets into N-chunks with 4k token boundaries.
+        Convert EventFacets into N-chunks with overflow-friendly chunking algorithm.
         
-        ENHANCED: Now includes per-chunk fingerprinting and temporal range tracking
+        UNIFIED ALGORITHM: Uses same overflow logic as incremental chunking to ensure
+        consistent chunk boundaries regardless of real-time vs restart processing.
+        
+        ENHANCED: Includes per-chunk fingerprinting and temporal range tracking
         for surgical invalidation support.
         
         Args:
             event_facets: List of regular EventFacets to chunk
             
         Returns:
-            List of N-chunk structures with enhanced metadata
+            List of N-chunk structures with enhanced metadata and consistent boundaries
         """
         logger.critical(f"🔥 REBUILDING CHUNKS FROM SCRATCH - this will lose has_memory_chunk flags! ({len(event_facets)} facets)")
         logger.critical(f"🔥 STACK TRACE: This rebuild was called - all compression state will be LOST!")
@@ -587,9 +543,10 @@ class VEILFacetCompressionEngine(Component):
                 # Calculate tokens for this facet
                 facet_tokens = self._calculate_event_facet_tokens(facet)
                 
-                # Check if adding this facet would exceed chunk limit
-                if current_tokens + facet_tokens > self.COMPRESSION_CHUNK_SIZE and current_chunk:
-                    # Complete current chunk with enhanced metadata
+                # UNIFIED LOGIC: Use same overflow-friendly algorithm as incremental chunking
+                # Check if current chunk is already at/over limit (not would-exceed)
+                if current_tokens >= self.COMPRESSION_CHUNK_SIZE and current_chunk:
+                    # Current chunk is already at/over limit, complete it and start new one
                     chunk_fingerprint = self._calculate_content_fingerprint(current_chunk)
                     temporal_range = self._calculate_temporal_range(current_chunk)
                     
@@ -609,9 +566,13 @@ class VEILFacetCompressionEngine(Component):
                     current_chunk = [facet]
                     current_tokens = facet_tokens
                 else:
-                    # Add to current chunk
+                    # Add to current chunk (allow overflow - compression will handle it)
                     current_chunk.append(facet)
                     current_tokens += facet_tokens
+                    
+                    # Debug: Show unified overflow behavior
+                    if current_tokens >= self.COMPRESSION_CHUNK_SIZE:
+                        logger.debug(f"Unified chunking: Chunk {len(chunks)} now has {current_tokens} tokens (overflow allowed for compression)")
             
             # Handle remaining facets (possibly incomplete chunk)
             if current_chunk:
@@ -1808,118 +1769,6 @@ class VEILFacetCompressionEngine(Component):
                 if memory_facet and not m_chunk.get("is_invalid", False):
                     all_facets.append(memory_facet)
             return all_facets
-    
-    async def _remove_status_events_for_compressed_content(self, processed_cache: VEILFacetCache) -> None:
-        """
-        DEPRECATED: Remove StatusFacets that are related to compressed EventFacets.
-        
-        This method is no longer used since we moved to events-only compression.
-        StatusFacets now flow through unchanged, and only EventFacets are compressed.
-        
-        Args:
-            processed_cache: VEILFacetCache to clean up
-        """
-        logger.warning("_remove_status_events_for_compressed_content is deprecated - events-only compression active")
-        return  # No-op since we're doing events-only compression
-        try:
-            # Find all memory EventFacets and their replaced facet IDs
-            replaced_facet_ids = set()
-            memory_facets = []
-            
-            for facet in processed_cache.facets.values():
-                if (facet.facet_type == VEILFacetType.EVENT and 
-                    facet.properties.get("event_type") == "compressed_memory"):
-                    memory_facets.append(facet)
-                    # Get replaced facet IDs from memory properties
-                    replaced_ids = facet.properties.get("replaced_facet_ids", [])
-                    replaced_facet_ids.update(replaced_ids)
-            
-            if not replaced_facet_ids:
-                logger.debug("No compressed EventFacets found, no status events to remove")
-                return
-            
-            # Find StatusFacets related to compressed content
-            status_facets_to_remove = []
-            
-            for facet in processed_cache.facets.values():
-                if facet.facet_type == VEILFacetType.STATUS:
-                    # Check if this StatusFacet is related to compressed content
-                    if self._is_status_related_to_compressed_content(facet, replaced_facet_ids):
-                        status_facets_to_remove.append(facet.facet_id)
-            
-            # Remove identified StatusFacets
-            removed_count = 0
-            for facet_id in status_facets_to_remove:
-                if processed_cache.remove_facet(facet_id):
-                    removed_count += 1
-            
-            if removed_count > 0:
-                logger.info(f"Removed {removed_count} status events related to {len(memory_facets)} compressed memories")
-            else:
-                logger.debug(f"No status events needed removal for {len(memory_facets)} compressed memories")
-                
-        except Exception as e:
-            logger.error(f"Error removing status events for compressed content: {e}", exc_info=True)
-    
-    def _is_status_related_to_compressed_content(self, status_facet: StatusFacet, replaced_facet_ids: set) -> bool:
-        """
-        DEPRECATED: Determine if a StatusFacet is related to compressed content.
-        
-        This method is no longer used since we moved to events-only compression.
-        StatusFacets are no longer removed during compression.
-        
-        Args:
-            status_facet: StatusFacet to check
-            replaced_facet_ids: Set of EventFacet IDs that were compressed
-            
-        Returns:
-            False (always preserve StatusFacets in events-only compression)
-        """
-        logger.warning("_is_status_related_to_compressed_content is deprecated - events-only compression active")
-        return False  # Always preserve StatusFacets in events-only compression
-        try:
-            status_type = status_facet.get_property("status_type", "")
-            current_state = status_facet.get_property("current_state", {})
-            
-            # Check for direct references to compressed facets
-            referenced_facet_id = current_state.get("related_facet_id")
-            if referenced_facet_id in replaced_facet_ids:
-                return True
-            
-            # Check for status types that are typically related to message events
-            temporal_status_types = {
-                "message_notification",
-                "typing_indicator", 
-                "read_receipt",
-                "delivery_status",
-                "reaction_added",
-                "reaction_removed",
-                "focus_changed"  # FIXED: Focus changes within compressed content aren't useful
-            }
-            
-            if status_type in temporal_status_types:
-                # These status types are typically tied to specific messages/events
-                # Remove them when related content is compressed
-                return True
-            
-            # Keep important structural status events ONLY
-            structural_status_types = {
-                "container_created",
-                "space_created", 
-                "chat_joined",
-                "connection_status_updated"
-            }
-            
-            if status_type in structural_status_types:
-                # Never remove truly structural status events
-                return False
-            
-            # For other status types, err on the side of preservation
-            return False
-            
-        except Exception as e:
-            logger.error(f"Error checking status relation to compressed content: {e}", exc_info=True)
-            return False  # Preserve on error
 
     # --- MEMORY EVENTFACET CREATION ---
     
@@ -1931,11 +1780,12 @@ class VEILFacetCompressionEngine(Component):
         """
         Create memory EventFacet from a complete N-chunk using AgentMemoryCompressor.
         
+        UPDATED: Now uses turn-based compression context for consistency with normal agent experience.
+        
         This is the key orchestration method that:
-        1. Converts EventFacets to VEIL nodes for AgentMemoryCompressor
-        2. Gets compression context by calling HUD (per user's clarification)
-        3. Calls AgentMemoryCompressor to form memory
-        4. Converts result back to memory EventFacet with mean timestamp
+        1. Gets turn-based compression context by calling HUD (per user's clarification)
+        2. Calls AgentMemoryCompressor with EventFacets and turn-based context
+        3. Converts result back to memory EventFacet with mean timestamp
         
         Args:
             container_id: ID of container being compressed
@@ -1951,15 +1801,15 @@ class VEILFacetCompressionEngine(Component):
                 logger.warning(f"No memory compressor available for {container_id}")
                 return None
             
-            # Get compression context by calling HUD (per user's flow clarification)
-            compression_context = await self._get_compression_context_from_hud(
-                container_id, full_facet_cache
+            # Get turn-based compression context by calling HUD (NEW APPROACH)
+            compression_context = await self._get_compression_context_from_hud_with_content(
+                container_id, full_facet_cache, event_facets
             )
             
             # Call AgentMemoryCompressor with EventFacets directly (no conversion needed!)
             # FIXED: Include chunk_index to ensure unique memory_id per chunk
             chunk_element_id = f"{container_id}_chunk_{chunk_index}"
-            logger.debug(f"Calling AgentMemoryCompressor for {chunk_element_id} with {len(event_facets)} EventFacets")
+            logger.debug(f"Calling AgentMemoryCompressor for {chunk_element_id} with {len(event_facets)} EventFacets (turn-based context)")
             memory_result = await self._memory_compressor.compress_event_facets(
                 event_facets=event_facets,
                 element_ids=[chunk_element_id],
@@ -2001,7 +1851,7 @@ class VEILFacetCompressionEngine(Component):
                 "token_count": token_count,
                 "own_token_count": own_token_count,
                 "source_chunk_index": chunk_index,
-                "compression_approach": "veil_facet_agent_memory_compressor",
+                "compression_approach": "veil_facet_agent_memory_compressor_turn_based",  # Updated to reflect new approach
                 "temporal_info": {
                     "earliest_content_timestamp": min(timestamps) if timestamps else mean_timestamp,
                     "latest_content_timestamp": max(timestamps) if timestamps else mean_timestamp,
@@ -2017,11 +1867,11 @@ class VEILFacetCompressionEngine(Component):
                 memory_facet.properties["timeline_divergence"] = divergence_info
                 logger.debug(f"Timeline divergence detected for memory {memory_facet.facet_id}: {divergence_info['divergence_type']}")
             
-            logger.info(f"Created memory EventFacet {memory_facet.facet_id} for {container_id} at timestamp {mean_timestamp}")
+            logger.info(f"Created turn-based memory EventFacet {memory_facet.facet_id} for {container_id} at timestamp {mean_timestamp}")
             return memory_facet
             
         except Exception as e:
-            logger.error(f"Error creating memory EventFacet for {container_id}: {e}", exc_info=True)
+            logger.error(f"Error creating turn-based memory EventFacet for {container_id}: {e}", exc_info=True)
             return None
 
     def _detect_timeline_divergence(self, 
@@ -2058,7 +1908,8 @@ class VEILFacetCompressionEngine(Component):
             event_stream = [
                 facet for facet in temporal_stream
                 if (facet.facet_type == VEILFacetType.EVENT and 
-                    facet.facet_id not in compressed_facet_ids)
+                    facet.facet_id not in compressed_facet_ids and
+                    facet.event_type not in ["agent_response", "compressed_memory"])
             ]
             
             if len(event_stream) < 2:
@@ -2137,17 +1988,20 @@ class VEILFacetCompressionEngine(Component):
                                               target_container_id: str,
                                               full_facet_cache: VEILFacetCache) -> Dict[str, Any]:
         """
-        Get compression context by calling HUD to render "compression at this moment".
+        LEGACY: Get compression context by calling HUD to render flat temporal context.
         
-        This implements the user's clarification: AgentMemoryCompressor calls HUD
-        to get full temporal context during memory formation.
+        This method is being phased out in favor of _get_compression_context_from_hud_with_content()
+        which provides turn-based consistency with normal agent interaction.
+        
+        ORIGINAL APPROACH: AgentMemoryCompressor calls HUD to get flat temporal context
+        NEW APPROACH: AgentMemoryCompressor gets same turn-based format as normal interaction
         
         Args:
             target_container_id: Container being compressed (gets focused treatment)
             full_facet_cache: Complete VEILFacetCache for context rendering
             
         Returns:
-            Compression context dictionary with rendered temporal context
+            Compression context dictionary with flat text context
         """
         try:
             # Get HUD component for context rendering
@@ -2156,18 +2010,9 @@ class VEILFacetCompressionEngine(Component):
                 logger.warning(f"HUD component not available for compression context")
                 return {"compression_reason": "hud_unavailable"}
             
-            # Prepare focus context - target container gets focused treatment
-            focus_context = {
-                "focus_element_id": target_container_id,
-                "compression_context": True,
-                "render_mode": "compression_context"
-            }
+            logger.debug(f"Requesting LEGACY flat text compression context from HUD for {target_container_id}")
             
-            # Get compression context from HUD using native VEILFacet method (no conversions!)
-            # This renders: target container (8-chunk focused) + other containers (1-chunk unfocused) + StatusFacets + AmbientFacets
-            logger.debug(f"Requesting native VEILFacet compression context from HUD for {target_container_id}")
-            
-            # Call native VEILFacet HUD method for compression context (eliminates round-trip conversions)
+            # Call legacy flat text HUD method
             compression_context_string = await hud_component.render_memorization_context_with_facet_cache(
                 facet_cache=full_facet_cache,
                 exclude_element_id=target_container_id,
@@ -2177,22 +2022,77 @@ class VEILFacetCompressionEngine(Component):
             compression_context = {
                 "focus_element_id": target_container_id,
                 "compression_reason": "veil_facet_chunk_boundary",
-                "full_veil_context": compression_context_string,
+                "full_veil_context": compression_context_string,  # Flat text approach
                 "compression_timestamp": datetime.now().isoformat(),
-                "is_focused": True  # Target container always gets focused treatment
+                "is_focused": True,  # Target container always gets focused treatment
+                "memorization_approach": "legacy_flat_text"
             }
             
-            logger.debug(f"Generated compression context for {target_container_id}: {len(compression_context_string)} chars")
+            logger.debug(f"Generated LEGACY compression context for {target_container_id}: {len(compression_context_string)} chars")
             return compression_context
             
         except Exception as e:
-            logger.error(f"Error getting compression context from HUD: {e}", exc_info=True)
+            logger.error(f"Error getting legacy compression context from HUD: {e}", exc_info=True)
             # Fallback context
             return {
                 "focus_element_id": target_container_id,
                 "compression_reason": "veil_facet_chunk_boundary_fallback",
                 "error": str(e)
             }
+    
+    async def _get_compression_context_from_hud_with_content(self,
+                                                           target_container_id: str,
+                                                           full_facet_cache: VEILFacetCache,
+                                                           content_to_memorize: List[EventFacet]) -> Dict[str, Any]:
+        """
+        UPDATED: Get turn-based compression context matching normal agent experience.
+        
+        This is the new approach that provides the agent with the same turn-based format
+        it normally sees, plus a synthetic final user turn requesting memorization.
+        
+        Args:
+            target_container_id: Container being compressed (gets focused treatment)
+            full_facet_cache: Complete VEILFacetCache for context rendering
+            content_to_memorize: Specific EventFacets being memorized (for synthetic turn)
+            
+        Returns:
+            Compression context dictionary with turn-based messages
+        """
+        try:
+            # Get HUD component for context rendering
+            hud_component = self._get_hud_component()
+            if not hud_component:
+                logger.warning(f"HUD component not available for turn-based compression context")
+                return {"compression_reason": "hud_unavailable"}
+            
+            logger.debug(f"Requesting turn-based compression context from HUD for {target_container_id} with {len(content_to_memorize)} facets to memorize")
+            
+            # Call new turn-based HUD method
+            turn_messages = await hud_component.render_memorization_context_as_turns(
+                facet_cache=full_facet_cache,
+                exclude_element_id=target_container_id,
+                focus_element_id=target_container_id,  # Target container gets focused treatment
+                content_to_memorize=content_to_memorize  # NEW: Pass specific content being memorized
+            )
+            
+            compression_context = {
+                "focus_element_id": target_container_id,
+                "compression_reason": "veil_facet_chunk_boundary",
+                "turn_messages": turn_messages,  # NEW: Turn-based instead of flat text
+                "compression_timestamp": datetime.now().isoformat(),
+                "is_focused": True,  # Target container always gets focused treatment
+                "content_facet_count": len(content_to_memorize),
+                "memorization_approach": "turn_based"
+            }
+            
+            logger.info(f"Generated turn-based compression context for {target_container_id}: {len(turn_messages)} turns ({len(content_to_memorize)} facets to memorize)")
+            return compression_context
+            
+        except Exception as e:
+            logger.error(f"Error getting turn-based compression context from HUD: {e}", exc_info=True)
+            # Fallback to legacy method
+            logger.info(f"Falling back to legacy flat text compression context for {target_container_id}")
+            return await self._get_compression_context_from_hud(target_container_id, full_facet_cache)
     
     def _get_hud_component(self):
         """Get HUD component for compression context rendering."""

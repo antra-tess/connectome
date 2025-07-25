@@ -81,6 +81,7 @@ class AgentMemoryCompressor(MemoryCompressor):
         
         # Ensure storage directory exists
         os.makedirs(agent_storage_path, exist_ok=True)
+        logger.critical(f"AgentMemoryCompressor for agent '{agent_id}' using storage path: {agent_storage_path}")
         
         # NEW: Pure async infrastructure
         self._memory_formation_queue: asyncio.Queue = asyncio.Queue(maxsize=10)
@@ -164,15 +165,22 @@ class AgentMemoryCompressor(MemoryCompressor):
 
     async def get_memory_state(self, memory_id: str) -> str:
         """Get current memory state: 'existing', 'forming', 'needs_formation'."""
-        if memory_id in self._memory_cache:
+        # FIXED: Check tracked memory states first
+        if memory_id in self._memory_states:
+            tracked_state = self._memory_states[memory_id]
+            logger.debug(f"Agent {self.agent_id}: Memory {memory_id} has tracked state: {tracked_state}")
+            return tracked_state
+        elif memory_id in self._memory_cache:
             return "existing"
         elif memory_id in self._active_formations:
             return "forming"
         else:
             # Check if file exists
             if await self._memory_file_exists(memory_id):
+                logger.debug(f"Agent {self.agent_id}: Memory {memory_id} file exists, returning existing")
                 return "existing"
             else:
+                logger.debug(f"Agent {self.agent_id}: Memory {memory_id} needs formation")
                 return "needs_formation"
 
     def _set_memory_state(self, memory_id: str, state: str):
@@ -184,8 +192,11 @@ class AgentMemoryCompressor(MemoryCompressor):
         """Check if memory file exists on disk."""
         try:
             memory_file = Path(self.storage_path) / f"{memory_id}.json"
-            return memory_file.exists()
-        except Exception:
+            file_exists = memory_file.exists()
+            logger.critical(f"Agent {self.agent_id}: Checking memory file {memory_file} -> exists={file_exists}")
+            return file_exists
+        except Exception as e:
+            logger.warning(f"Agent {self.agent_id}: Error checking memory file {memory_id}: {e}")
             return False
 
     async def _start_background_processor(self):
@@ -430,6 +441,7 @@ class AgentMemoryCompressor(MemoryCompressor):
             
             # Generate memory ID
             memory_id = self._generate_memory_id(element_ids)
+            logger.debug(f"Agent {self.agent_id}: Generated memory_id {memory_id} for elements {element_ids}")
             
             # Check memory state
             memory_state = await self.get_memory_state(memory_id)
@@ -444,23 +456,27 @@ class AgentMemoryCompressor(MemoryCompressor):
                     memory_data = await self.load_memory(memory_id)
                     if memory_data and memory_data.get("memorized_node"):
                         self._memory_cache[memory_id] = memory_data
+                        self._set_memory_state(memory_id, "existing")  # FIXED: Track loaded state
+                        logger.debug(f"Agent {self.agent_id}: Loaded existing memory {memory_id} from file")
                         return memory_data["memorized_node"]
                     else:
-                        # File exists but loading failed - fallback to new memory formation
+                        # File exists but loading failed - start new formation and preserve original content
                         logger.warning(f"Agent {self.agent_id}: Memory file {memory_id} exists but loading failed, starting new formation")
                         await self._queue_facet_memory_formation(memory_id, event_facets, element_ids, compression_context)
-                        return self._create_facet_forming_fallback(memory_id, element_ids, event_facets)
+                        logger.debug(f"Agent {self.agent_id}: File loading failed, returning None to preserve original EventFacets")
+                        return None  # Let compression engine use original EventFacets
             
             elif memory_state == "forming":
-                # Memory is currently being formed, return fallback
-                logger.debug(f"Agent {self.agent_id}: Memory {memory_id} is forming, returning EventFacet fallback")
-                return self._create_facet_forming_fallback(memory_id, element_ids, event_facets)
+                # Memory is currently being formed, return None to preserve original content
+                logger.debug(f"Agent {self.agent_id}: Memory {memory_id} is forming, returning None to preserve original EventFacets")
+                return None  # Let compression engine use original EventFacets
             
             elif memory_state == "needs_formation":
-                # Start background formation and return fallback
+                # Start background formation and return None to preserve original content  
                 logger.debug(f"Agent {self.agent_id}: Starting background formation for {memory_id}")
                 await self._queue_facet_memory_formation(memory_id, event_facets, element_ids, compression_context)
-                return self._create_facet_forming_fallback(memory_id, element_ids, event_facets)
+                logger.debug(f"Agent {self.agent_id}: Memory formation queued, returning None to preserve original EventFacets")
+                return None  # Let compression engine use original EventFacets
             
             # Fallback for unexpected states
             logger.warning(f"Agent {self.agent_id}: Unexpected memory state {memory_state} for {memory_id}")
@@ -499,7 +515,10 @@ class AgentMemoryCompressor(MemoryCompressor):
     def _create_facet_forming_fallback(self, memory_id: str, element_ids: List[str], 
                                       event_facets: List) -> Dict[str, Any]:
         """
-        NEW: Create fallback EventFacet-based memory node while memory is being formed.
+        DEPRECATED: No longer used - we now return None to preserve original content during formation.
+        
+        Previously created fallback EventFacet-based memory node while memory was being formed,
+        but this caused context loss by hiding actual content behind "Memory forming..." placeholders.
         """
         try:
             # Calculate tokens directly from EventFacets
@@ -755,24 +774,63 @@ class AgentMemoryCompressor(MemoryCompressor):
         """
         Have the agent reflect on its experience and create its own memory summary.
         
-        ENHANCED: Now handles multimodal content - agent is aware of images and documents.
+        ENHANCED: Now handles both flat text and turn-based message formats for consistency
+        with normal agent interaction. When turn_messages are provided in compression_context,
+        the agent sees the same conversation format as during normal interaction.
+        
         NEW: Uses existing memory context for better continuity in memory formation.
         PHASE 3: Enhanced with full VEIL context for contextually aware memories.
         This is the core of agent self-memorization - the agent decides what to remember.
         """
         try:
+            # Check if turn-based messages are provided (new approach)
+            turn_messages = compression_context.get("turn_messages") if compression_context else None
+            
+            if turn_messages:
+                # NEW: Turn-based reflection using conversation format
+                return await self._agent_reflect_on_experience_with_turns(
+                    turn_messages, element_ids, compression_context
+                )
+            else:
+                # LEGACY: Flat text reflection (maintain backward compatibility)
+                return await self._agent_reflect_on_experience_with_text(
+                    text_content, attachments, element_ids, compression_context
+                )
+                
+        except Exception as e:
+            logger.error(f"Error during agent reflection: {e}", exc_info=True)
+            return await self._create_fallback_summary(text_content, element_ids, False)
+
+    async def _agent_reflect_on_experience_with_turns(self,
+                                                    turn_messages: List[Dict[str, Any]],
+                                                    element_ids: List[str],
+                                                    compression_context: Optional[Dict[str, Any]]) -> str:
+        """
+        NEW: Agent reflection using turn-based messages identical to normal agent interaction.
+        
+        The agent sees the conversation as it normally would, with proper turn alternation,
+        then receives a memorization request as the final user turn. This creates consistency
+        between normal interaction and memorization contexts.
+        
+        Args:
+            turn_messages: List of turn-based messages (same format as normal agent context)
+            element_ids: List of element IDs for context
+            compression_context: Compression context information
+            
+        Returns:
+            Agent's memory summary based on conversation context
+        """
+        try:
             # Prepare context information
             element_context = ", ".join(element_ids) if len(element_ids) > 1 else element_ids[0]
+            compression_reason = compression_context.get("compression_reason", "memory management") if compression_context else "memory management"
             
             # Focus context if available
             focus_info = ""
             if compression_context and compression_context.get("focus_element_id"):
                 focus_info = f"\nNote: You were focusing on {compression_context['focus_element_id']} during this interaction."
             
-            # Compression reason
-            compression_reason = compression_context.get("compression_reason", "memory management") if compression_context else "memory management"
-            
-            # NEW: Extract existing memory context for continuity
+            # Extract existing memory context for continuity (if available)
             existing_memories = compression_context.get("existing_memory_context", []) if compression_context else []
             memory_context_section = ""
             
@@ -785,7 +843,7 @@ Here are your previous memories about this conversation/element to help you unde
 """
                 logger.debug(f"Agent {self.agent_id} reflecting with {len(existing_memories)} existing memory context")
 
-            # PHASE 3: NEW - Get full VEIL context from HUD for enhanced contextual awareness
+            # Get full VEIL context from compression context (if available)
             veil_context_section = ""
             full_veil_context = compression_context.get("full_veil_context") if compression_context else None
             
@@ -800,7 +858,143 @@ Here's your complete context to understand what's happening around this conversa
 """
                 logger.debug(f"Agent {self.agent_id} reflecting with full VEIL context ({len(full_veil_context)} chars)")
 
-            # NEW: Enhanced reflection prompt for multimodal content with VEIL context
+            # Check for multimodal content in turn messages
+            has_multimodal = self._detect_multimodal_in_turns(turn_messages)
+            
+            # Create turn-based reflection prompt
+            reflection_prompt = f"""You are an AI agent reflecting on a conversation. You will see the same conversation format you normally experience during interaction.
+
+{memory_context_section}{veil_context_section}CONVERSATION CONTEXT:
+- This experience occurred in: {element_context}
+- Compression reason: {compression_reason}{focus_info}
+
+The conversation below shows the same turn-based format you normally see. The final message is a user request asking you to create a memory summary of specific content from this conversation.
+
+Please respond naturally to this memorization request, creating a comprehensive memory from your perspective as an AI agent."""
+
+            # Convert turn messages to LLM format
+            from llm.provider_interface import LLMMessage
+            
+            # Create conversation messages
+            conversation_messages = []
+            
+            # Add system prompt
+            conversation_messages.append(LLMMessage("system", reflection_prompt))
+            
+            # Add turn messages as conversation history
+            for turn in turn_messages:
+                role = turn.get("role", "user")
+                content = turn.get("content", "")
+                
+                # Handle multimodal content if present  
+                if "attachments" in turn and turn["attachments"]:
+                    # Create multimodal message
+                    conversation_messages.append(LLMMessage(role, {
+                        "text": content,
+                        "attachments": turn["attachments"]
+                    }))
+                else:
+                    # Text-only message
+                    conversation_messages.append(LLMMessage(role, content))
+            
+            # Make LLM call with conversation format
+            context_info = f"turn-based conversation with {len(turn_messages)} turns"
+            if has_multimodal:
+                context_info += " (multimodal)"
+            
+            logger.info(f"Agent {self.agent_id} reflecting on {context_info}")
+            
+            # Get agent's reflection via LLM with retry mechanism
+            # Use the last message (which should be the memorization request)
+            final_message = conversation_messages[-1] if conversation_messages else LLMMessage("user", "Please create a memory summary.")
+            
+            llm_response = await self._call_llm_with_retry(final_message, context_info)
+            
+            if llm_response and llm_response.content:
+                agent_summary = llm_response.content.strip()
+                
+                # Log enhanced memory formation
+                context_enhancement = ""
+                if veil_context_section:
+                    context_enhancement = " (enhanced with full VEIL context)"
+                if existing_memories:
+                    context_enhancement += f" with {len(existing_memories)} memory context"
+                
+                if has_multimodal:
+                    logger.info(f"Agent {self.agent_id} created turn-based multimodal memory{context_enhancement}: {agent_summary[:100]}...")
+                else:
+                    logger.debug(f"Agent {self.agent_id} reflected with turn-based format{context_enhancement}: {agent_summary[:100]}...")
+                
+                return agent_summary
+            else:
+                logger.warning(f"LLM reflection failed for agent {self.agent_id} after retries, using fallback")
+                return await self._create_fallback_summary_from_turns(turn_messages, element_ids)
+                
+        except Exception as e:
+            logger.error(f"Error during turn-based agent reflection: {e}", exc_info=True)
+            return await self._create_fallback_summary_from_turns(turn_messages, element_ids)
+
+    async def _agent_reflect_on_experience_with_text(self,
+                                                   text_content: str,
+                                                   attachments: List[Dict[str, Any]],
+                                                   element_ids: List[str],
+                                                   compression_context: Optional[Dict[str, Any]]) -> str:
+        """
+        LEGACY: Agent reflection using flat text content (backward compatibility).
+        
+        This maintains the original reflection approach for systems that haven't
+        migrated to turn-based memorization yet.
+        
+        Args:
+            text_content: Flat text content to reflect on
+            attachments: List of attachments
+            element_ids: List of element IDs for context  
+            compression_context: Compression context information
+            
+        Returns:
+            Agent's memory summary based on text content
+        """
+        try:
+            # Prepare context information
+            element_context = ", ".join(element_ids) if len(element_ids) > 1 else element_ids[0]
+            
+            # Focus context if available
+            focus_info = ""
+            if compression_context and compression_context.get("focus_element_id"):
+                focus_info = f"\nNote: You were focusing on {compression_context['focus_element_id']} during this interaction."
+            
+            # Compression reason
+            compression_reason = compression_context.get("compression_reason", "memory management") if compression_context else "memory management"
+            
+            # Extract existing memory context for continuity
+            existing_memories = compression_context.get("existing_memory_context", []) if compression_context else []
+            memory_context_section = ""
+            
+            if existing_memories:
+                memory_context_section = f"""
+EXISTING MEMORIES FOR CONTEXT:
+Here are your previous memories about this conversation/element to help you understand the ongoing context:
+{chr(10).join([f"- {memory}" for memory in existing_memories])}
+
+"""
+                logger.debug(f"Agent {self.agent_id} reflecting with {len(existing_memories)} existing memory context")
+
+            # Get full VEIL context from compression context  
+            veil_context_section = ""
+            full_veil_context = compression_context.get("full_veil_context") if compression_context else None
+            
+            if full_veil_context:
+                veil_context_section = f"""
+FULL CONTEXT FOR MEMORIZATION:
+Here's your complete context to understand what's happening around this conversation:
+<veil>
+{full_veil_context}
+</veil>
+
+"""
+                logger.debug(f"Agent {self.agent_id} reflecting with full VEIL context ({len(full_veil_context)} chars)")
+
+            # Enhanced reflection prompt for multimodal content with VEIL context
             if attachments:
                 reflection_prompt = f"""You are an AI agent reflecting on your recent experience that included visual and document content. You have access to your complete conversation context to understand what you should remember.
 
@@ -855,7 +1049,7 @@ Keep the summary brief but informative - this will be your memory of this specif
 
 MEMORY SUMMARY:"""
 
-            # NEW: Create multimodal LLM message if attachments detected
+            # Create LLM message
             from llm.provider_interface import LLMMessage
             
             if attachments:
@@ -871,13 +1065,13 @@ MEMORY SUMMARY:"""
                 reflection_message = LLMMessage("user", reflection_prompt)
                 context_info = "content with full VEIL context" if veil_context_section else "content"
             
-            # NEW: Get agent's reflection via LLM with retry mechanism
+            # Get agent's reflection via LLM with retry mechanism
             llm_response = await self._call_llm_with_retry(reflection_message, context_info)
             
             if llm_response and llm_response.content:
                 agent_summary = llm_response.content.strip()
                 
-                # NEW: Log enhanced memory formation with VEIL context awareness
+                # Log enhanced memory formation with VEIL context awareness
                 context_enhancement = ""
                 if veil_context_section:
                     context_enhancement = " (enhanced with full VEIL context)"
@@ -895,8 +1089,55 @@ MEMORY SUMMARY:"""
                 return await self._create_fallback_summary(text_content, element_ids, len(attachments) > 0)
                 
         except Exception as e:
-            logger.error(f"Error during agent reflection: {e}", exc_info=True)
+            logger.error(f"Error during text-based agent reflection: {e}", exc_info=True)
             return await self._create_fallback_summary(text_content, element_ids, False)
+    
+    def _detect_multimodal_in_turns(self, turn_messages: List[Dict[str, Any]]) -> bool:
+        """
+        Detect if turn messages contain multimodal content.
+        
+        Args:
+            turn_messages: List of turn message dictionaries
+            
+        Returns:
+            True if multimodal content is present
+        """
+        try:
+            for turn in turn_messages:
+                if "attachments" in turn and turn["attachments"]:
+                    return True
+                # Could also check for embedded multimodal content in content
+            return False
+        except Exception as e:
+            logger.error(f"Error detecting multimodal in turns: {e}", exc_info=True)
+            return False
+
+    async def _create_fallback_summary_from_turns(self, turn_messages: List[Dict[str, Any]], element_ids: List[str]) -> str:
+        """
+        Create fallback summary from turn messages when LLM reflection fails.
+        
+        Args:
+            turn_messages: List of turn message dictionaries
+            element_ids: List of element IDs
+            
+        Returns:
+            Basic fallback summary
+        """
+        try:
+            user_turns = [turn for turn in turn_messages if turn.get("role") == "user"]
+            assistant_turns = [turn for turn in turn_messages if turn.get("role") == "assistant"]
+            has_multimodal = self._detect_multimodal_in_turns(turn_messages)
+            
+            base_summary = f"Conversation with {len(user_turns)} user messages and {len(assistant_turns)} agent responses in {', '.join(element_ids)}"
+            
+            if has_multimodal:
+                base_summary += " (with multimodal content)"
+                
+            return base_summary
+            
+        except Exception as e:
+            logger.error(f"Error creating fallback summary from turns: {e}", exc_info=True)
+            return f"Content from {', '.join(element_ids)}"
     
     async def _create_fallback_summary(self, text_content: str, element_ids: List[str], has_attachments: bool = False) -> str:
         """
@@ -904,104 +1145,25 @@ MEMORY SUMMARY:"""
         
         ENHANCED: Now aware of multimodal content.
         """
-        lines = text_content.split('\n')
-        message_lines = [line for line in lines if '] ' in line and ': ' in line]
-        attachment_lines = [line for line in lines if 'Attachment content:' in line or 'attachments:' in line]
-        
-        if message_lines:
-            base_summary = f"Conversation with {len(message_lines)} messages in {', '.join(element_ids)}"
+        try:
+            lines = text_content.split('\n')
+            message_lines = [line for line in lines if '] ' in line and ': ' in line]
+            attachment_lines = [line for line in lines if 'Attachment content:' in line or 'attachments:' in line]
             
-            # NEW: Add attachment context to fallback
-            if has_attachments or attachment_lines:
-                base_summary += " (with attachments)"
+            if message_lines:
+                base_summary = f"Conversation with {len(message_lines)} messages in {', '.join(element_ids)}"
                 
-            return base_summary
-        else:
-            return f"Content from {', '.join(element_ids)}"
-    
-    async def _fallback_compression(self, 
-                                  raw_veil_nodes: List[Dict[str, Any]], 
-                                  element_ids: List[str],
-                                  compression_context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        """Fallback compression when LLM is not available."""
-        logger.info(f"Using fallback compression for {len(raw_veil_nodes)} nodes")
-        
-        # OPTIMIZED: Use same single-pass approach for consistency
-        text_content, attachments = await self._parse_veil_content_and_attachments(raw_veil_nodes)
-        
-        # Simple analysis
-        message_count = 0
-        participants = set()
-        
-        for node in raw_veil_nodes:
-            props = node.get("properties", {})
-            if props.get("content_nature") == "chat_message":
-                message_count += 1
-                sender = props.get("sender_name")
-                if sender:
-                    participants.add(sender)
-        
-        # Create basic summary with multimodal awareness
-        if message_count > 0:
-            if len(participants) <= 2:
-                summary = f"Conversation with {', '.join(participants)}: {message_count} messages"
+                # Add attachment context to fallback
+                if has_attachments or attachment_lines:
+                    base_summary += " (with attachments)"
+                    
+                return base_summary
             else:
-                summary = f"Group conversation: {message_count} messages"
-            
-            # Add attachment context to fallback
-            if attachments:
-                summary += f" (with {len(attachments)} attachments)"
-        else:
-            summary = f"Content from {', '.join(element_ids)}"
-            if attachments:
-                summary += f" with {len(attachments)} attachments"
-        
-        # Count tokens
-        total_tokens = estimate_veil_tokens(raw_veil_nodes)
-        memory_id = self._generate_memory_id(element_ids)
-        
-        # NEW: Extract latest content timestamp for chronological placement
-        content_timestamp = self._extract_latest_content_timestamp(raw_veil_nodes)
-        
-        # Create memorized node with multimodal metadata
-        memorized_node = {
-            "veil_id": f"memorized_{memory_id}",
-            "node_type": "memorized_content",
-            "properties": {
-                "structural_role": "compressed_content",
-                "content_nature": "agent_memory",
-                "memory_id": memory_id,
-                "memory_summary": summary,
-                "original_element_ids": element_ids,
-                "original_node_count": len(raw_veil_nodes),
-                "token_count": total_tokens,
-                "own_token_count": self._calculate_own_token_count(summary),
-                "timestamp": content_timestamp,  # NEW: Use content timestamp for chronological placement
-                "compression_timestamp": datetime.now().isoformat(),  # Keep for metadata
-                "compressor_type": f"{self.__class__.__name__}_fallback",
-                "has_multimodal_content": len(attachments) > 0,  # NEW: Track multimodal in fallback too
-                "attachment_count": len(attachments)
-            },
-            "children": []
-        }
-        
-        # Store and track
-        await self._store_memory_to_file(memory_id, {
-            "memory_summary": summary,
-            "metadata": {
-                "fallback": True, 
-                "agent_id": self.agent_id,
-                "has_multimodal_content": len(attachments) > 0,
-                "attachment_count": len(attachments)
-            },
-            "memorized_node": memorized_node
-        })
-        
-        self.add_correlation(element_ids, memory_id)
-        
-        multimodal_info = f" with {len(attachments)} attachments" if attachments else ""
-        logger.info(f"Created fallback memory {memory_id}: {summary}{multimodal_info}")
-        return memorized_node
+                return f"Content from {', '.join(element_ids)}"
+                
+        except Exception as e:
+            logger.error(f"Error creating fallback summary: {e}", exc_info=True)
+            return f"Content from {', '.join(element_ids)}"
     
     # Storage methods remain the same
     async def _store_memory_to_file(self, memory_id: str, memory_data: Dict[str, Any]) -> bool:
@@ -1109,7 +1271,8 @@ MEMORY SUMMARY:"""
             hash_object = hashlib.md5(content_string.encode('utf-8'))
             memory_id = f"mem_{hash_object.hexdigest()[:12]}"
             
-            logger.debug(f"Generated deterministic memory ID {memory_id} for elements {sorted_elements}")
+            logger.critical(f"🔍 MEMORY ID GENERATION: Agent {self.agent_id} generated memory_id '{memory_id}' for elements {sorted_elements}")
+            logger.critical(f"🔍 CONTENT STRING: '{content_string}' → hash: {hash_object.hexdigest()}")
             return memory_id
             
         except Exception as e:

@@ -188,17 +188,10 @@ class FacetAwareHUDComponent(Component):
                                                          exclude_element_id: str,
                                                          focus_element_id: Optional[str] = None) -> str:
         """
-        NEW: Native VEILFacet compression context rendering (eliminates flat cache conversions).
+        LEGACY: Native VEILFacet compression context rendering (eliminates flat cache conversions).
         
-        This replaces the round-trip conversion pattern:
-        VEILFacetCache → flat_cache → VEILFacetCache
-        
-        MEMORIZATION RULES:
-        - Skip ambient facets (they float temporally and aren't memorizable)  
-        - Include ALL EventFacets for full conversational context
-        - Focus on element_id context if provided  
-        - Use temporal ordering for chronological context
-        - Content duplication acceptable for better memory formation quality
+        This method is being phased out in favor of render_memorization_context_as_turns()
+        which provides turn-based consistency with normal agent interaction.
         
         Args:
             facet_cache: Native VEILFacetCache to render
@@ -231,6 +224,202 @@ class FacetAwareHUDComponent(Component):
         except Exception as e:
             logger.error(f"Error in native VEILFacet memorization context: {e}", exc_info=True)
             return f"Error rendering memorization context: {e}"
+
+    async def render_memorization_context_as_turns(self, 
+                                                  facet_cache: VEILFacetCache,
+                                                  exclude_element_id: str,
+                                                  focus_element_id: Optional[str] = None,
+                                                  content_to_memorize: Optional[List] = None) -> List[Dict[str, Any]]:
+        """
+        NEW: Render memorization context using turn-based format like normal agent interaction.
+        
+        This creates the same turn-based representation the agent normally sees, 
+        plus a final synthetic user turn requesting memorization. This ensures
+        consistency between normal interaction and memorization contexts.
+        
+        Args:
+            facet_cache: Complete VEILFacetCache for context
+            exclude_element_id: Element where memorization is happening  
+            focus_element_id: Focus element for context (defaults to exclude_element_id)
+            content_to_memorize: Specific EventFacets being memorized (for synthetic turn)
+            
+        Returns:
+            List of turn-based messages ending with memorization request
+        """
+        try:
+            self._rendering_stats["memory_context_renders"] += 1
+            
+            # Use focus_element_id for focused treatment, default to exclude_element_id
+            effective_focus_id = focus_element_id or exclude_element_id
+            
+            # Apply memorization exclusion rules directly to VEILFacetCache
+            filtered_facets = self._apply_memorization_exclusions_native(
+                facet_cache, exclude_element_id
+            )
+            
+            # Prepare focus info for turn processing
+            focus_info = {
+                "focus_element_id": effective_focus_id,
+                "focus_source": "memorization_context",
+                "focus_context": {
+                    "memorization_context": True,
+                    "exclude_element_id": exclude_element_id
+                }
+            }
+            
+            # Process facets into turns using existing turn-based pipeline
+            memorization_options = {
+                "exclude_ambient": True,  # Skip ambient facets for memorization
+                "focus_context": focus_info["focus_context"],
+                "render_mode": "memorization",
+                "include_time_markers": False,  # Cleaner for memorization
+                "include_system_messages": True
+            }
+            
+            # Use existing turn processing pipeline
+            base_turn_messages = await self._process_facets_into_turns(
+                filtered_facets, memorization_options, tools=None
+            )
+            
+            # Create synthetic memorization request as final user turn
+            content_summary = self._create_content_summary_for_memorization(content_to_memorize)
+            memorization_request_turn = self._create_memorization_request_turn(
+                content_summary, content_to_memorize, exclude_element_id
+            )
+            
+            # Combine base turns with memorization request
+            turn_messages = base_turn_messages + [memorization_request_turn]
+            
+            logger.info(f"Generated turn-based memorization context: {len(turn_messages)} turns "
+                       f"({len(base_turn_messages)} conversation + 1 memorization request)")
+            return turn_messages
+            
+        except Exception as e:
+            logger.error(f"Error in turn-based memorization context: {e}", exc_info=True)
+            # Fallback to basic memorization request
+            return [{
+                "role": "user", 
+                "content": f"Please create a memory summary of recent content from {exclude_element_id}.",
+                "turn_metadata": {
+                    "turn_type": "memorization_request",
+                    "is_synthetic": True,
+                    "error_fallback": True,
+                    "error": str(e)
+                }
+            }]
+
+    def _create_content_summary_for_memorization(self, content_to_memorize: Optional[List]) -> str:
+        """
+        Create a summary of the content being memorized for the synthetic turn.
+        
+        Args:
+            content_to_memorize: List of EventFacets being memorized
+            
+        Returns:
+            Human-readable summary of the content
+        """
+        try:
+            if not content_to_memorize:
+                return "recent conversation content"
+            
+            # Count different types of content
+            message_count = 0
+            agent_responses = 0
+            content_samples = []
+            
+            for facet in content_to_memorize:
+                event_type = getattr(facet, 'event_type', '') or facet.get_property('event_type', '')
+                content = getattr(facet, 'content', '') or facet.get_property('content', '')
+                
+                if event_type == "message_added":
+                    message_count += 1
+                    sender = facet.get_property("sender_name", "Unknown")
+                    # Add sample content (first 50 chars)
+                    if len(content_samples) < 3:
+                        preview = content[:50] + "..." if len(content) > 50 else content
+                        content_samples.append(f"{sender}: {preview}")
+                        
+                elif event_type == "agent_response":
+                    agent_responses += 1
+                    if len(content_samples) < 3:
+                        preview = content[:50] + "..." if len(content) > 50 else content
+                        content_samples.append(f"Agent: {preview}")
+            
+            # Build descriptive summary
+            summary_parts = []
+            
+            if message_count > 0:
+                summary_parts.append(f"{message_count} messages")
+            if agent_responses > 0:
+                summary_parts.append(f"{agent_responses} agent responses")
+            
+            if content_samples:
+                content_preview = "\n".join(content_samples)
+                return f"Recent conversation content ({', '.join(summary_parts)}):\n\n{content_preview}"
+            else:
+                return f"Recent conversation content ({', '.join(summary_parts)})" if summary_parts else "recent conversation content"
+                
+        except Exception as e:
+            logger.error(f"Error creating content summary: {e}", exc_info=True)
+            return "recent conversation content"
+
+    def _create_memorization_request_turn(self, content_summary: str, 
+                                        content_to_memorize: Optional[List],
+                                        exclude_element_id: str) -> Dict[str, Any]:
+        """
+        Create synthetic user turn requesting memorization.
+        
+        Args:
+            content_summary: Summary of content being memorized
+            content_to_memorize: List of EventFacets being memorized
+            exclude_element_id: Element where memorization is happening
+            
+        Returns:
+            User turn message requesting memorization
+        """
+        try:
+            # Create natural memorization request
+            memorization_content = f"""Please create a memory summary of the following content from our conversation:
+
+{content_summary}
+
+Focus on:
+- Key topics and decisions discussed
+- Important context for future reference  
+- Your role and contributions to the discussion
+- Outcomes, conclusions, and next steps
+- Any important details that should be remembered
+
+Create a concise but comprehensive memory from your perspective as an AI agent. This memory will help you understand the context when we continue our conversation later."""
+
+            # Calculate metadata
+            facet_count = len(content_to_memorize) if content_to_memorize else 0
+            
+            return {
+                "role": "user",
+                "content": memorization_content,
+                "turn_metadata": {
+                    "turn_type": "memorization_request",
+                    "is_synthetic": True,
+                    "content_facet_count": facet_count,
+                    "memorization_context": True,
+                    "target_element_id": exclude_element_id,
+                    "turn_index": "synthetic_final"
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Error creating memorization request turn: {e}", exc_info=True)
+            return {
+                "role": "user",
+                "content": "Please create a memory summary of the recent conversation content.",
+                "turn_metadata": {
+                    "turn_type": "memorization_request",
+                    "is_synthetic": True,
+                    "error_fallback": True,
+                    "error": str(e)
+                }
+            }
 
     def _apply_memorization_exclusions_native(self, 
                                             facet_cache: VEILFacetCache, 
