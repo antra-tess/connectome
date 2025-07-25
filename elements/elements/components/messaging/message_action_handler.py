@@ -70,17 +70,17 @@ class MessageActionHandler(Component):
             return
 
         # --- Define Parameter Schemas ---
-        send_message_params: List[ToolParameter] = [
-            {"name": "text", "type": "string", "description": "The content of the message to send.", "required": True},
+        msg_params: List[ToolParameter] = [
+            {"name": "inner_content", "type": "string", "description": "The content of the message to send.", "required": True},
         ]
 
-        # --- Register send_message Tool ---
+        # --- Register msg Tool ---
         @tool_provider.register_tool(
-            name="send_message",
+            name="msg",
             description="Sends a message to the conversation (DM or channel).",
-            parameters_schema=send_message_params
+            parameters_schema=msg_params
         )
-        async def send_message_tool(text: str,
+        async def msg_tool(inner_content: str,
                                     # attachments: Optional[List[Dict[str, Any]]] = None,
                                     # reply_to_external_id: Optional[str] = None,
                                     # target_element_id: Optional[str] = None,
@@ -90,14 +90,14 @@ class MessageActionHandler(Component):
             Uses local outgoing_action_callback.
 
             Args:
-                text: Message content to send
+                inner_content: Message content to send
                 attachments: Optional list of attachment objects
                 reply_to_external_id: Optional ID of message being replied to
                 target_element_id: Optional specific element ID to target. Usually not needed
                                   as the agent loop will automatically route to the correct element.
                 calling_context: Context from the calling component
             """
-            logger.info(f"[{self.owner.id}] MessageActionHandler.send_message_tool called. Text: '{text[:50]}...', Target: {'auto'}")
+            logger.info(f"[{self.owner.id}] MessageActionHandler.msg_tool called. Text: '{inner_content[:50]}...', Target: {'auto'}")
 
             # Note: target_element_id parameter is included for completeness but typically
             # the agent loop handles routing automatically based on tool aggregation
@@ -130,13 +130,13 @@ class MessageActionHandler(Component):
                 #             if isinstance(att, dict):
                 #                 final_attachments.append(att)
                 #             else:
-                #                 logger.warning(f"[{self.owner.id}] send_message_tool: Skipping non-dict attachment: {att}")
+                #                 logger.warning(f"[{self.owner.id}] msg_tool: Skipping non-dict attachment: {att}")
                 #     else:
-                #         logger.warning(f"[{self.owner.id}] send_message_tool: Attachments argument was not a list: {attachments}")
+                #         logger.warning(f"[{self.owner.id}] msg_tool: Attachments argument was not a list: {attachments}")
 
                 msg_list_comp.add_pending_message(
                     internal_request_id=internal_request_id,
-                    text=text,
+                    text=inner_content,
                     sender_id=requesting_agent_id or "unknown_agent",
                     sender_name=agent_name or "Unknown Agent",
                     timestamp=time.time(),
@@ -157,7 +157,7 @@ class MessageActionHandler(Component):
                     "internal_request_id": internal_request_id,
                     "adapter_id": retrieved_adapter_id,
                     "conversation_id": retrieved_conversation_id,
-                    "text": text,
+                    "text": inner_content,
                     # "reply_to_external_id": reply_to_external_id,
                     # "attachments": attachments or [],
                     "requesting_element_id": self.owner.id,
@@ -357,7 +357,7 @@ class MessageActionHandler(Component):
 
         adapter_id = context_adapter_id # Assign to original variable name
 
-        # Generate internal request ID for tracking like send_message does
+        # Generate internal request ID for tracking like msg does
         internal_request_id = self._get_internal_request_id()
 
         logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] Preparing fetch_history action for adapter '{adapter_id}', conv '{conversation_id}'.")
@@ -408,7 +408,7 @@ class MessageActionHandler(Component):
         if not adapter_id or not actual_conversation_id:
             return { "success": False, "error": f"Could not determine adapter_id ({adapter_id}) or conversation_id ({actual_conversation_id}) for getting attachment."}
 
-        # Generate internal request ID for tracking like send_message does
+        # Generate internal request ID for tracking like msg does
         internal_request_id = f"attach_req_{self.owner.id if self.owner else 'unknown'}_{uuid.uuid4().hex[:12]}"
 
         logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] Preparing get_attachment action for adapter '{adapter_id}', conv '{actual_conversation_id}', attachment '{attachment_id}'.")
