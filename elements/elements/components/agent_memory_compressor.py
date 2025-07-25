@@ -235,10 +235,9 @@ class AgentMemoryCompressor(MemoryCompressor):
             self._processor_running = False
 
     async def _process_memory_formation(self, formation_request: Dict[str, Any]):
-        """Process a single memory formation request."""
+        """Process a single memory formation request (supports both VEIL nodes and EventFacets)."""
         try:
             memory_id = formation_request["memory_id"]
-            raw_veil_nodes = formation_request["raw_veil_nodes"]
             element_ids = formation_request["element_ids"]
             compression_context = formation_request.get("compression_context", {})
             
@@ -247,10 +246,17 @@ class AgentMemoryCompressor(MemoryCompressor):
             # Update state to forming
             self._set_memory_state(memory_id, "forming")
             
-            # Perform actual memory formation
-            memorized_node = await self._form_memory_async(
-                raw_veil_nodes, element_ids, compression_context
-            )
+            # EventFacet-native memory formation (VEIL nodes no longer supported)
+            if "event_facets" in formation_request:
+                event_facets = formation_request["event_facets"]
+                logger.debug(f"Agent {self.agent_id}: Processing {len(event_facets)} EventFacets natively")
+                memorized_node = await self._form_memory_from_event_facets(
+                    event_facets, element_ids, compression_context
+                )
+            else:
+                # ERROR: No EventFacets in request
+                logger.error(f"Agent {self.agent_id}: Memory formation request missing EventFacets for {memory_id}")
+                memorized_node = None
             
             if memorized_node:
                 # Store memory to file and cache
@@ -277,16 +283,146 @@ class AgentMemoryCompressor(MemoryCompressor):
             # Clean up active formation tracking
             self._active_formations.pop(memory_id, None)
 
-    async def compress_nodes(self, 
-                           raw_veil_nodes: List[Dict[str, Any]], 
-                           element_ids: List[str],
-                           compression_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def _form_memory_from_event_facets(self, event_facets: List, 
+                                           element_ids: List[str], 
+                                           compression_context: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """
-        NEW: Pure async memory formation with state-aware fallbacks.
+        NEW: Form memory directly from EventFacets without any VEIL node conversions.
         
+        This is the pure EventFacet path that eliminates all intermediate conversions.
+        """
+        try:
+            # Parse content directly from EventFacets (no VEIL conversion!)
+            text_content, attachments = self._parse_event_facet_content_and_attachments(event_facets)
+            
+            if not text_content.strip():
+                logger.warning(f"Agent {self.agent_id}: No text content to memorize from EventFacets")
+                return None
+            
+            # Generate memory using agent reflection
+            memory_summary = await self._agent_reflect_on_experience(
+                text_content, attachments, element_ids, compression_context
+            )
+            
+            if not memory_summary:
+                logger.warning(f"Agent {self.agent_id}: Agent reflection returned empty memory from EventFacets")
+                return None
+            
+            # Extract latest timestamp directly from EventFacets (no conversion!)
+            content_timestamp = self._extract_latest_timestamp_from_event_facets(event_facets)
+            current_time = time.time()
+            
+            # Create memorized VEIL node (final output format)
+            memorized_node = {
+                "veil_id": f"memorized_content_{int(current_time)}",
+                "node_type": "memorized_content",
+                "properties": {
+                    "structural_role": "compressed_memory",
+                    "content_nature": "memorized_content",
+                    "memory_summary": memory_summary,
+                    "original_element_ids": element_ids.copy(),
+                    "original_facet_count": len(event_facets),
+                    "compression_timestamp": datetime.fromtimestamp(content_timestamp).isoformat() + "Z",
+                    "token_count": self._calculate_event_facets_tokens_direct(event_facets),
+                    "own_token_count": self._calculate_own_token_count(memory_summary),
+                    "compressor_type": self.__class__.__name__,
+                    "compression_approach": "event_facet_native_agent_reflection"
+                },
+                "children": []
+            }
+            
+            logger.info(f"Agent {self.agent_id}: EventFacet-native memory formed with {len(event_facets)} facets")
+            return memorized_node
+            
+        except Exception as e:
+            logger.error(f"Agent {self.agent_id}: Error forming memory from EventFacets: {e}", exc_info=True)
+            return None
+
+    def _parse_event_facet_content_and_attachments(self, event_facets: List) -> tuple[str, List[Dict[str, Any]]]:
+        """
+        Parse content and attachments directly from EventFacets (no VEIL conversion).
+        """
+        try:
+            text_sections = []
+            attachments = []
+            
+            for facet in event_facets:
+                # Get properties using both new and legacy access patterns
+                content = getattr(facet, 'content', '') or facet.get_property('content', '')
+                event_type = getattr(facet, 'event_type', '') or facet.get_property('event_type', '')
+                
+                if event_type == "message_added":
+                    sender = facet.get_property("sender_name", "Unknown")
+                    conversation = facet.get_property("conversation_name", "")
+                    timestamp = getattr(facet, 'veil_timestamp', 0)
+                    
+                    # Format message with context
+                    formatted_time = datetime.fromtimestamp(timestamp).strftime("%H:%M:%S")
+                    text_sections.append(f"[{formatted_time}] {sender} in {conversation}: {content}")
+                    
+                elif event_type == "agent_response":
+                    timestamp = getattr(facet, 'veil_timestamp', 0)
+                    formatted_time = datetime.fromtimestamp(timestamp).strftime("%H:%M:%S")
+                    text_sections.append(f"[{formatted_time}] Agent: {content}")
+                    
+                elif event_type == "compressed_memory":
+                    # Already a memory, include as context
+                    text_sections.append(f"[Memory] {content}")
+                    
+                else:
+                    # Generic event
+                    text_sections.append(f"[{event_type}] {content}")
+                
+                # Handle attachments (for future extension)
+                # attachments.extend(self._extract_facet_attachments(facet))
+            
+            combined_text = "\n".join(text_sections)
+            return combined_text, attachments
+            
+        except Exception as e:
+            logger.error(f"Error parsing EventFacet content: {e}", exc_info=True)
+            # Fallback: basic content extraction
+            fallback_content = []
+            for facet in event_facets:
+                content = str(getattr(facet, 'content', '') or facet.get_property('content', ''))
+                if content:
+                    fallback_content.append(content)
+            return "\n".join(fallback_content), []
+
+    def _extract_latest_timestamp_from_event_facets(self, event_facets: List) -> float:
+        """
+        Extract latest timestamp directly from EventFacets (no VEIL conversion).
+        """
+        try:
+            timestamps = []
+            for facet in event_facets:
+                timestamp = getattr(facet, 'veil_timestamp', None)
+                if timestamp is not None:
+                    timestamps.append(float(timestamp))
+            
+            return max(timestamps) if timestamps else time.time()
+            
+        except Exception as e:
+            logger.warning(f"Error extracting timestamps from EventFacets: {e}")
+            return time.time()
+
+
+
+    async def compress_event_facets(self, 
+                                  event_facets: List,  # List[EventFacet] - avoiding import issues
+                                  element_ids: List[str],
+                                  compression_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        NEW: VEILFacet-native memory formation with pure async architecture.
+        
+        Args:
+            event_facets: List of EventFacets to compress into memory
+            element_ids: List of element IDs this memory represents  
+            compression_context: Optional context for compression
+            
         Returns:
             - Existing memory if available
-            - N-chunk fallback if memory is forming or needs formation
+            - Memory facet fallback if memory is forming or needs formation
         """
         try:
             # Ensure background processor is running
@@ -309,239 +445,177 @@ class AgentMemoryCompressor(MemoryCompressor):
                     if memory_data and memory_data.get("memorized_node"):
                         self._memory_cache[memory_id] = memory_data
                         return memory_data["memorized_node"]
+                    else:
+                        # File exists but loading failed - fallback to new memory formation
+                        logger.warning(f"Agent {self.agent_id}: Memory file {memory_id} exists but loading failed, starting new formation")
+                        await self._queue_facet_memory_formation(memory_id, event_facets, element_ids, compression_context)
+                        return self._create_facet_forming_fallback(memory_id, element_ids, event_facets)
             
             elif memory_state == "forming":
                 # Memory is currently being formed, return fallback
-                logger.debug(f"Agent {self.agent_id}: Memory {memory_id} is forming, returning N-chunk fallback")
-                return self._create_forming_fallback(memory_id, element_ids, raw_veil_nodes)
+                logger.debug(f"Agent {self.agent_id}: Memory {memory_id} is forming, returning EventFacet fallback")
+                return self._create_facet_forming_fallback(memory_id, element_ids, event_facets)
             
             elif memory_state == "needs_formation":
                 # Start background formation and return fallback
                 logger.debug(f"Agent {self.agent_id}: Starting background formation for {memory_id}")
-                await self._queue_memory_formation(memory_id, raw_veil_nodes, element_ids, compression_context)
-                return self._create_forming_fallback(memory_id, element_ids, raw_veil_nodes)
+                await self._queue_facet_memory_formation(memory_id, event_facets, element_ids, compression_context)
+                return self._create_facet_forming_fallback(memory_id, element_ids, event_facets)
             
             # Fallback for unexpected states
             logger.warning(f"Agent {self.agent_id}: Unexpected memory state {memory_state} for {memory_id}")
-            return self._create_error_fallback(element_ids, raw_veil_nodes)
+            return self._create_facet_error_fallback(element_ids, event_facets)
             
         except Exception as e:
-            logger.error(f"Agent {self.agent_id}: Error in memory formation: {e}", exc_info=True)
-            return self._create_error_fallback(element_ids, raw_veil_nodes)
+            logger.error(f"Agent {self.agent_id}: Error in EventFacet memory formation: {e}", exc_info=True)
+            return self._create_facet_error_fallback(element_ids, event_facets)
 
-    async def _queue_memory_formation(self, memory_id: str, raw_veil_nodes: List[Dict[str, Any]], 
-                                     element_ids: List[str], compression_context: Optional[Dict[str, Any]]):
-        """Queue memory formation request for background processing."""
+    async def _queue_facet_memory_formation(self, memory_id: str, event_facets: List, 
+                                       element_ids: List[str], compression_context: Optional[Dict[str, Any]]):
+        """
+        NEW: Queue EventFacet-based memory formation request for background processing.
+        """
         try:
-            # Mark as forming to prevent duplicate requests
-            self._set_memory_state(memory_id, "forming")
-            
             formation_request = {
                 "memory_id": memory_id,
-                "raw_veil_nodes": raw_veil_nodes,
+                "event_facets": event_facets,
                 "element_ids": element_ids,
                 "compression_context": compression_context,
-                "queued_at": datetime.now().isoformat()
+                "requested_at": datetime.now().isoformat()
             }
             
-            # Add to formation queue (non-blocking)
-            try:
-                self._memory_formation_queue.put_nowait(formation_request)
-                logger.debug(f"Agent {self.agent_id}: Queued memory formation for {memory_id}")
-            except asyncio.QueueFull:
-                logger.warning(f"Agent {self.agent_id}: Memory formation queue full, skipping {memory_id}")
-                self._set_memory_state(memory_id, "needs_formation")  # Reset for retry
-                
+            # Queue the request (non-blocking)
+            await self._memory_formation_queue.put(formation_request)
+            self._memory_states[memory_id] = "forming"
+            logger.debug(f"Agent {self.agent_id}: Queued EventFacet memory formation for {memory_id}")
+            
+        except asyncio.QueueFull:
+            logger.warning(f"Agent {self.agent_id}: Memory formation queue full, cannot queue {memory_id}")
+            self._memory_states[memory_id] = "needs_formation"
         except Exception as e:
-            logger.error(f"Agent {self.agent_id}: Error queuing memory formation: {e}", exc_info=True)
-            self._set_memory_state(memory_id, "needs_formation")  # Reset for retry
+            logger.error(f"Agent {self.agent_id}: Error queueing EventFacet memory formation: {e}", exc_info=True)
+            self._memory_states[memory_id] = "needs_formation"
 
-    async def _form_memory_async(self, raw_veil_nodes: List[Dict[str, Any]], 
-                                element_ids: List[str], 
-                                compression_context: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        """Form memory using pure async LLM calls."""
+    def _create_facet_forming_fallback(self, memory_id: str, element_ids: List[str], 
+                                      event_facets: List) -> Dict[str, Any]:
+        """
+        NEW: Create fallback EventFacet-based memory node while memory is being formed.
+        """
         try:
-            # Parse content for agent reflection
-            text_content, attachments = await self._parse_veil_content_and_attachments(raw_veil_nodes)
+            # Calculate tokens directly from EventFacets
+            total_tokens = self._calculate_event_facets_tokens_direct(event_facets)
             
-            if not text_content.strip():
-                logger.warning(f"Agent {self.agent_id}: No text content to memorize")
-                return None
+            # Calculate mean timestamp for chronological placement
+            timestamps = [facet.veil_timestamp for facet in event_facets]
+            mean_timestamp = sum(timestamps) / len(timestamps) if timestamps else 0.0
             
-            # Generate memory using agent reflection
-            memory_summary = await self._agent_reflect_on_experience(
-                text_content, attachments, element_ids, compression_context
-            )
-            
-            if not memory_summary:
-                logger.warning(f"Agent {self.agent_id}: Agent reflection returned empty memory")
-                return None
-            
-            # NEW: Extract latest timestamp from compressed content for chronological placement
-            content_timestamp = self._extract_latest_content_timestamp(raw_veil_nodes)
-            current_time = time.time()
-            
-            # Create memorized VEIL node
-            memorized_node = {
-                "veil_id": f"memory_{self.agent_id}_{int(current_time)}",
+            return {
+                "veil_id": f"forming_memory_{memory_id}",
                 "node_type": "memorized_content",
                 "properties": {
-                    "structural_role": "compressed_content",
-                    "content_nature": "content_memory",
-                    "memory_summary": memory_summary,
-                    "original_child_count": len(raw_veil_nodes),
-                    "timestamp": content_timestamp,  # NEW: Use content timestamp for chronological placement
-                    "compression_timestamp": datetime.now().isoformat(),  # Keep for metadata
-                    "compression_approach": "agent_memory_compressor_async",
-                    "is_focused": compression_context.get("is_focused", True) if compression_context else True,
-                    "agent_id": self.agent_id,
-                    "element_ids": element_ids
+                    "structural_role": "compressed_memory",
+                    "content_nature": "memorized_content",
+                    "memory_id": memory_id,
+                    "memory_summary": f"Memory forming in background for {len(event_facets)} EventFacets...",
+                    "original_element_ids": element_ids.copy(),
+                    "original_facet_count": len(event_facets),
+                    "compression_timestamp": datetime.fromtimestamp(mean_timestamp).isoformat() + "Z",
+                    "token_count": total_tokens,
+                    "own_token_count": self._calculate_own_token_count("Memory forming in background for {len(event_facets)} EventFacets..."),
+                    "compressor_type": self.__class__.__name__,
+                    "is_forming": True,
+                    "formation_status": "background_processing"
                 },
                 "children": []
             }
             
-            return memorized_node
-            
         except Exception as e:
-            logger.error(f"Agent {self.agent_id}: Error forming memory: {e}", exc_info=True)
-            return None
+            logger.error(f"Error creating EventFacet forming fallback: {e}", exc_info=True)
+            return self._create_facet_error_fallback(element_ids, event_facets)
 
-    def _extract_latest_content_timestamp(self, raw_veil_nodes: List[Dict[str, Any]]) -> float:
+    def _create_facet_error_fallback(self, element_ids: List[str], event_facets: List) -> Dict[str, Any]:
         """
-        Extract the latest timestamp from compressed content for chronological placement.
-        
-        This ensures memories appear at the time of their newest content, not compression time.
-        Week-old messages compressed today should appear in week-old position, not today.
-        
-        Args:
-            raw_veil_nodes: List of VEIL nodes being compressed
-            
-        Returns:
-            Latest content timestamp as Unix timestamp (float)
+        NEW: Create error fallback for EventFacet-based processing.
         """
         try:
-            latest_timestamp = 0.0
-            timestamps_found = 0
+            total_tokens = self._calculate_event_facets_tokens_direct(event_facets)
+            timestamps = [facet.veil_timestamp for facet in event_facets]
+            mean_timestamp = sum(timestamps) / len(timestamps) if timestamps else 0.0
             
-            for node in raw_veil_nodes:
-                props = node.get("properties", {})
-                
-                # Check various timestamp fields
-                timestamp_fields = [
-                    "timestamp_iso",    # Messages
-                    "timestamp",        # Scratchpad, numeric timestamps
-                    "created_at",       # Other content
-                    "message_timestamp" # Alternative message timestamp
-                ]
-                
-                for field in timestamp_fields:
-                    timestamp_value = props.get(field)
-                    if timestamp_value:
-                        numeric_timestamp = self._convert_timestamp_to_numeric(timestamp_value)
-                        if numeric_timestamp and numeric_timestamp > latest_timestamp:
-                            latest_timestamp = numeric_timestamp
-                            timestamps_found += 1
-                            
-                # Also check children recursively for nested timestamps
-                children = node.get("children", [])
-                if children:
-                    child_timestamp = self._extract_latest_content_timestamp(children)
-                    if child_timestamp > latest_timestamp:
-                        latest_timestamp = child_timestamp
+            return {
+                "veil_id": f"error_fallback_{int(time.time())}",
+                "node_type": "memorized_content", 
+                "properties": {
+                    "structural_role": "compressed_memory",
+                    "content_nature": "memorized_content",
+                    "memory_id": f"error_{int(time.time())}",
+                    "memory_summary": f"Memory formation failed for {len(event_facets)} EventFacets - preserved as raw content",
+                    "original_element_ids": element_ids.copy(),
+                    "original_facet_count": len(event_facets),
+                    "compression_timestamp": datetime.fromtimestamp(mean_timestamp).isoformat() + "Z",
+                    "token_count": total_tokens,
+                    "own_token_count": self._calculate_own_token_count("Memory formation failed for {len(event_facets)} EventFacets - preserved as raw content"),
+                    "compressor_type": self.__class__.__name__,
+                    "is_error_fallback": True
+                },
+                "children": []
+            }
             
-            if timestamps_found > 0:
-                logger.debug(f"Agent {self.agent_id}: Extracted latest content timestamp {latest_timestamp} from {timestamps_found} timestamps")
-                return latest_timestamp
-            else:
-                # Fallback to current time if no timestamps found
-                fallback_time = time.time()
-                logger.warning(f"Agent {self.agent_id}: No content timestamps found, using current time {fallback_time}")
-                return fallback_time
-                
         except Exception as e:
-            logger.error(f"Agent {self.agent_id}: Error extracting content timestamp: {e}", exc_info=True)
-            return time.time()  # Fallback to current time
+            logger.error(f"Error creating EventFacet error fallback: {e}", exc_info=True)
+            return {
+                "veil_id": "critical_error_fallback",
+                "node_type": "memorized_content",
+                "properties": {
+                    "memory_summary": "Critical error in memory formation",
+                    "is_error_fallback": True
+                },
+                "children": []
+            }
 
-    def _convert_timestamp_to_numeric(self, timestamp_value: Any) -> Optional[float]:
+    def _calculate_own_token_count(self, memory_summary: str) -> int:
         """
-        Convert various timestamp formats to numeric Unix timestamp.
-        
-        Args:
-            timestamp_value: Timestamp in various formats (ISO string, Unix timestamp, etc.)
-            
-        Returns:
-            Unix timestamp as float, or None if conversion fails
+        Calculate tokens directly from memory summary without conversion.
         """
         try:
-            if isinstance(timestamp_value, (int, float)):
-                # Already numeric timestamp
-                return float(timestamp_value)
+            import tiktoken
             
-            elif isinstance(timestamp_value, str):
-                # Parse ISO timestamp string
-                from datetime import datetime
-                try:
-                    # Handle various ISO formats
-                    if timestamp_value.endswith('Z'):
-                        dt = datetime.fromisoformat(timestamp_value.replace('Z', '+00:00'))
-                    elif '+' in timestamp_value or timestamp_value.endswith('UTC'):
-                        dt = datetime.fromisoformat(timestamp_value.replace('UTC', ''))
-                    else:
-                        dt = datetime.fromisoformat(timestamp_value)
-                    
-                    return dt.timestamp()
-                    
-                except ValueError:
-                    # Try parsing as pure numeric string
-                    try:
-                        return float(timestamp_value)
-                    except ValueError:
-                        logger.debug(f"Could not parse timestamp string: {timestamp_value}")
-                        return None
+            encoding = tiktoken.encoding_for_model("gpt-4")
+            return int(len(encoding.encode(memory_summary)) * 1.3)  # 30% overhead
             
-            else:
-                logger.debug(f"Unsupported timestamp type: {type(timestamp_value)}")
-                return None
+        except Exception:
+            # Fallback: character-based estimation
+            return len(memory_summary) // 4
+
+    def _calculate_event_facets_tokens_direct(self, event_facets: List) -> int:
+        """
+        Calculate tokens directly from EventFacets without conversion.
+        """
+        try:
+            import tiktoken
+            
+            encoding = tiktoken.encoding_for_model("gpt-4")
+            text_content = []
+            
+            for facet in event_facets:
+                content = getattr(facet, 'content', '') or facet.get_property('content', '')
+                event_type = getattr(facet, 'event_type', '') or facet.get_property('event_type', '')
                 
-        except Exception as e:
-            logger.debug(f"Error converting timestamp {timestamp_value}: {e}")
-            return None
+                if event_type == "message_added":
+                    sender = facet.get_property("sender_name", "")
+                    text_content.append(f"{sender}: {content}")
+                else:
+                    text_content.append(f"[{event_type}] {content}")
+            
+            combined_text = "\n".join(text_content)
+            return int(len(encoding.encode(combined_text)) * 1.1)  # 10% overhead
+            
+        except Exception:
+            # Fallback: character-based estimation
+            total_chars = sum(len(str(getattr(facet, 'content', '') or facet.get_property('content', ''))) for facet in event_facets)
+            return total_chars // 4
 
-    def _create_forming_fallback(self, memory_id: str, element_ids: List[str], 
-                                raw_veil_nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Create fallback node when memory is forming."""
-        return {
-            "veil_id": f"forming_{memory_id}",
-            "node_type": "fresh_content",  # Indicates fallback
-            "properties": {
-                "structural_role": "compressed_content",
-                "content_nature": "content_memory",
-                "memory_summary": f"⏳ Memory formation in progress for {', '.join(element_ids)}",
-                "original_child_count": len(raw_veil_nodes),
-                "compression_approach": "forming_fallback",
-                "is_forming": True,
-                "memory_id": memory_id,
-                "element_ids": element_ids
-            },
-            "children": raw_veil_nodes  # Include original content to prevent data loss
-        }
 
-    def _create_error_fallback(self, element_ids: List[str], 
-                              raw_veil_nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Create fallback node when memory formation fails."""
-        return {
-            "veil_id": f"error_fallback_{int(time.time())}",
-            "node_type": "fresh_content",
-            "properties": {
-                "structural_role": "compressed_content", 
-                "content_nature": "content_memory",
-                "memory_summary": f"Memory formation error for {', '.join(element_ids)}",
-                "original_child_count": len(raw_veil_nodes),
-                "compression_approach": "error_fallback",
-                "is_error": True
-            },
-            "children": raw_veil_nodes  # Include original content to prevent data loss
-        }
 
     async def _call_llm_with_retry(self, message, context_info: str = ""):
         """Pure async LLM call with retry logic and rate limiting."""
@@ -643,25 +717,19 @@ class AgentMemoryCompressor(MemoryCompressor):
                       element_ids: List[str],
                       compression_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-        Interface compatibility method - delegates to compress_nodes.
+        DEPRECATED: This interface is no longer supported. Use compress_event_facets instead.
         
-        Maintains interface compatibility while using the new async architecture.
+        The AgentMemoryCompressor has been refactored to work exclusively with EventFacets.
         """
-        return await self.compress_nodes(raw_veil_nodes, element_ids, compression_context)
+        raise NotImplementedError("VEIL node interface deprecated. Use compress_event_facets with EventFacets instead.")
 
     async def estimate_tokens(self, raw_veil_nodes: List[Dict[str, Any]]) -> int:
-        """Estimate token count for raw VEIL nodes using tiktoken."""
-        try:
-            return estimate_veil_tokens(raw_veil_nodes)
-        except Exception as e:
-            logger.warning(f"Agent {self.agent_id}: Error estimating tokens with tiktoken: {e}")
-            # Fallback to character-based estimation
-            total_chars = 0
-            for node in raw_veil_nodes:
-                props = node.get("properties", {})
-                text_content = props.get("text_content", "")
-                total_chars += len(text_content)
-            return total_chars // 4  # Rough estimate: 4 chars per token
+        """
+        DEPRECATED: This interface is no longer supported. 
+        
+        Use _calculate_event_facets_tokens_direct for EventFacets instead.
+        """
+        raise NotImplementedError("VEIL node interface deprecated. Use EventFacet token calculation instead.")
 
     async def store_memory(self, memory_id: str, memorized_veil_node: Dict[str, Any]) -> bool:
         """Store a memorized VEIL node to persistent storage."""
@@ -677,140 +745,7 @@ class AgentMemoryCompressor(MemoryCompressor):
             logger.error(f"Agent {self.agent_id}: Error storing memory {memory_id}: {e}", exc_info=True)
             return False
 
-    async def _parse_veil_content_and_attachments(self, raw_veil_nodes: List[Dict[str, Any]]) -> tuple[str, List[Dict[str, Any]]]:
-        """
-        NEW: Single-pass parsing of VEIL nodes to extract both text content and attachments.
-        
-        This replaces the inefficient dual-traversal approach with a clean single-pass operation
-        that extracts text content for reflection and attachment data for multimodal LLM calls.
-        
-        Args:
-            raw_veil_nodes: List of VEIL nodes to process
-            
-        Returns:
-            Tuple of (formatted_text_content, llm_compatible_attachments)
-        """
-        try:
-            content_parts = []
-            attachments = []
-            attachment_ids_seen = set()  # Simple deduplication
-            
-            for node in raw_veil_nodes:
-                # Extract text content for reflection
-                text_part = await self._format_node_for_reflection(node)
-                if text_part:
-                    content_parts.append(text_part)
-                
-                # Extract attachments in single pass (both direct and children)
-                node_attachments = await self._extract_node_attachments_single_pass(node, attachment_ids_seen)
-                attachments.extend(node_attachments)
-            
-            text_content = "\n".join(content_parts)
-            
-            logger.debug(f"Single-pass extraction: {len(content_parts)} content parts, {len(attachments)} unique attachments")
-            return text_content, attachments
-            
-        except Exception as e:
-            logger.error(f"Error in single-pass VEIL parsing: {e}", exc_info=True)
-            # Fallback to text-only
-            return str(raw_veil_nodes), []
-    
-    async def _format_node_for_reflection(self, node: Dict[str, Any]) -> str:
-        """
-        NEW: Format a single VEIL node for agent reflection text content.
-        
-        Args:
-            node: VEIL node to format
-            
-        Returns:
-            Formatted text line for reflection, or empty string if not relevant
-        """
-        try:
-            props = node.get("properties", {})
-            content_nature = props.get("content_nature", "")
-            
-            if content_nature == "chat_message":
-                # Format chat messages with attachment info
-                sender = props.get("sender_name", "Unknown")
-                text = props.get("text_content", "")
-                timestamp = props.get("timestamp_iso", props.get("timestamp", ""))
-                
-                message_line = f"[{timestamp}] {sender}: {text}"
-                
-                # Add attachment metadata (but not content - that's handled separately)
-                attachments = props.get("attachment_metadata", [])
-                if attachments:
-                    attachment_descriptions = []
-                    for att in attachments:
-                        filename = att.get("filename", "attachment")
-                        content_type = att.get("attachment_type", att.get("content_type", "unknown"))
-                        attachment_descriptions.append(f"{filename} ({content_type})")
-                    
-                    message_line += f" (attachments: {', '.join(attachment_descriptions)})"
-                
-                return message_line
-                
-            elif content_nature == "uplink_summary":
-                # Include uplink information
-                remote_name = props.get("remote_space_name", "Remote Space")
-                return f"[Uplink] Connected to {remote_name}"
-                
-            elif props.get("structural_role") == "container":
-                # Include container context
-                element_name = props.get("element_name", "Element")
-                available_tools = props.get("available_tools", [])
-                
-                container_line = f"[Context] {element_name}"
-                if available_tools:
-                    container_line += f" (tools available: {', '.join(available_tools)})"
-                return container_line
-            
-            elif props.get("text_content"):
-                # Generic text content
-                return f"[Content] {props['text_content']}"
-            
-            # Not a text-relevant node
-            return ""
-            
-        except Exception as e:
-            logger.error(f"Error formatting node for reflection: {e}", exc_info=True)
-            return ""
-    
-    async def _extract_node_attachments_single_pass(self, node: Dict[str, Any], seen_ids: set) -> List[Dict[str, Any]]:
-        """
-        NEW: Extract all attachments from a node and its children in a single efficient pass.
-        
-        Args:
-            node: VEIL node to extract attachments from
-            seen_ids: Set of attachment IDs already processed (for deduplication)
-            
-        Returns:
-            List of LiteLLM-compatible attachment dictionaries
-        """
-        try:
-            attachments = []
-            
-            # Check if this node itself is an attachment
-            if node.get("node_type") == "attachment_content_item":
-                attachment = await self._process_attachment_for_llm(node)
-                if attachment:
-                    attachment_id = node.get("properties", {}).get("attachment_id")
-                    if attachment_id and attachment_id not in seen_ids:
-                        seen_ids.add(attachment_id)
-                        attachments.append(attachment)
-                        logger.debug(f"Found direct attachment: {node.get('properties', {}).get('filename', 'unknown')}")
-            
-            # Recursively check children
-            children = node.get("children", [])
-            for child in children:
-                child_attachments = await self._extract_node_attachments_single_pass(child, seen_ids)
-                attachments.extend(child_attachments)
-            
-            return attachments
-            
-        except Exception as e:
-            logger.error(f"Error extracting node attachments: {e}", exc_info=True)
-            return []
+
     
     async def _agent_reflect_on_experience(self, 
                                          text_content: str,
@@ -1040,6 +975,7 @@ MEMORY SUMMARY:"""
                 "original_element_ids": element_ids,
                 "original_node_count": len(raw_veil_nodes),
                 "token_count": total_tokens,
+                "own_token_count": self._calculate_own_token_count(summary),
                 "timestamp": content_timestamp,  # NEW: Use content timestamp for chronological placement
                 "compression_timestamp": datetime.now().isoformat(),  # Keep for metadata
                 "compressor_type": f"{self.__class__.__name__}_fallback",
