@@ -28,30 +28,40 @@ tracer = get_tracer(__name__)
 @register_component
 class VEILFacetCompressionEngine(Component):
     """
-    VEILFacet-native compression engine with per-container memorization.
+    VEILFacet-native compression engine with incremental per-chunk memorization.
+    
+    NEW ARCHITECTURE: Incremental chunk-based compression
+    - Always assigns EventFacets to chunks immediately upon arrival
+    - Compresses individual chunks when they exceed 4k tokens  
+    - Tracks N-chunk → M-chunk mappings independently per chunk
+    - No container-level compression decisions - pure incremental processing
     
     Core Features:
     - StatusFacet-based container identification
     - EventFacet grouping by links_to relationships  
-    - Focus-dependent rendering (8-chunk vs 1-chunk+memories)
+    - Incremental chunking with dynamic N-chunk creation
+    - Per-chunk compression when chunks exceed 4k tokens
+    - Focus-dependent rendering (raw-first vs compressed-first)
     - Memory EventFacet creation with mean timestamps
     - AgentMemoryCompressor integration for LLM-based memory formation
     
     Architecture:
     - Containers = StatusFacets with EventFacets linking to them
-    - Per-container N-chunk/M-chunk streams (4k token boundaries)
-    - Focus rules: compression target gets 8 chunks, context gets 1 chunk
+    - Incremental N-chunk creation as EventFacets arrive
+    - Individual chunk compression when chunk exceeds 4k tokens
+    - Per-chunk N-chunk → M-chunk mapping tracking
+    - Focus rules: focused=raw-first, unfocused=compressed-first
     - Memory EventFacets positioned at mean timestamp of replaced content
     """
     
     COMPONENT_TYPE = "VEILFacetCompressionEngine"
     HANDLED_EVENT_TYPES = ["compression_requested", "memory_formation_completed"]
     
-    # Preserve existing token limits and processing logic
-    COMPRESSION_CHUNK_SIZE = 4000        # 4k tokens per N-chunk
-    FOCUSED_CHUNK_LIMIT = 8              # 8 N-chunks for focused containers
-    UNFOCUSED_CHUNK_LIMIT = 1            # 1 N-chunk for unfocused containers
-    MIN_COMPRESSION_THRESHOLD = 1000     # 1k tokens minimum before compression
+    # Incremental compression architecture - chunk-based processing
+    COMPRESSION_CHUNK_SIZE = 4000        # 4k tokens per N-chunk (individual chunk compression threshold)
+    FOCUSED_CHUNK_LIMIT = 8              # 8 completed N-chunks + 1 incomplete for focused containers (9 total)
+    UNFOCUSED_RECENT_CHUNKS = 2          # 2 recent N-chunks for unfocused containers (last completed + incomplete)
+    MIN_COMPRESSION_THRESHOLD = COMPRESSION_CHUNK_SIZE     # Chunk-level compression threshold (4k tokens per chunk)
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -68,12 +78,10 @@ class VEILFacetCompressionEngine(Component):
         
         logger.info(f"VEILFacetCompressionEngine initialized ({self.id}) - ready for per-container memorization")
     
-    async def initialize(self, **kwargs) -> None:
+    def initialize(self, **kwargs) -> bool:
         """Initialize the VEILFacet compression engine."""
-        await super().initialize(**kwargs)
-        
-        # Initialize AgentMemoryCompressor for memory formation
-        await self._initialize_memory_compressor()
+        if not super().initialize(**kwargs):
+            return False
         
         # Set agent name from owner space
         if self.owner and hasattr(self.owner, 'agent_name'):
@@ -83,7 +91,22 @@ class VEILFacetCompressionEngine(Component):
         else:
             self._agent_name = f"agent_{self.id}"
         
+        # Mark that we need async initialization
+        self._needs_async_init = True
+        
         logger.info(f"VEILFacetCompressionEngine initialized for agent {self._agent_name}")
+        return True
+    
+    async def _ensure_async_initialized(self) -> None:
+        """Ensure async initialization has been completed."""
+        if not hasattr(self, '_needs_async_init') or not self._needs_async_init:
+            return
+            
+        # Initialize AgentMemoryCompressor for memory formation
+        await self._initialize_memory_compressor()
+        
+        self._needs_async_init = False
+        logger.debug(f"Async initialization completed for {self._agent_name}")
     
     async def _initialize_memory_compressor(self) -> bool:
         """Initialize AgentMemoryCompressor for VEILFacet memory formation."""
@@ -130,28 +153,33 @@ class VEILFacetCompressionEngine(Component):
     
     async def process_facet_cache_with_compression(self,
                                                  facet_cache: VEILFacetCache,
-                                                 focus_context: Optional[Dict[str, Any]] = None,
+                                                 focus_info: Optional[Dict[str, Any]] = None,
         ) -> VEILFacetCache:
         """
         Main interface: Process VEILFacetCache with per-container memorization.
         
         This is called by HUD to get compressed VEILFacetCache for rendering.
         
+        UPDATED: Now accepts focus_info extracted by HUD instead of detecting focus internally.
+        
         Args:
             facet_cache: VEILFacetCache from SpaceVeilProducer
-            focus_context: Focus context with focus_element_id
+            focus_info: Focus information extracted by HUD from latest focus_changed StatusFacet
             
         Returns:
             Processed VEILFacetCache with memory EventFacets replacing compressed content
         """
         try:
+            # Ensure async initialization is completed
+            await self._ensure_async_initialized()
             with tracer.start_as_current_span("veil_facet_compression.process_cache") as span:
-                focus_element_id = focus_context.get('focus_element_id') if focus_context else None
+                focus_element_id = focus_info.get('focus_element_id') if focus_info else None
                 span.set_attribute("compression.focus_element_id", focus_element_id or "none")
+                span.set_attribute("compression.focus_source", focus_info.get('focus_source', 'none') if focus_info else 'none')
                 
-                logger.debug(f"Processing VEILFacetCache with {len(facet_cache.facets)} facets, focus: {focus_element_id}")
+                logger.debug(f"Processing VEILFacetCache with {len(facet_cache.facets)} facets, focus: {focus_element_id} (source: {focus_info.get('focus_source', 'none') if focus_info else 'none'})")
                 
-                # Analyze containers from VEILFacetCache  
+                # Analyze containers from VEILFacetCache (now filters out root/scratchpad)  
                 containers = self._identify_containers_from_cache(facet_cache)
                 span.set_attribute("compression.containers_found", len(containers))
                 
@@ -169,21 +197,30 @@ class VEILFacetCompressionEngine(Component):
                         "event_facets_count": len(event_facets)
                     })
                     
-                    # Determine if this container needs compression
-                    container_rules = self._determine_container_rules(container_id)
+                    # Determine if this container is focused (gets 8-chunk treatment)
+                    is_focused_container = (focus_element_id == container_id) if focus_element_id else False
                     
-                    if container_rules["enable_memorization"]:
-                        # Process with N-chunk/M-chunk logic
-                        processed_facets = await self._process_container_with_memorization(
-                            container_id, event_facets, container_rules, facet_cache
-                        )
-                    else:
-                        # Preserve all facets (scratchpad/root exclusion)
-                        processed_facets = event_facets
+                    # Process with N-chunk/M-chunk logic
+                    processed_facets = await self._process_container_with_memorization(
+                        container_id, event_facets, is_focused_container, facet_cache
+                    )
                     
                     # Add processed facets to output cache
                     for facet in processed_facets:
                         processed_cache.add_facet(facet)
+                
+                # FIXED: Add EventFacets that don't belong to any container (like agent responses)
+                containerized_facet_ids = set()
+                for event_facets in containers.values():
+                    for facet in event_facets:
+                        containerized_facet_ids.add(facet.facet_id)
+                
+                # Add uncontainerized EventFacets (agent responses, etc.)
+                for facet in facet_cache.facets.values():
+                    if (facet.facet_type == VEILFacetType.EVENT and 
+                        facet.facet_id not in containerized_facet_ids):
+                        processed_cache.add_facet(facet)
+                        logger.debug(f"Added uncontainerized EventFacet: {facet.facet_id} (type: {facet.get_property('event_type', 'unknown')})")
                 
                 logger.info(f"VEILFacet compression complete: {len(facet_cache.facets)} → {len(processed_cache.facets)} facets")
                 span.set_attribute("compression.output_facets", len(processed_cache.facets))
@@ -201,6 +238,9 @@ class VEILFacetCompressionEngine(Component):
         
         Containers = StatusFacets that have EventFacets linking to them.
         
+        UPDATED: Only returns chat-related containers, filters out root/scratchpad containers
+        which should not be compressed.
+        
         Returns:
             Dictionary mapping container_id to list of EventFacets linked to it
         """
@@ -212,25 +252,44 @@ class VEILFacetCompressionEngine(Component):
             containers = {}
             
             for status_facet in status_facets:
+                container_id = status_facet.facet_id
+                
+                # FILTER: Skip root and scratchpad containers (they should not be compressed)
+                if self._is_root_container(container_id):
+                    logger.debug(f"Skipping root container {container_id} from compression")
+                    continue
+                    
+                if self._is_scratchpad_container(container_id):
+                    logger.debug(f"Skipping scratchpad container {container_id} from compression")
+                    continue
+                
                 # Find EventFacets linking to this StatusFacet
                 linked_events = [f for f in facet_cache.facets.values() 
                                if f.facet_type == VEILFacetType.EVENT 
                                and f.links_to == status_facet.facet_id]
                 
                 if linked_events:  # Only containers with EventFacets
-                    # Sort chronologically by veil_timestamp
-                    linked_events.sort(key=lambda f: f.get_temporal_key())
-                    containers[status_facet.facet_id] = linked_events
+                    # ADDITIONAL FILTER: Skip containers that only have agent responses
+                    # (agent responses should not be compressed)
+                    non_agent_events = [f for f in linked_events 
+                                      if f.get_property("event_type") != "agent_response"]
                     
-                    logger.debug(f"Found container {status_facet.facet_id} with {len(linked_events)} EventFacets")
+                    if non_agent_events:  # Only include if there are non-agent events to compress
+                        # Sort chronologically by veil_timestamp
+                        linked_events.sort(key=lambda f: f.get_temporal_key())
+                        containers[container_id] = linked_events
+                        
+                        logger.debug(f"Found compressible container {container_id} with {len(linked_events)} EventFacets ({len(non_agent_events)} non-agent)")
+                    else:
+                        logger.debug(f"Skipping container {container_id} - only contains agent responses")
             
-            logger.info(f"Identified {len(containers)} containers from {len(status_facets)} StatusFacets")
+            logger.info(f"Identified {len(containers)} compressible containers from {len(status_facets)} StatusFacets (filtered out root/scratchpad)")
             return containers
             
         except Exception as e:
-            logger.error(f"Error identifying containers from cache: {e}", exc_info=True)
+            logger.error(f"Error identifying containers from VEILFacetCache: {e}", exc_info=True)
             return {}
-    
+
     def _determine_container_rules(self, container_id: str) -> Dict[str, Any]:
         """
         Determine compression and rendering rules for a container.
@@ -295,43 +354,45 @@ class VEILFacetCompressionEngine(Component):
     async def _process_container_with_memorization(self,
                                                  container_id: str,
                                                  event_facets: List[EventFacet],
-                                                 container_rules: Dict[str, Any],
+                                                 is_focused_container: bool,
                                                  full_facet_cache: VEILFacetCache) -> List[VEILFacet]:
         """
-        Process a container with N-chunk/M-chunk memorization logic.
+        Process a container with incremental N-chunk/M-chunk memorization logic.
+        
+        NEW ARCHITECTURE: Always chunk first, compress individual chunks when they exceed 4k tokens.
+        No more container-level threshold checks - compression happens incrementally per chunk.
         
         Args:
             container_id: ID of container being processed
             event_facets: EventFacets linked to this container
-            container_rules: Compression rules for this container
+            is_focused_container: Whether this container is being compressed (focused)
             full_facet_cache: Complete VEILFacetCache for context
             
         Returns:
             List of processed VEILFacets (mix of EventFacets and memory EventFacets)
         """
         try:
-            logger.debug(f"Processing container {container_id} with {len(event_facets)} EventFacets")
+            logger.debug(f"Processing container {container_id} with {len(event_facets)} EventFacets (incremental chunking)")
             
-            # Get or create chunk structure for this container
+            # ALWAYS get or create chunk structure - no threshold checks
             chunk_structure = await self._get_or_create_container_chunks(container_id, event_facets)
             
-            # Determine token counts
+            # Log token distribution for debugging
+            memory_facets, regular_facets = self._separate_memory_and_regular_facets(event_facets)
+            regular_tokens = self._calculate_event_facets_tokens(regular_facets)
             total_tokens = self._calculate_event_facets_tokens(event_facets)
             
-            # Check minimum compression threshold
-            if total_tokens < self.MIN_COMPRESSION_THRESHOLD:
-                logger.debug(f"Container {container_id} has {total_tokens} tokens (< {self.MIN_COMPRESSION_THRESHOLD} threshold), preserving all")
-                return event_facets
+            logger.debug(f"Container {container_id}: {regular_tokens} regular tokens, {total_tokens - regular_tokens} memory tokens, {total_tokens} total (processing all chunks)")
             
-            # Process chunk boundaries and trigger compression as needed
+            # ALWAYS process chunk boundaries and trigger incremental compression
             await self._process_container_chunk_boundaries(container_id, chunk_structure, full_facet_cache)
             
-            # Render container according to focus rules (target container gets focused treatment)
+            # Render container according to focus rules
             rendered_facets = await self._render_container_with_focus_rules(
-                container_id, chunk_structure, is_compression_target=True
+                container_id, chunk_structure, is_focused_container
             )
             
-            logger.debug(f"Container {container_id} processed: {len(event_facets)} → {len(rendered_facets)} facets")
+            logger.debug(f"Container {container_id} processed: {len(event_facets)} → {len(rendered_facets)} facets (incremental)")
             return rendered_facets
             
         except Exception as e:
@@ -409,7 +470,9 @@ class VEILFacetCompressionEngine(Component):
                 "m_chunks": m_chunks,
                 "last_update": datetime.now(),
                 "total_tokens": total_tokens,
-                "container_id": container_id
+                "container_id": container_id,
+                "content_fingerprint": self._calculate_content_fingerprint(regular_facets),  # Container-level for overall tracking
+                "invalidation_log": []  # Track invalidation history
             }
             
             logger.debug(f"Initialized {len(n_chunks)} N-chunks, {len(m_chunks)} M-chunks for {container_id}")
@@ -451,13 +514,19 @@ class VEILFacetCompressionEngine(Component):
     
     async def _event_facets_to_n_chunks(self, event_facets: List[EventFacet]) -> List[Dict[str, Any]]:
         """
-        Convert EventFacets into N-chunks with 4k token boundaries.
+        Convert EventFacets into N-chunks with overflow-friendly chunking algorithm.
+        
+        UNIFIED ALGORITHM: Uses same overflow logic as incremental chunking to ensure
+        consistent chunk boundaries regardless of real-time vs restart processing.
+        
+        ENHANCED: Includes per-chunk fingerprinting and temporal range tracking
+        for surgical invalidation support.
         
         Args:
             event_facets: List of regular EventFacets to chunk
             
         Returns:
-            List of N-chunk structures
+            List of N-chunk structures with enhanced metadata and consistent boundaries
         """
         try:
             if not event_facets:
@@ -471,43 +540,329 @@ class VEILFacetCompressionEngine(Component):
                 # Calculate tokens for this facet
                 facet_tokens = self._calculate_event_facet_tokens(facet)
                 
-                # Check if adding this facet would exceed chunk limit
-                if current_tokens + facet_tokens > self.COMPRESSION_CHUNK_SIZE and current_chunk:
-                    # Complete current chunk
+                # UNIFIED LOGIC: Use same overflow-friendly algorithm as incremental chunking
+                # Check if current chunk is already at/over limit (not would-exceed)
+                if current_tokens >= self.COMPRESSION_CHUNK_SIZE and current_chunk:
+                    # Current chunk is already at/over limit, complete it and start new one
+                    chunk_fingerprint = self._calculate_content_fingerprint(current_chunk)
+                    temporal_range = self._calculate_temporal_range(current_chunk)
+                    
                     chunks.append({
                         "chunk_type": "n_chunk",
                         "event_facets": current_chunk,
+                        "content_fingerprint": chunk_fingerprint,  # NEW: Per-chunk fingerprint
                         "token_count": current_tokens,
                         "chunk_index": len(chunks),
                         "created_at": datetime.now(),
-                        "is_complete": True
+                        "is_complete": True,
+                        "has_memory_chunk": False,  # Will be preserved across surgical invalidations
+                        "temporal_range": temporal_range  # NEW: Track chunk boundaries
                     })
                     
                     # Start new chunk
                     current_chunk = [facet]
                     current_tokens = facet_tokens
                 else:
-                    # Add to current chunk
+                    # Add to current chunk (allow overflow - compression will handle it)
                     current_chunk.append(facet)
                     current_tokens += facet_tokens
+                    
+                    # Debug: Show unified overflow behavior
+                    if current_tokens >= self.COMPRESSION_CHUNK_SIZE:
+                        logger.debug(f"Unified chunking: Chunk {len(chunks)} now has {current_tokens} tokens (overflow allowed for compression)")
             
             # Handle remaining facets (possibly incomplete chunk)
             if current_chunk:
+                chunk_fingerprint = self._calculate_content_fingerprint(current_chunk)
+                temporal_range = self._calculate_temporal_range(current_chunk)
+                
                 chunks.append({
                     "chunk_type": "n_chunk",
                     "event_facets": current_chunk,
+                    "content_fingerprint": chunk_fingerprint,  # NEW: Per-chunk fingerprint
                     "token_count": current_tokens,
                     "chunk_index": len(chunks),
                     "created_at": datetime.now(),
-                    "is_complete": current_tokens >= self.COMPRESSION_CHUNK_SIZE
+                    "is_complete": current_tokens >= self.COMPRESSION_CHUNK_SIZE,
+                    "has_memory_chunk": False,  # Will be preserved across surgical invalidations
+                    "temporal_range": temporal_range  # NEW: Track chunk boundaries
                 })
             
-            logger.debug(f"Created {len(chunks)} N-chunks from {len(event_facets)} EventFacets")
+            logger.debug(f"Created {len(chunks)} N-chunks from {len(event_facets)} EventFacets with enhanced metadata")
             return chunks
             
         except Exception as e:
             logger.error(f"Error converting EventFacets to N-chunks: {e}", exc_info=True)
             return []
+
+    def _calculate_temporal_range(self, facets: List[EventFacet]) -> Dict[str, float]:
+        """
+        Calculate temporal boundaries for a chunk.
+        
+        Args:
+            facets: List of EventFacets to calculate range for
+            
+        Returns:
+            Temporal range information
+        """
+        try:
+            if not facets:
+                return {"start_timestamp": 0, "end_timestamp": 0, "span_seconds": 0, "facet_count": 0}
+            
+            timestamps = [f.veil_timestamp for f in facets]
+            return {
+                "start_timestamp": min(timestamps),
+                "end_timestamp": max(timestamps),
+                "span_seconds": max(timestamps) - min(timestamps) if len(timestamps) > 1 else 0,
+                "facet_count": len(facets)
+            }
+        except Exception as e:
+            logger.error(f"Error calculating temporal range: {e}", exc_info=True)
+            return {"start_timestamp": 0, "end_timestamp": 0, "span_seconds": 0, "facet_count": 0}
+
+    async def _detect_chunk_level_changes(self, container_id: str, 
+                                         new_facets: List[EventFacet], 
+                                         chunk_structure: Dict[str, Any]) -> List[int]:
+        """
+        Detect which specific chunks are affected by new/changed facets.
+        
+        Uses temporal range checking and facet ID cross-reference to identify
+        only the chunks that actually need invalidation and rebuilding.
+        
+        Args:
+            container_id: ID of container being analyzed
+            new_facets: New/changed EventFacets
+            chunk_structure: Current chunk structure
+            
+        Returns:
+            List of chunk indices that need invalidation
+        """
+        try:
+            changed_chunk_indices = []
+            n_chunks = chunk_structure.get("n_chunks", [])
+            
+            if not n_chunks or not new_facets:
+                logger.debug(f"No chunks or facets to analyze for {container_id}")
+                return []
+            
+            logger.debug(f"Analyzing {len(n_chunks)} chunks for changes from {len(new_facets)} new facets")
+            
+            for chunk_index, chunk in enumerate(n_chunks):
+                # Method 1: Temporal Range Check
+                chunk_temporal_range = chunk.get("temporal_range", {})
+                start_time = chunk_temporal_range.get("start_timestamp", 0)
+                end_time = chunk_temporal_range.get("end_timestamp", float('inf'))
+                
+                # Check if any new facets fall within this chunk's time range
+                affects_this_chunk = any(
+                    start_time <= facet.veil_timestamp <= end_time 
+                    for facet in new_facets
+                )
+                
+                # Method 2: Facet ID Cross-Reference
+                if not affects_this_chunk:
+                    chunk_facet_ids = {f.facet_id for f in chunk.get("event_facets", [])}
+                    new_facet_ids = {f.facet_id for f in new_facets}
+                    affects_this_chunk = bool(chunk_facet_ids.intersection(new_facet_ids))
+                
+                if affects_this_chunk:
+                    # Recalculate fingerprint for this specific chunk
+                    chunk_facets = chunk.get("event_facets", [])
+                    current_fingerprint = self._calculate_content_fingerprint(chunk_facets)
+                    stored_fingerprint = chunk.get("content_fingerprint", "")
+                    
+                    if current_fingerprint != stored_fingerprint:
+                        changed_chunk_indices.append(chunk_index)
+                        logger.info(f"Chunk {chunk_index} fingerprint changed: {stored_fingerprint[:16]}... → {current_fingerprint[:16]}...")
+                    else:
+                        logger.debug(f"Chunk {chunk_index} affected but fingerprint unchanged")
+            
+            logger.info(f"Detected {len(changed_chunk_indices)} changed chunks for {container_id}: {changed_chunk_indices}")
+            return changed_chunk_indices
+            
+        except Exception as e:
+            logger.error(f"Error detecting chunk-level changes for {container_id}: {e}", exc_info=True)
+            # Fallback: assume all chunks changed to be safe
+            return list(range(len(chunk_structure.get("n_chunks", []))))
+
+    async def _invalidate_specific_chunks(self, container_id: str, 
+                                        changed_chunk_indices: List[int],
+                                        chunk_structure: Dict[str, Any]) -> None:
+        """
+        Invalidate only specific chunks, preserving others completely.
+        
+        This is the core surgical invalidation method that maintains compression
+        state for unaffected chunks while marking only changed chunks for rebuilding.
+        
+        Args:
+            container_id: ID of container being processed
+            changed_chunk_indices: List of chunk indices to invalidate
+            chunk_structure: Current chunk structure
+        """
+        try:
+            n_chunks = chunk_structure.get("n_chunks", [])
+            m_chunks = chunk_structure.get("m_chunks", [])
+            
+            logger.info(f"Surgically invalidating {len(changed_chunk_indices)} chunks for {container_id}")
+            
+            for chunk_index in changed_chunk_indices:
+                if chunk_index >= len(n_chunks):
+                    logger.warning(f"Chunk index {chunk_index} out of range for {container_id}")
+                    continue
+                    
+                chunk = n_chunks[chunk_index]
+                
+                # If chunk has a memory, invalidate the corresponding M-chunk
+                if chunk.get("has_memory_chunk", False):
+                    memory_chunk_index = chunk.get("memory_chunk_index")
+                    if memory_chunk_index is not None and memory_chunk_index < len(m_chunks):
+                        m_chunks[memory_chunk_index]["is_invalid"] = True
+                        m_chunks[memory_chunk_index]["invalidated_at"] = datetime.now().isoformat()
+                        m_chunks[memory_chunk_index]["invalidation_reason"] = "content_change_surgical"
+                        
+                        logger.info(f"Invalidated M-chunk {memory_chunk_index} for N-chunk {chunk_index} in {container_id}")
+                
+                # Clear compression flag for this chunk only (will be recompressed if needed)
+                chunk["has_memory_chunk"] = False
+                chunk["invalidated_at"] = datetime.now().isoformat()
+                
+                # Log invalidation for debugging
+                invalidation_log = chunk_structure.setdefault("invalidation_log", [])
+                invalidation_log.append({
+                    "chunk_index": chunk_index,
+                    "timestamp": datetime.now().isoformat(),
+                    "reason": "content_change",
+                    "fingerprint_changed": True
+                })
+                
+                logger.debug(f"Invalidated N-chunk {chunk_index} in {container_id} (surgical)")
+            
+            # Preserve all other chunks' compression state
+            preserved_count = len(n_chunks) - len(changed_chunk_indices)
+            logger.info(f"Preserved compression state for {preserved_count} unaffected chunks in {container_id}")
+            
+        except Exception as e:
+            logger.error(f"Error in surgical chunk invalidation for {container_id}: {e}", exc_info=True)
+
+    async def _rebuild_affected_chunks(self, container_id: str,
+                                     current_regular_facets: List[EventFacet],
+                                     changed_chunk_indices: List[int], 
+                                     chunk_structure: Dict[str, Any]) -> None:
+        """
+        Rebuild only the chunks that were affected, preserve others.
+        
+        This method performs precision rebuilding by only reconstructing chunks
+        that actually changed, while preserving the structure and state of all
+        unaffected chunks.
+        
+        Args:
+            container_id: ID of container being processed
+            current_regular_facets: Current regular EventFacets in container
+            changed_chunk_indices: List of chunk indices to rebuild
+            chunk_structure: Current chunk structure
+        """
+        try:
+            n_chunks = chunk_structure.get("n_chunks", [])
+            
+            logger.info(f"Precision rebuilding {len(changed_chunk_indices)} affected chunks for {container_id}")
+            
+            # Group facets by which chunk they should belong to
+            chunk_facet_mapping = self._map_facets_to_chunk_indices(
+                current_regular_facets, chunk_structure
+            )
+            
+            for chunk_index in changed_chunk_indices:
+                if chunk_index >= len(n_chunks):
+                    logger.warning(f"Chunk index {chunk_index} out of range for {container_id}")
+                    continue
+                    
+                # Get facets that belong to this chunk
+                chunk_facets = chunk_facet_mapping.get(chunk_index, [])
+                
+                # Rebuild this specific chunk with enhanced metadata
+                chunk_fingerprint = self._calculate_content_fingerprint(chunk_facets)
+                temporal_range = self._calculate_temporal_range(chunk_facets)
+                
+                rebuilt_chunk = {
+                    "chunk_type": "n_chunk",
+                    "event_facets": chunk_facets,
+                    "content_fingerprint": chunk_fingerprint,  # NEW: Per-chunk fingerprint
+                    "token_count": self._calculate_event_facets_tokens(chunk_facets),
+                    "chunk_index": chunk_index,
+                    "has_memory_chunk": False,  # Reset for potential recompression
+                    "created_at": datetime.now(),
+                    "temporal_range": temporal_range,  # NEW: Track chunk boundaries
+                    "rebuild_reason": "content_change_surgical"
+                }
+                
+                # Replace ONLY this chunk, preserve all others
+                n_chunks[chunk_index] = rebuilt_chunk
+                
+                logger.info(f"Rebuilt chunk {chunk_index} in {container_id} with {len(chunk_facets)} facets")
+            
+            # Update chunk structure with modified chunks
+            chunk_structure["n_chunks"] = n_chunks
+            
+        except Exception as e:
+            logger.error(f"Error in precision chunk rebuilding for {container_id}: {e}", exc_info=True)
+
+    def _map_facets_to_chunk_indices(self, facets: List[EventFacet], 
+                                    chunk_structure: Dict[str, Any]) -> Dict[int, List[EventFacet]]:
+        """
+        Map facets to chunks based on temporal boundaries.
+        
+        Uses existing chunk temporal ranges to determine which facets belong
+        to which chunks, enabling surgical rebuilding of only affected chunks.
+        
+        Args:
+            facets: List of EventFacets to map
+            chunk_structure: Current chunk structure with temporal ranges
+            
+        Returns:
+            Dictionary mapping chunk indices to their facets
+        """
+        try:
+            n_chunks = chunk_structure.get("n_chunks", [])
+            mapping = {}
+            
+            # Initialize all chunk indices
+            for chunk_index in range(len(n_chunks)):
+                mapping[chunk_index] = []
+            
+            for chunk_index, chunk in enumerate(n_chunks):
+                temporal_range = chunk.get("temporal_range", {})
+                start_time = temporal_range.get("start_timestamp", 0)
+                end_time = temporal_range.get("end_timestamp", float('inf'))
+                
+                chunk_facets = [
+                    facet for facet in facets 
+                    if start_time <= facet.veil_timestamp <= end_time
+                ]
+                mapping[chunk_index] = chunk_facets
+            
+            # Handle facets that don't fit in existing temporal ranges (new content)
+            unmapped_facets = []
+            for facet in facets:
+                mapped = False
+                for chunk_facets in mapping.values():
+                    if facet in chunk_facets:
+                        mapped = True
+                        break
+                if not mapped:
+                    unmapped_facets.append(facet)
+            
+            # Assign unmapped facets to the last chunk or create new chunk logic
+            if unmapped_facets and mapping:
+                last_chunk_index = max(mapping.keys())
+                mapping[last_chunk_index].extend(unmapped_facets)
+                logger.debug(f"Assigned {len(unmapped_facets)} unmapped facets to chunk {last_chunk_index}")
+            
+            return mapping
+            
+        except Exception as e:
+            logger.error(f"Error mapping facets to chunk indices: {e}", exc_info=True)
+            # Fallback: assign all facets to chunk 0
+            return {0: facets} if facets else {}
     
     def _memory_facets_to_m_chunks(self, memory_facets: List[EventFacet]) -> List[Dict[str, Any]]:
         """
@@ -538,26 +893,68 @@ class VEILFacetCompressionEngine(Component):
     # --- TOKEN CALCULATION ---
     
     def _calculate_event_facets_tokens(self, event_facets: List[EventFacet]) -> int:
-        """Calculate total tokens in a list of EventFacets."""
+        """
+        Calculate total tokens in a list of EventFacets using direct tiktoken approach.
+        
+        SIMPLIFIED: No more VEIL node conversions - direct EventFacet token calculation.
+        """
         try:
-            from .memory_compressor_interface import estimate_veil_tokens
+            import tiktoken
             
-            # Convert EventFacets to VEIL node format for token estimation
-            veil_nodes = []
+            # Use GPT-4 encoding as default
+            encoding = tiktoken.encoding_for_model("gpt-4")
+            
+            # Extract text content directly from EventFacets
+            text_content = []
+            
             for facet in event_facets:
-                veil_node = self._convert_event_facet_to_veil_node(facet)
-                veil_nodes.append(veil_node)
+                event_type = facet.get_property("event_type", "")
+                content = facet.get_property("content", "")
+                
+                if event_type == "message_added":
+                    # For messages, include sender and content
+                    sender = facet.get_property("sender_name", "")
+                    conversation = facet.get_property("conversation_name", "")
+                    text_content.append(f"[{conversation}] {sender}: {content}")
+                    
+                elif event_type == "compressed_memory":
+                    # For memories, include the memory summary
+                    text_content.append(f"[Memory] {content}")
+                    
+                elif event_type == "agent_response":
+                    # For agent responses, include the content
+                    text_content.append(f"[Agent] {content}")
+                    
+                else:
+                    # For other events, just include content
+                    text_content.append(f"[{event_type}] {content}")
             
-            return estimate_veil_tokens(veil_nodes)
+            # Combine all text and count tokens
+            combined_text = "\n".join(text_content)
+            token_count = len(encoding.encode(combined_text))
+            
+            # Add minimal overhead for structure (much less than VEIL nodes)
+            overhead_factor = 1.1
+            return int(token_count * overhead_factor)
+            
+        except ImportError:
+            logger.warning("tiktoken not available, using character-based fallback")
+            # Fallback: character-based estimation
+            total_chars = sum(len(facet.get_property("content", "")) for facet in event_facets)
+            return total_chars // 4  # 4 chars per token fallback
             
         except Exception as e:
-            logger.warning(f"Error calculating EventFacet tokens with tiktoken: {e}")
-            # Fallback: estimate based on content length
-            total_chars = sum(len(facet.properties.get("content", "")) for facet in event_facets)
+            logger.warning(f"Error calculating EventFacet tokens: {e}")
+            # Fallback: character-based estimation
+            total_chars = sum(len(facet.get_property("content", "")) for facet in event_facets)
             return total_chars // 4  # 4 chars per token fallback
     
     def _calculate_event_facet_tokens(self, event_facet: EventFacet) -> int:
-        """Calculate tokens for a single EventFacet."""
+        """
+        Calculate tokens for a single EventFacet.
+        
+        OPTIMIZED: Uses direct tiktoken calculation without VEIL node conversion.
+        """
         return self._calculate_event_facets_tokens([event_facet])
     
     def _calculate_chunk_tokens(self, chunk: Dict[str, Any]) -> int:
@@ -581,58 +978,565 @@ class VEILFacetCompressionEngine(Component):
         except Exception as e:
             logger.warning(f"Error calculating chunk tokens: {e}")
             return 0
-    
-    # --- CONVERSION UTILITIES ---
-    
-    def _convert_event_facet_to_veil_node(self, event_facet: EventFacet) -> Dict[str, Any]:
-        """Convert EventFacet to VEIL node format for AgentMemoryCompressor."""
+
+    async def _update_chunks_with_new_facets(self, chunk_structure: Dict[str, Any], event_facets: List[EventFacet]):
+        """
+        Update chunk structure with incremental chunking architecture.
+        
+        NEW ARCHITECTURE: Always assign new EventFacets to chunks incrementally.
+        Creates new chunks when current chunk would exceed 4k tokens.
+        No container-level decisions - pure incremental chunk management.
+        
+        Args:
+            chunk_structure: Existing chunk structure to update
+            event_facets: Current EventFacets (may include new content)
+        """
         try:
-            # Convert EventFacet properties to VEIL node structure
-            veil_node = {
-                "veil_id": event_facet.facet_id,
-                "node_type": "content_item",  # Generic content type
-                "properties": {
-                    "text_content": event_facet.properties.get("content", ""),
-                    "content_nature": event_facet.properties.get("event_type", "event"),
-                    "timestamp": event_facet.veil_timestamp,
-                    "timestamp_iso": datetime.fromtimestamp(event_facet.veil_timestamp).isoformat() + "Z",
-                    "owner_element_id": event_facet.owner_element_id,
-                    "links_to": event_facet.links_to,
-                    # Preserve all original properties
-                    **event_facet.properties
-                },
-                "children": []
-            }
+            container_id = chunk_structure.get("container_id", "unknown")
             
-            return veil_node
+            logger.debug(f"Incremental chunking update for {container_id}")
+            
+            # Detect new EventFacets since last update
+            new_facets = await self._detect_new_event_facets(chunk_structure, event_facets)
+            
+            # FIXED: Only check for content changes if we're NOT just adding new facets
+            # Surgical invalidation should only be used for actual edits/changes to existing content,
+            # not for normal incremental addition of new facets
+            content_changed = False
+            if not new_facets:
+                # No new facets, so check if existing content was modified (edits, deletions, etc.)
+                content_changed = await self._detect_content_changes(container_id, event_facets, chunk_structure)
+                if content_changed:
+                    logger.info(f"Content changes detected for {container_id} without new facets - surgical invalidation performed")
+            else:
+                logger.debug(f"New facets detected for {container_id} - using incremental addition, skipping surgical invalidation")
+            
+            # Separate new memory facets from new regular facets
+            new_memory_facets, new_regular_facets = self._separate_memory_and_regular_facets(new_facets)
+            
+            # Add new memory facets to M-stream if any
+            if new_memory_facets:
+                new_m_chunks = self._memory_facets_to_m_chunks(new_memory_facets)
+                chunk_structure["m_chunks"].extend(new_m_chunks)
+                logger.info(f"Added {len(new_memory_facets)} new memory EventFacets to M-stream for {container_id}")
+            
+            # INCREMENTAL CHUNKING: Add new regular facets to N-stream with dynamic chunk creation
+            if new_regular_facets:
+                await self._add_facets_to_n_stream_incrementally(chunk_structure, new_regular_facets, container_id)
+                logger.info(f"Added {len(new_regular_facets)} new EventFacets to N-stream for {container_id} (incremental)")
+            else:
+                logger.debug(f"No new regular EventFacets detected for {container_id}")
+            
+            # Update metadata
+            chunk_structure["last_update"] = datetime.now()
+            chunk_structure["total_tokens"] = self._calculate_total_chunk_tokens(chunk_structure)
+            
+            final_n_count = len(chunk_structure.get('n_chunks', []))
+            final_m_count = len(chunk_structure.get('m_chunks', []))
+            logger.debug(f"Updated chunks for {container_id}: {final_n_count} N-chunks, {final_m_count} M-chunks (incremental)")
             
         except Exception as e:
-            logger.error(f"Error converting EventFacet to VEIL node: {e}", exc_info=True)
-            # Minimal fallback
-            return {
-                "veil_id": event_facet.facet_id,
-                "node_type": "content_item",
-                "properties": {
-                    "text_content": str(event_facet.properties.get("content", "")),
-                    "content_nature": "event"
-                },
-                "children": []
+            logger.error(f"Error in incremental chunk update: {e}", exc_info=True)
+    
+    async def _add_facets_to_n_stream_incrementally(self, chunk_structure: Dict[str, Any], 
+                                                  new_facets: List[EventFacet], 
+                                                  container_id: str):
+        """
+        Add new EventFacets to N-stream with fixed incremental chunk creation.
+        
+        FIXED LOGIC:
+        - Allow chunks to overflow during creation (compression handles this later)
+        - Don't add to chunks that are ALREADY over the limit
+        - Track chronologically latest chunk properly
+        
+        Args:
+            chunk_structure: Chunk structure to update
+            new_facets: New EventFacets to add
+            container_id: Container ID for logging
+        """
+        try:
+            n_chunks = chunk_structure.get("n_chunks", [])
+            
+            # Get or create current (chronologically latest) chunk
+            if not n_chunks:
+                # Create first chunk
+                current_chunk = {
+                    "chunk_type": "n_chunk",
+                    "event_facets": [],
+                    "token_count": 0,
+                    "chunk_index": 0,
+                    "created_at": datetime.now(),
+                    "is_complete": False,
+                    "has_memory_chunk": False
+                }
+                n_chunks.append(current_chunk)
+                logger.debug(f"Created first N-chunk for {container_id}")
+            else:
+                # Get the chronologically latest chunk (should be last, but let's be explicit)
+                current_chunk = n_chunks[-1]
+                
+                # CRITICAL FIX: Never add to chunks that have been compressed
+                if current_chunk.get("has_memory_chunk", False):
+                    current_chunk = {
+                        "chunk_type": "n_chunk",
+                        "event_facets": [],
+                        "token_count": 0,
+                        "chunk_index": len(n_chunks),
+                        "created_at": datetime.now(),
+                        "is_complete": False,
+                        "has_memory_chunk": False
+                    }
+                    n_chunks.append(current_chunk)
+                else:
+                    logger.debug(f"Using existing latest chunk {current_chunk['chunk_index']} for new facets")
+            
+            # Add each new facet, creating new chunks when current is already full
+            for facet in new_facets:
+                facet_tokens = self._calculate_event_facet_tokens(facet)
+                current_tokens = current_chunk.get("token_count", 0)
+                
+                content_preview = facet.get_property("content", "")[:30] + "..." if len(facet.get_property("content", "")) > 30 else facet.get_property("content", "")
+                
+                # CRITICAL FIX: Never add to compressed chunks
+                if current_chunk.get("has_memory_chunk", False):
+                    new_chunk = {
+                        "chunk_type": "n_chunk",
+                        "event_facets": [facet],
+                        "token_count": facet_tokens,
+                        "chunk_index": len(n_chunks),
+                        "created_at": datetime.now(),
+                        "is_complete": False,
+                        "has_memory_chunk": False
+                    }
+                    n_chunks.append(new_chunk)
+                    current_chunk = new_chunk
+                
+                # FIXED: Don't add to chunks that are ALREADY over the limit  
+                # But allow overflow if chunk is currently under the limit
+                elif current_tokens >= self.COMPRESSION_CHUNK_SIZE and current_chunk.get("event_facets"):
+                    # Current chunk is already full, create new one
+                    new_chunk = {
+                        "chunk_type": "n_chunk",
+                        "event_facets": [facet],
+                        "token_count": facet_tokens,
+                        "chunk_index": len(n_chunks),
+                        "created_at": datetime.now(),
+                        "is_complete": False,
+                        "has_memory_chunk": False
+                    }
+                    n_chunks.append(new_chunk)
+                    current_chunk = new_chunk
+                    
+                else:
+                    # Add to current chunk (allow overflow - compression will handle it)
+                    current_chunk["event_facets"].append(facet)
+                    current_chunk["token_count"] = current_tokens + facet_tokens
+                    
+                    new_total = current_tokens + facet_tokens            
+            # Update chunk structure
+            chunk_structure["n_chunks"] = n_chunks
+            
+            # Log final state
+            total_chunks = len(n_chunks)
+            last_chunk_tokens = n_chunks[-1]["token_count"] if n_chunks else 0
+            logger.debug(f"Incremental chunking complete for {container_id}: {total_chunks} N-chunks, latest chunk has {last_chunk_tokens} tokens")
+            
+            # DEBUGGING: Show final chunk structure
+            for i, chunk in enumerate(n_chunks):
+                tokens = chunk.get("token_count", 0)
+                facet_count = len(chunk.get("event_facets", []))
+                has_memory = chunk.get("has_memory_chunk", False)
+            
+        except Exception as e:
+            logger.error(f"Error adding facets to N-stream incrementally: {e}", exc_info=True)
+
+    async def _detect_new_event_facets(self, chunk_structure: Dict[str, Any], current_facets: List[EventFacet]) -> List[EventFacet]:
+        """
+        Detect new EventFacets since last update.
+        
+        Args:
+            chunk_structure: Current chunk structure with existing facets
+            current_facets: Current list of EventFacets
+            
+        Returns:
+            List of new EventFacets not seen before
+        """
+        try:
+            # Get existing facet IDs from N-chunks and M-chunks
+            existing_facet_ids = set()
+            
+            # Collect from N-chunks
+            for n_chunk in chunk_structure.get("n_chunks", []):
+                for facet in n_chunk.get("event_facets", []):
+                    existing_facet_ids.add(facet.facet_id)
+            
+            # Collect from M-chunks
+            for m_chunk in chunk_structure.get("m_chunks", []):
+                memory_facet = m_chunk.get("memory_facet")
+                if memory_facet:
+                    existing_facet_ids.add(memory_facet.facet_id)
+                    # Also check replaced facet IDs
+                    replaced_ids = memory_facet.properties.get("replaced_facet_ids", [])
+                    existing_facet_ids.update(replaced_ids)
+            
+            # Find new facets
+            new_facets = [facet for facet in current_facets if facet.facet_id not in existing_facet_ids]
+            
+            if new_facets:
+                for facet in new_facets:
+                    content_preview = facet.get_property("content", "")[:50] + "..." if len(facet.get_property("content", "")) > 50 else facet.get_property("content", "")
+            else:
+                logger.debug(f"No new EventFacets detected (checked {len(current_facets)} facets against {len(existing_facet_ids)} existing)")
+            
+            return new_facets
+            
+        except Exception as e:
+            logger.error(f"Error detecting new EventFacets: {e}", exc_info=True)
+            # Fallback: assume all facets are new on error
+            return current_facets
+
+    def _calculate_total_chunk_tokens(self, chunk_structure: Dict[str, Any]) -> int:
+        """
+        Calculate total tokens across all chunks in structure.
+        
+        Args:
+            chunk_structure: Chunk structure to calculate tokens for
+            
+        Returns:
+            Total token count
+        """
+        try:
+            total_tokens = 0
+            
+            # Add N-chunk tokens
+            for n_chunk in chunk_structure.get("n_chunks", []):
+                total_tokens += n_chunk.get("token_count", 0)
+            
+            # Add M-chunk tokens
+            for m_chunk in chunk_structure.get("m_chunks", []):
+                total_tokens += m_chunk.get("token_count", 0)
+            
+            return total_tokens
+            
+        except Exception as e:
+            logger.error(f"Error calculating total chunk tokens: {e}", exc_info=True)
+            return 0
+
+    def _calculate_content_fingerprint(self, event_facets: List[EventFacet]) -> str:
+        """
+        Calculate a content fingerprint for EventFacets to detect changes.
+        
+        Adapted from old compression engine to work with EventFacets instead of VEIL children.
+        
+        Args:
+            event_facets: List of EventFacets to fingerprint
+            
+        Returns:
+            Content fingerprint string (SHA-256 hash)
+        """
+        try:
+            import hashlib
+            import json
+            
+            # Extract key content for fingerprinting
+            content_items = []
+            
+            for facet in event_facets:
+                event_type = facet.get_property("event_type", "")
+                
+                if event_type == "message_added":
+                    # For messages, include sender, content, timestamp, and metadata
+                    message_content = {
+                        "event_type": event_type,
+                        "facet_id": facet.facet_id,
+                        "sender": facet.get_property("sender_name", ""),
+                        "content": facet.get_property("content", ""),
+                        "timestamp": facet.veil_timestamp,
+                        "external_id": facet.get_property("external_id", ""),
+                        "reactions": facet.get_property("reactions", {}),
+                        "message_status": facet.get_property("message_status", "received"),
+                        "is_edited": facet.get_property("is_edited", False),
+                        "conversation_name": facet.get_property("conversation_name", "")
+                    }
+                    content_items.append(message_content)
+                    
+                elif event_type == "compressed_memory":
+                    # For memory facets, include memory-specific properties
+                    memory_content = {
+                        "event_type": event_type,
+                        "facet_id": facet.facet_id,
+                        "content": facet.get_property("content", ""),
+                        "memory_id": facet.get_property("memory_id", ""),
+                        "timestamp": facet.veil_timestamp,
+                        "original_facet_count": facet.get_property("original_facet_count", 0),
+                        "replaced_facet_ids": sorted(facet.get_property("replaced_facet_ids", []))  # Sort for deterministic hash
+                    }
+                    content_items.append(memory_content)
+                    
+                elif event_type == "agent_response":
+                    # For agent responses, include content and timestamp
+                    response_content = {
+                        "event_type": event_type,
+                        "facet_id": facet.facet_id,
+                        "content": facet.get_property("content", ""),
+                        "timestamp": facet.veil_timestamp
+                    }
+                    content_items.append(response_content)
+                    
+                else:
+                    # For other event types, include basic properties
+                    generic_content = {
+                        "event_type": event_type,
+                        "facet_id": facet.facet_id,
+                        "timestamp": facet.veil_timestamp,
+                        "content": facet.get_property("content", "")
+                    }
+                    content_items.append(generic_content)
+            
+            # Create deterministic JSON representation
+            content_json = json.dumps(content_items, sort_keys=True, separators=(',', ':'))
+            
+            # Generate SHA-256 hash
+            fingerprint = hashlib.sha256(content_json.encode('utf-8')).hexdigest()
+            
+            return fingerprint
+            
+        except Exception as e:
+            logger.error(f"Error calculating content fingerprint: {e}", exc_info=True)
+            # Return timestamp-based fallback
+            return f"error_fallback_{datetime.now().isoformat()}"
+
+    async def _detect_content_changes(self, container_id: str, current_facets: List[EventFacet], 
+                                    chunk_structure: Dict[str, Any]) -> bool:
+        """
+        Detect if EventFacet content has changed since last compression using surgical chunk-level detection.
+        
+        IMPORTANT: This method should ONLY be used for detecting actual content changes to existing facets
+        (edits, deletions, reactions, etc.), NOT for detecting new facets being added incrementally.
+        
+        For new facets, use _add_facets_to_n_stream_incrementally() instead.
+        
+        UPDATED: Now uses chunk-level change detection instead of container-level fingerprinting.
+        This prevents unnecessary invalidation of unaffected chunks.
+        
+        Args:
+            container_id: ID of the container being checked
+            current_facets: Current EventFacets in container
+            chunk_structure: Current chunk structure with N-chunks and M-chunks
+            
+        Returns:
+            True if content has changed and surgical invalidation was performed
+        """
+        try:
+            n_chunks = chunk_structure.get("n_chunks", [])
+            
+            if not n_chunks:
+                # No existing chunks to compare against
+                logger.debug(f"No existing N-chunks for {container_id}, no changes to detect")
+                return False
+            
+            # Separate memory and regular facets
+            memory_facets, regular_facets = self._separate_memory_and_regular_facets(current_facets)
+            
+            # Detect new facets since last update
+            new_facets = await self._detect_new_event_facets(chunk_structure, current_facets)
+            
+            # Use surgical chunk-level change detection
+            changed_chunk_indices = await self._detect_chunk_level_changes(
+                container_id, new_facets, chunk_structure
+            )
+            
+            if changed_chunk_indices:
+                logger.info(f"Surgical content change detection for {container_id}: {len(changed_chunk_indices)} chunks affected")
+                
+                # Perform surgical invalidation and rebuilding
+                await self._invalidate_specific_chunks(container_id, changed_chunk_indices, chunk_structure)
+                await self._rebuild_affected_chunks(container_id, regular_facets, changed_chunk_indices, chunk_structure)
+                
+                # Update container-level fingerprint for overall tracking
+                current_fingerprint = self._calculate_content_fingerprint(regular_facets)
+                chunk_structure["content_fingerprint"] = current_fingerprint
+                
+                return True
+            else:
+                logger.debug(f"No chunk-level changes detected for {container_id}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error detecting content changes for {container_id}: {e}", exc_info=True)
+            return True  # Assume changed on error to ensure fresh compression
+
+
+
+
+
+    async def _recompress_m_chunks(self, container_id: str, m_chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Re-compress M-chunks when they exceed 1-chunk limit for unfocused rendering.
+        
+        Creates a "memory-of-memories" when too many M-chunks exist, ensuring
+        unfocused containers still get compressed memory representation.
+        
+        Args:
+            container_id: ID of the container
+            m_chunks: List of M-chunks to re-compress
+            
+        Returns:
+            List with single re-compressed memory chunk
+        """
+        try:
+            if not m_chunks:
+                return []
+            
+            # Extract memory EventFacets from M-chunks
+            memory_facets = []
+            for m_chunk in m_chunks:
+                memory_facet = m_chunk.get("memory_facet")
+                if memory_facet and not m_chunk.get("is_invalid", False):
+                    memory_facets.append(memory_facet)
+            
+            if not memory_facets:
+                return []
+            
+            # Use AgentMemoryCompressor to create memory-of-memories
+            if self._memory_compressor:
+                # Create summary memory EventFacet of all individual memory EventFacets
+                summary_memory_facet = await self._create_memory_summary_facet(memory_facets, container_id)
+                
+                if summary_memory_facet:
+                    # Convert back to M-chunk format
+                    recompressed_chunk = {
+                        "chunk_type": "m_chunk",
+                        "memory_facet": summary_memory_facet,
+                        "token_count": summary_memory_facet.properties.get("token_count", 0),
+                        "chunk_index": 0,
+                        "created_at": datetime.now(),
+                        "is_complete": True,
+                        "is_recompressed": True,
+                        "original_chunk_count": len(m_chunks),
+                        "is_memory_of_memories": True
+                    }
+                    
+                    logger.info(f"Re-compressed {len(m_chunks)} M-chunks into 1 memory-of-memories for {container_id}")
+                    return [recompressed_chunk]
+                else:
+                    logger.warning(f"Failed to create memory summary for {container_id}")
+                    return m_chunks[:1]  # Keep only first memory as fallback
+            else:
+                logger.warning(f"No memory compressor available for re-compression of {container_id}")
+                return m_chunks[:1]  # Keep only first memory as fallback
+                
+        except Exception as e:
+            logger.error(f"Error re-compressing M-chunks for {container_id}: {e}", exc_info=True)
+            return m_chunks[:1]  # Fallback to first memory
+
+    async def _create_memory_summary_facet(self, memory_facets: List[EventFacet], container_id: str) -> Optional[EventFacet]:
+        """
+        Create a summary memory EventFacet from multiple existing memory EventFacets.
+        
+        This creates a "memory-of-memories" by using AgentMemoryCompressor to 
+        intelligently summarize multiple memories into a single cohesive memory.
+        
+        Args:
+            memory_facets: List of memory EventFacets to combine
+            container_id: Container ID for context
+            
+        Returns:
+            Single summary memory EventFacet or None if failed
+        """
+        try:
+            # Extract summaries from individual memory facets
+            individual_summaries = []
+            total_original_count = 0
+            earliest_timestamp = float('inf')
+            latest_timestamp = 0
+            
+            for memory_facet in memory_facets:
+                summary = memory_facet.get_property("content", "Unknown memory")
+                original_count = memory_facet.get_property("original_facet_count", 0)
+                timestamp = memory_facet.veil_timestamp
+                
+                individual_summaries.append(summary)
+                total_original_count += original_count
+                earliest_timestamp = min(earliest_timestamp, timestamp)
+                latest_timestamp = max(latest_timestamp, timestamp)
+            
+            # Create compression context for memory summarization
+            compression_context = {
+                "element_id": container_id,
+                "compression_reason": "memory_recompression",
+                "is_focused": True,
+                "is_memory_summary": True,
+                "summarized_memory_count": len(memory_facets),
+                "individual_summaries": individual_summaries,  # Direct data, no pseudo-nodes!
+                "full_veil_context": f"Recompressing {len(memory_facets)} memories for {container_id}"
             }
-    
-    # STUB METHODS - To be implemented in next phase
-    
-    async def _update_chunks_with_new_facets(self, chunk_structure: Dict[str, Any], event_facets: List[EventFacet]):
-        """Update existing chunk structure with new EventFacets.""" 
-        # TODO: Implement chunk updating logic
-        logger.debug("Chunk updating not yet implemented, using existing structure")
-        pass
-    
+            
+            # Use AgentMemoryCompressor directly with memory EventFacets (no pseudo-nodes!)
+            logger.debug(f"Creating memory-of-memories for {container_id} from {len(memory_facets)} memory EventFacets (no conversions)")
+            memory_result = await self._memory_compressor.compress_event_facets(
+                event_facets=memory_facets,  # Use memory EventFacets directly!
+                element_ids=[f"{container_id}_memory_summary"],
+                compression_context=compression_context
+            )
+            
+            if not memory_result:
+                logger.warning(f"AgentMemoryCompressor failed to create memory summary for {container_id}")
+                return None
+            
+            # Extract memory content from result
+            memory_props = memory_result.get("properties", {})
+            summary_text = memory_props.get("memory_summary", "")
+            memory_id = memory_props.get("memory_id", f"summary_{container_id}")
+            token_count = memory_props.get("token_count", 0)
+            own_token_count = memory_props.get("own_token_count", 0)
+            
+            # Calculate mean timestamp for chronological placement
+            mean_timestamp = (earliest_timestamp + latest_timestamp) / 2 if memory_facets else ConnectomeEpoch.get_veil_timestamp()
+            
+            # Create summary memory EventFacet
+            summary_memory_facet = EventFacet(
+                facet_id=f"memory_summary_{container_id}_{memory_id}",
+                veil_timestamp=mean_timestamp,
+                owner_element_id=memory_facets[0].owner_element_id if memory_facets else container_id,
+                event_type="compressed_memory",
+                content=summary_text,
+                links_to=container_id
+            )
+            
+            # Add memory-specific properties
+            summary_memory_facet.properties.update({
+                "is_compressed_memory": True,
+                "is_memory_of_memories": True,
+                "memory_id": memory_id,
+                "original_facet_count": total_original_count,
+                "summarized_memory_count": len(memory_facets),
+                "compression_timestamp": datetime.now().isoformat(),
+                "compression_approach": "veil_facet_memory_summary",
+                "token_count": token_count,
+                "own_token_count": own_token_count,
+                "temporal_info": {
+                    "earliest_content_timestamp": earliest_timestamp,
+                    "latest_content_timestamp": latest_timestamp,
+                    "mean_timestamp": mean_timestamp,
+                    "content_timespan_seconds": latest_timestamp - earliest_timestamp,
+                    "uses_mean_timestamp": True
+                }
+            })
+            
+            logger.info(f"Created memory-of-memories EventFacet {summary_memory_facet.facet_id} for {container_id}")
+            return summary_memory_facet
+            
+        except Exception as e:
+            logger.error(f"Error creating memory summary facet for {container_id}: {e}", exc_info=True)
+            return None
+
     async def _process_container_chunk_boundaries(self, container_id: str, chunk_structure: Dict[str, Any], full_facet_cache: VEILFacetCache):
         """
-        Process chunk boundaries and trigger memory formation for complete N-chunks.
+        Process chunk boundaries with incremental per-chunk compression.
         
-        This identifies N-chunks that are complete (>=4k tokens) and ready for compression,
-        calls AgentMemoryCompressor to form memories, and converts results to memory EventFacets.
+        NEW ARCHITECTURE: Compress individual chunks when they exceed 4k tokens.
+        Each chunk is independently evaluated and compressed, with N-chunk → M-chunk mapping tracked.
         
         Args:
             container_id: ID of container being processed
@@ -642,124 +1546,184 @@ class VEILFacetCompressionEngine(Component):
         try:
             n_chunks = chunk_structure.get("n_chunks", [])
             
-            # Find complete N-chunks ready for compression
-            complete_chunks = [chunk for chunk in n_chunks if chunk.get("is_complete", False)]
-            
-            if not complete_chunks:
-                logger.debug(f"No complete N-chunks found for {container_id}")
+            if not n_chunks:
+                logger.debug(f"No N-chunks to process for {container_id}")
                 return
             
-            logger.info(f"Processing {len(complete_chunks)} complete N-chunks for {container_id}")
+            logger.debug(f"Processing {len(n_chunks)} N-chunks for incremental compression in {container_id}")
             
-            # Process each complete chunk
-            for chunk in complete_chunks:
+            # Process each N-chunk individually
+            chunks_compressed = 0
+            for chunk_index, n_chunk in enumerate(n_chunks):
                 try:
-                    # Get EventFacets from chunk
-                    event_facets = chunk.get("event_facets", [])
-                    if not event_facets:
+                    chunk_tokens = n_chunk.get("token_count", 0)
+                    event_facets = n_chunk.get("event_facets", [])
+                    has_memory = n_chunk.get("has_memory_chunk", False)
+                    
+                    # Skip chunks that are already compressed (have corresponding M-chunk)
+                    if has_memory:
                         continue
                     
-                    chunk_index = chunk.get("chunk_index", 0)
-                    logger.debug(f"Forming memory for {container_id} chunk {chunk_index} with {len(event_facets)} EventFacets")
-                    
-                    # Create memory EventFacet from complete N-chunk
-                    memory_facet = await self._create_memory_event_facet_from_chunk(
-                        container_id, event_facets, chunk_index, full_facet_cache
-                    )
-                    
-                    if memory_facet:
-                        # Convert memory EventFacet to M-chunk
-                        m_chunk = {
-                            "chunk_type": "m_chunk",
-                            "memory_facet": memory_facet,
-                            "token_count": memory_facet.properties.get("token_count", 0),
-                            "chunk_index": len(chunk_structure.get("m_chunks", [])),
-                            "created_at": datetime.now(),
-                            "is_complete": True,
-                            "source_n_chunk_index": chunk_index,
-                            "replaced_facet_count": len(event_facets)
-                        }
+                    if chunk_tokens >= self.COMPRESSION_CHUNK_SIZE and event_facets:
                         
-                        # Add to M-chunks
-                        if "m_chunks" not in chunk_structure:
-                            chunk_structure["m_chunks"] = []
-                        chunk_structure["m_chunks"].append(m_chunk)
+                        # Create memory EventFacet from this specific N-chunk
+                        memory_facet = await self._create_memory_event_facet_from_chunk(
+                            container_id, event_facets, chunk_index, full_facet_cache
+                        )
                         
-                        logger.info(f"Created memory EventFacet for {container_id} chunk {chunk_index}: {memory_facet.facet_id}")
+                        if memory_facet:
+                            # Create M-chunk for this N-chunk
+                            m_chunk = {
+                                "chunk_type": "m_chunk",
+                                "memory_facet": memory_facet,
+                                "token_count": memory_facet.properties.get("token_count", 0),
+                                "own_token_count": memory_facet.properties.get("own_token_count", 0),
+                                "chunk_index": len(chunk_structure.get("m_chunks", [])),
+                                "created_at": datetime.now(),
+                                "is_complete": True,
+                                "source_n_chunk_index": chunk_index,
+                                "replaced_facet_count": len(event_facets)
+                            }
+                            
+                            # Add to M-chunks
+                            if "m_chunks" not in chunk_structure:
+                                chunk_structure["m_chunks"] = []
+                            chunk_structure["m_chunks"].append(m_chunk)
+                            
+                            # Mark N-chunk as having a corresponding M-chunk
+                            n_chunk["has_memory_chunk"] = True
+                            n_chunk["memory_chunk_index"] = m_chunk["chunk_index"]
+                            
+                            # Track replaced EventFacet IDs
+                            replaced_facet_ids = [facet.facet_id for facet in event_facets]
+                            memory_facet.properties["replaced_facet_ids"] = replaced_facet_ids
+                            
+                            chunks_compressed += 1
+                        else:
+                            logger.warning(f"Could not create memory for chunk {chunk_index}")
                     else:
-                        logger.warning(f"Failed to create memory EventFacet for {container_id} chunk {chunk_index}")
+                        logger.debug(f"Not compressing chunk {chunk_index}: {chunk_tokens} tokens < {self.COMPRESSION_CHUNK_SIZE} or no facets ({len(event_facets)})")
                 
                 except Exception as e:
-                    logger.error(f"Error processing chunk {chunk.get('chunk_index', 'unknown')} for {container_id}: {e}", exc_info=True)
+                    logger.error(f"Error processing chunk {chunk_index} in {container_id}: {e}", exc_info=True)
+            
+            if chunks_compressed > 0:
+                logger.info(f"Compressed {chunks_compressed} chunks in {container_id} (incremental per-chunk compression)")
+            
+            # Check if M-chunks need re-compression (memory-of-memories)
+            m_chunks = chunk_structure.get("m_chunks", [])
+            valid_m_chunks = [m for m in m_chunks if not m.get("is_invalid", False)]
+            total_memory_tokens = sum(chunk.get("own_token_count", 0) for chunk in valid_m_chunks)
+            
+            # FIXED: Only recompress when we have MULTIPLE M-chunks, not a single oversized one
+            if len(valid_m_chunks) > 1 and total_memory_tokens > self.COMPRESSION_CHUNK_SIZE:
+                logger.info(f"Multiple M-chunks in {container_id} ({len(valid_m_chunks)} chunks, {total_memory_tokens} total tokens) exceed {self.COMPRESSION_CHUNK_SIZE} tokens, triggering re-compression")
+                recompressed_m_chunks = await self._recompress_m_chunks(container_id, valid_m_chunks)
+                chunk_structure["m_chunks"] = recompressed_m_chunks
+                logger.info(f"Re-compressed {len(valid_m_chunks)} M-chunks into {len(recompressed_m_chunks)} memory-of-memories for {container_id}")
+            elif len(valid_m_chunks) == 1:
+                logger.debug(f"Single M-chunk in {container_id} has {total_memory_tokens} tokens (not recompressing single chunks)")
+            else:
+                logger.debug(f"M-chunks in {container_id} don't need recompression: {len(valid_m_chunks)} chunks, {total_memory_tokens} tokens")
             
             # Update chunk structure metadata
             chunk_structure["last_update"] = datetime.now()
             
         except Exception as e:
-            logger.error(f"Error processing chunk boundaries for {container_id}: {e}", exc_info=True)
+            logger.error(f"Error in incremental chunk boundary processing for {container_id}: {e}", exc_info=True)
     
-    async def _render_container_with_focus_rules(self, container_id: str, chunk_structure: Dict[str, Any], is_compression_target: bool) -> List[VEILFacet]:
+    async def _render_container_with_focus_rules(self, container_id: str, chunk_structure: Dict[str, Any], is_focused_container: bool) -> List[VEILFacet]:
         """
-        Render container according to focus rules from memory_refactor.md.
+        Render container according to focus rules from user clarification.
+        
+        Given: N(1) to N(X) chunks where N(X) is incomplete, and M(1) to M(X-1) memories
         
         Focus Rules:
-        - Compression target (focused): 8 latest N-chunks + all M-chunks
-        - Context providers (unfocused): Latest incomplete N-chunk + all M-chunks
+        - Focused: N(X-8) to N(X) raw chunks (8 recent completed + incomplete), 
+                  prepend M(1) to M(X-9) if X-8 > 1
+        - Unfocused: M(1) to M(X-2) memories + N(X-1) to N(X) raw chunks 
+                    (all memories except last completed + 2 recent raw)
         
         Args:
             container_id: ID of container being rendered
             chunk_structure: N-chunk/M-chunk structure
-            is_compression_target: Whether this container is being compressed (focused)
+            is_focused_container: Whether this container is focused
             
         Returns:
-            List of VEILFacets according to focus rules
+            List of VEILFacets according to corrected focus rules
         """
         try:
             rendered_facets = []
             n_chunks = chunk_structure.get("n_chunks", [])
             m_chunks = chunk_structure.get("m_chunks", [])
             
-            # Always include all M-chunks (memory EventFacets)
-            for m_chunk in m_chunks:
-                memory_facet = m_chunk.get("memory_facet")
-                if memory_facet:
-                    rendered_facets.append(memory_facet)
+            if not n_chunks:
+                logger.debug(f"No N-chunks for {container_id}, returning empty")
+                return []
             
-            # Apply focus rules for N-chunks
-            if is_compression_target:
-                # FOCUSED: 8 latest N-chunks for rich context during compression
-                n_chunk_limit = self.FOCUSED_CHUNK_LIMIT  # 8 chunks
-                selected_n_chunks = n_chunks[-n_chunk_limit:] if len(n_chunks) > n_chunk_limit else n_chunks
+            X = len(n_chunks)  # Total chunks (N1 to NX where NX is incomplete)
+            valid_m_chunks = [m for m in m_chunks if not m.get("is_invalid", False)]
+            
+            logger.debug(f"Container {container_id}: X={X} N-chunks, {len(valid_m_chunks)} valid M-chunks")
+            
+            if is_focused_container:
+                # FOCUSED: N(X-8) to N(X) raw chunks, prepend M(1) to M(X-9) if X-8 > 1
+                start_chunk_index = max(0, X - 9)  # 0-based indexing: X-9 becomes X-9 in 0-based
                 
+                # Add memories for chunks before start_chunk_index
+                if start_chunk_index > 0:
+                    memory_end_index = min(start_chunk_index, len(valid_m_chunks))
+                    for i in range(memory_end_index):
+                        memory_facet = valid_m_chunks[i].get("memory_facet")
+                        if memory_facet:
+                            rendered_facets.append(memory_facet)
+                    
+                    logger.debug(f"Focused {container_id}: Added {memory_end_index} memories M(1) to M({memory_end_index})")
+                
+                # Add raw chunks from start_chunk_index to end
+                selected_n_chunks = n_chunks[start_chunk_index:]
                 for n_chunk in selected_n_chunks:
                     event_facets = n_chunk.get("event_facets", [])
                     rendered_facets.extend(event_facets)
                 
-                logger.debug(f"Focused rendering for {container_id}: {len(selected_n_chunks)} N-chunks (limit: {n_chunk_limit})")
-            else:
-                # UNFOCUSED: Latest incomplete N-chunk only (compressed context)
-                incomplete_chunks = [chunk for chunk in n_chunks if not chunk.get("is_complete", False)]
+                memory_count = start_chunk_index if start_chunk_index > 0 else 0
+                raw_chunk_count = len(selected_n_chunks)
+                logger.debug(f"Focused {container_id}: {memory_count} memories + {raw_chunk_count} raw chunks (N({start_chunk_index+1}) to N({X}))")
                 
-                if incomplete_chunks:
-                    # Use latest incomplete chunk
-                    latest_incomplete = incomplete_chunks[-1]
-                    event_facets = latest_incomplete.get("event_facets", [])
-                    rendered_facets.extend(event_facets)
-                    logger.debug(f"Unfocused rendering for {container_id}: 1 incomplete N-chunk with {len(event_facets)} facets")
-                elif n_chunks:
-                    # If no incomplete chunks, use latest complete chunk
-                    latest_chunk = n_chunks[-1]
-                    event_facets = latest_chunk.get("event_facets", [])
-                    rendered_facets.extend(event_facets)
-                    logger.debug(f"Unfocused rendering for {container_id}: 1 latest complete N-chunk with {len(event_facets)} facets")
+            else:
+                # UNFOCUSED: M(1) to M(X-2) + N(X-1) to N(X)
+                
+                # Add memories M(1) to M(X-2) - all except memory of last completed chunk
+                if X >= 2:  # Only if we have at least 2 chunks
+                    memory_end_index = min(X - 2, len(valid_m_chunks))  # M(1) to M(X-2)
+                    for i in range(memory_end_index):
+                        memory_facet = valid_m_chunks[i].get("memory_facet")
+                        if memory_facet:
+                            rendered_facets.append(memory_facet)
+                    
+                    logger.debug(f"Unfocused {container_id}: Added {memory_end_index} memories M(1) to M({memory_end_index})")
+                
+                # Add raw chunks N(X-1) to N(X) - last completed + incomplete
+                if X >= 2:
+                    recent_n_chunks = n_chunks[-2:]  # Last 2 chunks: N(X-1), N(X)
                 else:
-                    logger.debug(f"Unfocused rendering for {container_id}: no N-chunks available")
+                    recent_n_chunks = n_chunks  # All available if less than 2
+                
+                for n_chunk in recent_n_chunks:
+                    event_facets = n_chunk.get("event_facets", [])
+                    rendered_facets.extend(event_facets)
+                
+                memory_count = min(X - 2, len(valid_m_chunks)) if X >= 2 else 0
+                raw_chunk_count = len(recent_n_chunks)
+                logger.debug(f"Unfocused {container_id}: {memory_count} memories + {raw_chunk_count} raw chunks (last {raw_chunk_count} chunks)")
             
             # Sort by temporal order for consistent rendering
             rendered_facets.sort(key=lambda f: f.get_temporal_key())
             
-            logger.debug(f"Rendered {container_id} ({'focused' if is_compression_target else 'unfocused'}): "
-                        f"{len(rendered_facets)} total facets ({len(m_chunks)} memories)")
+            total_memory_facets = len([f for f in rendered_facets if f.get_property("event_type") == "compressed_memory"])
+            total_regular_facets = len(rendered_facets) - total_memory_facets
+            
+            logger.info(f"Rendered {container_id} ({'focused' if is_focused_container else 'unfocused'}): {len(rendered_facets)} facets ({total_memory_facets} memories + {total_regular_facets} raw)")
             
             return rendered_facets
             
@@ -771,10 +1735,10 @@ class VEILFacetCompressionEngine(Component):
                 all_facets.extend(n_chunk.get("event_facets", []))
             for m_chunk in chunk_structure.get("m_chunks", []):
                 memory_facet = m_chunk.get("memory_facet")
-                if memory_facet:
+                if memory_facet and not m_chunk.get("is_invalid", False):
                     all_facets.append(memory_facet)
             return all_facets
-    
+
     # --- MEMORY EVENTFACET CREATION ---
     
     async def _create_memory_event_facet_from_chunk(self,
@@ -785,11 +1749,12 @@ class VEILFacetCompressionEngine(Component):
         """
         Create memory EventFacet from a complete N-chunk using AgentMemoryCompressor.
         
+        UPDATED: Now uses turn-based compression context for consistency with normal agent experience.
+        
         This is the key orchestration method that:
-        1. Converts EventFacets to VEIL nodes for AgentMemoryCompressor
-        2. Gets compression context by calling HUD (per user's clarification)
-        3. Calls AgentMemoryCompressor to form memory
-        4. Converts result back to memory EventFacet with mean timestamp
+        1. Gets turn-based compression context by calling HUD (per user's clarification)
+        2. Calls AgentMemoryCompressor with EventFacets and turn-based context
+        3. Converts result back to memory EventFacet with mean timestamp
         
         Args:
             container_id: ID of container being compressed
@@ -805,22 +1770,18 @@ class VEILFacetCompressionEngine(Component):
                 logger.warning(f"No memory compressor available for {container_id}")
                 return None
             
-            # Convert EventFacets to VEIL nodes for AgentMemoryCompressor
-            veil_nodes = []
-            for facet in event_facets:
-                veil_node = self._convert_event_facet_to_veil_node(facet)
-                veil_nodes.append(veil_node)
-            
-            # Get compression context by calling HUD (per user's flow clarification)
-            compression_context = await self._get_compression_context_from_hud(
-                container_id, full_facet_cache
+            # Get turn-based compression context by calling HUD (NEW APPROACH)
+            compression_context = await self._get_compression_context_from_hud_with_content(
+                container_id, full_facet_cache, event_facets
             )
             
-            # Call AgentMemoryCompressor to form memory
-            logger.debug(f"Calling AgentMemoryCompressor for {container_id} with {len(veil_nodes)} nodes")
-            memory_result = await self._memory_compressor.compress_nodes(
-                raw_veil_nodes=veil_nodes,
-                element_ids=[container_id],
+            # Call AgentMemoryCompressor with EventFacets directly (no conversion needed!)
+            # FIXED: Include chunk_index to ensure unique memory_id per chunk
+            chunk_element_id = f"{container_id}_chunk_{chunk_index}"
+            logger.debug(f"Calling AgentMemoryCompressor for {chunk_element_id} with {len(event_facets)} EventFacets (turn-based context)")
+            memory_result = await self._memory_compressor.compress_event_facets(
+                event_facets=event_facets,
+                element_ids=[chunk_element_id],
                 compression_context=compression_context
             )
             
@@ -833,6 +1794,7 @@ class VEILFacetCompressionEngine(Component):
             memory_summary = memory_props.get("memory_summary", "")
             memory_id = memory_props.get("memory_id", f"mem_{container_id}_{chunk_index}")
             token_count = memory_props.get("token_count", 0)
+            own_token_count = memory_props.get("own_token_count", 0)
             
             # Calculate mean timestamp for chronological placement
             timestamps = [facet.veil_timestamp for facet in event_facets]
@@ -856,8 +1818,9 @@ class VEILFacetCompressionEngine(Component):
                 "compression_timestamp": datetime.now().isoformat(),
                 "replaced_facet_ids": [facet.facet_id for facet in event_facets],
                 "token_count": token_count,
+                "own_token_count": own_token_count,
                 "source_chunk_index": chunk_index,
-                "compression_approach": "veil_facet_agent_memory_compressor",
+                "compression_approach": "veil_facet_agent_memory_compressor_turn_based",  # Updated to reflect new approach
                 "temporal_info": {
                     "earliest_content_timestamp": min(timestamps) if timestamps else mean_timestamp,
                     "latest_content_timestamp": max(timestamps) if timestamps else mean_timestamp,
@@ -867,28 +1830,147 @@ class VEILFacetCompressionEngine(Component):
                 }
             })
             
-            logger.info(f"Created memory EventFacet {memory_facet.facet_id} for {container_id} at timestamp {mean_timestamp}")
+            # NEW: Detect timeline divergence caused by mean timestamp positioning
+            divergence_info = self._detect_timeline_divergence(memory_facet, event_facets, full_facet_cache)
+            if divergence_info:
+                memory_facet.properties["timeline_divergence"] = divergence_info
+                logger.debug(f"Timeline divergence detected for memory {memory_facet.facet_id}: {divergence_info['divergence_type']}")
+            
+            logger.info(f"Created turn-based memory EventFacet {memory_facet.facet_id} for {container_id} at timestamp {mean_timestamp}")
             return memory_facet
             
         except Exception as e:
-            logger.error(f"Error creating memory EventFacet for {container_id}: {e}", exc_info=True)
+            logger.error(f"Error creating turn-based memory EventFacet for {container_id}: {e}", exc_info=True)
+            return None
+
+    def _detect_timeline_divergence(self, 
+                                   memory_facet: EventFacet,
+                                   original_event_facets: List[EventFacet],
+                                   full_facet_cache: VEILFacetCache) -> Optional[Dict[str, Any]]:
+        """
+        Detect if a memory EventFacet causes timeline divergence.
+        
+        Timeline divergence occurs when:
+        1. Memory's mean timestamp falls between non-compressed content that should remain sequential
+        2. The memory covers a time range that overlaps with other visible content
+        3. The memory appears out of chronological order relative to surrounding context
+        
+        Args:
+            memory_facet: The memory EventFacet being created
+            original_event_facets: The original EventFacets that were compressed
+            full_facet_cache: Complete VEILFacetCache for temporal context
+            
+        Returns:
+            Divergence information dict if divergence detected, None otherwise
+        """
+        try:
+            mean_timestamp = memory_facet.veil_timestamp
+            temporal_info = memory_facet.properties.get("temporal_info", {})
+            earliest_content = temporal_info.get("earliest_content_timestamp", mean_timestamp)
+            latest_content = temporal_info.get("latest_content_timestamp", mean_timestamp)
+            
+            # Get chronological stream of all non-compressed EventFacets
+            temporal_stream = full_facet_cache.get_chronological_stream(include_ambient=False)
+            
+            # Filter to just EventFacets (not StatusFacets) that aren't being compressed
+            compressed_facet_ids = {facet.facet_id for facet in original_event_facets}
+            event_stream = [
+                facet for facet in temporal_stream
+                if (facet.facet_type == VEILFacetType.EVENT and 
+                    facet.facet_id not in compressed_facet_ids and
+                    facet.properties.get("event_type") not in ["agent_response", "compressed_memory"])
+            ]
+            
+            if len(event_stream) < 2:
+                # Not enough context to detect divergence
+                return None
+            
+            # Find events immediately before and after the memory's time range
+            events_before = [f for f in event_stream if f.veil_timestamp < earliest_content]
+            events_after = [f for f in event_stream if f.veil_timestamp > latest_content]
+            events_overlapping = [f for f in event_stream 
+                                if earliest_content <= f.veil_timestamp <= latest_content]
+            
+            divergence_info = {
+                "memory_mean_timestamp": mean_timestamp,
+                "content_time_range": [earliest_content, latest_content],
+                "surrounding_context": {
+                    "events_before_count": len(events_before),
+                    "events_after_count": len(events_after), 
+                    "overlapping_events_count": len(events_overlapping)
+                }
+            }
+            
+            # Detect specific divergence types
+            if events_overlapping:
+                # Type 1: Memory content overlaps with non-compressed events
+                divergence_info.update({
+                    "divergence_type": "temporal_overlap",
+                    "description": f"Memory covers time range with {len(events_overlapping)} other events",
+                    "severity": "high",
+                    "overlapping_event_ids": [f.facet_id for f in events_overlapping]
+                })
+                return divergence_info
+            
+            # Check for insertion point divergence
+            if events_before and events_after:
+                latest_before = max(events_before, key=lambda f: f.veil_timestamp)
+                earliest_after = min(events_after, key=lambda f: f.veil_timestamp)
+                
+                # Check if memory appears out of order relative to surrounding events
+                if mean_timestamp < latest_before.veil_timestamp or mean_timestamp > earliest_after.veil_timestamp:
+                    divergence_info.update({
+                        "divergence_type": "insertion_order",
+                        "description": f"Memory positioned between events from different time periods",
+                        "severity": "medium",
+                        "context_events": {
+                            "before": latest_before.facet_id,
+                            "after": earliest_after.facet_id
+                        }
+                    })
+                    return divergence_info
+            
+            # Check for large time gaps (potential retroactive insertion)
+            time_gap_threshold = 300  # 5 minutes in seconds
+            
+            if events_before:
+                latest_before = max(events_before, key=lambda f: f.veil_timestamp)
+                gap_before = earliest_content - latest_before.veil_timestamp
+                
+                if gap_before > time_gap_threshold:
+                    divergence_info.update({
+                        "divergence_type": "retroactive_insertion",
+                        "description": f"Memory covers content from {gap_before:.0f}s before surrounding context",
+                        "severity": "low",
+                        "time_gap_seconds": gap_before
+                    })
+                    return divergence_info
+            
+            # No significant divergence detected
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error detecting timeline divergence: {e}", exc_info=True)
             return None
     
     async def _get_compression_context_from_hud(self,
                                               target_container_id: str,
                                               full_facet_cache: VEILFacetCache) -> Dict[str, Any]:
         """
-        Get compression context by calling HUD to render "compression at this moment".
+        LEGACY: Get compression context by calling HUD to render flat temporal context.
         
-        This implements the user's clarification: AgentMemoryCompressor calls HUD
-        to get full temporal context during memory formation.
+        This method is being phased out in favor of _get_compression_context_from_hud_with_content()
+        which provides turn-based consistency with normal agent interaction.
+        
+        ORIGINAL APPROACH: AgentMemoryCompressor calls HUD to get flat temporal context
+        NEW APPROACH: AgentMemoryCompressor gets same turn-based format as normal interaction
         
         Args:
             target_container_id: Container being compressed (gets focused treatment)
             full_facet_cache: Complete VEILFacetCache for context rendering
             
         Returns:
-            Compression context dictionary with rendered temporal context
+            Compression context dictionary with flat text context
         """
         try:
             # Get HUD component for context rendering
@@ -897,18 +1979,9 @@ class VEILFacetCompressionEngine(Component):
                 logger.warning(f"HUD component not available for compression context")
                 return {"compression_reason": "hud_unavailable"}
             
-            # Prepare focus context - target container gets focused treatment
-            focus_context = {
-                "focus_element_id": target_container_id,
-                "compression_context": True,
-                "render_mode": "compression_context"
-            }
+            logger.debug(f"Requesting LEGACY flat text compression context from HUD for {target_container_id}")
             
-            # Get compression context from HUD using native VEILFacet method (no conversions!)
-            # This renders: target container (8-chunk focused) + other containers (1-chunk unfocused) + StatusFacets + AmbientFacets
-            logger.debug(f"Requesting native VEILFacet compression context from HUD for {target_container_id}")
-            
-            # Call native VEILFacet HUD method for compression context (eliminates round-trip conversions)
+            # Call legacy flat text HUD method
             compression_context_string = await hud_component.render_memorization_context_with_facet_cache(
                 facet_cache=full_facet_cache,
                 exclude_element_id=target_container_id,
@@ -918,22 +1991,77 @@ class VEILFacetCompressionEngine(Component):
             compression_context = {
                 "focus_element_id": target_container_id,
                 "compression_reason": "veil_facet_chunk_boundary",
-                "full_veil_context": compression_context_string,
+                "full_veil_context": compression_context_string,  # Flat text approach
                 "compression_timestamp": datetime.now().isoformat(),
-                "is_focused": True  # Target container always gets focused treatment
+                "is_focused": True,  # Target container always gets focused treatment
+                "memorization_approach": "legacy_flat_text"
             }
             
-            logger.debug(f"Generated compression context for {target_container_id}: {len(compression_context_string)} chars")
+            logger.debug(f"Generated LEGACY compression context for {target_container_id}: {len(compression_context_string)} chars")
             return compression_context
             
         except Exception as e:
-            logger.error(f"Error getting compression context from HUD: {e}", exc_info=True)
+            logger.error(f"Error getting legacy compression context from HUD: {e}", exc_info=True)
             # Fallback context
             return {
                 "focus_element_id": target_container_id,
                 "compression_reason": "veil_facet_chunk_boundary_fallback",
                 "error": str(e)
             }
+    
+    async def _get_compression_context_from_hud_with_content(self,
+                                                           target_container_id: str,
+                                                           full_facet_cache: VEILFacetCache,
+                                                           content_to_memorize: List[EventFacet]) -> Dict[str, Any]:
+        """
+        UPDATED: Get turn-based compression context matching normal agent experience.
+        
+        This is the new approach that provides the agent with the same turn-based format
+        it normally sees, plus a synthetic final user turn requesting memorization.
+        
+        Args:
+            target_container_id: Container being compressed (gets focused treatment)
+            full_facet_cache: Complete VEILFacetCache for context rendering
+            content_to_memorize: Specific EventFacets being memorized (for synthetic turn)
+            
+        Returns:
+            Compression context dictionary with turn-based messages
+        """
+        try:
+            # Get HUD component for context rendering
+            hud_component = self._get_hud_component()
+            if not hud_component:
+                logger.warning(f"HUD component not available for turn-based compression context")
+                return {"compression_reason": "hud_unavailable"}
+            
+            logger.debug(f"Requesting turn-based compression context from HUD for {target_container_id} with {len(content_to_memorize)} facets to memorize")
+            
+            # Call new turn-based HUD method
+            turn_messages = await hud_component.render_memorization_context_as_turns(
+                facet_cache=full_facet_cache,
+                exclude_element_id=target_container_id,
+                focus_element_id=target_container_id,  # Target container gets focused treatment
+                content_to_memorize=content_to_memorize  # NEW: Pass specific content being memorized
+            )
+            
+            compression_context = {
+                "focus_element_id": target_container_id,
+                "compression_reason": "veil_facet_chunk_boundary",
+                "turn_messages": turn_messages,  # NEW: Turn-based instead of flat text
+                "compression_timestamp": datetime.now().isoformat(),
+                "is_focused": True,  # Target container always gets focused treatment
+                "content_facet_count": len(content_to_memorize),
+                "memorization_approach": "turn_based"
+            }
+            
+            logger.info(f"Generated turn-based compression context for {target_container_id}: {len(turn_messages)} turns ({len(content_to_memorize)} facets to memorize)")
+            return compression_context
+            
+        except Exception as e:
+            logger.error(f"Error getting turn-based compression context from HUD: {e}", exc_info=True)
+            # Fallback to legacy method
+            logger.info(f"Falling back to legacy flat text compression context for {target_container_id}")
+            return await self._get_compression_context_from_hud(target_container_id, full_facet_cache)
     
     def _get_hud_component(self):
         """Get HUD component for compression context rendering."""
@@ -942,137 +2070,3 @@ class VEILFacetCompressionEngine(Component):
         except Exception as e:
             logger.warning(f"Error getting HUD component: {e}")
             return None
-    
-    def _convert_facet_cache_to_flat(self, facet_cache: VEILFacetCache) -> Dict[str, Any]:
-        """
-        Convert VEILFacetCache to flat VEIL cache format for existing HUD methods.
-        
-        Args:
-            facet_cache: VEILFacetCache to convert
-            
-        Returns:
-            Dictionary in flat VEIL cache format
-        """
-        try:
-            flat_cache = {}
-            
-            for facet in facet_cache.facets.values():
-                # Convert facet back to VEIL node format
-                if facet.facet_type == VEILFacetType.EVENT:
-                    veil_node = self._convert_event_facet_to_veil_node(facet)
-                elif facet.facet_type == VEILFacetType.STATUS:
-                    veil_node = self._convert_status_facet_to_veil_node(facet)
-                elif facet.facet_type == VEILFacetType.AMBIENT:
-                    veil_node = self._convert_ambient_facet_to_veil_node(facet)
-                else:
-                    # Generic conversion
-                    veil_node = {
-                        "veil_id": facet.facet_id,
-                        "node_type": "unknown_facet",
-                        "properties": facet.properties.copy(),
-                        "children": []
-                    }
-                
-                flat_cache[facet.facet_id] = veil_node
-            
-            logger.debug(f"Converted VEILFacetCache to flat cache: {len(facet_cache.facets)} facets")
-            return flat_cache
-            
-        except Exception as e:
-            logger.error(f"Error converting VEILFacetCache to flat format: {e}", exc_info=True)
-            return {}
-    
-    def _convert_status_facet_to_veil_node(self, status_facet: StatusFacet) -> Dict[str, Any]:
-        """Convert StatusFacet to VEIL node format."""
-        try:
-            status_type = status_facet.properties.get("status_type", "unknown")
-            
-            # Determine node type based on status type
-            if "container" in status_type:
-                node_type = "message_list"  # Container nodes
-            elif "space" in status_type:
-                node_type = "space_root"
-            else:
-                node_type = "status_update"
-            
-            veil_node = {
-                "veil_id": status_facet.facet_id,
-                "node_type": node_type,
-                "properties": {
-                    "operation_index": status_facet.veil_timestamp,  # Convert back to operation_index
-                    "element_id": status_facet.owner_element_id,
-                    "links_to": status_facet.links_to,
-                    **status_facet.properties
-                },
-                "children": []
-            }
-            
-            return veil_node
-            
-        except Exception as e:
-            logger.error(f"Error converting StatusFacet to VEIL node: {e}", exc_info=True)
-            return {
-                "veil_id": status_facet.facet_id,
-                "node_type": "status_update",
-                "properties": status_facet.properties.copy(),
-                "children": []
-            }
-    
-    def _convert_ambient_facet_to_veil_node(self, ambient_facet: AmbientFacet) -> Dict[str, Any]:
-        """Convert AmbientFacet to VEIL node format."""
-        try:
-            ambient_type = ambient_facet.properties.get("ambient_type", "unknown")
-            
-            veil_node = {
-                "veil_id": ambient_facet.facet_id,
-                "node_type": "ambient_context",
-                "properties": {
-                    "content_nature": f"ambient_{ambient_type}",
-                    "text_content": ambient_facet.properties.get("content", ""),
-                    "element_id": ambient_facet.owner_element_id,
-                    **ambient_facet.properties
-                },
-                "children": []
-            }
-            
-            return veil_node
-            
-        except Exception as e:
-            logger.error(f"Error converting AmbientFacet to VEIL node: {e}", exc_info=True)
-            return {
-                "veil_id": ambient_facet.facet_id,
-                "node_type": "ambient_context",
-                "properties": ambient_facet.properties.copy(),
-                "children": []
-            }
-    
-    def _get_target_container_content_for_exclusion(self, facet_cache: VEILFacetCache, target_container_id: str) -> List[Dict[str, Any]]:
-        """
-        Get content from target container for exclusion from compression context.
-        
-        This prevents the compression context from including the content that's about to be compressed.
-        
-        Args:
-            facet_cache: Complete VEILFacetCache
-            target_container_id: Container being compressed
-            
-        Returns:
-            List of VEIL nodes to exclude from context rendering
-        """
-        try:
-            exclude_content = []
-            
-            # Find EventFacets linked to target container
-            for facet in facet_cache.facets.values():
-                if (facet.facet_type == VEILFacetType.EVENT and 
-                    facet.links_to == target_container_id):
-                    # Convert to VEIL node for exclusion
-                    veil_node = self._convert_event_facet_to_veil_node(facet)
-                    exclude_content.append(veil_node)
-            
-            logger.debug(f"Excluding {len(exclude_content)} EventFacets from compression context for {target_container_id}")
-            return exclude_content
-            
-        except Exception as e:
-            logger.error(f"Error getting target container content for exclusion: {e}", exc_info=True)
-            return [] 

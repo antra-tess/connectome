@@ -70,7 +70,7 @@ class ScaffoldingLLMProvider(LLMProvider):
             logger.info(f"Intercepting LLM call with {len(messages)} messages")
 
             context_data = {
-                "messages": self.formatter.format_context(messages, kwargs.get('original_context_data', None)),
+                "messages": self.formatter.format_context(messages),
                 "tools": [self.formatter.format_tool(tool) for tool in (tools or [])],
                 "session_id": self.session_id,
                 "model": model or "unspecified",

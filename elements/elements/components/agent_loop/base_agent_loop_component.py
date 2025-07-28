@@ -608,9 +608,10 @@ class BaseAgentLoopComponent(Component):
         for turn_data in context_data:
             role = turn_data.get("role", "user")
             content = turn_data.get("content", "")
+            turn_metadata = turn_data.get("turn_metadata")  # Extract turn metadata if present
             
-            # Create LLM message using existing utility
-            message = create_multimodal_llm_message(role, content)
+            # Create LLM message using existing utility with metadata
+            message = create_multimodal_llm_message(role, content, turn_metadata=turn_metadata)
             messages.append(message)
             
         logger.debug(f"Built {len(messages)} messages from turn-based context")
@@ -632,10 +633,11 @@ class BaseAgentLoopComponent(Component):
         for turn_data in turn_messages:
             role = turn_data.get("role", "user")
             content = turn_data.get("content", "")
+            turn_metadata = turn_data.get("turn_metadata")  # Extract turn metadata if present
             
             # For multimodal content, we may need to handle attachments
             # The create_multimodal_llm_message should handle this
-            message = create_multimodal_llm_message(role, content)
+            message = create_multimodal_llm_message(role, content, turn_metadata=turn_metadata)
             messages.append(message)
             
         logger.debug(f"Built {len(messages)} messages from multimodal turn-based context")

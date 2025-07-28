@@ -34,12 +34,11 @@ class ScaffoldingObserver:
                         model: Optional[str] = None,
                         temperature: Optional[float] = None,
                         max_tokens: Optional[int] = None,
-                        tools: Optional[List[LLMToolDefinition]] = None,
-                        original_context: Optional[List[Any]] = None) -> None:
+                        tools: Optional[List[LLMToolDefinition]] = None) -> None:
         logger.info(f"Sending LLM request to web interface: {self.web_server_url}")
 
         context_data = {
-            "messages": self.formatter.format_context(messages, original_context),
+            "messages": self.formatter.format_context(messages),
             "tools": [self.formatter.format_tool(tool) for tool in (tools or [])],
             "session_id": self.session_id,
             "model": model or "unspecified",

@@ -45,6 +45,7 @@ class RenderingOptions:
     ambient_text_threshold: int = 500
     include_time_markers: bool = True
     include_system_messages: bool = True
+    render_agent_messages: bool = False
 
 @register_component
 class FacetAwareHUDComponent(Component):
@@ -144,23 +145,26 @@ class FacetAwareHUDComponent(Component):
             
             facet_cache = veil_producer.get_facet_cache()  # NEW: Get VEILFacetCache
             
+            # NEW: Extract current focus information at HUD level
+            focus_info = self._extract_current_focus_info(facet_cache, options)
+            
             # Get VEILFacetCompressionEngine
             compression_engine = self.get_sibling_component("VEILFacetCompressionEngine") 
             if not compression_engine:
                 logger.warning(f"[{self.owner.id}] VEILFacetCompressionEngine not available, using direct rendering")
                 return await self._process_facets_into_turns_direct(facet_cache, options, tools)
             
-            # NEW: Pass VEILFacetCache to CompressionEngine (Option A from clarification)
+            # NEW: Pass extracted focus info to CompressionEngine
             processed_facets = await compression_engine.process_facet_cache_with_compression(
                 facet_cache=facet_cache,
-                focus_context=options.get('focus_context')
+                focus_info=focus_info  # Pass structured focus info instead of focus_context
             )
             
             # NEW: Process facets into turn-based messages
             turn_based_messages = await self._process_facets_into_turns(processed_facets, options, tools)
             
             # Check for multimodal content if focus element provided
-            focus_element_id = options.get('focus_context', {}).get('focus_element_id')
+            focus_element_id = focus_info.get('focus_element_id') if focus_info else None
             if focus_element_id and self._has_multimodal_content(processed_facets, focus_element_id):
                 return {
                     "messages": turn_based_messages,
@@ -185,16 +189,10 @@ class FacetAwareHUDComponent(Component):
                                                          exclude_element_id: str,
                                                          focus_element_id: Optional[str] = None) -> str:
         """
-        NEW: Native VEILFacet compression context rendering (eliminates flat cache conversions).
+        LEGACY: Native VEILFacet compression context rendering (eliminates flat cache conversions).
         
-        This replaces the round-trip conversion pattern:
-        VEILFacetCache → flat_cache → VEILFacetCache
-        
-        MEMORIZATION RULES:
-        - Skip ambient facets (they float temporally and aren't memorizable)  
-        - Focus on element_id context if provided
-        - Exclude EventFacets from target container to avoid duplication
-        - Use temporal ordering for chronological context
+        This method is being phased out in favor of render_memorization_context_as_turns()
+        which provides turn-based consistency with normal agent interaction.
         
         Args:
             facet_cache: Native VEILFacetCache to render
@@ -228,6 +226,157 @@ class FacetAwareHUDComponent(Component):
             logger.error(f"Error in native VEILFacet memorization context: {e}", exc_info=True)
             return f"Error rendering memorization context: {e}"
 
+    async def render_memorization_context_as_turns(self, 
+                                                  facet_cache: VEILFacetCache,
+                                                  exclude_element_id: str,
+                                                  focus_element_id: Optional[str] = None,
+                                                  content_to_memorize: Optional[List] = None) -> List[Dict[str, Any]]:
+        """
+        NEW: Render memorization context using turn-based format like normal agent interaction.
+        
+        SIMPLIFIED: Just provides clean conversation turns. AgentMemoryCompressor handles memorization prompting.
+        
+        Args:
+            facet_cache: Complete VEILFacetCache for context
+            exclude_element_id: Element where memorization is happening  
+            focus_element_id: Focus element for context (defaults to exclude_element_id)
+            content_to_memorize: Specific EventFacets being memorized (metadata only)
+            
+        Returns:
+            List of clean conversation turns (no synthetic memorization request)
+        """
+        try:
+            self._rendering_stats["memory_context_renders"] += 1
+            
+            # Use focus_element_id for focused treatment, default to exclude_element_id
+            effective_focus_id = focus_element_id or exclude_element_id
+            
+            # Apply memorization exclusion rules directly to VEILFacetCache
+            filtered_facets = self._apply_memorization_exclusions_native(
+                facet_cache, exclude_element_id
+            )
+            
+            # Prepare focus info for turn processing
+            focus_info = {
+                "focus_element_id": effective_focus_id,
+                "focus_source": "memorization_context",
+                "focus_context": {
+                    "memorization_context": True,
+                    "exclude_element_id": exclude_element_id
+                }
+            }
+            
+            # Process facets into turns using existing turn-based pipeline
+            memorization_options = {
+                "exclude_ambient": True,  # Skip ambient facets for memorization
+                "focus_context": focus_info["focus_context"],
+                "render_mode": "memorization",
+                "include_time_markers": False,  # Cleaner for memorization
+                "include_system_messages": True
+            }
+            
+            # Use existing turn processing pipeline - just return clean conversation turns
+            turn_messages = await self._process_facets_into_turns(
+                filtered_facets, memorization_options, tools=None
+            )
+            
+            # Add metadata about content being memorized (for AgentMemoryCompressor)
+            if content_to_memorize and turn_messages:
+                # Add metadata to the last turn or create metadata container
+                content_summary = self._create_content_summary_for_memorization(content_to_memorize)
+                metadata = {
+                    "content_to_memorize_count": len(content_to_memorize),
+                    "content_to_memorize_summary": content_summary,
+                    "target_element_id": exclude_element_id
+                }
+                
+                # Attach to context for AgentMemoryCompressor to use
+                turn_messages.append({
+                    "role": "system", 
+                    "content": "",  # Empty content
+                    "turn_metadata": {
+                        "turn_type": "memorization_metadata",
+                        "is_internal": True,
+                        "memorization_info": metadata
+                    }
+                })
+            
+            logger.info(f"Generated clean turn-based memorization context: {len(turn_messages)} turns")
+            return turn_messages
+            
+        except Exception as e:
+            logger.error(f"Error in turn-based memorization context: {e}", exc_info=True)
+            # Fallback to empty context with error metadata
+            return [{
+                "role": "system", 
+                "content": "",
+                "turn_metadata": {
+                    "turn_type": "memorization_metadata",
+                    "is_internal": True,
+                    "error_fallback": True,
+                    "error": str(e),
+                    "target_element_id": exclude_element_id
+                }
+            }]
+
+    def _create_content_summary_for_memorization(self, content_to_memorize: Optional[List]) -> str:
+        """
+        Create a summary of the content being memorized for the synthetic turn.
+        
+        UPDATED: Now renders the actual content being memorized in full, not previews/heuristics.
+        
+        Args:
+            content_to_memorize: List of EventFacets being memorized
+            
+        Returns:
+            Full rendered content of the facets being memorized
+        """
+        try:
+            if not content_to_memorize:
+                return "recent conversation content"
+            
+            # Render the actual content being memorized in full
+            rendered_parts = []
+            
+            # Create minimal system_state and options for rendering
+            minimal_system_state = {
+                "active_channels": {},
+                "agent_name": self._agent_name,
+                "content_length_total": 0
+            }
+            
+            minimal_options = RenderingOptions(
+                exclude_ambient=True,
+                render_mode="memorization",
+                include_time_markers=False,
+                include_system_messages=False,
+                render_agent_messages=True
+            )
+            
+            for facet in content_to_memorize:
+                try:
+                    # Reuse existing rendering logic
+                    rendered_content = self._render_event_facet_with_system_context(
+                        facet, minimal_system_state, minimal_options
+                    )
+                    if rendered_content:
+                        rendered_parts.append(rendered_content)
+                except Exception as e:
+                    logger.warning(f"Error rendering facet {getattr(facet, 'facet_id', 'unknown')} for memorization: {e}")
+                    # Fallback to basic content extraction
+                    content = getattr(facet, 'content', '') or facet.get_property('content', '')
+                    if content:
+                        rendered_parts.append(content)
+            
+            if rendered_parts:
+                return "\n".join(rendered_parts)
+            else:
+                return "recent conversation content"
+                
+        except Exception as e:
+            logger.error(f"Error creating content summary: {e}", exc_info=True)
+            return "recent conversation content"
+
     def _apply_memorization_exclusions_native(self, 
                                             facet_cache: VEILFacetCache, 
                                             exclude_element_id: str) -> VEILFacetCache:
@@ -248,13 +397,12 @@ class FacetAwareHUDComponent(Component):
                 # Skip ambient facets (they float temporally and aren't memorizable)
                 if facet.facet_type == VEILFacetType.AMBIENT:
                     continue
+                
+                # FIXED: Include ALL EventFacets in context for full conversational awareness
+                # The LLM needs to see the complete conversation flow to form good memories
+                # Content duplication is acceptable for better memory formation quality
                     
-                # Skip EventFacets linked to the excluded element (the content being compressed)
-                if (facet.facet_type == VEILFacetType.EVENT and 
-                    facet.links_to == exclude_element_id):
-                    continue
-                    
-                # Include all other facets
+                # Include all other facets (EventFacets and StatusFacets)
                 filtered_cache.add_facet(facet)
                     
             logger.debug(f"Applied native memorization exclusions: {len(facet_cache)} → {len(filtered_cache)} facets")
@@ -263,6 +411,65 @@ class FacetAwareHUDComponent(Component):
         except Exception as e:
             logger.error(f"Error applying native memorization exclusions: {e}", exc_info=True)
             return facet_cache  # Return unfiltered cache on error
+
+    async def _render_temporal_facet_stream(self, 
+                                          facet_cache: VEILFacetCache, 
+                                          options: Dict[str, Any]) -> str:
+        """
+        Render temporal facet stream for memorization context.
+        
+        This method renders facets in chronological order, suitable for
+        memorization contexts where temporal consistency is important.
+        
+        Args:
+            facet_cache: VEILFacetCache to render
+            options: Rendering options dictionary
+            
+        Returns:
+            Rendered temporal stream as string
+        """
+        try:
+            # Create RenderingOptions from dict
+            render_opts = RenderingOptions(**{k: v for k, v in options.items() if hasattr(RenderingOptions, k)})
+            
+            # Get chronological temporal stream
+            temporal_stream = facet_cache.get_chronological_stream(include_ambient=not render_opts.exclude_ambient)
+            
+            if not temporal_stream:
+                return self._render_empty_context(render_opts)
+            
+            # Initialize system state for rendering
+            system_state = self._initialize_system_state(temporal_stream, options)
+            
+            # Render each facet in temporal order
+            rendered_parts = []
+            
+            for facet in temporal_stream:
+                rendered_content = ""
+                
+                if facet.facet_type == VEILFacetType.EVENT:
+                    rendered_content = self._render_event_facet_with_system_context(facet, system_state, render_opts)
+                elif facet.facet_type == VEILFacetType.STATUS:
+                    if render_opts.include_system_messages:
+                        rendered_content = self._generate_system_message_for_status(facet)
+                elif facet.facet_type == VEILFacetType.AMBIENT:
+                    if not render_opts.exclude_ambient:
+                        rendered_content = self._render_ambient_facet_individual(facet)
+                
+                if rendered_content:
+                    rendered_parts.append(rendered_content)
+            
+            # Join with appropriate separators
+            if render_opts.render_mode == "memorization":
+                # Compact format for memorization
+                return "\n".join(rendered_parts)
+            else:
+                # Regular format with more spacing
+                return "\n\n".join(rendered_parts)
+            
+        except Exception as e:
+            logger.error(f"Error rendering temporal facet stream: {e}", exc_info=True)
+            return f"Error rendering temporal stream: {e}"
 
     # --- NEW: Turn-Based Message Processing ---
     
@@ -834,7 +1041,6 @@ class FacetAwareHUDComponent(Component):
                     if msg["collected_at_turn"] < turn_index
                 ]
                 expanded_status_facets = previous_scene_messages + expanded_status_facets
-            logger.critical(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Expanded status facets: {[x.to_veil_dict() for x in expanded_status_facets]} for turn {turn_index}")
             # Extract specific facet types for consolidated rendering
             workspace_facets = [facet for facet in expanded_status_facets if facet.get_property("status_type") == "space_created"]
             chat_facets = [facet for facet in expanded_status_facets if facet.get_property("status_type") in ["container_created", "chat_joined"]]
@@ -1460,7 +1666,7 @@ class FacetAwareHUDComponent(Component):
                 # ENHANCED: Intelligent agent message rendering based on timestamp context
                 is_from_current_agent = facet.get_property("is_from_current_agent", False)
                 
-                if is_from_current_agent:
+                if is_from_current_agent and not options.render_agent_messages:
                     # Check if this agent message should be rendered or skipped
                     if not self._should_render_agent_message(facet, system_state):
                         logger.debug(f"Skipping agent message from {facet.get_property('timestamp_iso')}: tool call context available")
@@ -1506,6 +1712,10 @@ class FacetAwareHUDComponent(Component):
                 
             elif event_type == "note_created":
                 return f"<note>{content}</note>"
+                
+            elif event_type == "compressed_memory":
+                # NEW: Render compressed memory EventFacets (M-chunks)
+                return self._render_memory_event_facet(facet, system_state, options)
                                 
             else:
                 return ""
@@ -1514,6 +1724,97 @@ class FacetAwareHUDComponent(Component):
         except Exception as e:
             logger.error(f"Error rendering event facet: {e}", exc_info=True)
             return ""
+
+    def _render_memory_event_facet(self, facet: EventFacet, system_state: Dict[str, Any], options: RenderingOptions) -> str:
+        """
+        Render compressed memory EventFacets (M-chunks) with proper formatting.
+        
+        Memory EventFacets should be rendered with special formatting that:
+        - Clearly indicates this is compressed content
+        - Shows the temporal range covered
+        - Displays the memory summary
+        - Optionally shows metadata (token count, original message count)
+        
+        Args:
+            facet: The memory EventFacet to render
+            system_state: Current system state
+            options: Rendering options
+            
+        Returns:
+            Rendered memory content string
+        """
+        try:
+            # Extract memory properties
+            memory_summary = facet.get_property("content", "")
+
+            memory_content = f'<memory>\n{memory_summary}\n</memory>'
+            
+            # NEW: Add timeline divergence indicators if present
+            divergence_info = facet.get_property("timeline_divergence")
+            if divergence_info:
+                divergence_indicator = self._render_timeline_divergence_indicator(divergence_info)
+                if divergence_indicator:
+                    memory_content = divergence_indicator + "\n" + memory_content
+            
+                return memory_content
+                
+        except Exception as e:
+            logger.error(f"Error rendering memory EventFacet {facet.facet_id}: {e}", exc_info=True)
+            # Fallback rendering to ensure memory is not invisible
+            content = facet.get_property("content", "")
+            return f"<memory>[Compressed memory: {content}]</memory>"
+
+    def _render_timeline_divergence_indicator(self, divergence_info: Dict[str, Any]) -> str:
+        """
+        Render timeline divergence indicators based on divergence information.
+        
+        Creates visual indicators to help users understand when memories appear
+        out of chronological order or cause temporal conflicts.
+        
+        Args:
+            divergence_info: Timeline divergence information from memory EventFacet
+            
+        Returns:
+            Rendered divergence indicator string
+        """
+        try:
+            divergence_type = divergence_info.get("divergence_type", "unknown")
+            description = divergence_info.get("description", "Timeline irregularity detected")
+            severity = divergence_info.get("severity", "low")
+            
+            # Choose indicator style based on severity
+            if severity == "high":
+                indicator_style = "⚠️  TIMELINE DIVERGENCE"
+                wrapper = "timeline_divergence_high"
+            elif severity == "medium":
+                indicator_style = "⏰ Timeline Note"
+                wrapper = "timeline_divergence_medium"
+            else:
+                indicator_style = "ℹ️  Timeline Info"
+                wrapper = "timeline_divergence_low"
+            
+            # Create specific indicators based on divergence type
+            if divergence_type == "temporal_overlap":
+                overlapping_count = divergence_info.get("surrounding_context", {}).get("overlapping_events_count", 0)
+                detail = f"This memory covers a time period that overlaps with {overlapping_count} other visible events."
+                
+            elif divergence_type == "insertion_order":
+                detail = "This memory appears between events from different time periods due to mean timestamp positioning."
+                
+            elif divergence_type == "retroactive_insertion":
+                time_gap = divergence_info.get("time_gap_seconds", 0)
+                minutes = int(time_gap // 60)
+                detail = f"This memory covers content from {minutes} minutes before the surrounding conversation context."
+                
+            else:
+                detail = description
+            
+            # Format the complete indicator
+            return f'<{wrapper}>\n{indicator_style}: {detail}\n</{wrapper}>'
+            
+        except Exception as e:
+            logger.error(f"Error rendering timeline divergence indicator: {e}", exc_info=True)
+            return "<timeline_divergence_low>\nℹ️  Timeline Note: Memory positioning may affect chronological flow.\n</timeline_divergence_low>"
 
     def _determine_conversation_for_event(self, facet: EventFacet, system_state: Dict[str, Any]) -> str:
         """Determine conversation name for an event facet."""
@@ -2156,3 +2457,80 @@ Use the actual tool name as the XML element name. You can make multiple tool cal
             
         except Exception as e:
             logger.error(f"Error in simple retroactive deduplication: {e}", exc_info=True)
+
+    def _extract_current_focus_info(self, facet_cache: VEILFacetCache, options: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Extract current focus information from latest focus_changed StatusFacet.
+        
+        This implements the new focus flow where HUD extracts focus info and passes it
+        to CompressionEngine for decision-making.
+        
+        Args:
+            facet_cache: VEILFacetCache to examine for focus StatusFacets
+            options: Rendering options (may contain explicit focus override)
+            
+        Returns:
+            Structured focus info dict with focus_element_id, timestamp, etc.
+            None if no focus information found
+        """
+        try:
+            # Check for explicit focus override in options first
+            explicit_focus = options.get('focus_context', {}).get('focus_element_id')
+            if explicit_focus:
+                logger.debug(f"Using explicit focus override: {explicit_focus}")
+                return {
+                    "focus_element_id": explicit_focus,
+                    "focus_source": "explicit_override",
+                    "focus_timestamp": None,
+                    "focus_context": options.get('focus_context', {})
+                }
+            
+            # Find all focus_changed StatusFacets
+            focus_facets = []
+            for facet in facet_cache.facets.values():
+                if (facet.facet_type == VEILFacetType.STATUS and 
+                    facet.get_property("status_type") == "focus_changed"):
+                    focus_facets.append(facet)
+            
+            if not focus_facets:
+                logger.debug("No focus_changed StatusFacets found")
+                return None
+            
+            # Sort by timestamp to get the most recent focus change
+            focus_facets.sort(key=lambda f: f.veil_timestamp, reverse=True)
+            latest_focus_facet = focus_facets[0]
+            
+            # Extract focus information from current_state
+            current_state = latest_focus_facet.get_property("current_state", {})
+            focused_element_id = current_state.get("focused_element_id")
+            
+            if not focused_element_id:
+                logger.warning(f"Focus StatusFacet found but no focused_element_id in current_state: {current_state}")
+                return None
+            
+            # Build structured focus info
+            focus_info = {
+                "focus_element_id": focused_element_id,
+                "focus_source": "status_facet",
+                "focus_timestamp": latest_focus_facet.veil_timestamp,
+                "focus_facet_id": latest_focus_facet.facet_id,
+                "focused_element_name": current_state.get("focused_element_name", "Unknown"),
+                "previous_focus_element_id": current_state.get("previous_focus_element_id"),
+                "focus_context": current_state
+            }
+            
+            logger.debug(f"Extracted focus info: {focused_element_id} from StatusFacet {latest_focus_facet.facet_id}")
+            return focus_info
+                
+        except Exception as e:
+            logger.error(f"Error extracting current focus info: {e}", exc_info=True)
+            return None
+
+    def _is_minor_status_change(self, status_facet: StatusFacet) -> bool:
+        """Determine if this is a minor status change that shouldn't trigger ambient facets"""
+        status_type = status_facet.get_property("status_type")
+        return status_type in MINOR_STATUS_TYPES
+
+    def _is_scene_changing_status(self, status_facet: StatusFacet) -> bool:
+        """Determine if this is a major scene change that should trigger ambient facets"""
+        return not self._is_minor_status_change(status_facet)
