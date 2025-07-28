@@ -436,7 +436,7 @@ class BaseAgentLoopComponent(Component):
         """
         Emit agent response via SpaceVeilProducer for centralized, reusable VEILFacet Event creation.
         Also persists to timeline for replay capability.
-        
+
         Args:
             agent_response_text: The agent's text response from LLM
             agent_tool_calls: List of tool calls the agent made
@@ -447,10 +447,10 @@ class BaseAgentLoopComponent(Component):
             if not space_veil_producer:
                 logger.error(f"{self.agent_loop_name} ({self.id}): No SpaceVeilProducer available")
                 return
-            
+
             # Convert tool calls to serializable format
             tool_calls_data = self._convert_tool_calls_to_data(agent_tool_calls)
-            
+
             # Use centralized agent response emission
             response_id = space_veil_producer.emit_agent_response(
                 agent_response_text=agent_response_text,
@@ -459,10 +459,10 @@ class BaseAgentLoopComponent(Component):
                 parsing_mode=self._get_parsing_mode(),
                 links_to=None
             )
-            
+
             if response_id:
                 logger.debug(f"Successfully emitted agent response {response_id}")
-                
+
                 # Persist to timeline for replay
                 await self._persist_agent_response_to_timeline(
                     response_id=response_id,
@@ -471,39 +471,39 @@ class BaseAgentLoopComponent(Component):
                 )
             else:
                 logger.warning(f"Failed to emit agent response via SpaceVeilProducer")
-                
+
         except Exception as e:
             logger.error(f"Error emitting agent response: {e}", exc_info=True)
 
     def _extract_enhanced_tools_from_veil(self) -> List[Dict[str, Any]]:
         """
         NEW: Extract enhanced tool definitions from VEILFacetCache for Phase 2 integration.
-        
+
         This method gets enhanced tool metadata from StatusFacets that represent
         container creation events with available_tools metadata.
-        
+
         Returns:
             List of enhanced tool definitions with complete metadata
         """
         try:
             enhanced_tools = []
-            
+
             hud = self._get_hud()
             if not hud:
                 logger.debug(f"No HUD available for extracting enhanced tools from VEIL")
                 return []
-            
+
             # Get VEILFacetCache directly from SpaceVeilProducer via HUD
             veil_producer = hud._get_space_veil_producer()
             if not veil_producer:
                 logger.debug(f"No SpaceVeilProducer available for enhanced tool extraction")
                 return []
-                
+
             facet_cache = veil_producer.get_facet_cache()
             if not facet_cache:
                 logger.debug(f"No VEILFacetCache available for enhanced tool extraction")
                 return []
-            
+
             # Extract enhanced tools from StatusFacets representing container creation
             for facet in facet_cache.facets.values():
                 if facet.facet_type == VEILFacetType.STATUS:  # StatusFacet
@@ -514,7 +514,7 @@ class BaseAgentLoopComponent(Component):
                             # Extract element metadata from the status facet
                             element_id = current_state.get("element_id")
                             element_name = current_state.get("element_name") or current_state.get("conversation_name")
-                            
+
                             # Extract available_tools from current_state
                             available_tools = current_state.get("available_tools", [])
                             if isinstance(available_tools, list) and available_tools:
@@ -526,7 +526,7 @@ class BaseAgentLoopComponent(Component):
                                         enhanced_tool["target_element_id"] = element_id
                                         enhanced_tool["element_name"] = element_name
                                         enhanced_tools.append(enhanced_tool)
-                                        
+
                     # Also check general status facets with available_tools in properties
                     elif facet.properties:
                         properties = facet.properties
@@ -534,7 +534,7 @@ class BaseAgentLoopComponent(Component):
                             # Extract element metadata from properties
                             element_id = properties.get("element_id")
                             element_name = properties.get("element_name") or properties.get("conversation_name")
-                            
+
                             available_tools = properties.get("available_tools", [])
                             if isinstance(available_tools, list) and available_tools:
                                 for tool in available_tools:
@@ -544,9 +544,9 @@ class BaseAgentLoopComponent(Component):
                                         enhanced_tool["target_element_id"] = element_id
                                         enhanced_tool["element_name"] = element_name
                                         enhanced_tools.append(enhanced_tool)
-            
+
             logger.debug(f"Extracted {len(enhanced_tools)} enhanced tools from VEILFacetCache")
-            
+
             # Debug logging to help troubleshoot
             if not enhanced_tools:
                 logger.warning(f"No enhanced tools extracted from VEILFacetCache. Checking facet count...")
@@ -555,103 +555,103 @@ class BaseAgentLoopComponent(Component):
                 logger.warning(f"Total facets: {total_facets}, Status facets: {status_facets}")
             else:
                 logger.debug(f"Sample enhanced tool: {enhanced_tools[0] if enhanced_tools else 'none'}")
-            
+
             return enhanced_tools
-            
+
         except Exception as e:
             logger.error(f"Error extracting enhanced tools from VEILFacetCache: {e}", exc_info=True)
             return []
 
     # --- NEW: Turn-Based Message Processing Utilities ---
-    
+
     def _is_turn_based_context(self, context_data: Union[str, Dict[str, Any], List[Dict[str, Any]]]) -> bool:
         """
         Check if context data is in turn-based format.
-        
+
         Args:
             context_data: Context from HUD
-            
+
         Returns:
             True if context is turn-based message array, False otherwise
         """
         return isinstance(context_data, list) and all(
-            isinstance(item, dict) and "role" in item and "content" in item 
+            isinstance(item, dict) and "role" in item and "content" in item
             for item in context_data
         )
-    
+
     def _is_multimodal_turn_based_context(self, context_data: Union[str, Dict[str, Any], List[Dict[str, Any]]]) -> bool:
         """
         Check if context data contains multimodal turn-based content.
-        
+
         Args:
             context_data: Context from HUD
-            
+
         Returns:
             True if context contains multimodal turn-based data, False otherwise
         """
         if isinstance(context_data, dict):
             return 'messages' in context_data and 'multimodal_content' in context_data
         return False
-    
+
     def _build_messages_from_turn_based_context(self, context_data: List[Dict[str, Any]]) -> List[LLMMessage]:
         """
         Convert turn-based context to LLM messages.
-        
+
         Args:
             context_data: Turn-based message array from HUD
-            
+
         Returns:
             List of LLMMessage objects for LLM provider
         """
         messages = []
-        
+
         for turn_data in context_data:
             role = turn_data.get("role", "user")
             content = turn_data.get("content", "")
             turn_metadata = turn_data.get("turn_metadata")  # Extract turn metadata if present
-            
+
             # Create LLM message using existing utility with metadata
             message = create_multimodal_llm_message(role, content, turn_metadata=turn_metadata)
             messages.append(message)
-            
+
         logger.debug(f"Built {len(messages)} messages from turn-based context")
         return messages
-    
+
     def _build_messages_from_multimodal_turn_based_context(self, context_data: Dict[str, Any]) -> List[LLMMessage]:
         """
         Convert multimodal context with turn-based messages to LLM messages.
-        
+
         Args:
             context_data: Multimodal context dict with 'messages' array
-            
+
         Returns:
             List of LLMMessage objects for LLM provider
         """
         turn_messages = context_data.get("messages", [])
         messages = []
-        
+
         for turn_data in turn_messages:
             role = turn_data.get("role", "user")
             content = turn_data.get("content", "")
             turn_metadata = turn_data.get("turn_metadata")  # Extract turn metadata if present
-            
+
             # For multimodal content, we may need to handle attachments
             # The create_multimodal_llm_message should handle this
             message = create_multimodal_llm_message(role, content, turn_metadata=turn_metadata)
             messages.append(message)
-            
+
         logger.debug(f"Built {len(messages)} messages from multimodal turn-based context")
         return messages
-    
+
     def _process_context_to_messages(self, context_data: Union[str, Dict[str, Any], List[Dict[str, Any]]]) -> List[LLMMessage]:
         """
         Universal context processor that handles all context formats.
-        
+
         This method processes the new turn-based format from HUD and converts it to LLM messages.
-        
+
         Args:
             context_data: Context from HUD in turn-based format
-            
+
         Returns:
             List of LLMMessage objects for LLM provider
         """
@@ -659,20 +659,20 @@ class BaseAgentLoopComponent(Component):
             if self._is_turn_based_context(context_data):
                 # New turn-based format from HUD
                 return self._build_messages_from_turn_based_context(context_data)
-            
+
             elif self._is_multimodal_turn_based_context(context_data):
                 # Multimodal format with turn-based messages
                 return self._build_messages_from_multimodal_turn_based_context(context_data)
-                
+
         except Exception as e:
             logger.error(f"Error processing context to messages: {e}", exc_info=True)
             # Fallback: treat as legacy
             return self._build_messages_from_legacy_context(context_data)
-    
+
     def _log_context_format(self, context_data: Union[str, Dict[str, Any], List[Dict[str, Any]]]) -> None:
         """
         Log detailed information about the context format received.
-        
+
         Args:
             context_data: Context from HUD
         """
@@ -680,19 +680,19 @@ class BaseAgentLoopComponent(Component):
             turn_count = len(context_data)
             turn_roles = [turn.get("role", "unknown") for turn in context_data]
             logger.info(f"Received turn-based context: {turn_count} turns with roles {turn_roles}")
-            
+
             # Log turn metadata if available
             for i, turn in enumerate(context_data):
                 metadata = turn.get("turn_metadata", {})
                 if metadata:
                     logger.debug(f"Turn {i}: {metadata}")
-            
+
         elif self._is_multimodal_turn_based_context(context_data):
             turn_count = len(context_data.get("messages", []))
             multimodal_info = context_data.get("multimodal_content", {})
             attachment_count = multimodal_info.get("attachment_count", 0)
             logger.info(f"Received multimodal turn-based context: {turn_count} turns, {attachment_count} attachments")
-            
+
         else:
             # Legacy format (should be rare with new HUD)
             if isinstance(context_data, dict) and 'attachments' in context_data:
@@ -708,7 +708,7 @@ class BaseAgentLoopComponent(Component):
         """
         Smart fallback: if agent has text but no tool calls, try to send it to the activating chat.
 
-        This keeps conversations flowing when the agent forgets to use the send_message tool.
+        This keeps conversations flowing when the agent forgets to use the msg tool.
 
         Args:
             agent_text: The agent's text response
@@ -745,53 +745,53 @@ class BaseAgentLoopComponent(Component):
                 logger.debug(f"Smart chat fallback: No target element identified")
                 return False
 
-            # Check if target element exists and has send_message tool
+            # Check if target element exists and has msg tool
             target_element = self.parent_inner_space.get_element_by_id(target_element_id)
             if not target_element:
                 logger.debug(f"Smart chat fallback: Target element {target_element_id} not found")
                 return False
 
-            # Look for send_message tool on the target element
+            # Look for msg tool on the target element
             tool_provider = target_element.get_component_by_type(ToolProviderComponent)
             if not tool_provider:
                 logger.debug(f"Smart chat fallback: No ToolProvider on element {target_element_id}")
                 return False
 
             available_tools = tool_provider.list_tools()
-            send_message_tool = None
+            msg_tool = None
 
             # Look for variations of send message tool
             for tool_name in available_tools:
-                if tool_name.lower() in ['send_message', 'send_msg', 'reply', 'send', 'message']:
-                    send_message_tool = tool_name
+                if tool_name.lower() in ['send_message', 'send_msg', 'reply', 'send', 'message', 'msg']:
+                    msg_tool = tool_name
                     break
 
-            if not send_message_tool:
-                logger.debug(f"Smart chat fallback: No send_message tool found on element {target_element_id}. Available: {available_tools}")
+            if not msg_tool:
+                logger.debug(f"Smart chat fallback: No msg tool found on element {target_element_id}. Available: {available_tools}")
                 return False
 
-            # Execute the send_message tool with agent's text
-            logger.info(f"Smart chat fallback: Sending agent response via {send_message_tool} to {target_element_id}")
+            # Execute the msg tool with agent's text
+            logger.info(f"Smart chat fallback: Sending agent response via {msg_tool} to {target_element_id}")
 
             calling_context = {"loop_component_id": self.id, "fallback_send": True}
             tool_result = await self.parent_inner_space.execute_action_on_element(
                 element_id=target_element_id,
-                action_name=send_message_tool,
-                parameters={"text": agent_text},
+                action_name=msg_tool,
+                parameters={"inner_content": agent_text},
                 calling_context=calling_context
             )
 
-            logger.info(f"Smart chat fallback: Successfully sent message to {target_element_id} via {send_message_tool}")
+            logger.info(f"Smart chat fallback: Successfully sent message to {target_element_id} via {msg_tool}")
             return True
 
         except Exception as e:
             logger.warning(f"Smart chat fallback failed: {e}", exc_info=True)
-            return False 
+            return False
 
     def _get_space_veil_producer(self):
         """
         Get the SpaceVeilProducer from the parent InnerSpace.
-        
+
         Returns:
             SpaceVeilProducer instance or None if not available
         """
@@ -800,7 +800,7 @@ class BaseAgentLoopComponent(Component):
             logger.error(f"{self.agent_loop_name} ({self.id}): No SpaceVeilProducer available for agent response emission")
             return None
         return producer
-    
+
     def _get_parsing_mode(self) -> str:
         """Get parsing mode for this loop type. Override in subclasses if needed."""
         # Default implementation based on class type
@@ -810,11 +810,11 @@ class BaseAgentLoopComponent(Component):
             return "tool_call"
         else:
             return "unknown"
-    
+
     def _convert_tool_calls_to_data(self, agent_tool_calls: List) -> List[Dict[str, Any]]:
         """Convert tool calls to serializable format. Override if needed."""
         tool_calls_data = []
-        
+
         for tool_call in agent_tool_calls:
             if hasattr(tool_call, '__dict__'):  # ParsedToolCall objects
                 tool_call_dict = {
@@ -834,19 +834,19 @@ class BaseAgentLoopComponent(Component):
                     "parameters": getattr(tool_call, 'parameters', {})
                 }
                 tool_calls_data.append(tool_call_dict)
-        
+
         return tool_calls_data
-    
+
     async def _persist_agent_response_to_timeline(
-        self, 
+        self,
         response_id: str,
-        agent_response_text: str, 
+        agent_response_text: str,
         tool_calls_data: List[Dict[str, Any]]
     ) -> None:
         """Persist agent response to timeline for replay capability."""
         try:
             import time
-            
+
             # Create timeline event
             agent_response_event = {
                 "event_type": "agent_response_generated",
@@ -863,18 +863,18 @@ class BaseAgentLoopComponent(Component):
                     "agent_name": getattr(self.parent_inner_space, 'agent_name', 'Unknown Agent')
                 }
             }
-            
+
             # Add to timeline
             timeline_context = {"timeline_id": self.parent_inner_space.get_primary_timeline()}
             event_id = self.parent_inner_space.add_event_to_timeline(
-                agent_response_event, 
+                agent_response_event,
                 timeline_context
             )
-            
+
             if event_id:
                 logger.debug(f"Persisted agent response to timeline: {event_id}")
             else:
                 logger.warning(f"Failed to persist agent response to timeline")
-                
+
         except Exception as e:
             logger.error(f"Error persisting agent response to timeline: {e}", exc_info=True)
