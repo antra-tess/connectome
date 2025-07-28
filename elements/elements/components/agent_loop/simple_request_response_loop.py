@@ -96,8 +96,9 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
 
             # Get aggregated tools and send to LLM
             aggregated_tools = await self.aggregate_tools()
-            # Pass original context data for scaffolding provider to preserve turn metadata
-            llm_response_obj = llm_provider.complete(messages=messages, tools=aggregated_tools, original_context_data=context_data)
+            # 3. Send rendered context + tools to LLM
+            # Metadata now travels with LLMMessage objects, no need for original_context_data
+            llm_response_obj = llm_provider.complete(messages=messages, tools=aggregated_tools)
 
             if not llm_response_obj:
                 logger.warning(f"{self.agent_loop_name} ({self.id}): LLM returned no response. Aborting cycle.")

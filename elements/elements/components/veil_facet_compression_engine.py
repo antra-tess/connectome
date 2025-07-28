@@ -528,11 +528,8 @@ class VEILFacetCompressionEngine(Component):
         Returns:
             List of N-chunk structures with enhanced metadata and consistent boundaries
         """
-        logger.critical(f"🔥 REBUILDING CHUNKS FROM SCRATCH - this will lose has_memory_chunk flags! ({len(event_facets)} facets)")
-        logger.critical(f"🔥 STACK TRACE: This rebuild was called - all compression state will be LOST!")
         try:
             if not event_facets:
-                logger.critical(f"🔥 No facets to rebuild, returning empty chunks")
                 return []
             
             chunks = []
@@ -1080,7 +1077,6 @@ class VEILFacetCompressionEngine(Component):
                 
                 # CRITICAL FIX: Never add to chunks that have been compressed
                 if current_chunk.get("has_memory_chunk", False):
-                    logger.critical(f"Latest chunk {current_chunk['chunk_index']} has been compressed, creating new chunk")
                     current_chunk = {
                         "chunk_type": "n_chunk",
                         "event_facets": [],
@@ -1091,7 +1087,6 @@ class VEILFacetCompressionEngine(Component):
                         "has_memory_chunk": False
                     }
                     n_chunks.append(current_chunk)
-                    logger.critical(f"Created new N-chunk {current_chunk['chunk_index']} (previous was compressed)")
                 else:
                     logger.debug(f"Using existing latest chunk {current_chunk['chunk_index']} for new facets")
             
@@ -1101,12 +1096,9 @@ class VEILFacetCompressionEngine(Component):
                 current_tokens = current_chunk.get("token_count", 0)
                 
                 content_preview = facet.get_property("content", "")[:30] + "..." if len(facet.get_property("content", "")) > 30 else facet.get_property("content", "")
-                logger.critical(f"PROCESSING FACET {facet.facet_id}: {facet_tokens} tokens - '{content_preview}'")
-                logger.critical(f"  Current chunk {current_chunk['chunk_index']}: {current_tokens} tokens, {len(current_chunk.get('event_facets', []))} facets")
                 
                 # CRITICAL FIX: Never add to compressed chunks
                 if current_chunk.get("has_memory_chunk", False):
-                    logger.critical(f"  Current chunk {current_chunk['chunk_index']} is compressed, creating new chunk for facet")
                     new_chunk = {
                         "chunk_type": "n_chunk",
                         "event_facets": [facet],
@@ -1118,7 +1110,6 @@ class VEILFacetCompressionEngine(Component):
                     }
                     n_chunks.append(new_chunk)
                     current_chunk = new_chunk
-                    logger.critical(f"  CREATED NEW CHUNK {current_chunk['chunk_index']} (previous was compressed)")
                 
                 # FIXED: Don't add to chunks that are ALREADY over the limit  
                 # But allow overflow if chunk is currently under the limit
@@ -1136,21 +1127,12 @@ class VEILFacetCompressionEngine(Component):
                     n_chunks.append(new_chunk)
                     current_chunk = new_chunk
                     
-                    logger.critical(f"  CREATED NEW CHUNK {current_chunk['chunk_index']} (old was full at {current_tokens} tokens)")
-                    logger.critical(f"  New chunk now has: {facet_tokens} tokens, 1 facet")
                 else:
                     # Add to current chunk (allow overflow - compression will handle it)
                     current_chunk["event_facets"].append(facet)
                     current_chunk["token_count"] = current_tokens + facet_tokens
                     
-                    new_total = current_tokens + facet_tokens
-                    logger.critical(f"  ADDED TO EXISTING CHUNK {current_chunk['chunk_index']}: {current_tokens} + {facet_tokens} = {new_total} tokens")
-                    
-                    if new_total >= self.COMPRESSION_CHUNK_SIZE:
-                        logger.critical(f"  CHUNK {current_chunk['chunk_index']} NOW READY FOR COMPRESSION ({new_total} >= {self.COMPRESSION_CHUNK_SIZE})")
-                    else:
-                        logger.debug(f"Added facet to N-chunk {current_chunk['chunk_index']} for {container_id} - now {new_total} tokens")
-            
+                    new_total = current_tokens + facet_tokens            
             # Update chunk structure
             chunk_structure["n_chunks"] = n_chunks
             
@@ -1160,12 +1142,10 @@ class VEILFacetCompressionEngine(Component):
             logger.debug(f"Incremental chunking complete for {container_id}: {total_chunks} N-chunks, latest chunk has {last_chunk_tokens} tokens")
             
             # DEBUGGING: Show final chunk structure
-            logger.critical(f"FINAL CHUNK STRUCTURE for {container_id}:")
             for i, chunk in enumerate(n_chunks):
                 tokens = chunk.get("token_count", 0)
                 facet_count = len(chunk.get("event_facets", []))
                 has_memory = chunk.get("has_memory_chunk", False)
-                logger.critical(f"  Chunk {i}: {tokens} tokens, {facet_count} facets, has_memory={has_memory}")
             
         except Exception as e:
             logger.error(f"Error adding facets to N-stream incrementally: {e}", exc_info=True)
@@ -1203,10 +1183,8 @@ class VEILFacetCompressionEngine(Component):
             new_facets = [facet for facet in current_facets if facet.facet_id not in existing_facet_ids]
             
             if new_facets:
-                logger.critical(f"DETECTED {len(new_facets)} new EventFacets out of {len(current_facets)} total")
                 for facet in new_facets:
                     content_preview = facet.get_property("content", "")[:50] + "..." if len(facet.get_property("content", "")) > 50 else facet.get_property("content", "")
-                    logger.critical(f"  NEW FACET: {facet.facet_id} - {content_preview}")
             else:
                 logger.debug(f"No new EventFacets detected (checked {len(current_facets)} facets against {len(existing_facet_ids)} existing)")
             
@@ -1582,17 +1560,11 @@ class VEILFacetCompressionEngine(Component):
                     event_facets = n_chunk.get("event_facets", [])
                     has_memory = n_chunk.get("has_memory_chunk", False)
                     
-                    logger.critical(f"BOUNDARY PROCESSING - Chunk {chunk_index}: {chunk_tokens} tokens, {len(event_facets)} facets, has_memory={has_memory}")
-                    
                     # Skip chunks that are already compressed (have corresponding M-chunk)
                     if has_memory:
-                        logger.critical(f"  SKIPPING chunk {chunk_index} - already has M-chunk")
                         continue
                     
-                    logger.critical(f"Chunk {chunk_index} in {container_id} has {chunk_tokens} tokens")
-                    
                     if chunk_tokens >= self.COMPRESSION_CHUNK_SIZE and event_facets:
-                        logger.critical(f"  COMPRESSING chunk {chunk_index} ({chunk_tokens} tokens >= {self.COMPRESSION_CHUNK_SIZE})")
                         
                         # Create memory EventFacet from this specific N-chunk
                         memory_facet = await self._create_memory_event_facet_from_chunk(
@@ -1620,8 +1592,6 @@ class VEILFacetCompressionEngine(Component):
                             
                             # Mark N-chunk as having a corresponding M-chunk
                             n_chunk["has_memory_chunk"] = True
-                            logger.critical(f"🔥 SETTING has_memory_chunk=True for chunk {chunk_index} in {container_id}")
-                            logger.critical(f"🔥 Chunk {chunk_index} is now COMPRESSED and should be read-only!")
                             n_chunk["memory_chunk_index"] = m_chunk["chunk_index"]
                             
                             # Track replaced EventFacet IDs
@@ -1629,11 +1599,10 @@ class VEILFacetCompressionEngine(Component):
                             memory_facet.properties["replaced_facet_ids"] = replaced_facet_ids
                             
                             chunks_compressed += 1
-                            logger.critical(f"  SUCCESS: Created M-chunk for N-chunk {chunk_index}: {memory_facet.facet_id}")
                         else:
-                            logger.critical(f"  FAILED: Could not create memory for chunk {chunk_index}")
+                            logger.warning(f"Could not create memory for chunk {chunk_index}")
                     else:
-                        logger.critical(f"  NOT COMPRESSING chunk {chunk_index}: {chunk_tokens} tokens < {self.COMPRESSION_CHUNK_SIZE} or no facets ({len(event_facets)})")
+                        logger.debug(f"Not compressing chunk {chunk_index}: {chunk_tokens} tokens < {self.COMPRESSION_CHUNK_SIZE} or no facets ({len(event_facets)})")
                 
                 except Exception as e:
                     logger.error(f"Error processing chunk {chunk_index} in {container_id}: {e}", exc_info=True)
@@ -1909,7 +1878,7 @@ class VEILFacetCompressionEngine(Component):
                 facet for facet in temporal_stream
                 if (facet.facet_type == VEILFacetType.EVENT and 
                     facet.facet_id not in compressed_facet_ids and
-                    facet.event_type not in ["agent_response", "compressed_memory"])
+                    facet.properties.get("event_type") not in ["agent_response", "compressed_memory"])
             ]
             
             if len(event_stream) < 2:

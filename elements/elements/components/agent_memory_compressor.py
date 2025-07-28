@@ -81,7 +81,6 @@ class AgentMemoryCompressor(MemoryCompressor):
         
         # Ensure storage directory exists
         os.makedirs(agent_storage_path, exist_ok=True)
-        logger.critical(f"AgentMemoryCompressor for agent '{agent_id}' using storage path: {agent_storage_path}")
         
         # NEW: Pure async infrastructure
         self._memory_formation_queue: asyncio.Queue = asyncio.Queue(maxsize=10)
@@ -193,7 +192,6 @@ class AgentMemoryCompressor(MemoryCompressor):
         try:
             memory_file = Path(self.storage_path) / f"{memory_id}.json"
             file_exists = memory_file.exists()
-            logger.critical(f"Agent {self.agent_id}: Checking memory file {memory_file} -> exists={file_exists}")
             return file_exists
         except Exception as e:
             logger.warning(f"Agent {self.agent_id}: Error checking memory file {memory_id}: {e}")
@@ -808,12 +806,10 @@ class AgentMemoryCompressor(MemoryCompressor):
         """
         NEW: Agent reflection using turn-based messages identical to normal agent interaction.
         
-        The agent sees the conversation as it normally would, with proper turn alternation,
-        then receives a memorization request as the final user turn. This creates consistency
-        between normal interaction and memorization contexts.
+        SIMPLIFIED: HUD provides clean conversation turns, we add memorization prompting directly.
         
         Args:
-            turn_messages: List of turn-based messages (same format as normal agent context)
+            turn_messages: List of clean conversation turns from HUD
             element_ids: List of element IDs for context
             compression_context: Compression context information
             
@@ -821,109 +817,66 @@ class AgentMemoryCompressor(MemoryCompressor):
             Agent's memory summary based on conversation context
         """
         try:
+            # Extract memorization metadata from turns (HUD provides this)
+            memorization_info = self._extract_memorization_metadata(turn_messages)
+            content_summary = memorization_info.get("content_to_memorize_summary", "recent conversation content")
+            
             # Prepare context information
             element_context = ", ".join(element_ids) if len(element_ids) > 1 else element_ids[0]
             compression_reason = compression_context.get("compression_reason", "memory management") if compression_context else "memory management"
             
-            # Focus context if available
-            focus_info = ""
-            if compression_context and compression_context.get("focus_element_id"):
-                focus_info = f"\nNote: You were focusing on {compression_context['focus_element_id']} during this interaction."
+            # Check for multimodal content in conversation turns
+            conversation_turns = [turn for turn in turn_messages if turn.get("turn_metadata", {}).get("turn_type") != "memorization_metadata"]
+            has_multimodal = self._detect_multimodal_in_turns(conversation_turns)
             
-            # Extract existing memory context for continuity (if available)
-            existing_memories = compression_context.get("existing_memory_context", []) if compression_context else []
-            memory_context_section = ""
+            # Create memorization prompt (moved from HUD to here)
+            memorization_request = self._create_memorization_prompt(content_summary, element_context)
             
-            if existing_memories:
-                memory_context_section = f"""
-EXISTING MEMORIES FOR CONTEXT:
-Here are your previous memories about this conversation/element to help you understand the ongoing context:
-{chr(10).join([f"- {memory}" for memory in existing_memories])}
-
-"""
-                logger.debug(f"Agent {self.agent_id} reflecting with {len(existing_memories)} existing memory context")
-
-            # Get full VEIL context from compression context (if available)
-            veil_context_section = ""
-            full_veil_context = compression_context.get("full_veil_context") if compression_context else None
-            
-            if full_veil_context:
-                veil_context_section = f"""
-FULL CONTEXT FOR MEMORIZATION:
-Here's your complete context to understand what's happening around this conversation:
-<veil>
-{full_veil_context}
-</veil>
-
-"""
-                logger.debug(f"Agent {self.agent_id} reflecting with full VEIL context ({len(full_veil_context)} chars)")
-
-            # Check for multimodal content in turn messages
-            has_multimodal = self._detect_multimodal_in_turns(turn_messages)
-            
-            # Create turn-based reflection prompt
-            reflection_prompt = f"""You are an AI agent reflecting on a conversation. You will see the same conversation format you normally experience during interaction.
-
-{memory_context_section}{veil_context_section}CONVERSATION CONTEXT:
-- This experience occurred in: {element_context}
-- Compression reason: {compression_reason}{focus_info}
-
-The conversation below shows the same turn-based format you normally see. The final message is a user request asking you to create a memory summary of specific content from this conversation.
-
-Please respond naturally to this memorization request, creating a comprehensive memory from your perspective as an AI agent."""
-
-            # Convert turn messages to LLM format
+            # Build conversation for LLM
             from llm.provider_interface import LLMMessage
             
-            # Create conversation messages
             conversation_messages = []
             
-            # Add system prompt
-            conversation_messages.append(LLMMessage("system", reflection_prompt))
-            
-            # Add turn messages as conversation history
-            for turn in turn_messages:
+            # Add conversation turns (skip internal metadata turns)
+            for turn in conversation_turns:
                 role = turn.get("role", "user")
                 content = turn.get("content", "")
+                turn_metadata = turn.get("turn_metadata")  # Extract turn metadata if present
                 
                 # Handle multimodal content if present  
                 if "attachments" in turn and turn["attachments"]:
-                    # Create multimodal message
                     conversation_messages.append(LLMMessage(role, {
                         "text": content,
                         "attachments": turn["attachments"]
-                    }))
+                    }, turn_metadata=turn_metadata))
                 else:
-                    # Text-only message
-                    conversation_messages.append(LLMMessage(role, content))
+                    conversation_messages.append(LLMMessage(role, content, turn_metadata=turn_metadata))
             
-            # Make LLM call with conversation format
-            context_info = f"turn-based conversation with {len(turn_messages)} turns"
+            # Add memorization request as final user message
+            conversation_messages.append(LLMMessage("user", memorization_request))
+            
+            # Call LLM with full conversation
+            context_info = f"turn-based conversation with {len(conversation_turns)} turns + memorization"
             if has_multimodal:
                 context_info += " (multimodal)"
             
             logger.info(f"Agent {self.agent_id} reflecting on {context_info}")
             
-            # Get agent's reflection via LLM with retry mechanism
-            # Use the last message (which should be the memorization request)
-            final_message = conversation_messages[-1] if conversation_messages else LLMMessage("user", "Please create a memory summary.")
+            if not conversation_messages:
+                logger.warning(f"No conversation messages built for agent {self.agent_id}")
+                return await self._create_fallback_summary_from_turns(turn_messages, element_ids)
             
-            llm_response = await self._call_llm_with_retry(final_message, context_info)
+            # Call LLM with full conversation history
+            llm_response = await self._call_llm_with_conversation_history(conversation_messages, context_info)
             
             if llm_response and llm_response.content:
                 agent_summary = llm_response.content.strip()
                 
-                # Log enhanced memory formation
-                context_enhancement = ""
-                if veil_context_section:
-                    context_enhancement = " (enhanced with full VEIL context)"
-                if existing_memories:
-                    context_enhancement += f" with {len(existing_memories)} memory context"
-                
+                # Log memory formation
                 if has_multimodal:
-                    logger.info(f"Agent {self.agent_id} created turn-based multimodal memory{context_enhancement}: {agent_summary[:100]}...")
+                    logger.info(f"Agent {self.agent_id} created turn-based multimodal memory: {agent_summary[:100]}...")
                 else:
-                    logger.debug(f"Agent {self.agent_id} reflected with turn-based format{context_enhancement}: {agent_summary[:100]}...")
+                    logger.debug(f"Agent {self.agent_id} reflected with turn-based format: {agent_summary[:100]}...")
                 
                 return agent_summary
             else:
@@ -933,6 +886,106 @@ Please respond naturally to this memorization request, creating a comprehensive 
         except Exception as e:
             logger.error(f"Error during turn-based agent reflection: {e}", exc_info=True)
             return await self._create_fallback_summary_from_turns(turn_messages, element_ids)
+
+    def _extract_memorization_metadata(self, turn_messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Extract memorization metadata from turn messages provided by HUD.
+        
+        Args:
+            turn_messages: List of turn messages from HUD
+            
+        Returns:
+            Dictionary with memorization metadata
+        """
+        try:
+            # Look for memorization metadata in turn messages
+            for turn in reversed(turn_messages):  # Check from the end
+                turn_metadata = turn.get("turn_metadata", {})
+                if turn_metadata.get("turn_type") == "memorization_metadata":
+                    memorization_info = turn_metadata.get("memorization_info", {})
+                    logger.debug(f"Found memorization metadata: {memorization_info}")
+                    return memorization_info
+            
+            logger.warning("No memorization metadata found in turn messages")
+            return {}
+            
+        except Exception as e:
+            logger.error(f"Error extracting memorization metadata: {e}", exc_info=True)
+            return {}
+
+    def _create_memorization_prompt(self, content_summary: str, element_context: str) -> str:
+        """
+        Create memorization prompt for the agent (moved from HUD).
+        
+        Args:
+            content_summary: Summary of content being memorized
+            element_context: Context about where memorization is happening
+            
+        Returns:
+            Memorization prompt string
+        """
+        try:
+            return f"""Please create a memory summary of the following content from our conversation:
+
+{content_summary}
+
+Focus on:
+- Key topics and decisions discussed
+- Important context for future reference  
+- Your role and contributions to the discussion
+- Outcomes, conclusions, and next steps
+- Any important details that should be remembered
+
+Create a concise but comprehensive memory from your perspective as an AI agent. This memory will help you understand the context when we continue our conversation later."""
+            
+        except Exception as e:
+            logger.error(f"Error creating memorization prompt: {e}", exc_info=True)
+            return f"Please create a memory summary of the recent conversation content from {element_context}."
+
+    async def _call_llm_with_conversation_history(self, conversation_messages: List, context_info: str):
+        """
+        Call LLM with full conversation history for turn-based memorization.
+        
+        This method handles the full conversation context, allowing the agent to respond
+        naturally to the memorization request while having access to the complete conversation.
+        
+        Args:
+            conversation_messages: List of LLMMessage objects representing the full conversation
+            context_info: Context information for logging
+            
+        Returns:
+            LLM response with agent's memory summary
+        """
+        try:
+            if not self.llm_provider:
+                logger.warning(f"No LLM provider available for conversation history call")
+                return None
+            
+            if not conversation_messages:
+                logger.warning(f"No valid messages for LLM conversation history")
+                return None
+            
+            # Call LLM with conversation history directly (no conversion needed!)
+            logger.debug(f"Calling LLM with {len(conversation_messages)} conversation messages for {context_info}")
+            
+            # LLM provider expects List[LLMMessage] directly
+            response = self.llm_provider.complete(conversation_messages)
+            
+            if response and hasattr(response, 'content'):
+                logger.debug(f"LLM conversation response received: {len(response.content)} chars")
+                return response
+            else:
+                logger.warning(f"LLM conversation call returned no valid response")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error in LLM conversation history call: {e}", exc_info=True)
+            # Fallback to single message retry with the last message
+            if conversation_messages:
+                final_message = conversation_messages[-1]
+                logger.info(f"Falling back to single message retry for {context_info}")
+                return await self._call_llm_with_retry(final_message, f"{context_info} (fallback)")
+            return None
 
     async def _agent_reflect_on_experience_with_text(self,
                                                    text_content: str,
@@ -1271,8 +1324,6 @@ MEMORY SUMMARY:"""
             hash_object = hashlib.md5(content_string.encode('utf-8'))
             memory_id = f"mem_{hash_object.hexdigest()[:12]}"
             
-            logger.critical(f"🔍 MEMORY ID GENERATION: Agent {self.agent_id} generated memory_id '{memory_id}' for elements {sorted_elements}")
-            logger.critical(f"🔍 CONTENT STRING: '{content_string}' → hash: {hash_object.hexdigest()}")
             return memory_id
             
         except Exception as e:

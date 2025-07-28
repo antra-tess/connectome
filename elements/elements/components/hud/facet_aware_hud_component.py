@@ -45,6 +45,7 @@ class RenderingOptions:
     ambient_text_threshold: int = 500
     include_time_markers: bool = True
     include_system_messages: bool = True
+    render_agent_messages: bool = False
 
 @register_component
 class FacetAwareHUDComponent(Component):
@@ -233,18 +234,16 @@ class FacetAwareHUDComponent(Component):
         """
         NEW: Render memorization context using turn-based format like normal agent interaction.
         
-        This creates the same turn-based representation the agent normally sees, 
-        plus a final synthetic user turn requesting memorization. This ensures
-        consistency between normal interaction and memorization contexts.
+        SIMPLIFIED: Just provides clean conversation turns. AgentMemoryCompressor handles memorization prompting.
         
         Args:
             facet_cache: Complete VEILFacetCache for context
             exclude_element_id: Element where memorization is happening  
             focus_element_id: Focus element for context (defaults to exclude_element_id)
-            content_to_memorize: Specific EventFacets being memorized (for synthetic turn)
+            content_to_memorize: Specific EventFacets being memorized (metadata only)
             
         Returns:
-            List of turn-based messages ending with memorization request
+            List of clean conversation turns (no synthetic memorization request)
         """
         try:
             self._rendering_stats["memory_context_renders"] += 1
@@ -276,35 +275,47 @@ class FacetAwareHUDComponent(Component):
                 "include_system_messages": True
             }
             
-            # Use existing turn processing pipeline
-            base_turn_messages = await self._process_facets_into_turns(
+            # Use existing turn processing pipeline - just return clean conversation turns
+            turn_messages = await self._process_facets_into_turns(
                 filtered_facets, memorization_options, tools=None
             )
             
-            # Create synthetic memorization request as final user turn
-            content_summary = self._create_content_summary_for_memorization(content_to_memorize)
-            memorization_request_turn = self._create_memorization_request_turn(
-                content_summary, content_to_memorize, exclude_element_id
-            )
+            # Add metadata about content being memorized (for AgentMemoryCompressor)
+            if content_to_memorize and turn_messages:
+                # Add metadata to the last turn or create metadata container
+                content_summary = self._create_content_summary_for_memorization(content_to_memorize)
+                metadata = {
+                    "content_to_memorize_count": len(content_to_memorize),
+                    "content_to_memorize_summary": content_summary,
+                    "target_element_id": exclude_element_id
+                }
+                
+                # Attach to context for AgentMemoryCompressor to use
+                turn_messages.append({
+                    "role": "system", 
+                    "content": "",  # Empty content
+                    "turn_metadata": {
+                        "turn_type": "memorization_metadata",
+                        "is_internal": True,
+                        "memorization_info": metadata
+                    }
+                })
             
-            # Combine base turns with memorization request
-            turn_messages = base_turn_messages + [memorization_request_turn]
-            
-            logger.info(f"Generated turn-based memorization context: {len(turn_messages)} turns "
-                       f"({len(base_turn_messages)} conversation + 1 memorization request)")
+            logger.info(f"Generated clean turn-based memorization context: {len(turn_messages)} turns")
             return turn_messages
             
         except Exception as e:
             logger.error(f"Error in turn-based memorization context: {e}", exc_info=True)
-            # Fallback to basic memorization request
+            # Fallback to empty context with error metadata
             return [{
-                "role": "user", 
-                "content": f"Please create a memory summary of recent content from {exclude_element_id}.",
+                "role": "system", 
+                "content": "",
                 "turn_metadata": {
-                    "turn_type": "memorization_request",
-                    "is_synthetic": True,
+                    "turn_type": "memorization_metadata",
+                    "is_internal": True,
                     "error_fallback": True,
-                    "error": str(e)
+                    "error": str(e),
+                    "target_element_id": exclude_element_id
                 }
             }]
 
@@ -312,114 +323,59 @@ class FacetAwareHUDComponent(Component):
         """
         Create a summary of the content being memorized for the synthetic turn.
         
+        UPDATED: Now renders the actual content being memorized in full, not previews/heuristics.
+        
         Args:
             content_to_memorize: List of EventFacets being memorized
             
         Returns:
-            Human-readable summary of the content
+            Full rendered content of the facets being memorized
         """
         try:
             if not content_to_memorize:
                 return "recent conversation content"
             
-            # Count different types of content
-            message_count = 0
-            agent_responses = 0
-            content_samples = []
+            # Render the actual content being memorized in full
+            rendered_parts = []
+            
+            # Create minimal system_state and options for rendering
+            minimal_system_state = {
+                "active_channels": {},
+                "agent_name": self._agent_name,
+                "content_length_total": 0
+            }
+            
+            minimal_options = RenderingOptions(
+                exclude_ambient=True,
+                render_mode="memorization",
+                include_time_markers=False,
+                include_system_messages=False,
+                render_agent_messages=True
+            )
             
             for facet in content_to_memorize:
-                event_type = getattr(facet, 'event_type', '') or facet.get_property('event_type', '')
-                content = getattr(facet, 'content', '') or facet.get_property('content', '')
-                
-                if event_type == "message_added":
-                    message_count += 1
-                    sender = facet.get_property("sender_name", "Unknown")
-                    # Add sample content (first 50 chars)
-                    if len(content_samples) < 3:
-                        preview = content[:50] + "..." if len(content) > 50 else content
-                        content_samples.append(f"{sender}: {preview}")
-                        
-                elif event_type == "agent_response":
-                    agent_responses += 1
-                    if len(content_samples) < 3:
-                        preview = content[:50] + "..." if len(content) > 50 else content
-                        content_samples.append(f"Agent: {preview}")
+                try:
+                    # Reuse existing rendering logic
+                    rendered_content = self._render_event_facet_with_system_context(
+                        facet, minimal_system_state, minimal_options
+                    )
+                    if rendered_content:
+                        rendered_parts.append(rendered_content)
+                except Exception as e:
+                    logger.warning(f"Error rendering facet {getattr(facet, 'facet_id', 'unknown')} for memorization: {e}")
+                    # Fallback to basic content extraction
+                    content = getattr(facet, 'content', '') or facet.get_property('content', '')
+                    if content:
+                        rendered_parts.append(content)
             
-            # Build descriptive summary
-            summary_parts = []
-            
-            if message_count > 0:
-                summary_parts.append(f"{message_count} messages")
-            if agent_responses > 0:
-                summary_parts.append(f"{agent_responses} agent responses")
-            
-            if content_samples:
-                content_preview = "\n".join(content_samples)
-                return f"Recent conversation content ({', '.join(summary_parts)}):\n\n{content_preview}"
+            if rendered_parts:
+                return "\n".join(rendered_parts)
             else:
-                return f"Recent conversation content ({', '.join(summary_parts)})" if summary_parts else "recent conversation content"
+                return "recent conversation content"
                 
         except Exception as e:
             logger.error(f"Error creating content summary: {e}", exc_info=True)
             return "recent conversation content"
-
-    def _create_memorization_request_turn(self, content_summary: str, 
-                                        content_to_memorize: Optional[List],
-                                        exclude_element_id: str) -> Dict[str, Any]:
-        """
-        Create synthetic user turn requesting memorization.
-        
-        Args:
-            content_summary: Summary of content being memorized
-            content_to_memorize: List of EventFacets being memorized
-            exclude_element_id: Element where memorization is happening
-            
-        Returns:
-            User turn message requesting memorization
-        """
-        try:
-            # Create natural memorization request
-            memorization_content = f"""Please create a memory summary of the following content from our conversation:
-
-{content_summary}
-
-Focus on:
-- Key topics and decisions discussed
-- Important context for future reference  
-- Your role and contributions to the discussion
-- Outcomes, conclusions, and next steps
-- Any important details that should be remembered
-
-Create a concise but comprehensive memory from your perspective as an AI agent. This memory will help you understand the context when we continue our conversation later."""
-
-            # Calculate metadata
-            facet_count = len(content_to_memorize) if content_to_memorize else 0
-            
-            return {
-                "role": "user",
-                "content": memorization_content,
-                "turn_metadata": {
-                    "turn_type": "memorization_request",
-                    "is_synthetic": True,
-                    "content_facet_count": facet_count,
-                    "memorization_context": True,
-                    "target_element_id": exclude_element_id,
-                    "turn_index": "synthetic_final"
-                }
-            }
-            
-        except Exception as e:
-            logger.error(f"Error creating memorization request turn: {e}", exc_info=True)
-            return {
-                "role": "user",
-                "content": "Please create a memory summary of the recent conversation content.",
-                "turn_metadata": {
-                    "turn_type": "memorization_request",
-                    "is_synthetic": True,
-                    "error_fallback": True,
-                    "error": str(e)
-                }
-            }
 
     def _apply_memorization_exclusions_native(self, 
                                             facet_cache: VEILFacetCache, 
@@ -1710,7 +1666,7 @@ Create a concise but comprehensive memory from your perspective as an AI agent. 
                 # ENHANCED: Intelligent agent message rendering based on timestamp context
                 is_from_current_agent = facet.get_property("is_from_current_agent", False)
                 
-                if is_from_current_agent:
+                if is_from_current_agent and not options.render_agent_messages:
                     # Check if this agent message should be rendered or skipped
                     if not self._should_render_agent_message(facet, system_state):
                         logger.debug(f"Skipping agent message from {facet.get_property('timestamp_iso')}: tool call context available")
@@ -1790,53 +1746,16 @@ Create a concise but comprehensive memory from your perspective as an AI agent. 
         try:
             # Extract memory properties
             memory_summary = facet.get_property("content", "")
-            memory_id = facet.get_property("memory_id", "unknown")
-            original_facet_count = facet.get_property("original_facet_count", 0)
-            token_count = facet.get_property("token_count", 0)
-            temporal_info = facet.get_property("temporal_info", {})
+
+            memory_content = f'<memory>\n{memory_summary}\n</memory>'
             
-            # Extract temporal range information
-            earliest_timestamp = temporal_info.get("earliest_content_timestamp")
-            latest_timestamp = temporal_info.get("latest_content_timestamp")
-            timespan_seconds = temporal_info.get("content_timespan_seconds", 0)
+            # NEW: Add timeline divergence indicators if present
+            divergence_info = facet.get_property("timeline_divergence")
+            if divergence_info:
+                divergence_indicator = self._render_timeline_divergence_indicator(divergence_info)
+                if divergence_indicator:
+                    memory_content = divergence_indicator + "\n" + memory_content
             
-            # Format temporal range
-            timespan_display = ""
-            if earliest_timestamp and latest_timestamp:
-                from datetime import datetime
-                try:
-                    earliest_dt = datetime.fromtimestamp(earliest_timestamp)
-                    latest_dt = datetime.fromtimestamp(latest_timestamp)
-                    timespan_display = f' timespan="{earliest_dt.strftime("%H:%M:%S")} to {latest_dt.strftime("%H:%M:%S")}"'
-                except (ValueError, OSError):
-                    # Fallback if timestamp conversion fails
-                    timespan_display = f' timespan="{timespan_seconds}s"'
-            elif timespan_seconds > 0:
-                timespan_display = f' timespan="{timespan_seconds}s"'
-            
-            # Build metadata attributes
-            metadata_attrs = []
-            if original_facet_count > 0:
-                metadata_attrs.append(f'messages="{original_facet_count}"')
-            if token_count > 0:
-                metadata_attrs.append(f'tokens="{token_count}"')
-            
-            # Format according to render mode
-            if options.render_mode == "memorization":
-                # Concise rendering for memorization context to save tokens
-                return f"[Memory: {memory_summary}]"
-            else:
-                # Full rendering for normal context
-                metadata_str = " " + " ".join(metadata_attrs) if metadata_attrs else ""
-                memory_content = f'<memory{timespan_display}{metadata_str}>\n{memory_summary}\n</memory>'
-                
-                # NEW: Add timeline divergence indicators if present
-                divergence_info = facet.get_property("timeline_divergence")
-                if divergence_info:
-                    divergence_indicator = self._render_timeline_divergence_indicator(divergence_info)
-                    if divergence_indicator:
-                        memory_content = divergence_indicator + "\n" + memory_content
-                
                 return memory_content
                 
         except Exception as e:

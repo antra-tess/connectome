@@ -17,25 +17,10 @@ tracer = get_tracer(__name__)
 class ScaffoldingFormatter:
     """Formatter implementation for Scaffolding LLMProvider."""
 
-    def format_context(self,
-                       messages: List[LLMMessage],
-                       original_context: Optional[List[Any]] = None) -> List[Dict[str, Any]]:
+    def format_context(self, messages: List[LLMMessage]) -> List[Dict[str, Any]]:
         """Format a list of LLMMessages for display in the web interface."""
-        formatted_messages = []
-
-        if original_context and isinstance(original_context, list) and len(original_context) == len(messages):
-            # We have turn-based context - preserve metadata
-            for i, (msg, turn_data) in enumerate(zip(messages, original_context)):
-                formatted_msg = self.format_message(msg)
-                # Add turn metadata from original context
-                if isinstance(turn_data, dict) and 'turn_metadata' in turn_data:
-                    formatted_msg['turn_metadata'] = turn_data['turn_metadata']
-                formatted_messages.append(formatted_msg)
-        else:
-            # Fallback to standard message formatting
-            formatted_messages = [self.format_message(msg) for msg in messages]
-
-        return formatted_messages
+        # Metadata now travels with LLMMessage objects, no need for original_context tracking
+        return [self.format_message(msg) for msg in messages]
 
     def format_message(self, message: LLMMessage) -> Dict[str, Any]:
         """Format an LLMMessage for display in the web interface."""
@@ -55,7 +40,7 @@ class ScaffoldingFormatter:
                 formatted["is_multimodal"] = False
                 formatted["text_length"] = len(str(message.content))
 
-            # Preserve turn metadata if present (for turn-based messaging)
+            # Use turn metadata directly from message object (no more dual tracking)
             if hasattr(message, 'turn_metadata') and message.turn_metadata:
                 formatted["turn_metadata"] = message.turn_metadata
 

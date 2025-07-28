@@ -129,8 +129,8 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
 
             # 3. Send rendered context to LLM (no separate tool definitions - they're in the context)
             # NOTE: We don't pass tools parameter to LLM since they're already rendered in the context
-            # Pass original context data for scaffolding provider to preserve turn metadata
-            llm_response_obj = llm_provider.complete(messages=messages, tools=[], original_context_data=context_data)
+            # Metadata now travels with LLMMessage objects, no need for original_context_data
+            llm_response_obj = llm_provider.complete(messages=messages, tools=[])
 
             if not llm_response_obj:
                 logger.warning(f"{self.agent_loop_name} ({self.id}): LLM returned no response. Aborting cycle.")

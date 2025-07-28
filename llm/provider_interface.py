@@ -12,7 +12,8 @@ from typing import Dict, Any, List, Optional, Union
 class LLMMessage:
     """Representation of a message in a conversation with an LLM."""
     
-    def __init__(self, role: str, content: Union[str, List[Dict[str, Any]]], name: Optional[str] = None):
+    def __init__(self, role: str, content: Union[str, List[Dict[str, Any]]], 
+                 name: Optional[str] = None, turn_metadata: Optional[Dict[str, Any]] = None):
         """
         Initialize a message.
         
@@ -23,10 +24,12 @@ class LLMMessage:
                      - List[Dict]: Multimodal content with parts like:
                        [{"type": "text", "text": "..."}, {"type": "image_url", "image_url": {"url": "..."}}]
             name: Optional name for function calls
+            turn_metadata: Optional metadata about the turn (turn index, facet count, etc.)
         """
         self.role = role
         self.content = content
         self.name = name
+        self.turn_metadata = turn_metadata
     
     def is_multimodal(self) -> bool:
         """Check if this message contains multimodal content."""
