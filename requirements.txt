@@ -50,3 +50,6 @@ uvicorn
 
 # OpenTelemetry for Tracing
 opentelemetry-distro
+opentelemetry-sdk
+opentelemetry-exporter-oltp-proto-http
+opentelemetry-exporter-oltp-proto-grpc
