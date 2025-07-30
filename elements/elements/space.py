@@ -36,19 +36,26 @@ class EventReplayMode(Enum):
     SELECTIVE = "selective"  # Future: replay only specific event types
     ENABLED_WITH_VEIL_SNAPSHOT = "enabled_with_veil_snapshot"  # NEW: Structural replay + VEIL cache restoration
 
+# NEW: Event phase classification for two-phase replay
+# Phase 1: Structural events (system skeleton)
+STRUCTURAL_EVENTS = {
+    'element_mounted', 'element_unmounted', 'component_initialized',
+    'element_created_from_prefab', 'tool_provider_registered',
+    'component_state_updated'
+}
+
+# Phase 2: Content events (data and conversations)
+CONTENT_EVENTS = {
+    'message_received', 'historical_message_received', 'agent_message_confirmed',
+    'connectome_message_deleted', 'connectome_message_updated', 
+    'connectome_reaction_added', 'connectome_reaction_removed', 
+    'attachment_content_available', 'connectome_message_send_confirmed', 
+    'connectome_message_send_failed', 'agent_response_generated'
+}
+
 # NEW: Default replayability for event types (fallback when is_replayable flag not set)
 # These are only used when events don't have explicit is_replayable flag
-DEFAULT_REPLAYABLE_EVENTS = {
-    # Structural events - generally safe to replay
-    'element_mounted', 'element_unmounted', 'component_initialized', 
-    'tool_provider_registered', 'element_created_from_prefab',
-    'component_state_updated',
-    
-    # Message events - content restoration
-    'message_received', 'historical_message_received', 'agent_message_confirmed', 'connectome_message_deleted', 'connectome_message_updated', 
-    'connectome_reaction_added', 'connectome_reaction_removed', 'attachment_content_available',
-    'connectome_message_send_confirmed', 'connectome_message_send_failed',
-}
+DEFAULT_REPLAYABLE_EVENTS = STRUCTURAL_EVENTS | CONTENT_EVENTS
 
 DEFAULT_NON_REPLAYABLE_EVENTS = {
     # Runtime-only events that shouldn't be replayed
@@ -96,11 +103,19 @@ class Space(BaseElement):
         self.adapter_id = adapter_id
         self.external_conversation_id = external_conversation_id
         self._outgoing_action_callback = outgoing_action_callback
+
+        if not self.IS_UPLINK_SPACE:
+            self._veil_producer: Optional[SpaceVeilProducer] = self.add_component(SpaceVeilProducer)
         
         # NEW: Event replay configuration
         self._event_replay_mode = self._determine_replay_mode()
         self._replay_in_progress = False
         self._replayed_event_ids = set()  # Track which events have been replayed
+        
+        # NEW: Two-phase replay state tracking
+        self._current_replay_phase = None  # Track current phase: 'structural', 'content', or None
+        self._structural_phase_complete = False
+        self._content_phase_complete = False
         
         # Initialize space with required components
         # Store references for easier delegation, though get_component could also be used.
@@ -116,16 +131,10 @@ class Space(BaseElement):
         if not self.IS_UPLINK_SPACE:    
             self._element_factory: Optional[ElementFactoryComponent] = self.add_component(ElementFactoryComponent, **factory_kwargs)
             self.add_component(ChatManagerComponent)
-            self._veil_producer: Optional[SpaceVeilProducer] = self.add_component(SpaceVeilProducer)
+            
         # assert  False, self._element_factory
-        # NEW: Initialize uplink listeners set and delta cache
-        self._uplink_listeners: Set[Callable[[List[Dict[str, Any]]], None]] = set()
-        self._cached_deltas: List[Dict[str, Any]] = []
-        
-        # NEW: Initialize internal hierarchical VEIL cache (Phase 1, Step 1.1)
-        self._flat_veil_cache: Dict[str, Any] = {}
-        # NEW: For accumulating deltas from children in the "emit on change" model
-        self._deltas_accumulated_this_frame: List[Dict[str, Any]] = []
+        # NEW: Initialize uplink listeners set for VEILFacet operations
+        self._uplink_listeners: Set[Callable[[List], None]] = set()  # Now handles VEILFacetOperations
         self._ensure_own_veil_presence_initialized()
         
         if not self._container or not self._timeline:
@@ -163,117 +172,55 @@ class Space(BaseElement):
         else:
             return EventReplayMode.DISABLED
 
+    def _classify_event_phase(self, event_type: str, event_payload: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Classify an event into structural or content phase.
+        
+        Args:
+            event_type: The type of event to classify
+            event_payload: Optional event payload for override checking
+            
+        Returns:
+            'structural' or 'content' phase classification
+        """
+        # Check for explicit phase override in event payload
+        if event_payload and 'replay_phase' in event_payload:
+            override_phase = event_payload['replay_phase']
+            if override_phase in ['structural', 'content']:
+                logger.debug(f"[{self.id}] Event {event_type} has explicit phase override: {override_phase}")
+                return override_phase
+        
+        # Automatic classification based on event type
+        if event_type in STRUCTURAL_EVENTS:
+            return 'structural'
+        elif event_type in CONTENT_EVENTS:
+            return 'content'
+        else:
+            # Default: treat unknown events as content events to maintain safety
+            logger.debug(f"[{self.id}] Unknown event type {event_type}, classifying as content")
+            return 'content'
+
     def _ensure_own_veil_presence_initialized(self) -> None:
         """
-        Ensures that the Space's own root VEIL node is present in self._flat_veil_cache.
+        Ensures that the Space's own root VEIL node is present via SpaceVeilProducer.
         This is crucial to call before processing any deltas that might reference it as a parent,
         and also ensures it's there if on_frame_end triggers its own producer.
         """
-        # Ensure _flat_veil_cache itself is initialized (should be by __init__)
-        if not hasattr(self, '_flat_veil_cache'):
-            logger.error(f"[{self.id}] Critical: _flat_veil_cache attribute not found during _ensure_own_veil_presence_initialized. Initializing to empty dict.")
-            self._flat_veil_cache = {}
-
-        space_root_id = f"{self.id}_space_root"
-
-        if space_root_id not in self._flat_veil_cache:
-            logger.warning(f"[{self.id}] Root VEIL node '{space_root_id}' not found in cache. Initializing in _ensure_own_veil_presence_initialized.")
-            if not self.IS_UPLINK_SPACE:
-                self._veil_producer.emit_delta()
-            logger.info(f"[{self.id}] Initialized own root VEIL node '{space_root_id}' in _flat_veil_cache via _ensure_own_veil_presence_initialized.")
-        else:
-            logger.debug(f"[{self.id}] Own root VEIL node '{space_root_id}' already present in _flat_veil_cache.")
-
-
-    def _apply_deltas_to_internal_cache(self, deltas: List[Dict[str, Any]]) -> None:
-        """
-        Applies a list of VEIL delta operations to the internal flat VEIL cache.
-        Modifies self._flat_veil_cache in place.
-        It checks for a top-level 'parent_id' in 'add_node' and 'update_node' operations
-        and ensures this 'parent_id' is stored within the node's 'properties'.
-        """
-        if not isinstance(deltas, list):
-            logger.warning(f"[{self.id}] Invalid deltas format received by _apply_deltas_to_internal_cache: not a list.")
-            return
-        logger.debug(f"[{self.id}] Applying {len(deltas)} deltas to internal flat cache.")
-
-        for operation in deltas:
-            op_type = operation.get("op")
-            node_id_from_op = operation.get("veil_id") # Used by update_node, remove_node
-            node_data_from_op = operation.get("node")   # Used by add_node
-            top_level_parent_id = operation.get("parent_id") # Check for parent_id at the operation level
-
-            if op_type == "add_node":
-                if not node_data_from_op or not isinstance(node_data_from_op, dict) or "veil_id" not in node_data_from_op:
-                    logger.warning(f"[{self.id}] Invalid 'add_node' operation (missing node, node not dict, or missing veil_id): {operation}")
-                    continue
-                
-                new_node_id = node_data_from_op["veil_id"]
-                
-                # Ensure 'properties' dictionary exists in the node data
-                if "properties" not in node_data_from_op or not isinstance(node_data_from_op.get("properties"), dict):
-                    node_data_from_op["properties"] = {}
-                
-                # If parent_id is provided at the top level of the delta op, inject it into node's properties
-                if top_level_parent_id:
-                    node_data_from_op["properties"]["parent_id"] = top_level_parent_id
-                    logger.debug(f"[{self.id}] Cache: Injecting parent_id '{top_level_parent_id}' into properties of node '{new_node_id}' during add_node.")
-
-                if new_node_id in self._flat_veil_cache:
-                    logger.debug(f"[{self.id}] Cache: Updating existing node {new_node_id} via add_node delta in _flat_veil_cache.")
-                else:
-                    logger.debug(f"[{self.id}] Cache: Adding new node {new_node_id} via add_node delta to _flat_veil_cache.")
-                
-                if "children" not in node_data_from_op or not isinstance(node_data_from_op.get("children"), list):
-                    node_data_from_op["children"] = [] 
-                
-                self._flat_veil_cache[new_node_id] = node_data_from_op
-
-            elif op_type == "update_node":
-                if not node_id_from_op:
-                    logger.warning(f"[{self.id}] Invalid 'update_node' operation (missing veil_id): {operation}")
-                    continue
-                
-                if node_id_from_op in self._flat_veil_cache:
-                    logger.debug(f"[{self.id}] Cache: Updating properties for node {node_id_from_op} in _flat_veil_cache.")
-                    
-                    # Ensure 'properties' dictionary exists in the cached node data
-                    if "properties" not in self._flat_veil_cache[node_id_from_op] or \
-                       not isinstance(self._flat_veil_cache[node_id_from_op].get("properties"), dict):
-                         self._flat_veil_cache[node_id_from_op]["properties"] = {}
-
-                    # Apply property updates from the delta
-                    properties_to_update = operation.get("properties")
-                    if properties_to_update is not None: # Can be an empty dict to clear properties
-                        self._flat_veil_cache[node_id_from_op]["properties"].update(properties_to_update)
-                    else:
-                        # If "properties" is not in the delta, it's not an error, just means no property changes.
-                        # However, if "properties" is explicitly null, it could mean clear all, but our current
-                        # model uses an empty dict for that if updating. Let's log if it's missing but was expected.
-                        # For now, if properties_to_update is None, we only care about potential parent_id change.
-                        pass 
-
-                    # If parent_id is provided at the top level of the update_node op, update it in node's properties
-                    if top_level_parent_id:
-                        self._flat_veil_cache[node_id_from_op]["properties"]["parent_id"] = top_level_parent_id
-                        logger.debug(f"[{self.id}] Cache: Injecting/updating parent_id '{top_level_parent_id}' into properties of node '{node_id_from_op}' during update_node.")
-                else:
-                    logger.warning(f"[{self.id}] Cache: 'update_node' for {node_id_from_op} but node not found in _flat_veil_cache.")
+        if not self.IS_UPLINK_SPACE and self._veil_producer:
+            space_root_id = f"{self.id}_space_root"
             
-            elif op_type == "remove_node":
-                if not node_id_from_op:
-                    logger.warning(f"[{self.id}] Invalid 'remove_node' operation (missing veil_id): {operation}")
-                    continue
-
-                if node_id_from_op in self._flat_veil_cache:
-                    logger.debug(f"[{self.id}] Cache: Removing node {node_id_from_op} from _flat_veil_cache.")
-                    del self._flat_veil_cache[node_id_from_op]
-                    # No need to remove from parent's children list here;
-                    # SpaceVeilProducer will handle this during reconstruction.
-                else:
-                    logger.warning(f"[{self.id}] Cache: 'remove_node' for {node_id_from_op} but node not found in _flat_veil_cache.")
+            # Check if root exists in SpaceVeilProducer's cache
+            veil_cache = self._veil_producer.get_flat_veil_cache()
+            if space_root_id not in veil_cache:
+                logger.warning(f"[{self.id}] Root VEIL node '{space_root_id}' not found in SpaceVeilProducer cache. Triggering emit_delta.")
+                self._veil_producer.emit_delta()
+                logger.info(f"[{self.id}] Initialized own root VEIL node '{space_root_id}' via SpaceVeilProducer.")
             else:
-                logger.warning(f"[{self.id}] Cache: Unsupported delta operation '{op_type}' received. Skipping.")
+                logger.debug(f"[{self.id}] Own root VEIL node '{space_root_id}' already present in SpaceVeilProducer cache.")
+        elif self.IS_UPLINK_SPACE:
+            logger.debug(f"[{self.id}] Skipping VEIL initialization for UplinkSpace.")
+        else:
+            logger.warning(f"[{self.id}] Cannot ensure VEIL presence: SpaceVeilProducer not available.")
 
     # --- Container Methods (Delegated) ---
     def mount_element(self, element: BaseElement, mount_id: Optional[str] = None, mount_type: MountType = MountType.INCLUSION, creation_data: Optional[Dict[str, Any]] = None) -> Tuple[bool, Optional[str]]:
@@ -441,8 +388,9 @@ class Space(BaseElement):
         
         # NEW: Check if this is a replay mode to prevent double-recording
         is_replay_mode = timeline_context.get('replay_mode', False)
+        replay_phase = timeline_context.get('replay_phase', 'unknown')
         
-        logger.debug(f"[{self.id}] Receiving event: Type='{event_type}', Target='{target_element_id}', Timeline='{timeline_context.get('timeline_id')}', Replay={is_replay_mode}")
+        logger.debug(f"[{self.id}] Receiving event: Type='{event_type}', Target='{target_element_id}', Timeline='{timeline_context.get('timeline_id')}', Replay={is_replay_mode}, Phase={replay_phase}")
         
         # 1. Add event to the timeline via TimelineComponent (unless in replay mode)
         new_event_id = None
@@ -563,15 +511,15 @@ class Space(BaseElement):
         # --- End handle action_request_for_remote ---
 
     # NEW methods for listener registration
-    def register_uplink_listener(self, callback: Callable[[List[Dict[str, Any]]], None]):
-        """Registers a callback function to be notified when new VEIL deltas are generated."""
+    def register_uplink_listener(self, callback: Callable[[List], None]):
+        """Registers a callback function to be notified when new VEILFacet operations are generated."""
         if callable(callback):
             self._uplink_listeners.add(callback)
             logger.debug(f"[{self.id}] Registered uplink listener: {callback}")
         else:
             logger.warning(f"[{self.id}] Attempted to register non-callable uplink listener: {callback}")
 
-    def unregister_uplink_listener(self, callback: Callable[[List[Dict[str, Any]]], None]):
+    def unregister_uplink_listener(self, callback: Callable[[List], None]):
         """Unregisters a previously registered uplink listener callback."""
         self._uplink_listeners.discard(callback)
         logger.debug(f"[{self.id}] Unregistered uplink listener: {callback}")
@@ -580,39 +528,41 @@ class Space(BaseElement):
     def on_frame_end(self) -> None:
         """
         Called by the HostEventLoop (or owning Space) after its processing frame.
-        In the new "emit on change" model:
-        1. Triggers its own SpaceVeilProducer to emit deltas (which will be cached via receive_delta).
-        2. Sends all deltas accumulated in _deltas_accumulated_this_frame to uplink listeners.
+        In the new VEILFacet model:
+        1. Triggers its own SpaceVeilProducer to emit VEILFacet operations.
+        2. Sends accumulated VEILFacet operations to uplink listeners.
         """
-        # 1. Trigger this Space's own VeilProducer to emit its delta
-        # This ensures the Space's own root node state is up-to-date in the cache and accumulated deltas.
+        # 1. Trigger this Space's own VeilProducer to emit VEILFacet operations
         if not self.IS_UPLINK_SPACE and self._veil_producer and hasattr(self._veil_producer, 'emit_delta'):
             try:
                 logger.debug(f"[{self.id}] on_frame_end: Triggering emit_delta for own SpaceVeilProducer.")
-                self._veil_producer.emit_delta() # This will call calculate_delta and then self.receive_delta
+                self._veil_producer.emit_delta()  # This calls calculate_delta and then self.receive_delta
             except Exception as e:
                 logger.error(f"[{self.id}] on_frame_end: Error triggering emit_delta for SpaceVeilProducer: {e}", exc_info=True)
 
-        # 2. Send accumulated deltas to listeners
-        if self._deltas_accumulated_this_frame:
-            logger.debug(f"[{self.id}] on_frame_end: Sending {len(self._deltas_accumulated_this_frame)} accumulated deltas to {len(self._uplink_listeners)} listeners.")
-            
-            # Create a copy for sending, as listeners might modify it or processing might take time.
-            deltas_to_send = list(self._deltas_accumulated_this_frame) 
-            
-            all_listeners_notified_successfully = True
-            for listener_callback in self._uplink_listeners:
-                try:
-                    listener_callback(deltas_to_send)
-                except Exception as e:
-                    all_listeners_notified_successfully = False
-                    logger.error(f"[{self.id}] Error calling uplink listener {listener_callback}: {e}", exc_info=True)
-            
-            # Clear the accumulated deltas for the next frame, regardless of listener success for now.
-            # If listener success is critical for not clearing, that logic would be more complex (e.g., retry, dead-letter queue for deltas).
-            self._deltas_accumulated_this_frame.clear()
-        else:
-            logger.debug(f"[{self.id}] on_frame_end: No accumulated deltas to send.")
+        # 2. Send accumulated VEILFacet operations to listeners
+        if not self.IS_UPLINK_SPACE and self._veil_producer:
+            try:
+                accumulated_operations = self._veil_producer.get_accumulated_facet_operations()
+                
+                if accumulated_operations:
+                    logger.debug(f"[{self.id}] on_frame_end: Sending {len(accumulated_operations)} accumulated VEILFacet operations to {len(self._uplink_listeners)} listeners.")
+                    
+                    # Create a copy for sending
+                    operations_to_send = list(accumulated_operations)
+                    
+                    all_listeners_notified_successfully = True
+                    for listener_callback in self._uplink_listeners:
+                        try:
+                            listener_callback(operations_to_send)
+                        except Exception as e:
+                            all_listeners_notified_successfully = False
+                            logger.error(f"[{self.id}] Error calling uplink listener {listener_callback}: {e}", exc_info=True)
+                else:
+                    logger.debug(f"[{self.id}] on_frame_end: No accumulated VEILFacet operations to send.")
+                    
+            except Exception as e:
+                logger.error(f"[{self.id}] on_frame_end: Error processing accumulated VEILFacet operations: {e}", exc_info=True)
             
     # --- Uplink Support Methods ---
     def get_space_metadata_for_uplink(self) -> Dict[str, Any]:
@@ -654,8 +604,9 @@ class Space(BaseElement):
             # Consider what an UplinkSpace should return here.
             # For now, let's provide its own root if the cache has it.
             space_root_id = f"{self.id}_space_root"
-            if self._flat_veil_cache and space_root_id in self._flat_veil_cache:
-                 return copy.deepcopy(self._flat_veil_cache[space_root_id]) # Just its own node
+            if self._veil_producer and self._veil_producer.check_node_exists(space_root_id):
+                veil_cache = self._veil_producer.get_flat_veil_cache()
+                return copy.deepcopy(veil_cache.get(space_root_id, {})) # Just its own node
             return {"veil_id": space_root_id, "properties": {"name": self.name, "status": "UplinkSpace - snapshot not applicable"}, "children": []}
 
 
@@ -679,7 +630,7 @@ class Space(BaseElement):
         # The SpaceVeilProducer's get_full_veil method now handles building from this Space's cache.
         logger.debug(f"[{self.id}] get_full_veil_snapshot: Delegating to SpaceVeilProducer to build VEIL from internal cache.")
         try:
-            # SpaceVeilProducer.get_full_veil() will use self.owner._flat_veil_cache
+            # SpaceVeilProducer.get_full_veil() will use its own internal _flat_veil_cache
             # and self.owner.id (which are this Space's attributes)
             full_reconstructed_veil = self._veil_producer.get_full_veil() 
             
@@ -699,7 +650,7 @@ class Space(BaseElement):
                         "element_type": self.__class__.__name__,
                         "veil_status": "veil_producer_failed_to_build_hierarchy"
                      },
-                    "children": list(self._flat_veil_cache.values()) if self._flat_veil_cache else [] 
+                    "children": list(self._veil_producer.get_flat_veil_cache().values()) if self._veil_producer else [] 
                 }
         except Exception as e:
             logger.error(f"[{self.id}] Error calling SpaceVeilProducer.get_full_veil() for snapshot: {e}", exc_info=True)
@@ -721,65 +672,83 @@ class Space(BaseElement):
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(id={self.id}, name={self.name}, description={self.description})"
 
-    # Optional: Method for listeners to pull cached deltas if needed
-    def get_cached_deltas(self) -> List[Dict[str, Any]]:
-        """Returns the VEIL deltas calculated in the last frame."""
-        # Consider clearing cache after retrieval? Or timestamping?
-        return list(self._cached_deltas) # Return a copy
+    # Optional: Method for listeners to pull cached VEILFacet operations if needed
+    def get_cached_facet_operations(self) -> List:
+        """Returns the VEILFacet operations calculated in the last frame."""
+        if self._veil_producer:
+            return self._veil_producer.get_accumulated_facet_operations()
+        return []
 
-    def receive_delta(self, delta_operations: List[Dict[str, Any]]) -> None:
+    def receive_delta(self, facet_operations: List) -> None:
         """
-        Receives VEIL delta operations, typically from a child element's VeilProducer
-        (via its emit_delta -> owner.receive_delta -> this_method chain).
-        Applies these deltas to the Space's internal flat VEIL cache and
-        accumulates them for dispatch by on_frame_end.
+        NEW: Pure VEILFacet operation processing.
+        
+        Space now only handles VEILFacetOperations from child producers.
+        All legacy delta operation complexity has been removed.
+        
+        Args:
+            facet_operations: List of VEILFacetOperation instances from child producers
         """
-        if not isinstance(delta_operations, list) or not delta_operations:
-            logger.debug(f"[{self.id}] Space.receive_delta called with no valid delta operations. Skipping.")
+        if not isinstance(facet_operations, list) or not facet_operations:
+            logger.debug(f"[{self.id}] Space.receive_delta called with no valid facet operations.")
             return
 
-        logger.debug(f"[{self.id}] Space.receive_delta: Processing {len(delta_operations)} delta operations.")
+        # Validate that these are VEILFacetOperation instances
+        if not (facet_operations and hasattr(facet_operations[0], 'operation_type')):
+            logger.error(f"[{self.id}] Space.receive_delta received non-VEILFacetOperation objects. Legacy deltas are no longer supported.")
+            return
 
-        # 1. Apply to internal flat VEIL cache
-        try:
-            self._apply_deltas_to_internal_cache(delta_operations)
-            logger.debug(f"[{self.id}] Space.receive_delta: Applied {len(delta_operations)} operations to _flat_veil_cache.")
-        except Exception as e:
-            logger.error(f"[{self.id}] Space.receive_delta: Error applying deltas to internal cache: {e}", exc_info=True)
-            # Decide if we should still accumulate if caching fails. For now, let's still accumulate.
+        logger.debug(f"[{self.id}] Space.receive_delta: Received {len(facet_operations)} VEILFacetOperations, routing to SpaceVeilProducer.")
 
-        # 2. Accumulate for on_frame_end dispatch
-        self._deltas_accumulated_this_frame.extend(delta_operations)
-        logger.debug(f"[{self.id}] Space.receive_delta: Added {len(delta_operations)} operations to _deltas_accumulated_this_frame. Total accumulated: {len(self._deltas_accumulated_this_frame)}")
+        # Route VEILFacetOperations to SpaceVeilProducer
+        veil_producer = self._veil_producer
+        if veil_producer:
+            import asyncio
+            try:
+                if asyncio.iscoroutinefunction(veil_producer.receive_facet_operations):
+                    asyncio.create_task(veil_producer.receive_facet_operations(facet_operations))
+                else:
+                    veil_producer.receive_facet_operations(facet_operations)
+            except Exception as e:
+                logger.error(f"[{self.id}] Error delegating VEILFacetOperations to SpaceVeilProducer: {e}", exc_info=True)
+        else:
+            logger.error(f"[{self.id}] SpaceVeilProducer not available for facet operation processing")
 
-        # Optional: Record an event to the timeline (as before, but maybe less critical now that cache is updated)
-        # This might be too noisy if every producer emitting causes an event here.
-        # Consider if this specific event is still needed or if the cache changes are sufficient.
-        # For now, let's keep it to see its utility.
+        # Record VEILFacet operation event to timeline
         event_payload = {
-            "event_type": "veil_delta_operations_received_by_space", 
+            "event_type": "veil_facet_operations_received_by_space", 
             "payload": { 
-                "source": "child_producer_emission", # Indicates source
-                "delta_operation_count": len(delta_operations)
+                "source": "child_producer_emission",
+                "facet_operation_count": len(facet_operations),
+                "operation_types": [op.operation_type for op in facet_operations[:5]]  # Sample first 5 for logging
             }
         }
-        timeline_context = {} # TODO: ensure this gets proper context from caller if needed
+        timeline_context = {}
         primary_timeline = self.get_primary_timeline()
         if primary_timeline:
             timeline_context['timeline_id'] = primary_timeline
         try:
-            self.add_event_to_timeline(event_payload, timeline_context) # Commented out to reduce noise, can be re-enabled if useful for debugging.
+            self.add_event_to_timeline(event_payload, timeline_context)
         except Exception as e:
             logger.error(f"[{self.id}] Space.receive_delta: Error adding event to timeline: {e}", exc_info=True)
 
-    def get_flat_veil_snapshot(self) -> Dict[str, Any]:
+    # REMOVED: get_flat_veil_snapshot(), get_flat_veil_cache_snapshot() 
+    # Flat cache methods removed after VEILFacet architecture completion
+    # Use get_facet_cache_snapshot() for native VEILFacet access
+
+    def get_facet_cache_snapshot(self) -> 'VEILFacetCache':
         """
-        Returns a deep copy of the Space's internal flat VEIL node cache.
-        The cache is a dictionary where keys are veil_ids and values are node data.
-        Hierarchy is not explicitly stored here; it's reconstructed by producers.
+        NEW: Get VEILFacetCache snapshot directly.
+        
+        Returns:
+            Copy of the VEILFacetCache from SpaceVeilProducer
         """
-        logger.debug(f"[{self.id}] Providing flat VEIL cache snapshot. Size: {len(self._flat_veil_cache)}")
-        return copy.deepcopy(self._flat_veil_cache)
+        veil_producer = self._veil_producer
+        if veil_producer:
+            return veil_producer.get_facet_cache_copy()
+        logger.warning(f"[{self.id}] Cannot get VEILFacetCache snapshot: SpaceVeilProducer not available")
+        from ..components.veil import VEILFacetCache
+        return VEILFacetCache()  # Return empty cache
 
     # --- Action Execution --- 
     async def execute_action_on_element(self, element_id: str, action_name: str, parameters: Dict[str, Any], calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -889,7 +858,11 @@ class Space(BaseElement):
     
     async def replay_events_from_timeline(self) -> bool:
         """
-        Replay timeline events to reconstruct system state.
+        NEW: Two-phase replay timeline events to reconstruct system state with proper chronological ordering.
+        
+        Phase 1: Structural Restoration - Mount elements and initialize components
+        Phase 2: Content Restoration - Process content events chronologically 
+        
         Should be called after storage is initialized but before normal operation.
         
         Returns:
@@ -909,7 +882,7 @@ class Space(BaseElement):
             
         try:
             self._replay_in_progress = True
-            logger.info(f"[{self.id}] Starting event replay for system state reconstruction")
+            logger.info(f"[{self.id}] Starting two-phase event replay for system state reconstruction")
             
             # Get all events from the primary timeline in chronological order
             primary_timeline_id = self._timeline.get_primary_timeline()
@@ -927,74 +900,286 @@ class Space(BaseElement):
                 logger.info(f"[{self.id}] No events found in timeline, nothing to replay")
                 return True
                 
-            logger.info(f"[{self.id}] Found {len(chronological_events)} events to potentially replay")
+            logger.info(f"[{self.id}] Found {len(chronological_events)} events for two-phase replay")
+            
+            # Phase 1: Structural Replay
+            logger.info(f"[{self.id}] === Phase 1: Structural Replay Starting ===")
+            structural_success = await self._replay_structural_phase(chronological_events)
+            if not structural_success:
+                logger.error(f"[{self.id}] Phase 1: Structural replay failed")
+                return False
+                
+            # Verify structural integrity before content
+            logger.info(f"[{self.id}] Verifying structural integrity before content phase")
+            structure_ready = await self._verify_structural_integrity()
+            if not structure_ready:
+                logger.error(f"[{self.id}] Structural integrity verification failed")
+                return False
+                
+            # Phase 2: Content Replay  
+            logger.info(f"[{self.id}] === Phase 2: Content Replay Starting ===")
+            content_success = await self._replay_content_phase(chronological_events)
+            if not content_success:
+                logger.error(f"[{self.id}] Phase 2: Content replay failed")
+                return False
+            
+            # Post-replay operations
+            await self._complete_two_phase_replay()
+            
+            logger.info(f"[{self.id}] ✓ Two-phase replay completed successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[{self.id}] Error during two-phase replay: {e}", exc_info=True)
+            return False
+        finally:
+            self._replay_in_progress = False
+            self._current_replay_phase = None
+
+    async def _replay_structural_phase(self, all_events: List[Dict]) -> bool:
+        """
+        Phase 1: Replay only structural events to establish system skeleton.
+        
+        Args:
+            all_events: All chronological events from timeline
+            
+        Returns:
+            True if structural phase completed successfully, False otherwise
+        """
+        try:
+            self._current_replay_phase = 'structural'
+            
+            # Filter to only structural events
+            structural_events = [
+                event for event in all_events 
+                if self._classify_event_phase(
+                    event.get('payload', {}).get('event_type'), 
+                    event.get('payload', {})
+                ) == 'structural'
+            ]
+            
+            logger.info(f"[{self.id}] Phase 1: Processing {len(structural_events)} structural events")
             
             replayed_count = 0
             skipped_count = 0
             
-            for event_node in chronological_events:
+            for event_node in structural_events:
                 event_id = event_node.get('id')
                 event_payload = event_node.get('payload', {})
                 event_type = event_payload.get('event_type')
                 
-                # Skip if already replayed (shouldn't happen, but safety check)
-                if event_id in self._replayed_event_ids:
-                    logger.debug(f"[{self.id}] Skipping already replayed event {event_id}")
-                    skipped_count += 1
-                    continue
-                    
-                # Check if this event type should be replayed
+                # Check if this event should be replayed
                 if not self._should_replay_event(event_type, event_payload):
-                    logger.debug(f"[{self.id}] Skipping non-replayable event {event_id} ({event_type})")
+                    logger.debug(f"[{self.id}] Phase 1: Skipping non-replayable event {event_id} ({event_type})")
                     skipped_count += 1
                     continue
-                    
-                # Log what we're about to replay
-                logger.info(f"[{self.id}] Replaying event {event_id}: {event_type}")
                 
-                # Replay the event
-                success = await self._replay_single_event(event_node)
+                logger.info(f"[{self.id}] Phase 1: Replaying structural event {event_id}: {event_type}")
+                
+                # Replay the structural event
+                success = await self._replay_single_event(event_node, phase="structural")
                 if success:
                     self._replayed_event_ids.add(event_id)
                     replayed_count += 1
-                    logger.info(f"[{self.id}] ✓ Successfully replayed event {event_id} ({event_type})")
+                    logger.info(f"[{self.id}] Phase 1: ✓ Successfully replayed {event_id} ({event_type})")
                 else:
-                    logger.error(f"[{self.id}] ✗ Failed to replay event {event_id} ({event_type})")
-                    # Continue with other events even if one fails
-                    skipped_count += 1
+                    logger.error(f"[{self.id}] Phase 1: ✗ Failed to replay {event_id} ({event_type})")
+                    return False  # Fail fast for structural issues
                     
-            logger.info(f"[{self.id}] Event replay completed: {replayed_count} replayed, {skipped_count} skipped")
+            self._structural_phase_complete = True
+            logger.info(f"[{self.id}] Phase 1: Structural replay completed - {replayed_count} replayed, {skipped_count} skipped")
+            return True
             
-            # NEW: For VEIL snapshot mode, restore VEIL cache after structural replay
+        except Exception as e:
+            logger.error(f"[{self.id}] Phase 1: Error during structural replay: {e}", exc_info=True)
+            return False
+
+    async def _replay_content_phase(self, all_events: List[Dict]) -> bool:
+        """
+        Phase 2: Replay only content events chronologically with proper VEIL facet timing.
+        
+        Args:
+            all_events: All chronological events from timeline
+            
+        Returns:
+            True if content phase completed successfully, False otherwise
+        """
+        try:
+            self._current_replay_phase = 'content'
+            
+            # Filter to only content events (preserve chronological order)
+            content_events = [
+                event for event in all_events 
+                if self._classify_event_phase(
+                    event.get('payload', {}).get('event_type'), 
+                    event.get('payload', {})
+                ) == 'content'
+            ]
+            
+            logger.info(f"[{self.id}] Phase 2: Processing {len(content_events)} content events chronologically")
+            
+            replayed_count = 0
+            skipped_count = 0
+            
+            for event_node in content_events:
+                event_id = event_node.get('id')
+                event_payload = event_node.get('payload', {})
+                event_type = event_payload.get('event_type')
+                
+                # Check if this event should be replayed
+                if not self._should_replay_event(event_type, event_payload):
+                    logger.debug(f"[{self.id}] Phase 2: Skipping non-replayable event {event_id} ({event_type})")
+                    skipped_count += 1
+                    continue
+                
+                logger.info(f"[{self.id}] Phase 2: Replaying content event {event_id}: {event_type}")
+                
+                # Replay the content event
+                success = await self._replay_single_event(event_node, phase="content")
+                if success:
+                    self._replayed_event_ids.add(event_id)
+                    replayed_count += 1
+                    logger.info(f"[{self.id}] Phase 2: ✓ Successfully replayed {event_id} ({event_type})")
+                else:
+                    logger.warning(f"[{self.id}] Phase 2: ⚠ Failed to replay {event_id} ({event_type}) - continuing")
+                    skipped_count += 1
+                    # Continue with other content events even if one fails
+                    
+            self._content_phase_complete = True
+            logger.info(f"[{self.id}] Phase 2: Content replay completed - {replayed_count} replayed, {skipped_count} skipped")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[{self.id}] Phase 2: Error during content replay: {e}", exc_info=True)
+            return False
+
+    async def _verify_structural_integrity(self) -> bool:
+        """
+        Verify all expected elements and components exist before content replay.
+        
+        Returns:
+            True if structural integrity is verified, False otherwise
+        """
+        try:
+            logger.info(f"[{self.id}] Verifying structural integrity after Phase 1")
+            
+            # Check that all expected chat elements exist based on timeline events
+            expected_elements = self._extract_expected_elements_from_timeline()
+            
+            missing_elements = []
+            incomplete_elements = []
+            
+            for element_info in expected_elements:
+                mount_id = element_info.get('mount_id')
+                element_type = element_info.get('element_type', 'Unknown')
+                
+                element = self.get_mounted_element(mount_id) if mount_id else None
+                
+                if not element:
+                    missing_elements.append(f"{mount_id} ({element_type})")
+                    continue
+                    
+                # Verify element has expected components based on type
+                if element_type in ['ConversationElement', 'ChatElement']:
+                    required_components = ['MessageListComponent', 'MessageListVeilProducer']
+                    for comp_type_name in required_components:
+                        # Try to get component by name (more flexible than type)
+                        comp = element.get_component(comp_type_name)
+                        if not comp:
+                            incomplete_elements.append(f"{mount_id} missing {comp_type_name}")
+                            
+            # Report structural integrity results
+            if missing_elements:
+                logger.error(f"[{self.id}] Missing expected elements: {missing_elements}")
+                return False
+                
+            if incomplete_elements:
+                logger.warning(f"[{self.id}] Elements with missing components: {incomplete_elements}")
+                # Don't fail for missing components - they might be optional
+                
+            total_elements = len(expected_elements)
+            ready_elements = total_elements - len(missing_elements)
+            
+            logger.info(f"[{self.id}] Structural integrity verified: {ready_elements}/{total_elements} elements ready")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[{self.id}] Structural integrity verification failed: {e}", exc_info=True)
+            return False
+
+    def _extract_expected_elements_from_timeline(self) -> List[Dict[str, Any]]:
+        """
+        Extract expected element information from timeline mount events.
+        
+        Returns:
+            List of dictionaries with element information
+        """
+        expected_elements = []
+        
+        try:
+            # Look for element_mounted events that were successfully replayed
+            for event_id in self._replayed_event_ids:
+                # This is a simplified approach - in a full implementation,
+                # we'd need to track the events we just processed
+                pass
+                
+            # For now, check what's currently mounted as a proxy
+            if self._container:
+                mounted_elements_info = self._container.get_mounted_elements_info()
+                for mount_id, element_info in mounted_elements_info.items():
+                    expected_elements.append({
+                        'mount_id': mount_id,
+                        'element_type': element_info.get('element_type', 'Unknown'),
+                        'element_id': element_info.get('element_id')
+                    })
+                    
+        except Exception as e:
+            logger.warning(f"[{self.id}] Error extracting expected elements: {e}")
+            
+        return expected_elements
+
+    async def _complete_two_phase_replay(self) -> bool:
+        """
+        Complete post-replay operations with simplified VEIL handling.
+        
+        NEW: VEIL facets are now built in real-time during content phase,
+        so no complex regeneration is needed!
+        
+        Returns:
+            True if completion was successful, False otherwise
+        """
+        try:
+            total_replayed = len(self._replayed_event_ids)
+            logger.info(f"[{self.id}] Completing two-phase replay with {total_replayed} total events replayed")
+            
+            # Check final VEIL cache size (built during content phase)
+            final_cache_size = self._veil_producer.get_facet_cache_size() if self._veil_producer else 0
+            logger.info(f"[{self.id}] VEIL cache size after chronological replay: {final_cache_size}")
+            
+            # NEW: Simplified VEIL handling
             if self._event_replay_mode == EventReplayMode.ENABLED_WITH_VEIL_SNAPSHOT:
-                logger.info(f"[{self.id}] Attempting VEIL cache restoration after structural replay")
+                # For snapshot mode, still try to restore stored VEIL
+                logger.info(f"[{self.id}] Attempting VEIL cache restoration in snapshot mode")
                 veil_restoration_success = await self._restore_veil_snapshot()
                 if not veil_restoration_success:
-                    logger.warning(f"[{self.id}] VEIL cache restoration failed, regenerating from current state")
-                    await self._regenerate_veil_state_after_replay()
-            elif replayed_count > 0:
-                # Only regenerate VEIL state if we actually replayed events
-                # For new agents with no events, let normal initialization handle VEIL setup
-                logger.info(f"[{self.id}] Regenerating VEIL state after replaying {replayed_count} events")
-                await self._regenerate_veil_state_after_replay()
+                    logger.info(f"[{self.id}] VEIL cache restoration failed, using chronologically built VEIL from content phase")
             else:
-                logger.info(f"[{self.id}] No events replayed, skipping VEIL regeneration - normal initialization will handle VEIL setup")
+                # For regular mode, VEIL was built chronologically during content phase - no regeneration needed!
+                logger.info(f"[{self.id}] ✓ VEIL state built chronologically during content phase - no regeneration required")
             
-            # NEW: After VEIL regeneration, ensure uplinks are connected (crucial for InnerSpaces)
-            if replayed_count > 0:
-                logger.info(f"[{self.id}] Connecting uplinks after timeline replay")
+            # Connect uplinks after replay (crucial for InnerSpaces)
+            if total_replayed > 0:
+                logger.info(f"[{self.id}] Connecting uplinks after two-phase replay")
                 await self._connect_uplinks_after_replay()
             
-            # NEW: Verify replay integrity for message components
+            # Verify replay integrity for message components
             await self._verify_replay_integrity()
             
             return True
             
         except Exception as e:
-            logger.error(f"[{self.id}] Error during event replay: {e}", exc_info=True)
+            logger.error(f"[{self.id}] Error during two-phase replay completion: {e}", exc_info=True)
             return False
-        finally:
-            self._replay_in_progress = False
 
     async def _regenerate_veil_state_after_replay(self) -> bool:
         """
@@ -1006,8 +1191,9 @@ class Space(BaseElement):
         try:
             logger.info(f"[{self.id}] Regenerating VEIL state after event replay")
             
-            # Clear the existing VEIL cache to force regeneration
-            self._flat_veil_cache.clear()
+            # FIXED: Don't clear the entire cache - agent responses were already replayed!
+            # Only regenerate VEIL for mounted elements that might not have been replayed
+            # (e.g., status facets for containers)
             
             # Ensure own VEIL presence is initialized
             self._ensure_own_veil_presence_initialized()
@@ -1054,7 +1240,8 @@ class Space(BaseElement):
             if hasattr(self, 'on_frame_end') and callable(self.on_frame_end):
                 self.on_frame_end()
                 
-            logger.info(f"[{self.id}] VEIL state regeneration completed. Cache size: {len(self._flat_veil_cache)}")
+            cache_size = self._veil_producer.get_facet_cache_size() if self._veil_producer else 0
+            logger.info(f"[{self.id}] VEIL state regeneration completed. Cache size: {cache_size}")
             return True
             
         except Exception as e:
@@ -1108,12 +1295,13 @@ class Space(BaseElement):
             
         return False
     
-    async def _replay_single_event(self, event_node: Dict[str, Any]) -> bool:
+    async def _replay_single_event(self, event_node: Dict[str, Any], phase: str = "unknown") -> bool:
         """
-        Replay a single event to reconstruct system state.
+        Replay a single event to reconstruct system state with phase awareness.
         
         Args:
             event_node: The complete event node from timeline
+            phase: The current replay phase ('structural', 'content', or 'unknown')
             
         Returns:
             True if replay was successful, False otherwise
@@ -1123,18 +1311,23 @@ class Space(BaseElement):
         event_data = event_payload.get('data', {})
         
         try:
-            # For most events, we can use the generic receive_event mechanism with replay mode
-            # This allows components to handle replay events the same way as live events
+            # NEW: Enhanced timeline context with phase information
             timeline_context = {
                 'timeline_id': event_node.get('timeline_id'),
                 'replay_mode': True,  # Mark this as a replay to prevent double-recording
+                'replay_phase': phase,  # NEW: Include current phase for component awareness
                 'original_event_id': event_node.get('id'),
                 'original_timestamp': event_node.get('timestamp')
             }
             
+            # Handle activation_call events during replay (extract focus context)
+            if event_type == "activation_call":
+                self._handle_activation_call_during_replay(event_node)
+                return True  # Don't replay the activation_call itself, just extract focus
+
             # Use receive_event for most replay scenarios
-            # This ensures components get the chance to handle replayed events
-            logger.debug(f"[{self.id}] Replaying event {event_type} via receive_event mechanism")
+            # This ensures components get the chance to handle replayed events with phase awareness
+            logger.debug(f"[{self.id}] Replaying {phase} event {event_type} via receive_event mechanism")
             self.receive_event(event_payload, timeline_context)
             
             # For events that need special handling beyond component processing:
@@ -1153,12 +1346,43 @@ class Space(BaseElement):
                 return True
                 
             else:
-                logger.debug(f"[{self.id}] Event type {event_type} replayed via component mechanism")
+                logger.debug(f"[{self.id}] Event type {event_type} replayed via component mechanism in {phase} phase")
                 return True
                 
         except Exception as e:
-            logger.error(f"[{self.id}] Error replaying {event_type} event: {e}", exc_info=True)
+            logger.error(f"[{self.id}] Error replaying {event_type} event in {phase} phase: {e}", exc_info=True)
             return False
+
+    def _handle_activation_call_during_replay(self, event_node: Dict[str, Any]) -> None:
+        """
+        NEW: Extract and signal focus StatusFacet from activation_call during replay.
+        
+        Args:
+            event_node: The activation_call event node containing focus context
+        """
+        try:
+            focus_context = event_node.get('focus_context', {})
+            focus_element_id = focus_context.get('focus_element_id')
+            
+            if focus_element_id:
+                # Find the target element and trigger focus signal
+                target_element = self.get_element_by_id(focus_element_id)
+                if target_element:
+                    # Get the MessageList component and trigger focus signal
+                    message_list_component = target_element.get_component("MessageListComponent")
+                    if message_list_component:
+                        # Call the focus signal method (which is replay-aware)
+                        message_list_component._signal_focus_change_to_veil_producer()
+                        logger.debug(f"[REPLAY] Signaled focus change for {focus_element_id}")
+                    else:
+                        logger.debug(f"[REPLAY] MessageListComponent not found for element {focus_element_id}")
+                else:
+                    logger.debug(f"[REPLAY] Element {focus_element_id} not found for focus signal")
+            else:
+                logger.debug(f"[REPLAY] No focus_element_id in activation_call focus_context")
+                
+        except Exception as e:
+            logger.error(f"[{self.id}] Error handling activation_call during replay: {e}", exc_info=True)
     
     async def _replay_element_mounted(self, event_data: Dict[str, Any]) -> bool:
         """Replay element_mounted event - recreate the mounted element if possible."""
@@ -1292,13 +1516,14 @@ class Space(BaseElement):
                 return False
                 
             # Create snapshot data
+            veil_cache = self._veil_producer.get_flat_veil_cache() if self._veil_producer else {}
             snapshot_data = {
-                'veil_cache': self._flat_veil_cache.copy(),
+                'veil_cache': veil_cache,
                 'snapshot_timestamp': time.time(),
                 'space_id': self.id,
                 'space_type': self.__class__.__name__,
                 'element_count': len(self._container.get_mounted_elements()) if self._container else 0,
-                'cache_size': len(self._flat_veil_cache),
+                'cache_size': len(veil_cache),
                 'metadata': {
                     'is_inner_space': self.IS_INNER_SPACE,
                     'is_uplink_space': self.IS_UPLINK_SPACE,
@@ -1312,7 +1537,8 @@ class Space(BaseElement):
             success = await self._timeline._storage.store_system_state(storage_key, snapshot_data)
             
             if success:
-                logger.info(f"[{self.id}] VEIL snapshot stored successfully. Cache size: {len(self._flat_veil_cache)}")
+                cache_size = self._veil_producer.get_facet_cache_size() if self._veil_producer else 0
+                logger.info(f"[{self.id}] VEIL snapshot stored successfully. Cache size: {cache_size}")
             else:
                 logger.error(f"[{self.id}] Failed to store VEIL snapshot")
                 
@@ -1354,11 +1580,14 @@ class Space(BaseElement):
                 logger.error(f"[{self.id}] Invalid VEIL cache format in snapshot")
                 return False
                 
-            self._flat_veil_cache.clear()
-            self._flat_veil_cache.update(restored_cache)
+            if self._veil_producer:
+                self._veil_producer.update_flat_veil_cache(restored_cache)
+            else:
+                logger.error(f"[{self.id}] Cannot restore VEIL cache: SpaceVeilProducer not available")
+                return False
             
             snapshot_timestamp = snapshot_data.get('snapshot_timestamp', 0)
-            cache_size = len(self._flat_veil_cache)
+            cache_size = len(restored_cache)
             
             logger.info(f"[{self.id}] VEIL snapshot restored successfully. Cache size: {cache_size}, "
                        f"Snapshot age: {time.time() - snapshot_timestamp:.1f}s")
@@ -1574,31 +1803,31 @@ class Space(BaseElement):
         Returns:
             Deep copy of the flat VEIL cache
         """
-        logger.debug(f"[{self.id}] Providing flat VEIL cache snapshot. Size: {len(self._flat_veil_cache)}")
-        return copy.deepcopy(self._flat_veil_cache)
+        if self._veil_producer:
+            veil_cache = self._veil_producer.get_flat_veil_cache()
+            logger.debug(f"[{self.id}] Providing flat VEIL cache snapshot. Size: {len(veil_cache)}")
+            return veil_cache
+        else:
+            logger.warning(f"[{self.id}] Cannot provide VEIL cache snapshot: SpaceVeilProducer not available")
+            return {}
     
-    def get_veil_nodes_by_owner(self, owner_id: str) -> Dict[str, Any]:
+    def get_facets_by_owner(self, owner_id: str) -> Dict[str, 'VEILFacet']:
         """
-        Get all VEIL nodes belonging to a specific owner element.
+        Get all VEILFacets belonging to a specific owner element.
         
-        This enables efficient granular access without full VEIL tree reconstruction.
+        This enables efficient granular access to facets by owner.
         
         Args:
             owner_id: Element ID to filter by
             
         Returns:
-            Dictionary of {veil_id: veil_node} for nodes owned by the specified element
+            Dictionary of {facet_id: VEILFacet} for facets owned by the specified element
         """
-        filtered_nodes = {}
-        
-        for veil_id, node_data in self._flat_veil_cache.items():
-            if isinstance(node_data, dict):
-                props = node_data.get("properties", {})
-                if props.get("owner_id") == owner_id:
-                    filtered_nodes[veil_id] = copy.deepcopy(node_data)
-        
-        logger.debug(f"[{self.id}] Filtered {len(filtered_nodes)} VEIL nodes for owner {owner_id}")
-        return filtered_nodes
+        if self._veil_producer:
+            return self._veil_producer.get_facets_by_owner(owner_id)
+        else:
+            logger.warning(f"[{self.id}] Cannot filter VEILFacets by owner: SpaceVeilProducer not available")
+            return {}
     
     def get_veil_nodes_by_type(self, node_type: str, owner_id: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -1611,22 +1840,11 @@ class Space(BaseElement):
         Returns:
             Dictionary of {veil_id: veil_node} matching the criteria
         """
-        filtered_nodes = {}
-        
-        for veil_id, node_data in self._flat_veil_cache.items():
-            if isinstance(node_data, dict):
-                if node_data.get("node_type") == node_type:
-                    # If owner_id is specified, also filter by owner
-                    if owner_id is None:
-                        filtered_nodes[veil_id] = copy.deepcopy(node_data)
-                    else:
-                        props = node_data.get("properties", {})
-                        if props.get("owner_id") == owner_id:
-                            filtered_nodes[veil_id] = copy.deepcopy(node_data)
-        
-        logger.debug(f"[{self.id}] Filtered {len(filtered_nodes)} VEIL nodes of type '{node_type}'" + 
-                    (f" for owner {owner_id}" if owner_id else ""))
-        return filtered_nodes
+        if self._veil_producer:
+            return self._veil_producer.get_veil_nodes_by_type(node_type, owner_id)
+        else:
+            logger.warning(f"[{self.id}] Cannot filter VEIL nodes by type: SpaceVeilProducer not available")
+            return {}
     
     def get_veil_nodes_by_content_nature(self, content_nature: str, owner_id: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -1639,22 +1857,11 @@ class Space(BaseElement):
         Returns:
             Dictionary of {veil_id: veil_node} matching the criteria
         """
-        filtered_nodes = {}
-        
-        for veil_id, node_data in self._flat_veil_cache.items():
-            if isinstance(node_data, dict):
-                props = node_data.get("properties", {})
-                if props.get("content_nature") == content_nature:
-                    # If owner_id is specified, also filter by owner
-                    if owner_id is None:
-                        filtered_nodes[veil_id] = copy.deepcopy(node_data)
-                    else:
-                        if props.get("owner_id") == owner_id:
-                            filtered_nodes[veil_id] = copy.deepcopy(node_data)
-        
-        logger.debug(f"[{self.id}] Filtered {len(filtered_nodes)} VEIL nodes with content_nature '{content_nature}'" + 
-                    (f" for owner {owner_id}" if owner_id else ""))
-        return filtered_nodes
+        if self._veil_producer:
+            return self._veil_producer.get_veil_nodes_by_content_nature(content_nature, owner_id)
+        else:
+            logger.warning(f"[{self.id}] Cannot filter VEIL nodes by content nature: SpaceVeilProducer not available")
+            return {}
     
     def has_multimodal_content(self, owner_id: Optional[str] = None) -> bool:
         """
@@ -1666,18 +1873,8 @@ class Space(BaseElement):
         Returns:
             True if multimodal content is found, False otherwise
         """
-        for veil_id, node_data in self._flat_veil_cache.items():
-            if isinstance(node_data, dict):
-                props = node_data.get("properties", {})
-                
-                # Check if it's an attachment content node
-                if (props.get("content_nature", "").startswith("image") or 
-                    props.get("structural_role") == "attachment_content" or
-                    node_data.get("node_type") == "attachment_content_item"):
-                    
-                    # If owner_id filter is specified, check ownership
-                    if owner_id is None or props.get("owner_id") == owner_id:
-                        logger.debug(f"[{self.id}] Found multimodal content in node {veil_id}")
-                        return True
-        
-        return False
+        if self._veil_producer:
+            return self._veil_producer.has_multimodal_content(owner_id)
+        else:
+            logger.warning(f"[{self.id}] Cannot check for multimodal content: SpaceVeilProducer not available")
+            return False

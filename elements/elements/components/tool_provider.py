@@ -24,7 +24,7 @@ class ToolParameterProperty(TypedDict):
     # For array type, can specify items schema
     items: Optional[Dict[str, Any]] # e.g., {"type": "string"} or {"type": "object", "properties": {...}}
     # For object type, can specify properties schema
-    properties: Optional[Dict[str, Any]] 
+    properties: Optional[Dict[str, Any]]
     # For enum
     enum: Optional[List[Any]]
 
@@ -74,7 +74,7 @@ class ToolProviderComponent(Component):
             description: A human-readable description of what the tool does.
             parameters_schema: A list of dictionaries, where each dictionary defines a parameter
                              according to ToolParameter TypedDict structure.
-        
+
         Returns:
             The decorator that registers the function.
         """
@@ -113,14 +113,14 @@ class ToolProviderComponent(Component):
         """
         if name in self._tools:
             logger.warning(f"Tool '{name}' is being re-registered on Element {self.owner.id if self.owner else 'unknown'}. Overwriting previous definition.")
-        
+
         # Validate parameters_schema (could reuse validation from decorator or add more here)
         for param in parameters_schema:
              if not isinstance(param, dict) or not all(k in param for k in ['name', 'type', 'description', 'required']):
                  logger.error(f"Parameters schema: {parameters_schema}")
                  logger.error(f"Invalid parameter definition during register_tool_function for tool '{name}': {param}")
                  # Potentially raise an error or skip registration
-                 return 
+                 return
 
         self._tools[name] = {
             "description": description,
@@ -133,6 +133,10 @@ class ToolProviderComponent(Component):
         """
         Returns a list of available tools with their descriptions and parameter schemas.
         Formatted for easy consumption.
+
+        DEPRECATED: Use get_llm_tool_definitions() for LLMToolDefinition objects
+        or get_available_tool_names() for simple name lists.
+        This method is maintained for backward compatibility.
         """
         available_tools_list = []
         for tool_name, tool_info in self._tools.items():
@@ -149,9 +153,80 @@ class ToolProviderComponent(Component):
             available_tools_list.append({
                 "name": tool_name,
                 "description": tool_info["description"],
-                "parameters": formatted_params 
+                "parameters": formatted_params
             })
         return available_tools_list
+
+    def get_available_tool_names(self) -> List[str]:
+        """
+        Returns a list of names of all registered tools.
+
+        NEW: Backward compatibility method for components that expect simple tool name lists.
+        This is the same as list_tools() but with a more descriptive name.
+        """
+        return list(self._tools.keys())
+
+    def get_enhanced_tool_definitions(self) -> List[Dict[str, Any]]:
+        """
+        NEW: Returns enhanced tool definitions with complete metadata for VEIL emission.
+
+        This provides the rich tool information needed for tool aggregation and rendering
+        while maintaining all original tool metadata including target element information.
+
+        Returns:
+            List of enhanced tool definition dictionaries with complete metadata
+        """
+        enhanced_definitions = []
+        for tool_name, tool_info in self._tools.items():
+            # Build the complete tool definition with all metadata
+            enhanced_def = {
+                "name": tool_name,
+                "description": tool_info["description"],
+                "parameters": self._build_json_schema_from_parameters(tool_info["parameters_schema"]),
+                "target_element_id": self.owner.id if self.owner else None,
+                "element_name": getattr(self.owner, 'name', 'Unknown Element') if self.owner else 'Unknown Element',
+                "element_type": self.owner.__class__.__name__ if self.owner else 'Unknown',
+                "original_tool_name": tool_name  # For aggregation logic
+            }
+            enhanced_definitions.append(enhanced_def)
+        return enhanced_definitions
+
+    def _build_json_schema_from_parameters(self, parameters_schema: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        NEW: Build JSON schema from parameter definitions for enhanced tool definitions.
+
+        This is extracted from get_llm_tool_definitions() to avoid code duplication.
+        """
+        json_schema_properties = {}
+        required_params = []
+
+        for param_def in parameters_schema:
+            param_name = param_def["name"]
+            prop_schema = {
+                "type": param_def["type"],
+                "description": param_def["description"]
+            }
+            # Add optional fields if present
+            if param_def.get("items"):
+                prop_schema["items"] = param_def["items"]
+            if param_def.get("properties"): # For object type
+                prop_schema["properties"] = param_def["properties"]
+            if param_def.get("enum"):
+                 prop_schema["enum"] = param_def["enum"]
+
+            json_schema_properties[param_name] = prop_schema
+
+            if param_def["required"]:
+                required_params.append(param_name)
+
+        final_json_schema = {
+            "type": "object",
+            "properties": json_schema_properties
+        }
+        if required_params: # Only add 'required' key if there are required parameters
+            final_json_schema["required"] = required_params
+
+        return final_json_schema
 
     def get_llm_tool_definitions(self) -> List[LLMToolDefinition]:
         """
@@ -161,42 +236,8 @@ class ToolProviderComponent(Component):
         """
         llm_tools = []
         for tool_name, tool_info in self._tools.items():
-            json_schema_properties = {}
-            required_params = []
-
-            for param_def in tool_info["parameters_schema"]:
-                param_name = param_def["name"]
-                prop_schema = {
-                    "type": param_def["type"],
-                    "description": param_def["description"]
-                }
-                # Add optional fields if present
-                if param_def.get("items"):
-                    prop_schema["items"] = param_def["items"]
-                if param_def.get("properties"): # For object type
-                    prop_schema["properties"] = param_def["properties"]
-                if param_def.get("enum"):
-                     prop_schema["enum"] = param_def["enum"]
-                
-                json_schema_properties[param_name] = prop_schema
-                
-                if param_def["required"]:
-                    required_params.append(param_name)
-            
-            final_json_schema = {
-                "type": "object",
-                "properties": json_schema_properties
-            }
-            if required_params: # Only add 'required' key if there are required parameters
-                final_json_schema["required"] = required_params
-            
-            # If no parameters at all, the schema should reflect that (e.g. empty properties)
-            if not json_schema_properties:
-                # Some LLMs expect an empty properties object if no params
-                # Others might not need 'properties' or 'required' at all.
-                # For now, let's ensure 'properties' is there but empty.
-                # 'required' list would be empty and thus omitted.
-                pass
+            # Use the new helper method to build JSON schema
+            final_json_schema = self._build_json_schema_from_parameters(tool_info["parameters_schema"])
 
             llm_tools.append(LLMToolDefinition(
                 name=tool_name,
@@ -237,12 +278,12 @@ class ToolProviderComponent(Component):
 
         try:
             logger.info(f"Executing tool '{tool_name}' on Element {self.owner.id if self.owner else 'unknown'} with params: {kwargs}. Context provided: {bool(calling_context)}")
-            
+
             if asyncio.iscoroutinefunction(tool_func):
                 result = await tool_func(**params_to_pass)
             else:
                 result = tool_func(**params_to_pass)
-            
+
             if not isinstance(result, dict):
                 logger.warning(f"Tool '{tool_name}' did not return a dictionary. Wrapping result. Original: {result}")
                 if result is not None:
@@ -251,10 +292,10 @@ class ToolProviderComponent(Component):
 
             if 'success' not in result:
                 logger.debug(f"Tool '{tool_name}' result dict missing 'success' flag. Assuming success for now.")
-                result['success'] = True 
+                result['success'] = True
 
             return result
-        except TypeError as te: 
+        except TypeError as te:
             logger.error(f"TypeError executing tool '{tool_name}' on Element {self.owner.id if self.owner else 'unknown'}: {te}", exc_info=True)
             return {"success": False, "error": f"Parameter mismatch for tool '{tool_name}': {te}"}
         except Exception as e:
@@ -273,4 +314,4 @@ class ToolProviderComponent(Component):
         return list(self._tools.keys())
 
     # Optional: Method to unregister a tool, if dynamic unregistration is needed.
-    # def unregister_tool(self, tool_name: str) -> bool: ... 
+    # def unregister_tool(self, tool_name: str) -> bool: ...

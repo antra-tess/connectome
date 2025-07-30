@@ -4,13 +4,22 @@ Generates VEIL representation for notes stored in a ScratchpadElement.
 """
 import logging
 from typing import Dict, Any, Optional, List, Set
+import time
 
 # Assuming owner element has a get_notes() method or _notes attribute
 from ..base_component import VeilProducer 
 # Import the registry decorator
 from elements.component_registry import register_component
+# NEW: Import VEILFacet system
+from ..veil import (
+    VEILFacetOperation, VEILFacet, VEILFacetType,
+    EventFacet, StatusFacet, AmbientFacet, ConnectomeEpoch,
+    FacetOperationBuilder
+)
 
 logger = logging.getLogger(__name__)
+
+# NEW: Removed centralized tool families - each VeilProducer sets arbitrary tool_family string
 
 # VEIL Node Structure Constants (Example)
 VEIL_SCRATCHPAD_ROOT_TYPE = "scratchpad_root"
@@ -22,8 +31,11 @@ VEIL_NOTE_TIMESTAMP_PROP = "note_timestamp" # From event? Or element state?
 class ScratchpadVeilProducer(VeilProducer):
     """
     Generates VEIL representation for notes managed by the owning ScratchpadElement.
-    Assumes the owner element provides a way to get the current list of notes 
-    (e.g., a `get_notes()` method returning a list of strings or dicts).
+    
+    NEW: Uses VEILFacet architecture generating:
+    - StatusFacet for scratchpad container creation/updates
+    - EventFacet for note additions and removals
+    - Maintains content-based note identification via hash IDs
     """
     COMPONENT_TYPE = "ScratchpadVeilProducer"
 
@@ -63,7 +75,12 @@ class ScratchpadVeilProducer(VeilProducer):
 
         for index, note_content in enumerate(current_notes_list):
             import hashlib
+            import time
+            from datetime import datetime
             note_hash_id = hashlib.md5(str(note_content).encode()).hexdigest()[:8] 
+            
+            # Add timestamp for time markers (operation_index handles chronological placement)
+            current_timestamp = time.time()
             
             child_node = {
                 "veil_id": f"{self.owner.id}_scratchpad_note_{note_hash_id}",
@@ -72,6 +89,12 @@ class ScratchpadVeilProducer(VeilProducer):
                     "structural_role": "list_item",
                     "content_nature": "text_note",
                     VEIL_NOTE_CONTENT_PROP: note_content,
+                    # NEW: Add timestamp fields for time markers (not chronological placement)
+                    "timestamp": current_timestamp,
+                    "timestamp_iso": datetime.fromtimestamp(current_timestamp).isoformat() + "Z",
+                    "note_timestamp": current_timestamp,
+                    "created_at": datetime.fromtimestamp(current_timestamp).isoformat() + "Z"
+                    # NOTE: operation_index will be added by SpaceVeilProducer for chronological placement
                 },
                 "children": [] 
             }
@@ -107,63 +130,81 @@ class ScratchpadVeilProducer(VeilProducer):
         # Baselines are updated in signal_delta_produced_this_frame
         return root_veil_node
 
-    def calculate_delta(self) -> Optional[List[Dict[str, Any]]]:
+    def calculate_delta(self) -> Optional[List[VEILFacetOperation]]:
         """
-        Calculates the changes (delta) in the notes since the last VEIL generation.
-        Detects added and removed notes and handles the scratchpad root node.
+        NEW: Calculate VEILFacet operations for scratchpad note management with phase awareness.
+        
+        This replaces the old delta operation system with VEILFacet operations, generating:
+        - StatusFacet for scratchpad container creation/updates
+        - EventFacet for note additions and removals
+        - Uses content-based hash identification for note tracking
+        
+        NEW: Phase-aware processing - defers content processing during structural phase.
+        
+        Returns:
+            List of VEILFacetOperation instances for the scratchpad
         """
+        # NEW: Check if we're in structural replay phase and should defer content processing
+        if self._should_defer_content_processing():
+            logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Deferring content processing during structural phase")
+            return None
+            
         current_notes_list, is_error = self._get_current_notes_from_owner()
         if is_error:
-            logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Error getting notes from owner, cannot calculate delta.")
+            logger.error(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Error getting notes from owner, cannot calculate facet operations.")
             return None
 
-        delta_operations = []
-        scratchpad_root_veil_id = f"{self.owner.id}_scratchpad_root"
+        if not self.owner:
+            logger.error(f"[{self.COMPONENT_TYPE}] Owner not set, cannot calculate facet operations.")
+            return None
 
-        current_scratchpad_root_properties = {
-            "structural_role": "container",
-            "content_nature": "scratchpad_summary",
-            "element_id": self.owner.id,
+        facet_operations = []
+        owner_id = self.owner.id
+        scratchpad_root_facet_id = f"{owner_id}_scratchpad_container"
+
+        # 1. Handle scratchpad container (StatusFacet)
+        container_facet_exists = self._state.get('_has_produced_scratchpad_root_add_before', False)
+        
+        # FIXED: Get enhanced tools for StatusFacet
+        enhanced_tools = self._get_enhanced_tools_for_element()
+        
+        # Get current container state
+        current_container_state = {
+            "element_id": owner_id,
             "element_name": self.owner.name,
-            "note_count": len(current_notes_list) 
+            "note_count": len(current_notes_list),
+            "content_nature": "scratchpad_summary",
+            # FIXED: Include enhanced tools in StatusFacet current_state
+            "available_tools": enhanced_tools
         }
         
-        parent_veil_id_for_scratchpad_root = None
-        if self.owner and hasattr(self.owner, 'get_parent_info') and callable(getattr(self.owner, 'get_parent_info')):
-            parent_info = self.owner.get_parent_info()
-            if parent_info and parent_info.get('parent_id'):
-                parent_space_id = parent_info['parent_id']
-                parent_veil_id_for_scratchpad_root = f"{parent_space_id}_space_root"
-                logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Scratchpad root '{scratchpad_root_veil_id}' will be parented to space root: {parent_veil_id_for_scratchpad_root}")
-            else:
-                logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Could not determine parent_space_id for scratchpad root from get_parent_info(). Parent info: {parent_info}")
+        if not container_facet_exists:
+            # Create container StatusFacet
+            container_facet = StatusFacet(
+                facet_id=scratchpad_root_facet_id,
+                veil_timestamp=ConnectomeEpoch.get_veil_timestamp(),
+                owner_element_id=owner_id,
+                status_type="container_created",
+                current_state=current_container_state,
+                links_to=f"{self.owner.get_parent_info()['parent_id']}_space_root" if hasattr(self.owner, 'get_parent_info') else None
+            )
+            
+            facet_operations.append(FacetOperationBuilder.add_facet(container_facet))
+            logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] Generated add_facet for scratchpad container {scratchpad_root_facet_id}")
+            
         else:
-            logger.warning(f"[{self.owner.id if self.owner else 'UnknownOwner'}/{self.COMPONENT_TYPE}] Owner does not have get_parent_info or it's not callable. Scratchpad root will not be parented.")
+            # Check for container state updates
+            last_container_state = self._state.get('_last_scratchpad_root_properties', {})
+            if current_container_state != last_container_state:
+                facet_operations.append(
+                    FacetOperationBuilder.update_facet(
+                        scratchpad_root_facet_id,
+                        {"current_state": current_container_state}
+                    )
+                )
+                logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] Generated update_facet for scratchpad container {scratchpad_root_facet_id}")
 
-        if not self._state.get('_has_produced_scratchpad_root_add_before', False):
-            logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Generating 'add_node' for scratchpad root '{scratchpad_root_veil_id}'.")
-            add_node_op_for_root = {
-                "op": "add_node",
-                "node": {
-                    "veil_id": scratchpad_root_veil_id,
-                    "node_type": VEIL_SCRATCHPAD_ROOT_TYPE,
-                    "properties": current_scratchpad_root_properties,
-                    "children": [] 
-                }
-            }
-            if parent_veil_id_for_scratchpad_root:
-                add_node_op_for_root["parent_id"] = parent_veil_id_for_scratchpad_root
-            delta_operations.append(add_node_op_for_root)
-        else:
-            last_root_props = self._state.get('_last_scratchpad_root_properties', {})
-            if current_scratchpad_root_properties != last_root_props:
-                logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Generating 'update_node' for scratchpad root '{scratchpad_root_veil_id}' properties.")
-                delta_operations.append({
-                    "op": "update_node",
-                    "veil_id": scratchpad_root_veil_id,
-                    "properties": current_scratchpad_root_properties
-                })
-
+        # 2. Handle note additions and removals (EventFacets)
         last_notes_list = self._state.get('_last_generated_notes', [])
         current_notes_str_set = {str(n) for n in current_notes_list}
         last_notes_str_set = {str(n) for n in last_notes_list}
@@ -174,54 +215,223 @@ class ScratchpadVeilProducer(VeilProducer):
         notes_to_add_map = {str(n): n for n in current_notes_list}
         notes_to_remove_map = {str(n): n for n in last_notes_list}
 
-        for note_str_content in removed_notes_str_content:
-            original_note_content = notes_to_remove_map.get(note_str_content)
-            if original_note_content is None: continue
-            import hashlib
-            note_hash_id = hashlib.md5(str(original_note_content).encode()).hexdigest()[:8]
-            removed_veil_id = f"{self.owner.id}_scratchpad_note_{note_hash_id}"
-            delta_operations.append({"op": "remove_node", "veil_id": removed_veil_id})
-
+        # Handle note additions
         for note_str_content in added_notes_str_content:
             original_note_content = notes_to_add_map.get(note_str_content)
-            if original_note_content is None: continue
+            if original_note_content is None: 
+                continue
+                
+            # Generate hash-based ID for content tracking
             import hashlib
             note_hash_id = hashlib.md5(str(original_note_content).encode()).hexdigest()[:8]
-            added_node = {
-                "veil_id": f"{self.owner.id}_scratchpad_note_{note_hash_id}",
-                "node_type": VEIL_NOTE_ITEM_TYPE,
-                "properties": {
-                    "structural_role": "list_item",
-                    "content_nature": "text_note",
-                    VEIL_NOTE_CONTENT_PROP: original_note_content,
-                },
-                "children": []
-            }
-            delta_operations.append({
-                "op": "add_node",
-                "parent_id": scratchpad_root_veil_id,
-                "node": added_node
+            note_facet_id = f"{owner_id}_scratchpad_note_{note_hash_id}"
+            
+            # Create EventFacet for new note
+            note_facet = EventFacet(
+                facet_id=note_facet_id,
+                veil_timestamp=ConnectomeEpoch.get_veil_timestamp(),
+                owner_element_id=owner_id,
+                event_type="note_created",
+                content=str(original_note_content),
+                links_to=scratchpad_root_facet_id
+            )
+            
+            # Add note-specific properties
+            current_timestamp = time.time()
+            note_facet.properties.update({
+                "note_hash_id": note_hash_id,
+                "content_nature": "text_note",
+                "structural_role": "list_item",
+                "timestamp": current_timestamp,
+                "timestamp_iso": time.strftime('%Y-%m-%dT%H:%M:%S.%fZ', time.gmtime(current_timestamp)),
+                "note_timestamp": current_timestamp,
+                "created_at": time.strftime('%Y-%m-%dT%H:%M:%S.%fZ', time.gmtime(current_timestamp))
             })
+            
+            facet_operations.append(FacetOperationBuilder.add_facet(note_facet))
+            logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] Generated add_facet for note {note_facet_id}")
 
-        # --- Update State After Deltas are Determined ---
-        if not self._state.get('_has_produced_scratchpad_root_add_before', False):
-            for delta_op in delta_operations:
-                if delta_op.get("op") == "add_node" and isinstance(delta_op.get("node"), dict) and delta_op["node"].get("veil_id") == scratchpad_root_veil_id:
-                    self._state['_has_produced_scratchpad_root_add_before'] = True
-                    break
-        
-        self._state['_last_scratchpad_root_properties'] = current_scratchpad_root_properties
-        self._state['_last_generated_notes'] = current_notes_list # Corrected key
-        
-        if delta_operations:
-            logger.info(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Calculated Scratchpad VEIL delta with {len(delta_operations)} operations.")
+        # Handle note removals
+        for note_str_content in removed_notes_str_content:
+            original_note_content = notes_to_remove_map.get(note_str_content)
+            if original_note_content is None:
+                continue
+                
+            # Generate hash-based ID for removal
+            import hashlib
+            note_hash_id = hashlib.md5(str(original_note_content).encode()).hexdigest()[:8]
+            note_facet_id = f"{owner_id}_scratchpad_note_{note_hash_id}"
+            
+            facet_operations.append(FacetOperationBuilder.remove_facet(note_facet_id))
+            logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] Generated remove_facet for note {note_facet_id}")
+
+        # 3. Generate tool availability ambient facets (when appropriate)
+        if self._should_emit_tools_ambient_facet():
+            tools_ambient_facet = self._create_tools_ambient_facet()
+            if tools_ambient_facet:
+                facet_operations.append(FacetOperationBuilder.add_facet(tools_ambient_facet))
+                logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] Generated structured ambient facet for scratchpad tools")
+
+        # Update state after generating operations
+        if not container_facet_exists and any(
+            op.operation_type == "add_facet" and 
+            op.facet and op.facet.facet_id == scratchpad_root_facet_id 
+            for op in facet_operations
+        ):
+            self._state['_has_produced_scratchpad_root_add_before'] = True
+
+        self._state['_last_scratchpad_root_properties'] = current_container_state
+        self._state['_last_generated_notes'] = current_notes_list
+
+        if facet_operations:
+            logger.info(f"[{owner_id}/{self.COMPONENT_TYPE}] Calculated {len(facet_operations)} scratchpad facet operations")
         else:
-            logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] No Scratchpad VEIL delta operations calculated.")
+            logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] No scratchpad facet operations calculated")
+
+        return facet_operations if facet_operations else None
+
+    # --- NEW: Enhanced Structured Ambient Facet Methods ---
+    
+    def _get_available_tools_for_element(self) -> List[str]:
+        """Get list of available tool names for this scratchpad element."""
+        from ..tool_provider import ToolProviderComponent
+
+        tool_provider = self.get_sibling_component(ToolProviderComponent)
+        if tool_provider:
+            return tool_provider.list_tools()
+        return []
+
+    def _get_enhanced_tools_for_element(self) -> List[Dict[str, Any]]:
+        """
+        Get enhanced tool definitions with complete metadata for scratchpad element.
         
-        logger.debug(
-            f"[{self.owner.id}/{self.COMPONENT_TYPE}] calculate_delta finished. Baseline updated. "
-            f"Scratchpad root props tracked. Notes count: {len(current_notes_list)}. "
-            f"Root add produced: {self._state.get('_has_produced_scratchpad_root_add_before', False)}"
+        Returns rich tool information needed for tool aggregation and rendering.
+        """
+        from ..tool_provider import ToolProviderComponent
+
+        tool_provider = self.get_sibling_component(ToolProviderComponent)
+        if tool_provider:
+            return tool_provider.get_enhanced_tool_definitions()
+        return []
+    
+    def _should_emit_tools_ambient_facet(self) -> bool:
+        """
+        Determine whether to emit tools ambient facet for this scratchpad element.
+        
+        Returns:
+            True if tools ambient facet should be emitted
+        """
+        enhanced_tools = self._get_enhanced_tools_for_element()
+        return bool(enhanced_tools)
+    
+    def _create_tools_ambient_facet(self) -> Optional[AmbientFacet]:
+        """
+        Create enhanced AmbientFacet for available scratchpad tools with structured data.
+        
+        This creates structured data that HUD can consolidate and render appropriately,
+        rather than pre-rendered strings.
+        
+        Returns:
+            AmbientFacet with structured tool data for HUD consolidation
+        """
+        enhanced_tools = self._get_enhanced_tools_for_element()
+        if not enhanced_tools:
+            return None
+        
+        # Determine tool family for this element
+        tool_family = self._classify_tool_family(enhanced_tools)
+        
+        # Create structured content instead of pre-rendered strings
+        structured_content = {
+            "tools": enhanced_tools,
+            "element_context": self._get_element_context_metadata(),
+            "tool_family": tool_family
+        }
+        
+        ambient_facet = AmbientFacet(
+            facet_id=f"{self.owner.id}_tools_ambient",
+            owner_element_id=self.owner.id,
+            ambient_type=tool_family,  # Tool family classification for HUD grouping
+            content=structured_content,  # Structured data instead of string
+            trigger_threshold=1500  # Element-specific threshold
         )
-        # --- End State Update ---
-        return delta_operations
+        
+        # Add additional properties for HUD processing
+        ambient_facet.properties.update({
+            "data_format": "structured",
+            "tools_count": len(enhanced_tools),
+            "element_type": "scratchpad"
+        })
+        
+        return ambient_facet
+    
+    def _classify_tool_family(self, enhanced_tools: List[Dict[str, Any]]) -> str:
+        """
+        Get tool family for this scratchpad element.
+        
+        Args:
+            enhanced_tools: List of enhanced tool definitions (unused - family is element-based)
+            
+        Returns:
+            Tool family string for this element type
+        """
+        # Each element type sets its own arbitrary tool_family string
+        # Scratchpad elements use "scratchpad_tools" by default
+        return "scratchpad_tools"
+    
+    def _get_element_context_metadata(self) -> Dict[str, Any]:
+        """
+        Get element context metadata for HUD consolidation.
+        
+        Returns:
+            Dictionary with element context information
+        """
+        return {
+            "element_id": self.owner.id,
+            "element_name": self.owner.name,
+            "element_type": "scratchpad",
+            "note_count": len(self._state.get('_last_generated_notes', [])),
+            "content_nature": "scratchpad_summary"
+        }
+
+    def _should_defer_content_processing(self) -> bool:
+        """
+        NEW: Determine if content processing should be deferred during structural replay phase.
+        
+        UPDATED: Only defer during structural phase. During content phase, allow VEIL emission
+        for real-time chronological VEIL building.
+        
+        Returns:
+            True if content processing should be deferred, False otherwise
+        """
+        try:
+            # Check if owner space is in structural replay phase (ONLY defer during structural)
+            if self.owner and hasattr(self.owner, '_replay_in_progress'):
+                if self.owner._replay_in_progress:
+                    current_phase = getattr(self.owner, '_current_replay_phase', None)
+                    if current_phase == 'structural':
+                        logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Structural phase - deferring content processing")
+                        return True
+                    elif current_phase == 'content':
+                        logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Content phase - allowing VEIL emission for chronological order")
+                        return False  # NEW: Allow processing during content phase for real-time VEIL emission
+                        
+            # Check if parent space is in structural replay phase (for nested elements)
+            if self.owner and hasattr(self.owner, 'get_parent_object'):
+                parent_space = self.owner.get_parent_object()
+                if parent_space and hasattr(parent_space, '_replay_in_progress'):
+                    if parent_space._replay_in_progress:
+                        current_phase = getattr(parent_space, '_current_replay_phase', None)
+                        if current_phase == 'structural':
+                            logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Parent in structural phase - deferring content")
+                            return True
+                        elif current_phase == 'content':
+                            logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Parent in content phase - allowing VEIL emission")
+                            return False  # NEW: Allow processing during content phase
+                            
+            return False  # Normal operation - no deferral
+            
+        except Exception as e:
+            logger.warning(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Error checking replay phase: {e}")
+            # Safe default: don't defer if unsure
+            return False

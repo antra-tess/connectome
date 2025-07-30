@@ -19,15 +19,15 @@ from .base import BaseElement, MountType
 from .components.tool_provider import ToolProviderComponent 
 from .components.factory_component import ElementFactoryComponent
 from .components.base_component import VeilProducer, Component
-from .components.hud.hud_component import HUDComponent # Explicitly import if kept
+from .components.hud.facet_aware_hud_component import FacetAwareHUDComponent # NEW: Import FacetAware HUD for VEILFacet architecture
 from .components.uplink_manager_component import UplinkManagerComponent # NEWLY ADDED
-from .components.compression_engine_component import CompressionEngineComponent # NEW: Import CompressionEngine
+from .components.veil_facet_compression_engine import VEILFacetCompressionEngine # NEW: Import VEILFacet CompressionEngine
 
 # Import the specific Space Veil Producer
 from .components.space.space_veil_producer import SpaceVeilProducer
 
 # Import agent loop components
-from .agent_loop import BaseAgentLoopComponent, SimpleRequestResponseLoopComponent
+from .components.agent_loop import BaseAgentLoopComponent, SimpleRequestResponseLoopComponent
 
 # Type checking imports
 from typing import TYPE_CHECKING
@@ -71,6 +71,7 @@ class InnerSpace(Space):
         element_id: str,
         name: str,
         agent_name: str,
+        agent_description: str,
         description: str,
         agent_id: str,
         llm_provider: 'LLMProviderInterface',
@@ -106,6 +107,7 @@ class InnerSpace(Space):
         self.agent_id = agent_id
         self.agent_name = agent_name
         self._llm_provider = llm_provider
+        self.agent_description = agent_description
         
         # NEW: Adapter tracking for mention-based activation
         self._adapter_mappings: Dict[str, Dict[str, str]] = {}  # {adapter_type: {adapter_name: adapter_id}}
@@ -143,7 +145,7 @@ class InnerSpace(Space):
             logger.info(f"[{self.id}] Attempting to create default scratchpad element '{scratchpad_id}'.")
             scratchpad_config = {
                 "name": "Agent Scratchpad",
-                "description": f"Default scratchpad for agent {self.agent_id}"
+                "description": f"Default scratchpad for agent {self.agent_name}"
             }
             creation_result = self._element_factory.handle_create_element_from_prefab(
                 element_id=scratchpad_id,
@@ -161,27 +163,29 @@ class InnerSpace(Space):
         if not self._uplink_manager:
             logger.error(f"Failed to add UplinkManagerComponent to InnerSpace {self.id}")
 
-        # NEW: Add CompressionEngineComponent - Required for agent memory and context management
-        self._compression_engine = self.add_component(CompressionEngineComponent)
+        # NEW: Add VEILFacetCompressionEngine - Required for agent memory and VEILFacet-native context management
+        self._compression_engine = self.add_component(VEILFacetCompressionEngine)
         if not self._compression_engine:
-            logger.error(f"Failed to add CompressionEngineComponent to InnerSpace {self.id}")
+            logger.error(f"Failed to add VEILFacetCompressionEngine to InnerSpace {self.id}")
         else:
-            logger.info(f"CompressionEngineComponent successfully added to InnerSpace {self.id}")
+            logger.info(f"VEILFacetCompressionEngine successfully added to InnerSpace {self.id}")
 
-        # Add HUD component for rendering agent context
+        # Add FacetAware HUD component for VEILFacet temporal stream rendering
         hud_kwargs = {'llm_provider': llm_provider} if llm_provider else {}
-        self._hud = self.add_component(HUDComponent, **hud_kwargs)
+        self._hud = self.add_component(FacetAwareHUDComponent, **hud_kwargs)
         if not self._hud:
-            logger.error(f"Failed to add HUDComponent to InnerSpace {self.id}")
+            logger.error(f"Failed to add FacetAwareHUDComponent to InnerSpace {self.id}")
+        else:
+            logger.info(f"FacetAwareHUDComponent successfully added to InnerSpace {self.id}")
         
         # Add any additional requested components
         if additional_components:
             for component_type in additional_components:
                 if component_type in [ToolProviderComponent, ElementFactoryComponent, 
                                      UplinkManagerComponent, # NEWLY ADDED
-                                     CompressionEngineComponent, # NEW: Add to skip list
+                                     VEILFacetCompressionEngine, # NEW: Add VEILFacet compression engine to skip list
                                      # GlobalAttentionComponent, # REMOVED
-                                     HUDComponent 
+                                     FacetAwareHUDComponent # NEW: Add FacetAware HUD to skip list
                                      # ContextManagerComponent # REMOVED
                                      ]:
                     # Skip components that we already added
@@ -521,11 +525,11 @@ class InnerSpace(Space):
     def get_uplink_manager(self) -> Optional[UplinkManagerComponent]:
         return self._uplink_manager
 
-    def get_hud(self) -> Optional[HUDComponent]:
+    def get_hud(self) -> Optional[FacetAwareHUDComponent]:
         return self._hud
 
-    def get_compression_engine(self) -> Optional[CompressionEngineComponent]:
-        """Get the compression engine component."""
+    def get_compression_engine(self) -> Optional[VEILFacetCompressionEngine]:
+        """Get the VEILFacet compression engine component."""
         return self._compression_engine
 
     def handle_deltas_from_uplink(self, uplink_id: str, deltas: List[Dict[str, Any]]):

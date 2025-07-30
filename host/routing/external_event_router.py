@@ -112,6 +112,16 @@ class ExternalEventRouter:
         logger.warning(f"No agent found for adapter_name '{adapter_name}'. Available aliases: {[list(ac.platform_aliases.values()) for ac in self.agent_configs]}")
         return None
 
+    def _get_adapter_type_by_alias(self, adapter_name: str) -> Optional[str]:
+        """
+        Retrieves the adapter type associated with a given adapter_name.
+        """
+        for agent_config in self.agent_configs:
+            for adapter_type, alias in agent_config.platform_aliases.items():
+                if adapter_name == alias:
+                    return adapter_type
+        return None
+
     async def route_external_event(self, event_data_from_activity_client: Dict[str, Any], original_timeline_context: Dict[str, Any]):
         """
         Main entry point for processing an event received from the HostEventLoop,
@@ -150,6 +160,7 @@ class ExternalEventRouter:
             adapter_name = adapter_data.get("adapter_name")
             agent_id = self._get_agent_id_by_alias(adapter_name)
             adapter_data["recipient_connectome_agent_id"] = agent_id
+            adapter_type = self._get_adapter_type_by_alias(adapter_name)
 
             if not event_type_from_adapter or not isinstance(adapter_data, dict):
                 logger.error(f"Event payload missing 'event_type_from_adapter' or valid 'adapter_data' dict: {payload}")
@@ -173,6 +184,8 @@ class ExternalEventRouter:
                 elif event_type_from_adapter == "reaction_removed":
                     await self._handle_reaction_removed(source_adapter_id, adapter_data)
                 elif event_type_from_adapter == "conversation_started":
+                    # Pass adapter_type to conversation_started handler for metadata preservation
+                    adapter_data["adapter_type"] = adapter_type
                     await self._handle_conversation_started(source_adapter_id, adapter_data)
                 elif event_type_from_adapter == "history_fetched":  # NEW: Bulk history processing
                     await self._handle_history_fetched(source_adapter_id, adapter_data)
@@ -875,18 +888,23 @@ class ExternalEventRouter:
     async def _handle_conversation_started(self, source_adapter_id: str, adapter_data: Dict[str, Any]):
         """
         Handles the 'conversation_started' event, typically received when joining
-        a new channel or starting a connection, containing message history.
+        a new channel or starting a connection, containing conversation metadata.
 
-        NEW: Routes to InnerSpaces following the refactored architecture where
+        Routes to InnerSpaces following the refactored architecture where
         all conversations are handled within InnerSpaces, not SharedSpaces.
         Uses the same agent selection logic as _handle_direct_message.
         """
         logger.info(f"Handling 'conversation_started' event from {source_adapter_id}. Data keys: {adapter_data.keys()}")
+        
+        # Extract basic conversation info
         conversation_id = adapter_data.get("conversation_id")
-        history = adapter_data.get("history") # List of message dicts
         is_dm = adapter_data.get("is_direct_message", False)
 
-        # NEW: Reuse the same agent selection logic as _handle_direct_message
+        # Extract recipient agent ID like _handle_direct_message does
+        adapter_name = adapter_data.get("adapter_name")
+        agent_id = self._get_agent_id_by_alias(adapter_name)
+        adapter_data["recipient_connectome_agent_id"] = agent_id
+
         recipient_agent_id = adapter_data.get("recipient_connectome_agent_id")
         if not recipient_agent_id:
             logger.error(f"conversation_started event from adapter '{source_adapter_id}' missing 'recipient_connectome_agent_id' in adapter_data. Cannot route.")
@@ -895,32 +913,62 @@ class ExternalEventRouter:
         if not conversation_id:
             logger.error("conversation_started event missing 'conversation_id'. Cannot process.")
             return
-        if not isinstance(history, list):
-            logger.error(f"conversation_started event for '{conversation_id}' missing 'history' list or it's not a list. Cannot process history.")
-            history = [] # Process without history if it's invalid
 
-        # NEW: Get the target InnerSpace for the agent (same as _handle_direct_message)
+        # Get the target InnerSpace for the agent (same as _handle_direct_message)
         target_inner_space = self.space_registry.get_inner_space_for_agent(recipient_agent_id)
         if not target_inner_space:
             logger.error(f"Could not route conversation_started: InnerSpace for agent_id '{recipient_agent_id}' not found.")
             return
 
-        logger.info(f"Processing conversation_started for agent '{recipient_agent_id}' InnerSpace '{target_inner_space.id}' with {len(history)} history messages...")
+        logger.info(f"Processing conversation_started for agent '{recipient_agent_id}' InnerSpace '{target_inner_space.id}'")
 
-        # NEW: Route via bulk processing path only (remove legacy processing)
-        if history:
-            await self._process_bulk_history(
-                source_adapter_id=source_adapter_id,
-                conversation_id=conversation_id,
-                history_messages=history,
-                is_dm=is_dm,
-                recipient_agent_id=recipient_agent_id,
-                target_inner_space=target_inner_space,
-                original_adapter_data=adapter_data,
-                source_event_type="conversation_started"
-            )
-        else:
-            logger.info(f"No history to process for conversation_started: {conversation_id}")
+        # Extract all metadata fields for preservation
+        conversation_name = adapter_data.get("conversation_name", "Unknown Conversation")
+        server_name = adapter_data.get("server_name", "Unknown Server")
+        adapter_type = adapter_data.get("adapter_type", "unknown")
+        
+        # Warn about missing metadata fields
+        if conversation_name == "Unknown Conversation":
+            logger.warning(f"conversation_started event missing 'conversation_name' for {conversation_id}")
+        if server_name == "Unknown Server":
+            logger.warning(f"conversation_started event missing 'server_name' for {conversation_id}")
+        if adapter_type == "unknown":
+            logger.warning(f"conversation_started event missing 'adapter_type' for {conversation_id}")
+        
+        # Create conversation metadata for chat element
+        conversation_metadata = {
+            "conversation_name": conversation_name,
+            "server_name": server_name,
+            "adapter_type": adapter_type,
+            "alias": adapter_name
+        }
+
+        # Create conversation_started event for ChatManagerComponent
+        conversation_event = {
+            "event_type": "conversation_started",  # New event type for ChatManagerComponent
+            "event_id": f"conv_started_{conversation_id}_{int(time.time()*1000)}",
+            "source_adapter_id": source_adapter_id,
+            "external_conversation_id": conversation_id,
+            "is_replayable": True,  # Conversation metadata should be replayed
+            "payload": {
+                "event_type": "conversation_started",
+                "source_adapter_id": source_adapter_id,
+                "external_conversation_id": conversation_id,
+                "is_dm": is_dm,
+                "conversation_metadata": conversation_metadata,
+                "recipient_connectome_agent_id": recipient_agent_id,
+                "timestamp": time.time(),
+                "original_adapter_data": adapter_data
+            }
+        }
+
+        timeline_context = await self._construct_timeline_context_for_space(target_inner_space)
+        
+        try:
+            target_inner_space.receive_event(conversation_event, timeline_context)
+            logger.info(f"conversation_started event for '{conversation_id}' routed to InnerSpace '{target_inner_space.id}' with metadata: {conversation_metadata}")
+        except Exception as e:
+            logger.error(f"Error routing conversation_started event to InnerSpace '{target_inner_space.id}': {e}", exc_info=True)
 
     # --- NEW HANDLER for Bulk History Processing ---
     async def _handle_history_fetched(self, source_adapter_id: str, adapter_data: Dict[str, Any]):

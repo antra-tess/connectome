@@ -1,3 +1,3 @@
-from .hud_component import HUDComponent
+from .facet_aware_hud_component import FacetAwareHUDComponent
 
-__all__ = ['HUDComponent']
+__all__ = ['FacetAwareHUDComponent']

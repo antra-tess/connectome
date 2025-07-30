@@ -26,7 +26,7 @@ from host.modules.activities.activity_client import ActivityClient
 
 # Agent/InnerSpace
 from elements.elements.inner_space import InnerSpace
-from elements.elements.agent_loop import SimpleRequestResponseLoopComponent # Import loop types
+from elements.elements.components.agent_loop import SimpleRequestResponseLoopComponent, ToolTextParsingLoopComponent # Import loop types
 # Import other loop types if needed for config
 from elements.component_registry import COMPONENT_REGISTRY # Import registry to look up loop types
 
@@ -221,6 +221,7 @@ async def amain():
                 name=f"{agent_config.name}'s Mind", 
                 agent_name=agent_config.name,
                 description=f"Inner space for agent {agent_config.name}",
+                agent_description=agent_config.description,
                 agent_id=agent_config.agent_id,
                 llm_provider=llm_provider,
                 agent_loop_component_type=agent_loop_component_class,

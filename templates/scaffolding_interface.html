@@ -1,0 +1,957 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🔧 LLM Testing Scaffolding Interface</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f5f5f5;
+            color: #333;
+            line-height: 1.6;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            text-align: center;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        .header h1 {
+            margin-bottom: 10px;
+            font-size: 2em;
+        }
+
+        .header p {
+            opacity: 0.9;
+            font-size: 1.1em;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+            display: grid;
+            grid-template-columns: 1fr 400px;
+            gap: 20px;
+            min-height: calc(100vh - 120px);
+        }
+
+        .main-content {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .sidebar {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            height: fit-content;
+            position: sticky;
+            top: 20px;
+        }
+
+        .card {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        .card h2 {
+            margin-bottom: 15px;
+            color: #4a5568;
+            border-bottom: 2px solid #e2e8f0;
+            padding-bottom: 10px;
+        }
+
+        .status-indicator {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+
+        .status-waiting {
+            background-color: #fed7d7;
+            color: #c53030;
+        }
+
+        .status-ready {
+            background-color: #c6f6d5;
+            color: #2f855a;
+        }
+
+        .status-no-context {
+            background-color: #e2e8f0;
+            color: #4a5568;
+        }
+
+        .context-display {
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            background: #1a202c;
+            color: #e2e8f0;
+            padding: 20px;
+            border-radius: 8px;
+            max-height: 500px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            line-height: 1.4;
+            border: 2px solid #2d3748;
+        }
+
+        .context-metadata {
+            background: #edf2f7;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 10px;
+        }
+
+        .metadata-item {
+            padding: 5px;
+            justify-content: space-between;
+        }
+
+        .metadata-label {
+            display: block;
+            font-weight: 600;
+            color: #4a5568;
+        }
+
+        .metadata-value {
+            display: block;
+            color: #2d3748;
+            font-family: monospace;
+        }
+
+        .response-section {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .response-input {
+            width: 100%;
+            height: 200px;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 14px;
+            padding: 15px;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            resize: vertical;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .response-input:focus {
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 14px;
+            transition: all 0.2s;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.3);
+        }
+
+        .btn-secondary {
+            background: #e2e8f0;
+            color: #4a5568;
+        }
+
+        .btn-secondary:hover {
+            background: #cbd5e0;
+        }
+
+        .btn-danger {
+            background: #fed7d7;
+            color: #c53030;
+        }
+
+        .btn-danger:hover {
+            background: #feb2b2;
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none !important;
+            box-shadow: none !important;
+        }
+
+        .history-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .history-item {
+            padding: 12px;
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            margin-bottom: 10px;
+            background: #f7fafc;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .history-item:hover {
+            background: #edf2f7;
+        }
+
+        .history-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .history-timestamp {
+            font-size: 0.85em;
+            color: #718096;
+            font-family: monospace;
+        }
+
+        .history-stats {
+            font-size: 0.85em;
+            color: #4a5568;
+        }
+
+        .message-preview {
+            font-family: monospace;
+            font-size: 0.9em;
+            color: #2d3748;
+            background: white;
+            padding: 8px;
+            border-radius: 4px;
+            border-left: 3px solid #667eea;
+            margin-top: 8px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .no-context-message {
+            text-align: center;
+            padding: 40px;
+            color: #718096;
+            font-style: italic;
+        }
+
+        .refresh-indicator {
+            display: inline-block;
+            margin-left: 10px;
+            font-size: 0.9em;
+            color: #718096;
+        }
+
+        .loading-spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #e2e8f0;
+            border-radius: 50%;
+            border-top-color: #667eea;
+            animation: spin 1s ease-in-out infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .alert {
+            padding: 12px 16px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+            font-weight: 500;
+        }
+
+        .alert-success {
+            background: #c6f6d5;
+            color: #2f855a;
+            border: 1px solid #9ae6b4;
+        }
+
+        .alert-error {
+            background: #fed7d7;
+            color: #c53030;
+            border: 1px solid #feb2b2;
+        }
+
+        @media (max-width: 1024px) {
+            .container {
+                grid-template-columns: 1fr;
+                grid-template-rows: auto auto;
+            }
+
+            .sidebar {
+                position: static;
+                order: 2;
+            }
+        }
+
+        .tools-section {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #e2e8f0;
+        }
+
+        .tool-item {
+            background: #f7fafc;
+            padding: 10px;
+            border-radius: 6px;
+            margin-bottom: 8px;
+            border-left: 3px solid #38b2ac;
+        }
+
+        .tool-name {
+            font-weight: 600;
+            color: #2d3748;
+            font-family: monospace;
+        }
+
+        .tool-description {
+            font-size: 0.9em;
+            color: #4a5568;
+            margin-top: 4px;
+        }
+
+        .turn-boundary {
+            border-left: 4px solid #667eea;
+            margin: 15px 0;
+            padding-left: 15px;
+            background: rgba(102, 126, 234, 0.05);
+            border-radius: 0 8px 8px 0;
+        }
+
+        .turn-header {
+            font-weight: 600;
+            color: #4a5568;
+            font-size: 0.9em;
+            margin-bottom: 8px;
+            padding: 5px 10px;
+            background: rgba(102, 126, 234, 0.1);
+            border-radius: 4px;
+            font-family: monospace;
+        }
+
+        .turn-metadata {
+            font-size: 0.8em;
+            color: #718096;
+            margin-bottom: 10px;
+            font-family: monospace;
+        }
+
+        .message-role-user {
+            border-left-color: #38b2ac;
+            background: rgba(56, 178, 172, 0.05);
+        }
+
+        .message-role-assistant {
+            border-left-color: #9f7aea;
+            background: rgba(159, 122, 234, 0.05);
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🔧 LLM Testing Scaffolding Interface</h1>
+        <p>Manual LLM response interface for cost-free agent testing and debugging</p>
+        <p style="font-size: 0.9em; opacity: 0.8;">✨ Enhanced with turn-based messaging and ultra-concise XML tool call support</p>
+    </div>
+
+    <div class="container">
+        <div class="main-content">
+            <!-- Current Context Display -->
+            <div class="card">
+                <h2>
+                    Current Agent Context
+                    <span id="status-indicator" class="status-indicator status-no-context">No Context</span>
+                    <span id="refresh-indicator" class="refresh-indicator">Auto-refreshing...</span>
+                </h2>
+
+                <div id="context-metadata" class="context-metadata" style="display: none;">
+                    <div class="metadata-item">
+                        <span class="metadata-label">Model:</span>
+                        <span id="metadata-model" class="metadata-value">-</span>
+                    </div>
+                    <div class="metadata-item">
+                        <span class="metadata-label">Messages:</span>
+                        <span id="metadata-messages" class="metadata-value">-</span>
+                    </div>
+                    <div class="metadata-item">
+                        <span class="metadata-label">Tools:</span>
+                        <span id="metadata-tools" class="metadata-value">-</span>
+                    </div>
+                    <div class="metadata-item">
+                        <span class="metadata-label">Session:</span>
+                        <span id="metadata-session" class="metadata-value">-</span>
+                    </div>
+                    <div class="metadata-item">
+                        <span class="metadata-label">Call #:</span>
+                        <span id="metadata-call-number" class="metadata-value">-</span>
+                    </div>
+                    <div class="metadata-item">
+                        <span class="metadata-label">Timestamp:</span>
+                        <span id="metadata-timestamp" class="metadata-value">-</span>
+                    </div>
+                </div>
+
+                <div id="context-display" class="context-display">
+                    <div class="no-context-message">
+                        Waiting for agent context...<br>
+                        <small>Start the Connectome system with CONNECTOME_LLM_TYPE=scaffolding</small>
+                    </div>
+                </div>
+
+                <div id="tools-section" class="tools-section" style="display: none;">
+                    <h3>Available Tools</h3>
+                    <div id="tools-list"></div>
+                </div>
+            </div>
+
+            <!-- Response Input -->
+            <div class="card">
+                {% if observer %}
+                    <h2>LLM Response</h2>
+                {% else %}
+                    <h2>Your Response (as LLM)</h2>
+                {% endif %}
+
+                <div id="alert-container"></div>
+
+                <div class="response-section">
+                    <textarea id="response-input" class="response-input"
+                        placeholder="Enter your response as if you were the LLM...&#10;&#10;You can include tool calls in ultra-concise XML format:&#10;&lt;tool_calls&gt;&#10;&lt;tool_name param1=&quot;value1&quot; source=&quot;element_name&quot;&gt;&#10;&lt;/tool_calls&gt;&#10;&#10;Or just provide a conversational response."
+                        disabled></textarea>
+
+                    <div class="button-group">
+                        <button id="submit-btn" class="btn btn-primary" onclick="submitResponse()" disabled>
+                            🚀 Submit Response to Agent
+                        </button>
+                        <button id="clear-btn" class="btn btn-secondary" onclick="clearResponse()">
+                            🗑️ Clear
+                        </button>
+                        <button id="example-btn" class="btn btn-secondary" onclick="insertExampleResponse()">
+                            💡 Example Response
+                        </button>
+                        <button id="help-btn" class="btn btn-secondary" onclick="showXMLHelp()">
+                            ❓ XML Format Help
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Sidebar -->
+        <div class="sidebar">
+            <h2>Session History</h2>
+
+            <div class="button-group" style="margin-bottom: 15px;">
+                <button id="refresh-btn" class="btn btn-secondary" onclick="refreshHistory()">
+                    🔄 Refresh
+                </button>
+                <button id="clear-history-btn" class="btn btn-danger" onclick="clearHistory()">
+                    🗑️ Clear History
+                </button>
+            </div>
+
+            <div id="history-list" class="history-list">
+                <div class="no-context-message">No history yet</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentContext = null;
+        let contextRefreshInterval = null;
+        let historyRefreshInterval = null;
+        let observer = {{ 'true' if observer else 'false' }};
+
+        function formatTurnBasedMessages(messages) {
+            let html = '';
+
+            messages.forEach((msg, index) => {
+                const roleClass = `message-role-${msg.role}`;
+                const turnMeta = msg.turn_metadata || {};
+
+                // Create turn boundary container
+                html += `<div class="turn-boundary ${roleClass}">`;
+
+                // Turn header with role and metadata
+                let headerText = `${msg.role.toUpperCase()} MESSAGE`;
+                if (turnMeta.turn_index !== undefined) {
+                    headerText += ` (Turn ${turnMeta.turn_index})`;
+                }
+                html += `<div class="turn-header">${headerText}</div>`;
+
+                // Turn metadata if available
+                if (Object.keys(turnMeta).length > 0) {
+                    let metaText = '';
+                    if (turnMeta.facet_count !== undefined) metaText += `Facets: ${turnMeta.facet_count} • `;
+                    if (turnMeta.has_status_changes) metaText += 'Status Changes • ';
+                    if (turnMeta.has_ambient_triggers) metaText += 'Ambient Triggers • ';
+                    if (turnMeta.tool_calls_count > 0) metaText += `Tool Calls: ${turnMeta.tool_calls_count} • `;
+                    if (turnMeta.timestamp_range) {
+                        const start = new Date(turnMeta.timestamp_range[0] * 1000).toLocaleTimeString();
+                        const end = new Date(turnMeta.timestamp_range[1] * 1000).toLocaleTimeString();
+                        metaText += `Time: ${start}-${end}`;
+                    }
+                    metaText = metaText.replace(/ • $/, ''); // Remove trailing separator
+
+                    if (metaText) {
+                        html += `<div class="turn-metadata">${metaText}</div>`;
+                    }
+                }
+
+                // Message content length info
+                let lengthInfo = '';
+                if (msg.is_multimodal) {
+                    lengthInfo = `[MULTIMODAL: ${msg.text_length} chars text + ${msg.attachment_count} attachments]`;
+                } else {
+                    lengthInfo = `[${msg.text_length} chars]`;
+                }
+                html += `<div class="turn-metadata">${lengthInfo}</div>`;
+
+                // Message content (escaped for HTML)
+                const content = msg.content.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                html += `<pre style="margin: 0; white-space: pre-wrap; font-family: inherit;">${content}</pre>`;
+
+                html += '</div>'; // Close turn boundary
+
+                // Add spacing between turns
+                if (index < messages.length - 1) {
+                    html += '<div style="height: 10px;"></div>';
+                }
+            });
+
+            return html;
+        }
+
+        // Start auto-refresh when page loads
+        document.addEventListener('DOMContentLoaded', function() {
+            startAutoRefresh();
+            refreshHistory();
+        });
+
+        function startAutoRefresh() {
+            // Refresh every 2 seconds
+            contextRefreshInterval = setInterval(checkForNewContext, observer ? 1000 : 2000);
+
+            if (observer) {
+                historyRefreshInterval = setInterval(refreshHistory, 500);
+            }
+        }
+
+        function stopAutoRefresh() {
+            if (contextRefreshInterval) {
+                clearInterval(contextRefreshInterval);
+                contextRefreshInterval = null;
+            }
+
+            if (historyRefreshInterval) {
+                clearInterval(historyRefreshInterval);
+                historyRefreshInterval = null;
+            }
+        }
+
+        async function checkForNewContext() {
+            try {
+                const response = await fetch('/get-current-context');
+                const data = await response.json();
+
+                if (data.status === 'success') {
+                    if (data.has_context && data.context) {
+                        displayContext(data.context);
+
+                        if (!observer) {
+                            enableResponseInput();
+                        }
+                    } else {
+                        showNoContext();
+                        disableResponseInput();
+                    }
+                }
+            } catch (error) {
+                console.error('Error checking for context:', error);
+                showError('Connection error. Is the scaffolding server running?');
+            }
+        }
+
+        function displayContext(context) {
+            currentContext = context;
+
+            // Update status indicator
+            const statusIndicator = document.getElementById('status-indicator');
+            if (observer) {
+                statusIndicator.textContent = 'In Observer Mode';
+                statusIndicator.className = 'status-indicator status-no-context';
+            }
+            else {
+                statusIndicator.textContent = 'Waiting for Response';
+                statusIndicator.className = 'status-indicator status-waiting';
+            }
+
+            // Show and populate metadata
+            const metadataDiv = document.getElementById('context-metadata');
+            metadataDiv.style.display = 'grid';
+
+            document.getElementById('metadata-model').textContent = context.model || 'unspecified';
+            document.getElementById('metadata-messages').textContent = context.messages ? context.messages.length : 0;
+            document.getElementById('metadata-tools').textContent = context.tools ? context.tools.length : 0;
+            document.getElementById('metadata-session').textContent = context.session_id || '-';
+            document.getElementById('metadata-call-number').textContent = context.call_number || '-';
+
+            if (context.timestamp) {
+                const date = new Date(context.timestamp * 1000);
+                document.getElementById('metadata-timestamp').textContent = date.toLocaleString();
+            }
+
+            // Display messages with enhanced turn-based formatting
+            const contextDisplay = document.getElementById('context-display');
+
+            if (context.messages && context.messages.length > 0) {
+                // Check if messages have turn metadata (turn-based format)
+                const hasTurnMetadata = context.messages.some(msg => msg.turn_metadata);
+
+                if (hasTurnMetadata) {
+                    // Enhanced turn-based display
+                    contextDisplay.innerHTML = formatTurnBasedMessages(context.messages);
+                } else {
+                    // Fallback to legacy display
+                    let contextText = context.messages.map(msg => {
+                        let header = `=== ${msg.role.toUpperCase()} MESSAGE ===`;
+                        if (msg.is_multimodal) {
+                            header += ` [MULTIMODAL: ${msg.text_length} chars text + ${msg.attachment_count} attachments]`;
+                        } else {
+                            header += ` [${msg.text_length} chars]`;
+                        }
+                        return header + '\n' + msg.content + '\n';
+                    }).join('\n');
+                    contextDisplay.textContent = contextText;
+                }
+            } else {
+                contextDisplay.innerHTML = '<div class="no-context-message">No messages in context</div>';
+            }
+
+            // Display tools
+            const toolsSection = document.getElementById('tools-section');
+            const toolsList = document.getElementById('tools-list');
+
+            if (context.tools && context.tools.length > 0) {
+                toolsSection.style.display = 'block';
+                toolsList.innerHTML = context.tools.map(tool => `
+                    <div class="tool-item">
+                        <div class="tool-name">${tool.name}</div>
+                        <div class="tool-description">${tool.description}</div>
+                    </div>
+                `).join('');
+            } else {
+                toolsSection.style.display = 'none';
+            }
+        }
+
+        function showNoContext() {
+            const statusIndicator = document.getElementById('status-indicator');
+            statusIndicator.textContent = 'No Context';
+            statusIndicator.className = 'status-indicator status-no-context';
+
+            const metadataDiv = document.getElementById('context-metadata');
+            metadataDiv.style.display = 'none';
+
+            const contextDisplay = document.getElementById('context-display');
+            contextDisplay.innerHTML = `
+                <div class="no-context-message">
+                    Waiting for agent context...<br>
+                    <small>Start the Connectome system with CONNECTOME_LLM_TYPE=scaffolding</small>
+                </div>
+            `;
+
+            const toolsSection = document.getElementById('tools-section');
+            toolsSection.style.display = 'none';
+        }
+
+        function enableResponseInput() {
+            const responseInput = document.getElementById('response-input');
+            const submitBtn = document.getElementById('submit-btn');
+
+            responseInput.disabled = false;
+            submitBtn.disabled = false;
+
+            // Focus on input for immediate use
+            responseInput.focus();
+        }
+
+        function disableResponseInput() {
+            const responseInput = document.getElementById('response-input');
+            const submitBtn = document.getElementById('submit-btn');
+
+            responseInput.disabled = true;
+            submitBtn.disabled = true;
+        }
+
+        async function submitResponse() {
+            const responseInput = document.getElementById('response-input');
+            const response = responseInput.value.trim();
+
+            if (!response) {
+                showAlert('Please enter a response', 'error');
+                return;
+            }
+
+            if (!currentContext) {
+                showAlert('No active context to respond to', 'error');
+                return;
+            }
+
+            try {
+                // Disable input while submitting
+                const submitBtn = document.getElementById('submit-btn');
+                submitBtn.disabled = true;
+                submitBtn.innerHTML = '<span class="loading-spinner"></span> Submitting...';
+
+                const result = await fetch('/submit-response', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ response: response })
+                });
+
+                const data = await result.json();
+
+                if (data.status === 'success') {
+                    showAlert('Response submitted successfully!', 'success');
+                    responseInput.value = '';
+
+                    // Update status
+                    const statusIndicator = document.getElementById('status-indicator');
+                    statusIndicator.textContent = 'Response Sent';
+                    statusIndicator.className = 'status-indicator status-ready';
+
+                    // Refresh history
+                    setTimeout(refreshHistory, 500);
+                } else {
+                    showAlert('Error: ' + data.message, 'error');
+                }
+            } catch (error) {
+                console.error('Error submitting response:', error);
+                showAlert('Error submitting response', 'error');
+            } finally {
+                // Re-enable submit button
+                const submitBtn = document.getElementById('submit-btn');
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '🚀 Submit Response to Agent';
+            }
+        }
+
+        function clearResponse() {
+            document.getElementById('response-input').value = '';
+        }
+
+        function insertExampleResponse() {
+            const responseInput = document.getElementById('response-input');
+            responseInput.value = `I understand you want me to help with this task. Let me analyze the available tools and provide a response.
+
+<tool_calls>
+<msg source="Discord #general">Hello! I'm starting to work on your request.</msg>
+<execute_command command="ls -la" source="Terminal bash-1">
+</tool_calls>
+
+I've executed the appropriate tool calls above. The message has been sent and I've listed the directory contents. Is there anything else you'd like me to help you with?`;
+        }
+
+        function showXMLHelp() {
+            const helpText = `Ultra-Concise XML Tool Call Format Help:
+
+BASIC FORMAT:
+<tool_calls>
+<tool_name param1="value1" param2="value2" source="element_name">
+</tool_calls>
+
+EXAMPLES:
+
+1. Send Message:
+<tool_calls>
+<msg source="Discord #general">Hello world!</msg>
+</tool_calls>
+
+2. Multiple Tool Calls:
+<tool_calls>
+<msg source="Slack #updates">Starting task...</msg>
+<execute_command command="git status" source="Terminal main">
+<add_note content="Task started" source="Scratchpad notes">
+</tool_calls>
+
+KEY POINTS:
+• Use tool names directly as XML element names
+• All parameters are XML attributes
+• Always include source when specified
+• Multiple calls go in one <tool_calls> block
+• No JSON format - pure XML only`;
+
+            alert(helpText);
+        }
+
+        async function refreshHistory() {
+            try {
+                const response = await fetch('/get-history');
+                const data = await response.json();
+
+                if (data.status === 'success') {
+                    displayHistory(data.history);
+                }
+            } catch (error) {
+                console.error('Error refreshing history:', error);
+            }
+        }
+
+        function displayHistory(history) {
+            const historyList = document.getElementById('history-list');
+
+            if (!history || history.length === 0) {
+                historyList.innerHTML = '<div class="no-context-message">No history yet</div>';
+                return;
+            }
+
+            historyList.innerHTML = history.reverse().map(item => {
+                const timestamp = new Date(item.received_at).toLocaleString();
+                const messageCount = item.messages ? item.messages.length : 0;
+                const toolCount = item.tools ? item.tools.length : 0;
+
+                let statusClass = 'status-no-context';
+                let statusText = item.status;
+
+                if (item.status === 'completed') {
+                    statusClass = 'status-ready';
+                } else if (item.status === 'waiting_for_response') {
+                    statusClass = 'status-waiting';
+                }
+
+                const firstMessage = item.messages && item.messages.length > 0
+                    ? item.messages[0].content.substring(0, 100) + '...'
+                    : 'No messages';
+
+                return `
+                    <div class="history-item" onclick="loadHistoryItem(${JSON.stringify(item).replace(/"/g, '&quot;')})">
+                        <div class="history-header">
+                            <div class="history-timestamp">${timestamp}</div>
+                            <span class="status-indicator ${statusClass}">${statusText}</span>
+                        </div>
+                        <div class="history-stats">
+                            📨 ${messageCount} messages • 🔧 ${toolCount} tools • 🔄 Call #${item.call_number || '-'}
+                        </div>
+                        <div class="message-preview">${firstMessage}</div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function loadHistoryItem(item) {
+            displayContext(item);
+            // Don't enable input for historical items
+            disableResponseInput();
+
+            // Update status to show it's historical
+            const statusIndicator = document.getElementById('status-indicator');
+            statusIndicator.textContent = 'Historical Item';
+            statusIndicator.className = 'status-indicator status-no-context';
+
+            if (item.response) {
+                document.getElementById('response-input').value = item.response;
+            }
+        }
+
+        async function clearHistory() {
+            if (!confirm('Are you sure you want to clear the session history?')) {
+                return;
+            }
+
+            try {
+                const response = await fetch('/clear-history', { method: 'POST' });
+                const data = await response.json();
+
+                if (data.status === 'success') {
+                    showAlert('History cleared', 'success');
+                    refreshHistory();
+                } else {
+                    showAlert('Error clearing history', 'error');
+                }
+            } catch (error) {
+                console.error('Error clearing history:', error);
+                showAlert('Error clearing history', 'error');
+            }
+        }
+
+        function showAlert(message, type) {
+            const alertContainer = document.getElementById('alert-container');
+            const alertClass = type === 'error' ? 'alert-error' : 'alert-success';
+
+            alertContainer.innerHTML = `
+                <div class="alert ${alertClass}">
+                    ${message}
+                </div>
+            `;
+
+            // Auto-remove after 5 seconds
+            setTimeout(() => {
+                alertContainer.innerHTML = '';
+            }, 5000);
+        }
+
+        function showError(message) {
+            showAlert(message, 'error');
+        }
+
+        // Handle keyboard shortcuts
+        document.addEventListener('keydown', function(e) {
+            // Ctrl+Enter to submit response
+            if (e.ctrlKey && e.key === 'Enter') {
+                const submitBtn = document.getElementById('submit-btn');
+                if (!submitBtn.disabled) {
+                    submitResponse();
+                }
+            }
+        });
+    </script>
+</body>
+</html>

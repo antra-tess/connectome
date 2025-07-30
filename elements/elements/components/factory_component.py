@@ -79,12 +79,12 @@ class ElementFactoryComponent(Component):
                 f"Owner Space {self.owner.id} does not have 'get_outgoing_action_callback' or '_outgoing_action_callback'. "
                 f"Created elements/components requiring it may not function correctly."
             )
-        
+
         # Ensure element class lookup is populated
         _populate_element_class_lookup()
         if not COMPONENT_REGISTRY:
              logger.error("Component Registry is empty! ElementFactory cannot function. Was scan_and_load_components called?")
-        
+
         logger.debug(f"ElementFactoryComponent initialized for Element {self.owner.id if self.owner else 'Unknown'}. Callback acquired: {'Yes' if self._outgoing_action_callback_for_created else 'No'}")
 
     def _get_owner_space(self) -> Optional["Space"]:
@@ -104,10 +104,10 @@ class ElementFactoryComponent(Component):
 
             if 'space_registry' in params:
                 final_args['space_registry'] = SpaceRegistry.get_instance()
-            
+
             if 'outgoing_action_callback' in params and self._outgoing_action_callback_for_created:
                 final_args['outgoing_action_callback'] = self._outgoing_action_callback_for_created
-            
+
         except Exception as e:
             logger.warning(f"Could not inspect constructor for {target_class.__name__} to inject dependencies: {e}", exc_info=False)
         return final_args
@@ -118,7 +118,7 @@ class ElementFactoryComponent(Component):
         Returns a dictionary of available prefab names and their descriptions.
         """
         try:
-            prefab_info = { name: data.get("description", "No description.") 
+            prefab_info = { name: data.get("description", "No description.")
                             for name, data in PREFABS.items() }
             return { "success": True, "result": prefab_info, "error": None }
         except Exception as e:
@@ -127,7 +127,7 @@ class ElementFactoryComponent(Component):
 
     def handle_list_available_components(self) -> Dict[str, Any]:
         """
-        Logic for the 'list_available_components' tool. 
+        Logic for the 'list_available_components' tool.
         Returns a list of registered component type names.
         """
         try:
@@ -152,7 +152,7 @@ class ElementFactoryComponent(Component):
         """
         element_config = element_config or {}
         component_config_overrides = component_config_overrides or {}
-        
+
         owner_space = self._get_owner_space()
         if not owner_space:
             return { "success": False, "result": None, "error": "Cannot create element: Owner is not a valid Space or not initialized." }
@@ -182,7 +182,7 @@ class ElementFactoryComponent(Component):
         for key in constructor_arg_keys_from_prefab:
             if key in element_config:
                 base_element_constructor_args[key] = element_config[key]
-        
+
         # Component Configurations
         final_component_configs = []
         prefab_components = prefab_data.get("components", [])
@@ -194,20 +194,20 @@ class ElementFactoryComponent(Component):
             if not comp_type_name:
                  logger.warning(f"Prefab '{prefab_name}' has invalid component entry: {base_comp_config}. Skipping.")
                  continue
-            
+
             final_config = base_comp_config.get("config", {}).copy()
             if comp_type_name in component_config_overrides:
                 override = component_config_overrides[comp_type_name]
                 if isinstance(override, dict): final_config.update(override)
                 else: logger.warning(f"Invalid override format for {comp_type_name} in prefab '{prefab_name}'. Ignoring.")
-            
+
             if comp_type_name in required_component_configs:
                 for req_key in required_component_configs[comp_type_name]:
                     if req_key not in final_config or final_config[req_key] is None:
                         missing_requirements.append(f"Component '{comp_type_name}' requires config key '{req_key}'.")
-                        
+
             final_component_configs.append({"type": comp_type_name, "config": final_config})
-            
+
         if missing_requirements:
             error_msg = f"Missing required configurations for prefab '{prefab_name}' components: {'; '.join(missing_requirements)}"
             return { "success": False, "result": None, "error": error_msg }
@@ -217,7 +217,7 @@ class ElementFactoryComponent(Component):
             return { "success": False, "result": None, "error": f"Element ID '{element_id}' already exists in owner space '{owner_space.id}'." }
 
         logger.info(f"Attempting to create element '{element_config.get('name', element_id)}' (ID: {element_id}) from prefab '{prefab_name}' of type {element_class_name} in space {owner_space.id}.")
-        
+
         try:
             # 1. Instantiate the specific element class with injected dependencies
             actual_element_constructor_args = self._prepare_constructor_args(element_class, base_element_constructor_args)
@@ -228,7 +228,7 @@ class ElementFactoryComponent(Component):
             for comp_spec in final_component_configs:
                 comp_type_name = comp_spec["type"]
                 comp_args = comp_spec.get("config", {}).copy()
-                
+
                 existing_comp = new_element.get_component_by_type(comp_type_name)
                 if existing_comp:
                     logger.debug(f"Component '{comp_type_name}' already on element {element_id}. Skipping from prefab.")
@@ -248,7 +248,7 @@ class ElementFactoryComponent(Component):
 
             # 3. Mount the element in the owner_space
             actual_mount_id_to_use = mount_id_override if mount_id_override else new_element.id
-            
+
             # Prepare creation data for replay
             creation_data = {
                 'prefab_name': prefab_name,
@@ -256,7 +256,7 @@ class ElementFactoryComponent(Component):
                 'component_config_overrides': component_config_overrides,
                 'mount_id_override': mount_id_override
             }
-            
+
             mount_success, final_mount_id = owner_space.mount_element(new_element, mount_id=actual_mount_id_to_use, creation_data=creation_data)
             if not mount_success:
                  raise RuntimeError(f"Failed to mount element {element_id} (mount_id: {actual_mount_id_to_use}) into {owner_space.id}. Mount ID from call: {final_mount_id}")
@@ -277,7 +277,7 @@ class ElementFactoryComponent(Component):
                 }
             }
             owner_space.add_event_to_primary_timeline(event_payload)
-            
+
             # Set element attributes from element_config based on prefab hint
             attributes_to_set_map = prefab_data.get("element_attributes_from_config", {})
             if attributes_to_set_map:
@@ -290,7 +290,7 @@ class ElementFactoryComponent(Component):
                         except Exception as e:
                             logger.error(f"Error setting attribute '{attribute_name}' on {new_element.id} from config '{config_key}': {e}")
                     # else: (No warning if key not present, attribute might be optional)
-            
+
             result_msg = f"Element '{new_element.name}' ({element_id}) created from prefab '{prefab_name}' in space '{owner_space.id}'."
             logger.info(result_msg)
             return { "success": True, "result": result_msg, "error": None, "element_id": new_element.id, "element": new_element }
@@ -301,10 +301,10 @@ class ElementFactoryComponent(Component):
             return { "success": False, "result": None, "error": error_msg }
 
     def handle_create_element(
-        self, 
-        element_id: str, 
-        name: str, 
-        component_configs: List[Dict[str, Any]], 
+        self,
+        element_id: str,
+        name: str,
+        component_configs: List[Dict[str, Any]],
         description: str = "",
         element_class_name: str = "BaseElement" # Allow specifying class, defaults to BaseElement
     ) -> Dict[str, Any]:
@@ -330,18 +330,18 @@ class ElementFactoryComponent(Component):
             base_element_args = {"element_id": element_id, "name": name, "description": description}
             actual_element_args = self._prepare_constructor_args(element_class_to_create, base_element_args)
             new_element = element_class_to_create(**actual_element_args)
-            
+
             new_element._set_parent(owner_space.id, MountType.INCLUSION)
 
             # 2. Add components
             if not isinstance(component_configs, list):
                  raise ValueError("component_configs must be a list.")
-                 
+
             for comp_config in component_configs:
                 if not isinstance(comp_config, dict) or "type" not in comp_config:
                     logger.warning(f"Skipping invalid component definition: {comp_config}")
                     continue
-                    
+
                 comp_type_name = comp_config["type"]
                 comp_args = comp_config.get("config", {}).copy() # Ensure it's a dict
 
@@ -362,7 +362,7 @@ class ElementFactoryComponent(Component):
                 'component_configs': component_configs,
                 'dynamic_creation': True
             }
-            
+
             mount_success, final_mount_id = owner_space.mount_element(new_element, creation_data=creation_data) # Uses element_id as mount_id by default
             if not mount_success:
                  raise RuntimeError(f"Failed to mount element {element_id} into {owner_space.id}. Mount ID: {final_mount_id}")
@@ -382,7 +382,7 @@ class ElementFactoryComponent(Component):
                 }
             }
             owner_space.add_event_to_primary_timeline(event_payload)
-            
+
             result_msg = f"Element '{name}' ({element_id}) created dynamically in space '{owner_space.id}' with {len(new_element.get_components())} components."
             logger.info(result_msg)
             return { "success": True, "result": result_msg, "error": None, "element_id": new_element.id, "element": new_element}

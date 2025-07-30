@@ -248,7 +248,13 @@ class Component:
             return False
             
         # Check if this component handles this event type
+        # FIXED: Handle both direct event_type and nested payload.event_type
         event_type = event.get("event_type")
+        if not event_type:
+            # Try getting from payload (common structure from Space)
+            event_payload = event.get("payload", {})
+            event_type = event_payload.get("event_type")
+            
         if event_type not in self.HANDLED_EVENT_TYPES:
             return False
             
@@ -301,12 +307,18 @@ class VeilProducer(Component):
         if delta_operations:
             self.owner.receive_delta(delta_operations)
 
-    def calculate_delta(self) -> Optional[List[Dict[str, Any]]]:
+    def calculate_delta(self) -> Optional[List]:
         """
         Base implementation for calculate_delta.
         Subclasses should override this to provide specific delta calculation logic.
         This method should also be responsible for updating the producer's internal state 
         (e.g., _last_ids, _has_produced_root_add_before) after determining the deltas.
+        
+        NEW: Return type is now VEILFacetOperation only.
+        All legacy delta operation support has been removed for clean VEILFacet architecture.
+        
+        Returns:
+            List[VEILFacetOperation] instances for the VEILFacet system
         """
         logger.warning(f"[{self.owner.id if self.owner else 'Unknown'}/{self.COMPONENT_TYPE}] calculate_delta() not implemented.")
         return None

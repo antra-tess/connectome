@@ -70,79 +70,34 @@ class MessageActionHandler(Component):
             return
 
         # --- Define Parameter Schemas ---
-        send_message_params: List[ToolParameter] = [
-            {"name": "text", "type": "string", "description": "The content of the message to send.", "required": True},
-            {"name": "reply_to_external_id", "type": "string", "description": "Optional external ID of the message being replied to.", "required": False},
-            {"name": "target_element_id", "type": "string", "description": "Optional specific element ID to target for sending. If not provided, will use the element this tool is attached to.", "required": False},
-            {
-                "name": "attachments", "type": "array", "description": "Optional list of attachment objects to send.", "required": False,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string", "description": "URL of the attachment."},
-                        "filename": {"type": "string", "description": "Filename of the attachment."},
-                        "attachment_type": {"type": "string", "description": "MIME type (e.g., 'image/png')."}
-                    },
-                    "required": ["url"] # Example: URL is required for an attachment object
-                }
-            }
+        msg_params: List[ToolParameter] = [
+            {"name": "inner_content", "type": "string", "description": "The content of the message to send.", "required": True},
         ]
 
-        delete_message_params: List[ToolParameter] = [
-            {"name": "message_external_id", "type": "string", "description": "The external ID of the message to delete.", "required": True}
-        ]
-
-        edit_message_params: List[ToolParameter] = [
-            {"name": "message_external_id", "type": "string", "description": "The external ID of the message to edit.", "required": True},
-            {"name": "new_text", "type": "string", "description": "The new text content for the message.", "required": True}
-        ]
-
-        add_reaction_params: List[ToolParameter] = [
-            {"name": "message_external_id", "type": "string", "description": "The external ID of the message to react to.", "required": True},
-            {"name": "emoji", "type": "string", "description": "The emoji to add as a reaction (e.g., '👍', ':smile:').", "required": True}
-        ]
-
-        remove_reaction_params: List[ToolParameter] = [
-            {"name": "message_external_id", "type": "string", "description": "The external ID of the message to remove reaction from.", "required": True},
-            {"name": "emoji", "type": "string", "description": "The emoji reaction to remove (e.g., '👍', ':smile:').", "required": True}
-        ]
-
-        fetch_history_params: List[ToolParameter] = [
-            {"name": "conversation_id", "type": "string", "description": "The external ID of the conversation/channel to fetch history from.", "required": True},
-            {"name": "before", "type": "integer", "description": "Fetch messages before this UTC timestamp in seconds. For example, this param can be set to int(datetime.now().timestamp()). (Either this, or after param must be submitted)", "required": False},
-            {"name": "after", "type": "integer", "description": "Fetch messages after this UTC timestamp in seconds. (Either this, or before param must be submitted)", "required": False},
-            {"name": "limit", "type": "integer", "description": "Maximum number of messages to fetch (e.g., 100). (Optional)", "required": False}
-        ]
-
-        # get_message_attachment_content_params: List[ToolParameter] = [
-        #     {"name": "message_external_id", "type": "string", "description": "The external ID of the message containing the attachment.", "required": True},
-        #     {"name": "attachment_id", "type": "string", "description": "The unique ID of the attachment to fetch.", "required": True}
-        # ]
-
-        # --- Register send_message Tool ---
+        # --- Register msg Tool ---
         @tool_provider.register_tool(
-            name="send_message",
-            description="Sends a message to the current conversation (DM or channel). If used via an Uplink to a SharedSpace, this requests the SharedSpace to send the message.",
-            parameters_schema=send_message_params
+            name="msg",
+            description="Sends a message to the conversation (DM or channel).",
+            parameters_schema=msg_params
         )
-        async def send_message_tool(text: str,
-                                    attachments: Optional[List[Dict[str, Any]]] = None,
-                                    reply_to_external_id: Optional[str] = None,
-                                    target_element_id: Optional[str] = None,
+        async def msg_tool(inner_content: str,
+                                    # attachments: Optional[List[Dict[str, Any]]] = None,
+                                    # reply_to_external_id: Optional[str] = None,
+                                    # target_element_id: Optional[str] = None,
                                     calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             """
             Tool function to send a message.
             Uses local outgoing_action_callback.
 
             Args:
-                text: Message content to send
+                inner_content: Message content to send
                 attachments: Optional list of attachment objects
                 reply_to_external_id: Optional ID of message being replied to
                 target_element_id: Optional specific element ID to target. Usually not needed
                                   as the agent loop will automatically route to the correct element.
                 calling_context: Context from the calling component
             """
-            logger.info(f"[{self.owner.id}] MessageActionHandler.send_message_tool called. Text: '{text[:50]}...', Target: {target_element_id or 'auto'}")
+            logger.info(f"[{self.owner.id}] MessageActionHandler.msg_tool called. Text: '{inner_content[:50]}...', Target: {'auto'}")
 
             # Note: target_element_id parameter is included for completeness but typically
             # the agent loop handles routing automatically based on tool aggregation
@@ -168,26 +123,28 @@ class MessageActionHandler(Component):
             if msg_list_comp:
                 # Agent name might be different from owner name if tools are on InnerSpace directly
                 # For DMs, requesting_agent_id (self.owner.agent_id) and agent_name are relevant.
-                final_attachments = []
-                if attachments:
-                    if isinstance(attachments, list):
-                        for att in attachments:
-                            if isinstance(att, dict):
-                                final_attachments.append(att)
-                            else:
-                                logger.warning(f"[{self.owner.id}] send_message_tool: Skipping non-dict attachment: {att}")
-                    else:
-                        logger.warning(f"[{self.owner.id}] send_message_tool: Attachments argument was not a list: {attachments}")
+                # final_attachments = []
+                # if attachments:
+                #     if isinstance(attachments, list):
+                #         for att in attachments:
+                #             if isinstance(att, dict):
+                #                 final_attachments.append(att)
+                #             else:
+                #                 logger.warning(f"[{self.owner.id}] msg_tool: Skipping non-dict attachment: {att}")
+                #     else:
+                #         logger.warning(f"[{self.owner.id}] msg_tool: Attachments argument was not a list: {attachments}")
 
                 msg_list_comp.add_pending_message(
                     internal_request_id=internal_request_id,
-                    text=text,
+                    text=inner_content,
                     sender_id=requesting_agent_id or "unknown_agent",
                     sender_name=agent_name or "Unknown Agent",
                     timestamp=time.time(),
-                    attachments=final_attachments,
-                    reply_to_external_id=reply_to_external_id,
-                    adapter_id=retrieved_adapter_id # Should be correct for DM context
+                    # attachments=final_attachments,
+                    # reply_to_external_id=reply_to_external_id,
+                    adapter_id=retrieved_adapter_id, # Should be correct for DM context
+                    is_from_current_agent=True,  # FIXED: Mark messages from current agent for deduplication
+                    is_internal_origin=True  # NEW: Mark as tool-generated to prevent synthetic agent responses
                 )
                 logger.info(f"[{self.owner.id}] Added pending message (req_id: {internal_request_id}) to MessageListComponent for direct send.")
             else:
@@ -200,12 +157,12 @@ class MessageActionHandler(Component):
                     "internal_request_id": internal_request_id,
                     "adapter_id": retrieved_adapter_id,
                     "conversation_id": retrieved_conversation_id,
-                    "text": text,
-                    "reply_to_external_id": reply_to_external_id,
-                    "attachments": attachments or [],
+                    "text": inner_content,
+                    # "reply_to_external_id": reply_to_external_id,
+                    # "attachments": attachments or [],
                     "requesting_element_id": self.owner.id,
                     "requesting_agent_id": requesting_agent_id,
-                    "target_element_id": target_element_id
+                    # "target_element_id": target_element_id
                 }
             }
             logger.debug(f"[{self.owner.id}] Dispatching direct send_message action request: {action_request}")
@@ -224,373 +181,6 @@ class MessageActionHandler(Component):
                 error_msg = f"Exception during direct send_message dispatch: {e}"
                 logger.exception(f"[{self.owner.id}] {error_msg} for req_id: {internal_request_id}")
                 return {"success": False, "error": error_msg, "message_id": None}
-
-        # --- Register delete_message Tool ---
-        @tool_provider.register_tool(
-            name="delete_message",
-            description="Deletes a message specified by its external ID from the conversation this element represents.",
-            parameters_schema=delete_message_params
-        )
-        async def delete_message_tool(message_external_id: str, calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-            """Handles deleting a message using its external ID."""
-            if not self._outgoing_action_callback:
-                return {"success": False, "error": "Outgoing action callback is not configured."}
-            if not message_external_id:
-                return {"success": False, "error": "message_external_id is required."}
-
-            adapter_id, conversation_id = self._get_message_context()
-            if not adapter_id or not conversation_id:
-                logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] delete_message_tool: _get_message_context failed.")
-                return {"success": False, "error": f"Could not determine context for deleting message."}
-
-            requesting_agent_id = self._get_requesting_agent_id(calling_context)
-
-            # NEW: Immediately update local state before external dispatch
-            msg_list_comp = self.get_sibling_component(MessageListComponent)
-            if msg_list_comp:
-                local_update_success = msg_list_comp.mark_message_pending_delete(message_external_id, requesting_agent_id or "unknown_agent")
-                if local_update_success:
-                    logger.info(f"[{self.owner.id}] Immediately marked message '{message_external_id}' as pending deletion in local state")
-
-                    # Trigger VEIL update to show pending state immediately
-                    veil_producer = self.get_sibling_component("MessageListVeilProducer")
-                    if veil_producer:
-                        veil_producer.emit_delta()
-                else:
-                    logger.warning(f"[{self.owner.id}] Could not mark message '{message_external_id}' as pending delete in local state")
-            else:
-                logger.warning(f"[{self.owner.id}] MessageListComponent not found for immediate local state update")
-
-            action_request = {
-                "target_module": "ActivityClient",
-                "action_type": "delete_message",
-                "payload": {
-                    "internal_request_id": self._get_internal_request_id(),
-                    "adapter_id": adapter_id,
-                    "conversation_id": conversation_id,
-                    "message_external_id": message_external_id,
-                    "requesting_element_id": self.owner.id,
-                    "requesting_agent_id": requesting_agent_id
-                }
-            }
-            try:
-                await self._outgoing_action_callback(action_request)
-                logger.info(f"[{self.owner.id}] Dispatched 'delete_message' action for ID '{message_external_id}' to adapter '{adapter_id}'.")
-                return {"success": True, "status": "Delete request sent. Message marked as pending deletion in conversation.", "message_external_id": message_external_id}
-            except Exception as e:
-                # NEW: Restore message state if dispatch fails
-                if msg_list_comp:
-                    msg_list_comp.restore_message_from_pending_state(message_external_id, "delete")
-                    if veil_producer:
-                        veil_producer.emit_delta()  # Update VEIL to show restore
-                logger.error(f"[{self.owner.id}] Error dispatching delete_message action: {e}", exc_info=True)
-                return {"success": False, "error": f"Error dispatching delete request: {e}"}
-
-        # --- Register edit_message Tool ---
-        @tool_provider.register_tool(
-            name="edit_message",
-            description="Edits an existing message specified by its external ID.",
-            parameters_schema=edit_message_params
-        )
-        async def edit_message_tool(message_external_id: str, new_text: str, calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-            """Handles editing a message using its external ID."""
-            if not self._outgoing_action_callback:
-                return {"success": False, "error": "Outgoing action callback is not configured."}
-            if not message_external_id or not new_text:
-                return {"success": False, "error": "message_external_id and new_text are required."}
-
-            adapter_id, conversation_id = self._get_message_context()
-            if not adapter_id or not conversation_id:
-                logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] edit_message_tool: _get_message_context failed.")
-                return {"success": False, "error": f"Could not determine context for editing message."}
-
-            requesting_agent_id = self._get_requesting_agent_id(calling_context)
-
-            # NEW: Immediately update local state before external dispatch
-            msg_list_comp = self.get_sibling_component(MessageListComponent)
-            if msg_list_comp:
-                local_update_success = msg_list_comp.mark_message_pending_edit(message_external_id, new_text, requesting_agent_id or "unknown_agent")
-                if local_update_success:
-                    logger.info(f"[{self.owner.id}] Immediately marked message '{message_external_id}' as pending edit in local state")
-
-                    # Trigger VEIL update to show pending state immediately
-                    veil_producer = self.get_sibling_component("MessageListVeilProducer")
-                    if veil_producer:
-                        veil_producer.emit_delta()
-                else:
-                    logger.warning(f"[{self.owner.id}] Could not mark message '{message_external_id}' as pending edit in local state")
-            else:
-                logger.warning(f"[{self.owner.id}] MessageListComponent not found for immediate local state update")
-
-            action_request = {
-                "target_module": "ActivityClient",
-                "action_type": "edit_message",
-                "payload": {
-                    "internal_request_id": self._get_internal_request_id(),
-                    "adapter_id": adapter_id,
-                    "conversation_id": conversation_id,
-                    "message_external_id": message_external_id,
-                    "new_text": new_text,
-                    "requesting_element_id": self.owner.id,
-                    "requesting_agent_id": requesting_agent_id
-                }
-            }
-
-            try:
-                await self._outgoing_action_callback(action_request)
-                logger.info(f"[{self.owner.id}] Dispatched 'edit_message' action for ID '{message_external_id}' to adapter '{adapter_id}'.")
-                return {"success": True, "status": "Edit request sent. Message updated with new text in conversation.", "message_external_id": message_external_id}
-            except Exception as e:
-                 # NEW: Restore message state if dispatch fails
-                 if msg_list_comp:
-                     msg_list_comp.restore_message_from_pending_state(message_external_id, "edit")
-                     if veil_producer:
-                         veil_producer.emit_delta()  # Update VEIL to show restore
-                 logger.error(f"[{self.owner.id}] Error dispatching edit_message action: {e}", exc_info=True)
-                 return {"success": False, "error": f"Error dispatching edit request: {e}"}
-
-        # --- Register add_reaction Tool ---
-        @tool_provider.register_tool(
-            name="add_reaction",
-            description="Adds an emoji reaction to a message specified by its external ID.",
-            parameters_schema=add_reaction_params
-        )
-        async def add_reaction_tool(message_external_id: str, emoji: str, calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-            """Handles adding a reaction to a message using its external ID."""
-            if not self._outgoing_action_callback:
-                return {"success": False, "error": "Outgoing action callback is not configured."}
-            if not message_external_id or not emoji:
-                return {"success": False, "error": "message_external_id and emoji are required."}
-
-            adapter_id, conversation_id = self._get_message_context()
-            if not adapter_id or not conversation_id:
-                logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] add_reaction_tool: _get_message_context failed.")
-                return {"success": False, "error": f"Could not determine context for adding reaction."}
-
-            requesting_agent_id = self._get_requesting_agent_id(calling_context)
-
-            # NEW: Immediately update local state before external dispatch
-            msg_list_comp = self.get_sibling_component(MessageListComponent)
-            if msg_list_comp:
-                local_update_success = msg_list_comp.add_pending_reaction(message_external_id, emoji, requesting_agent_id or "unknown_agent")
-                if local_update_success:
-                    logger.info(f"[{self.owner.id}] Immediately added pending reaction '{emoji}' to message '{message_external_id}' in local state")
-
-                    # Trigger VEIL update to show pending state immediately
-                    veil_producer = self.get_sibling_component("MessageListVeilProducer")
-                    if veil_producer:
-                        veil_producer.emit_delta()
-                else:
-                    logger.warning(f"[{self.owner.id}] Could not add pending reaction '{emoji}' to message '{message_external_id}' in local state")
-            else:
-                logger.warning(f"[{self.owner.id}] MessageListComponent not found for immediate local state update")
-
-            action_request = {
-                "target_module": "ActivityClient",
-                "action_type": "add_reaction",
-                "payload": {
-                    "internal_request_id": self._get_internal_request_id(),
-                    "adapter_id": adapter_id,
-                    "conversation_id": conversation_id,
-                    "message_external_id": message_external_id,
-                    "emoji": emoji,
-                    "requesting_element_id": self.owner.id,
-                    "requesting_agent_id": requesting_agent_id
-                }
-            }
-
-            try:
-                await self._outgoing_action_callback(action_request)
-                logger.info(f"[{self.owner.id}] Dispatched 'add_reaction' ({emoji}) action for ID '{message_external_id}' to adapter '{adapter_id}'.")
-                return {"success": True, "status": f"Reaction '{emoji}' added to message in conversation.", "message_external_id": message_external_id}
-            except Exception as e:
-                # NEW: Restore message state if dispatch fails
-                if msg_list_comp:
-                    msg_list_comp.restore_message_from_pending_state(message_external_id, "add_reaction")
-                    if veil_producer:
-                        veil_producer.emit_delta()  # Update VEIL to show restore
-                logger.error(f"[{self.owner.id}] Error dispatching add_reaction action: {e}", exc_info=True)
-                return {"success": False, "error": f"Error dispatching add reaction request: {e}"}
-
-        # --- Register remove_reaction Tool ---
-        @tool_provider.register_tool(
-            name="remove_reaction",
-            description="Removes an emoji reaction (previously added by this agent/bot) from a message specified by its external ID.",
-            parameters_schema=remove_reaction_params
-        )
-        async def remove_reaction_tool(message_external_id: str, emoji: str, calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-            """Handles removing a reaction from a message using its external ID."""
-            if not self._outgoing_action_callback:
-                return {"success": False, "error": "Outgoing action callback is not configured."}
-            if not message_external_id or not emoji:
-                return {"success": False, "error": "message_external_id and emoji are required."}
-
-            adapter_id, conversation_id = self._get_message_context()
-            if not adapter_id or not conversation_id:
-                logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] remove_reaction_tool: _get_message_context failed.")
-                return {"success": False, "error": f"Could not determine context for removing reaction."}
-
-            requesting_agent_id = self._get_requesting_agent_id(calling_context)
-
-            # NEW: Immediately update local state before external dispatch
-            msg_list_comp = self.get_sibling_component(MessageListComponent)
-            if msg_list_comp:
-                local_update_success = msg_list_comp.remove_pending_reaction(message_external_id, emoji, requesting_agent_id or "unknown_agent")
-                if local_update_success:
-                    logger.info(f"[{self.owner.id}] Immediately removed pending reaction '{emoji}' from message '{message_external_id}' in local state")
-
-                    # Trigger VEIL update to show pending state immediately
-                    veil_producer = self.get_sibling_component("MessageListVeilProducer")
-                    if veil_producer:
-                        veil_producer.emit_delta()
-                else:
-                    logger.warning(f"[{self.owner.id}] Could not remove pending reaction '{emoji}' from message '{message_external_id}' in local state")
-            else:
-                logger.warning(f"[{self.owner.id}] MessageListComponent not found for immediate local state update")
-
-            action_request = {
-                "target_module": "ActivityClient",
-                "action_type": "remove_reaction",
-                "payload": {
-                    "internal_request_id": self._get_internal_request_id(),
-                    "adapter_id": adapter_id,
-                    "conversation_id": conversation_id,
-                    "message_external_id": message_external_id,
-                    "emoji": emoji,
-                    "requesting_element_id": self.owner.id,
-                    "requesting_agent_id": requesting_agent_id
-                }
-            }
-
-            try:
-                await self._outgoing_action_callback(action_request)
-                logger.info(f"[{self.owner.id}] Dispatched 'remove_reaction' ({emoji}) action for ID '{message_external_id}' to adapter '{adapter_id}'.")
-                return {"success": True, "status": f"Reaction '{emoji}' removed from message in conversation.", "message_external_id": message_external_id}
-            except Exception as e:
-                # NEW: Restore message state if dispatch fails
-                if msg_list_comp:
-                    msg_list_comp.restore_message_from_pending_state(message_external_id, "remove_reaction")
-                    if veil_producer:
-                        veil_producer.emit_delta()  # Update VEIL to show restore
-                logger.error(f"[{self.owner.id}] Error dispatching remove_reaction action: {e}", exc_info=True)
-                return {"success": False, "error": f"Error dispatching remove reaction request: {e}"}
-
-        # --- Register fetch_history Tool ---
-        @tool_provider.register_tool(
-            name="fetch_history",
-            description="Fetches historical messages for a specific conversation from the adapter.",
-            parameters_schema=fetch_history_params
-        )
-        async def fetch_history_tool(conversation_id: str, # Explicitly required by tool
-                                 before: Optional[int] = None,
-                                 after: Optional[int] = None,
-                                 limit: Optional[int] = 100,
-                                 calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-            # This tool might be called by an agent loop that doesn't have a `calling_context`
-            # in the same way a direct user tool might.
-            # The agent loop should ideally provide its own ID.
-            return await self.handle_fetch_history(
-                conversation_id=conversation_id,
-                before=before,
-                after=after,
-                limit=limit,
-                calling_context=calling_context # Pass context through
-            )
-
-        # --- Register get_message_attachment_content Tool (modified from get_attachment_tool) ---
-        # @tool_provider.register_tool(
-        #     name="get_message_attachment_content",
-        #     description="Retrieves the content of a specific attachment. If not locally cached, initiates a fetch from the adapter.",
-        #     parameters_schema=get_message_attachment_content_params # Use updated params
-        # )
-        # async def get_message_attachment_content_tool(message_external_id: str, attachment_id: str, calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        #     if not self._outgoing_action_callback: # _dispatch_action checks this, but good for early exit
-        #         return {"success": False, "error": "Outgoing action callback is not configured."}
-
-        #     logger.debug(f"[{self.owner.id}] Tool 'get_message_attachment_content' called for msg_ext_id: {message_external_id}, att_id: {attachment_id}")
-
-        #     msg_list_comp = self.get_sibling_component(MessageListComponent)
-        #     if not msg_list_comp:
-        #         return {"success": False, "error": "MessageListComponent not found on element."}
-
-        #     # Find the message in MessageListComponent
-        #     target_message: Optional[Dict[str, Any]] = None
-        #     for msg in msg_list_comp.get_messages(): # get_messages returns List[MessageType]
-        #         if msg.get('original_external_id') == message_external_id:
-        #             target_message = msg
-        #             break
-
-        #     if not target_message:
-        #         return {"success": False, "error": f"Message with external ID '{message_external_id}' not found."}
-
-        #     # Find the attachment in the message
-        #     target_attachment: Optional[Dict[str, Any]] = None
-        #     for att in target_message.get('attachments', []):
-        #         if att.get('attachment_id') == attachment_id:
-        #             target_attachment = att
-        #             break
-
-        #     if not target_attachment:
-        #         return {"success": False, "error": f"Attachment with ID '{attachment_id}' not found in message '{message_external_id}'."}
-
-        #     # Check if content is already available
-        #     if target_attachment.get('content') is not None:
-        #         logger.info(f"[{self.owner.id}] Attachment content for '{attachment_id}' found directly in MessageListComponent.")
-        #         return {
-        #             "success": True,
-        #             "status": "content_retrieved",
-        #             "filename": target_attachment.get('filename'),
-        #             "content_type": target_attachment.get('content_type'),
-        #             "content": target_attachment.get('content')
-        #         }
-
-        #     # If content not available, but URL is, initiate fetch
-        #     attachment_url = target_attachment.get('url')
-        #     if not attachment_url:
-        #         return {"success": False, "error": f"Attachment '{attachment_id}' in message '{message_external_id}' has no content and no URL to fetch from."}
-
-        #     # Determine context for dispatching the fetch action
-        #     adapter_id, conversation_id = self._get_message_context(use_external_conversation_id=conversation_id)
-        #     if not adapter_id or not conversation_id:
-        #          # _get_message_context logs error if it fails
-        #         logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] get_message_attachment_content_tool: _get_message_context failed for fetching attachment.")
-        #         return {"success": False, "error": "Failed to determine adapter/conversation context for fetching attachment."}
-
-        #     # Generate internal request ID for tracking like send_message does
-        #     internal_request_id = f"fetch_att_req_{self.owner.id}_{uuid.uuid4().hex[:12]}"
-
-        #     logger.info(f"[{self.owner.id}] Attachment content for '{attachment_id}' not cached. Initiating fetch from URL: {attachment_url}")
-
-        #     action_payload = {
-        #         "internal_request_id": internal_request_id,
-        #         "adapter_id": adapter_id,
-        #         "conversation_id": conversation_id, # Context for where the original message was
-        #         "message_external_id": message_external_id, # Original message ID
-        #         "attachment_id": attachment_id,
-        #         "attachment_url": attachment_url, # URL to fetch from
-        #         "requesting_element_id": self.owner.id,
-        #         "requesting_agent_id": self._get_requesting_agent_id(calling_context) # Pass context
-        #         # Pass through original is_dm flag from context if available in _get_message_context, ActivityClient might need it
-        #         # "is_dm": self._get_message_context().get('is_dm_context', False) # Assuming _get_message_context can provide this
-        #     }
-
-        #     # Use _dispatch_action to send to ActivityClient
-        #     dispatch_result = await self._dispatch_action(
-        #         action_type="fetch_attachment_content", # New action type for ActivityClient to handle
-        #         payload=action_payload
-        #     )
-
-        #     # _dispatch_action already formats success/error, but we can add status
-        #     if dispatch_result.get("success"):
-        #         return {
-        #             "success": True,
-        #             "status": "fetch_initiated",
-        #             "message_id": message_external_id,
-        #             "attachment_id": attachment_id,
-        #             "detail": dispatch_result.get("status", "Fetch request sent to outgoing queue.")
-        #         }
-        #     else:
-        #         return dispatch_result # Return the error from _dispatch_action
 
     def _get_message_context(self, use_external_conversation_id: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
         """
@@ -767,7 +357,7 @@ class MessageActionHandler(Component):
 
         adapter_id = context_adapter_id # Assign to original variable name
 
-        # Generate internal request ID for tracking like send_message does
+        # Generate internal request ID for tracking like msg does
         internal_request_id = self._get_internal_request_id()
 
         logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] Preparing fetch_history action for adapter '{adapter_id}', conv '{conversation_id}'.")
@@ -818,7 +408,7 @@ class MessageActionHandler(Component):
         if not adapter_id or not actual_conversation_id:
             return { "success": False, "error": f"Could not determine adapter_id ({adapter_id}) or conversation_id ({actual_conversation_id}) for getting attachment."}
 
-        # Generate internal request ID for tracking like send_message does
+        # Generate internal request ID for tracking like msg does
         internal_request_id = f"attach_req_{self.owner.id if self.owner else 'unknown'}_{uuid.uuid4().hex[:12]}"
 
         logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] Preparing get_attachment action for adapter '{adapter_id}', conv '{actual_conversation_id}', attachment '{attachment_id}'.")
