@@ -493,7 +493,10 @@ class FacetAwareHUDComponent(Component):
         """
         try:
             # Get chronological temporal stream
-            temporal_stream = facet_cache.get_chronological_stream(include_ambient=True)
+            temporal_stream = facet_cache.get_chronological_stream(
+                include_ambient=True,
+                only_synthetic_agent_responses_in_history=True
+            )
             if not temporal_stream:
                 return [{"role": "user", "content": "[AGENT WORKSPACE]\nNo content available", "turn_metadata": {"turn_index": 0, "facet_count": 0}}]
 
@@ -572,6 +575,7 @@ class FacetAwareHUDComponent(Component):
             "events": [],
             "turn_index": 0
         }
+
         for facet in temporal_stream:
             # Check if this facet triggers agent turn logic
             is_agent_response = (
@@ -1162,7 +1166,6 @@ class FacetAwareHUDComponent(Component):
             info_sections.append(info_section)
 
         return "\n\n".join(info_sections)
-
 
     async def _render_ambient_section_from_facets(self,
                                                 ambient_facets: List[VEILFacet],
