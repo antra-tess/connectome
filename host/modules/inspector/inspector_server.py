@@ -62,6 +62,10 @@ class InspectorServer:
         app.router.add_get('/timelines', self.handle_timelines)
         app.router.add_get('/timelines/{space_id}', self.handle_timeline_details)
         app.router.add_get('/timelines/{space_id}/{timeline_id}', self.handle_timeline_details)
+        app.router.add_get('/veil', self.handle_veil)
+        app.router.add_get('/veil/{space_id}', self.handle_veil_space)
+        app.router.add_get('/veil/{space_id}/facets', self.handle_veil_facets)
+        app.router.add_get('/veil/{space_id}/facets/{facet_id}', self.handle_veil_facet_details)
         app.router.add_get('/health', self.handle_health)
         
         # Add middleware for request counting
@@ -90,6 +94,10 @@ class InspectorServer:
             logger.info(f"  GET http://localhost:{self.port}/timelines - Timeline DAG overview")
             logger.info(f"  GET http://localhost:{self.port}/timelines/{{space_id}} - Timeline details for space")
             logger.info(f"  GET http://localhost:{self.port}/timelines/{{space_id}}/{{timeline_id}} - Specific timeline")
+            logger.info(f"  GET http://localhost:{self.port}/veil - VEIL system overview")
+            logger.info(f"  GET http://localhost:{self.port}/veil/{{space_id}} - VEIL cache for specific space")
+            logger.info(f"  GET http://localhost:{self.port}/veil/{{space_id}}/facets - All facets in space")
+            logger.info(f"  GET http://localhost:{self.port}/veil/{{space_id}}/facets/{{facet_id}} - Specific facet details")
             
         except Exception as e:
             logger.error(f"Failed to start inspector server: {e}", exc_info=True)
@@ -150,6 +158,10 @@ class InspectorServer:
                 "/timelines": "Timeline DAG overview for all spaces",
                 "/timelines/{space_id}": "Timeline details for specific space",
                 "/timelines/{space_id}/{timeline_id}": "Specific timeline events and details",
+                "/veil": "VEIL system overview and statistics",
+                "/veil/{space_id}": "VEIL cache state for specific space",
+                "/veil/{space_id}/facets": "All VEIL facets in space with filtering",
+                "/veil/{space_id}/facets/{facet_id}": "Detailed information about specific facet",
                 "/health": "Simple health check"
             }
         }
@@ -254,6 +266,85 @@ class InspectorServer:
                 status=500
             )
     
+    async def handle_veil(self, request: Request) -> Response:
+        """Handle VEIL system overview endpoint."""
+        try:
+            veil_data = await self.data_collector.collect_veil_overview()
+            return self._json_response(veil_data)
+        except Exception as e:
+            logger.error(f"Error collecting VEIL overview: {e}", exc_info=True)
+            return self._json_response(
+                {"error": "Failed to collect VEIL overview", "details": str(e)},
+                status=500
+            )
+
+    async def handle_veil_space(self, request: Request) -> Response:
+        """Handle VEIL cache state for specific space endpoint."""
+        try:
+            space_id = request.match_info.get('space_id')
+            if not space_id:
+                return self._json_response(
+                    {"error": "space_id is required"},
+                    status=400
+                )
+            
+            veil_space_data = await self.data_collector.collect_veil_space_data(space_id)
+            return self._json_response(veil_space_data)
+        except Exception as e:
+            logger.error(f"Error collecting VEIL space data: {e}", exc_info=True)
+            return self._json_response(
+                {"error": "Failed to collect VEIL space data", "details": str(e)},
+                status=500
+            )
+
+    async def handle_veil_facets(self, request: Request) -> Response:
+        """Handle all VEIL facets in space with filtering endpoint."""
+        try:
+            space_id = request.match_info.get('space_id')
+            if not space_id:
+                return self._json_response(
+                    {"error": "space_id is required"},
+                    status=400
+                )
+            
+            # Get optional query parameters for filtering
+            facet_type = request.query.get('type')  # event, status, ambient
+            owner_id = request.query.get('owner')
+            limit = int(request.query.get('limit', 100))
+            limit = min(max(limit, 1), 1000)  # Clamp between 1 and 1000
+            
+            veil_facets_data = await self.data_collector.collect_veil_facets_data(
+                space_id, facet_type, owner_id, limit
+            )
+            return self._json_response(veil_facets_data)
+        except Exception as e:
+            logger.error(f"Error collecting VEIL facets data: {e}", exc_info=True)
+            return self._json_response(
+                {"error": "Failed to collect VEIL facets data", "details": str(e)},
+                status=500
+            )
+
+    async def handle_veil_facet_details(self, request: Request) -> Response:
+        """Handle detailed information about specific facet endpoint."""
+        try:
+            space_id = request.match_info.get('space_id')
+            facet_id = request.match_info.get('facet_id')
+            
+            if not space_id or not facet_id:
+                return self._json_response(
+                    {"error": "Both space_id and facet_id are required"},
+                    status=400
+                )
+            
+            facet_details = await self.data_collector.collect_veil_facet_details(space_id, facet_id)
+            return self._json_response(facet_details)
+        except Exception as e:
+            logger.error(f"Error collecting VEIL facet details: {e}", exc_info=True)
+            return self._json_response(
+                {"error": "Failed to collect VEIL facet details", "details": str(e)},
+                status=500
+            )
+
     async def handle_health(self, request: Request) -> Response:
         """Handle health check endpoint."""
         health_data = {

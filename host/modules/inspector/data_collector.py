@@ -712,3 +712,483 @@ class InspectorDataCollector:
             event_type = payload.get('event_type', 'unknown')
             event_types[event_type] = event_types.get(event_type, 0) + 1
         return event_types
+
+    async def collect_veil_overview(self) -> Dict[str, Any]:
+        """
+        Collect VEIL system overview and statistics.
+        
+        Returns:
+            Dictionary containing VEIL system statistics
+        """
+        try:
+            veil_overview = {
+                "timestamp": time.time(),
+                "summary": {
+                    "total_spaces_with_veil": 0,
+                    "total_facets": 0,
+                    "facet_types": {
+                        "event": 0,
+                        "status": 0,
+                        "ambient": 0
+                    },
+                    "veil_producers_found": 0
+                },
+                "spaces": {}
+            }
+            
+            if self.space_registry:
+                spaces_dict = self.space_registry.get_spaces()
+                
+                for space_id, space in spaces_dict.items():
+                    try:
+                        space_veil_info = await self._collect_space_veil_summary(space_id, space)
+                        if space_veil_info and space_veil_info.get("has_veil_producer"):
+                            veil_overview["spaces"][space_id] = space_veil_info
+                            veil_overview["summary"]["total_spaces_with_veil"] += 1
+                            veil_overview["summary"]["total_facets"] += space_veil_info["summary"]["total_facets"]
+                            veil_overview["summary"]["veil_producers_found"] += space_veil_info["summary"]["producers_count"]
+                            
+                            # Add to facet type counts
+                            for facet_type, count in space_veil_info["summary"]["facet_types"].items():
+                                veil_overview["summary"]["facet_types"][facet_type] += count
+                                
+                    except Exception as e:
+                        logger.error(f"Error collecting VEIL overview for space {space_id}: {e}", exc_info=True)
+                        veil_overview["spaces"][space_id] = {
+                            "error": f"Failed to collect VEIL data: {str(e)}",
+                            "space_type": type(space).__name__ if space else "Unknown"
+                        }
+            
+            return veil_overview
+            
+        except Exception as e:
+            logger.error(f"Error collecting VEIL overview: {e}", exc_info=True)
+            return {
+                "error": "Failed to collect VEIL overview",
+                "details": str(e),
+                "timestamp": time.time()
+            }
+
+    async def collect_veil_space_data(self, space_id: str) -> Dict[str, Any]:
+        """
+        Collect VEIL cache state for specific space.
+        
+        Args:
+            space_id: The ID of the space to inspect
+            
+        Returns:
+            Dictionary containing VEIL cache data for the space
+        """
+        try:
+            if not self.space_registry:
+                return {"error": "Space registry not available"}
+            
+            spaces_dict = self.space_registry.get_spaces()
+            space = spaces_dict.get(space_id)
+            
+            if not space:
+                return {"error": f"Space '{space_id}' not found"}
+            
+            veil_space_data = {
+                "timestamp": time.time(),
+                "space_id": space_id,
+                "space_type": type(space).__name__,
+                "veil_producers": [],
+                "combined_cache_stats": {
+                    "total_facets": 0,
+                    "facet_types": {"event": 0, "status": 0, "ambient": 0},
+                    "cache_operations": 0,
+                    "recent_facets": []
+                },
+                "facet_cache": None
+            }
+            
+            # Find VEIL producers in the space
+            veil_producers = self._find_veil_producers_in_space(space)
+            veil_space_data["veil_producers"] = [
+                {
+                    "component_id": comp_id,
+                    "component_type": type(comp).__name__,
+                    "cache_size": comp.get_facet_cache_size() if hasattr(comp, 'get_facet_cache_size') else 0,
+                    "multimodal_content": comp.has_multimodal_content() if hasattr(comp, 'has_multimodal_content') else False
+                }
+                for comp_id, comp in veil_producers
+            ]
+            
+            # Get combined facet cache from primary VEIL producer
+            if veil_producers:
+                primary_producer = veil_producers[0][1]  # Use first producer found
+                if hasattr(primary_producer, 'get_facet_cache'):
+                    facet_cache = primary_producer.get_facet_cache()
+                    veil_space_data["facet_cache"] = self._serialize_facet_cache(facet_cache)
+                    veil_space_data["combined_cache_stats"] = self._get_facet_cache_stats(facet_cache)
+            
+            return veil_space_data
+            
+        except Exception as e:
+            logger.error(f"Error collecting VEIL space data for {space_id}: {e}", exc_info=True)
+            return {
+                "error": "Failed to collect VEIL space data",
+                "details": str(e),
+                "timestamp": time.time()
+            }
+
+    async def collect_veil_facets_data(self, space_id: str, facet_type: str = None, 
+                                     owner_id: str = None, limit: int = 100) -> Dict[str, Any]:
+        """
+        Collect all VEIL facets in space with filtering.
+        
+        Args:
+            space_id: The ID of the space to inspect
+            facet_type: Optional filter by facet type (event, status, ambient)
+            owner_id: Optional filter by owner element ID
+            limit: Maximum number of facets to return
+            
+        Returns:
+            Dictionary containing filtered facet data
+        """
+        try:
+            if not self.space_registry:
+                return {"error": "Space registry not available"}
+            
+            spaces_dict = self.space_registry.get_spaces()
+            space = spaces_dict.get(space_id)
+            
+            if not space:
+                return {"error": f"Space '{space_id}' not found"}
+            
+            facets_data = {
+                "timestamp": time.time(),
+                "space_id": space_id,
+                "filters": {
+                    "facet_type": facet_type,
+                    "owner_id": owner_id,
+                    "limit": limit
+                },
+                "facets": [],
+                "summary": {
+                    "total_matching": 0,
+                    "returned": 0,
+                    "limited": False
+                }
+            }
+            
+            # Find VEIL producer and get facet cache
+            veil_producers = self._find_veil_producers_in_space(space)
+            if not veil_producers:
+                return {**facets_data, "error": "No VEIL producers found in space"}
+            
+            primary_producer = veil_producers[0][1]
+            if not hasattr(primary_producer, 'get_facet_cache'):
+                return {**facets_data, "error": "VEIL producer does not support facet cache access"}
+            
+            facet_cache = primary_producer.get_facet_cache()
+            all_facets = list(facet_cache.facets.values())
+            
+            # Apply filters
+            filtered_facets = []
+            for facet in all_facets:
+                # Filter by facet type
+                if facet_type and facet.facet_type.value != facet_type:
+                    continue
+                    
+                # Filter by owner
+                if owner_id and facet.owner_element_id != owner_id:
+                    continue
+                    
+                filtered_facets.append(facet)
+            
+            # Sort by timestamp (newest first)
+            filtered_facets.sort(key=lambda f: f.veil_timestamp, reverse=True)
+            
+            # Apply limit
+            facets_data["summary"]["total_matching"] = len(filtered_facets)
+            limited_facets = filtered_facets[:limit]
+            facets_data["summary"]["returned"] = len(limited_facets)
+            facets_data["summary"]["limited"] = len(filtered_facets) > limit
+            
+            # Serialize facets
+            facets_data["facets"] = [
+                self._serialize_facet(facet) for facet in limited_facets
+            ]
+            
+            return facets_data
+            
+        except Exception as e:
+            logger.error(f"Error collecting VEIL facets data for {space_id}: {e}", exc_info=True)
+            return {
+                "error": "Failed to collect VEIL facets data",
+                "details": str(e),
+                "timestamp": time.time()
+            }
+
+    async def collect_veil_facet_details(self, space_id: str, facet_id: str) -> Dict[str, Any]:
+        """
+        Collect detailed information about specific facet.
+        
+        Args:
+            space_id: The ID of the space containing the facet
+            facet_id: The ID of the facet to inspect
+            
+        Returns:
+            Dictionary containing detailed facet information
+        """
+        try:
+            if not self.space_registry:
+                return {"error": "Space registry not available"}
+            
+            spaces_dict = self.space_registry.get_spaces()
+            space = spaces_dict.get(space_id)
+            
+            if not space:
+                return {"error": f"Space '{space_id}' not found"}
+            
+            # Find VEIL producer and get facet cache
+            veil_producers = self._find_veil_producers_in_space(space)
+            if not veil_producers:
+                return {"error": "No VEIL producers found in space"}
+            
+            primary_producer = veil_producers[0][1]
+            if not hasattr(primary_producer, 'get_facet_cache'):
+                return {"error": "VEIL producer does not support facet cache access"}
+            
+            facet_cache = primary_producer.get_facet_cache()
+            facet = facet_cache.facets.get(facet_id)
+            
+            if not facet:
+                return {"error": f"Facet '{facet_id}' not found in space '{space_id}'"}
+            
+            facet_details = {
+                "timestamp": time.time(),
+                "space_id": space_id,
+                "facet": self._serialize_facet(facet, include_detailed=True),
+                "relationships": {
+                    "links_to": facet.links_to,
+                    "linked_from": self._find_facets_linking_to(facet_cache, facet_id)
+                },
+                "context": {
+                    "owner_element_info": await self._get_element_info(space, facet.owner_element_id),
+                    "temporal_neighbors": self._get_temporal_neighbors(facet_cache, facet)
+                }
+            }
+            
+            return facet_details
+            
+        except Exception as e:
+            logger.error(f"Error collecting VEIL facet details for {space_id}/{facet_id}: {e}", exc_info=True)
+            return {
+                "error": "Failed to collect VEIL facet details",
+                "details": str(e),
+                "timestamp": time.time()
+            }
+
+    async def _collect_space_veil_summary(self, space_id: str, space: Space) -> Dict[str, Any]:
+        """Collect VEIL summary information for a specific space."""
+        veil_info = {
+            "space_id": space_id,
+            "space_type": type(space).__name__,
+            "has_veil_producer": False,
+            "summary": {
+                "producers_count": 0,
+                "total_facets": 0,
+                "facet_types": {"event": 0, "status": 0, "ambient": 0}
+            },
+            "producers": []
+        }
+        
+        # Find VEIL producers in the space
+        veil_producers = self._find_veil_producers_in_space(space)
+        veil_info["has_veil_producer"] = len(veil_producers) > 0
+        veil_info["summary"]["producers_count"] = len(veil_producers)
+        
+        for comp_id, comp in veil_producers:
+            producer_info = {
+                "component_id": comp_id,
+                "component_type": type(comp).__name__,
+                "facet_cache_size": 0
+            }
+            
+            # Get facet cache statistics
+            if hasattr(comp, 'get_facet_cache'):
+                try:
+                    facet_cache = comp.get_facet_cache()
+                    cache_stats = self._get_facet_cache_stats(facet_cache)
+                    producer_info["facet_cache_size"] = cache_stats["total_facets"]
+                    veil_info["summary"]["total_facets"] += cache_stats["total_facets"]
+                    
+                    # Add to facet type counts
+                    for facet_type, count in cache_stats["facet_types"].items():
+                        veil_info["summary"]["facet_types"][facet_type] += count
+                        
+                except Exception as e:
+                    logger.debug(f"Error collecting facet cache stats from {comp_id}: {e}")
+            
+            veil_info["producers"].append(producer_info)
+        
+        return veil_info
+
+    def _find_veil_producers_in_space(self, space: Space) -> List[tuple]:
+        """Find all VEIL producer components in a space."""
+        veil_producers = []
+        
+        if hasattr(space, 'components') and space.components:
+            for component_id, component in space.components.items():
+                # Check if component is a VEIL producer
+                if hasattr(component, 'get_facet_cache') or 'VeilProducer' in str(type(component)):
+                    veil_producers.append((component_id, component))
+        
+        return veil_producers
+
+    def _serialize_facet_cache(self, facet_cache) -> Dict[str, Any]:
+        """Serialize a VEILFacetCache for JSON output."""
+        if not facet_cache or not hasattr(facet_cache, 'facets'):
+            return {"facets": {}, "statistics": {}}
+        
+        serialized_facets = {}
+        for facet_id, facet in facet_cache.facets.items():
+            serialized_facets[facet_id] = self._serialize_facet(facet)
+        
+        return {
+            "facets": serialized_facets,
+            "statistics": self._get_facet_cache_stats(facet_cache)
+        }
+
+    def _serialize_facet(self, facet, include_detailed: bool = False) -> Dict[str, Any]:
+        """Serialize a VEILFacet for JSON output."""
+        serialized = {
+            "facet_id": facet.facet_id,
+            "facet_type": facet.facet_type.value,
+            "veil_timestamp": facet.veil_timestamp,
+            "owner_element_id": facet.owner_element_id,
+            "links_to": facet.links_to,
+            "properties": dict(facet.properties),
+            "content_summary": facet.get_content_summary() if hasattr(facet, 'get_content_summary') else "No summary available"
+        }
+        
+        if include_detailed:
+            # Add detailed information
+            serialized["class_name"] = type(facet).__name__
+            serialized["temporal_key"] = facet.get_temporal_key()
+            
+            # Try to get VEIL dict representation
+            try:
+                if hasattr(facet, 'to_veil_dict'):
+                    serialized["veil_dict"] = facet.to_veil_dict()
+            except Exception as e:
+                serialized["veil_dict_error"] = str(e)
+        
+        return serialized
+
+    def _get_facet_cache_stats(self, facet_cache) -> Dict[str, Any]:
+        """Get statistics about a facet cache."""
+        stats = {
+            "total_facets": 0,
+            "facet_types": {"event": 0, "status": 0, "ambient": 0},
+            "recent_facets": []
+        }
+        
+        if not facet_cache or not hasattr(facet_cache, 'facets'):
+            return stats
+        
+        all_facets = list(facet_cache.facets.values())
+        stats["total_facets"] = len(all_facets)
+        
+        # Count by type
+        for facet in all_facets:
+            facet_type = facet.facet_type.value
+            if facet_type in stats["facet_types"]:
+                stats["facet_types"][facet_type] += 1
+        
+        # Get recent facets (last 5)
+        recent_facets = sorted(all_facets, key=lambda f: f.veil_timestamp, reverse=True)[:5]
+        stats["recent_facets"] = [
+            {
+                "facet_id": f.facet_id,
+                "facet_type": f.facet_type.value,
+                "timestamp": f.veil_timestamp,
+                "summary": f.get_content_summary() if hasattr(f, 'get_content_summary') else "No summary"
+            }
+            for f in recent_facets
+        ]
+        
+        return stats
+
+    def _find_facets_linking_to(self, facet_cache, target_facet_id: str) -> List[str]:
+        """Find all facets that link to the target facet."""
+        linking_facets = []
+        
+        if not facet_cache or not hasattr(facet_cache, 'facets'):
+            return linking_facets
+        
+        for facet_id, facet in facet_cache.facets.items():
+            if facet.links_to == target_facet_id:
+                linking_facets.append(facet_id)
+        
+        return linking_facets
+
+    async def _get_element_info(self, space: Space, element_id: str) -> Dict[str, Any]:
+        """Get basic information about an element."""
+        element_info = {
+            "element_id": element_id,
+            "found": False
+        }
+        
+        # Check if element_id refers to the space itself
+        if hasattr(space, 'id') and space.id == element_id:
+            element_info.update({
+                "found": True,
+                "type": "space",
+                "name": getattr(space, 'name', element_id),
+                "class_name": type(space).__name__
+            })
+            return element_info
+        
+        # Check elements within the space
+        if hasattr(space, 'elements') and space.elements:
+            element = space.elements.get(element_id)
+            if element:
+                element_info.update({
+                    "found": True,
+                    "type": "element",
+                    "name": getattr(element, 'name', element_id),
+                    "class_name": type(element).__name__
+                })
+        
+        return element_info
+
+    def _get_temporal_neighbors(self, facet_cache, target_facet) -> Dict[str, Any]:
+        """Get temporal neighbors (before/after) of a facet."""
+        neighbors = {
+            "before": None,
+            "after": None
+        }
+        
+        if not facet_cache or not hasattr(facet_cache, 'facets'):
+            return neighbors
+        
+        all_facets = sorted(facet_cache.facets.values(), key=lambda f: f.veil_timestamp)
+        target_index = None
+        
+        for i, facet in enumerate(all_facets):
+            if facet.facet_id == target_facet.facet_id:
+                target_index = i
+                break
+        
+        if target_index is not None:
+            if target_index > 0:
+                before_facet = all_facets[target_index - 1]
+                neighbors["before"] = {
+                    "facet_id": before_facet.facet_id,
+                    "facet_type": before_facet.facet_type.value,
+                    "timestamp": before_facet.veil_timestamp
+                }
+            
+            if target_index < len(all_facets) - 1:
+                after_facet = all_facets[target_index + 1]
+                neighbors["after"] = {
+                    "facet_id": after_facet.facet_id,
+                    "facet_type": after_facet.facet_type.value,
+                    "timestamp": after_facet.veil_timestamp
+                }
+        
+        return neighbors
