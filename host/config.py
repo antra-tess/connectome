@@ -85,6 +85,10 @@ class HostSettings(BaseSettings):
         description="JSON string representing a list of AgentConfig objects"
     )
 
+    # Inspector Settings
+    inspector_enabled: bool = Field(default=False, alias="CONNECTOME_INSPECTOR_ENABLED", description="Enable the web inspector server")
+    inspector_port: int = Field(default=8080, alias="CONNECTOME_INSPECTOR_PORT", description="Port for the inspector web server")
+
     # Parsed lists (populated after initialization)
     activity_client_adapter_configs: List[ActivityAdapterConfig] = []
     agents: List[AgentConfig] = []

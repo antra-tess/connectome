@@ -16,6 +16,9 @@ flask>=2.3.0                                   # For scaffolding web interface
 jsonschema>=4.17.3                             # JSON Schema validation
 PyYAML>=6.0                                    # For YAML file handling
 
+# System monitoring
+psutil>=5.8.0                                  # For system metrics in inspector module
+
 # Testing
 pytest>=7.0.0                                  # For unit testing
 pytest-mock>=3.10.0                            # For mocking in tests

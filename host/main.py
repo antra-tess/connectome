@@ -24,6 +24,9 @@ from host.modules.routing.host_router import HostRouter
 # from host.modules.activities.activity_listener import ActivityListener
 from host.modules.activities.activity_client import ActivityClient
 
+# Inspector module
+from host.modules.inspector.inspector_server import InspectorServer
+
 # Agent/InnerSpace
 from elements.elements.inner_space import InnerSpace
 from elements.elements.components.agent_loop import SimpleRequestResponseLoopComponent, ToolTextParsingLoopComponent # Import loop types
@@ -253,6 +256,26 @@ async def amain():
     logger.info("Starting Activity Client connections...")
     await activity_client.connect_to_all_adapters()
 
+    # Initialize Inspector Server (if enabled)
+    inspector_server = None
+    if settings.inspector_enabled:
+        logger.info(f"Starting Inspector Server on port {settings.inspector_port}...")
+        try:
+            # Create a host instance reference for the inspector
+            host_instance = type('HostInstance', (), {
+                'space_registry': space_registry,
+                'activity_client': activity_client,
+                'event_loop': event_loop,
+                'external_event_router': external_event_router,
+                'settings': settings
+            })()
+            
+            inspector_server = InspectorServer(host_instance, port=settings.inspector_port)
+            await inspector_server.start()
+        except Exception as e:
+            logger.error(f"Failed to start Inspector Server: {e}", exc_info=True)
+            inspector_server = None
+
     try:
         logger.info("Starting Host Event Loop...")
         await event_loop.run() # Run the main async loop
@@ -274,6 +297,8 @@ async def amain():
              event_loop.stop() 
          if activity_client:
              await activity_client.shutdown()
+         if inspector_server:
+             await inspector_server.stop()
          logger.info("Shutdown sequence complete.")
 
 async def shutdown_all_spaces_gracefully(space_registry):
