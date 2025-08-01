@@ -315,8 +315,9 @@ class InspectorDataCollector:
             
             # Find the timeline component in the space
             timeline_component = None
-            if hasattr(space, 'components') and space.components:
-                for component_id, component in space.components.items():
+            space_components = space.get_components() if hasattr(space, 'get_components') else {}
+            if space_components:
+                for component_id, component in space_components.items():
                     if type(component).__name__ == "TimelineComponent":
                         timeline_component = component
                         break
@@ -430,8 +431,9 @@ class InspectorDataCollector:
                     }
         
         # Collect components directly on the space
-        if hasattr(space, 'components') and space.components:
-            for component_id, component in space.components.items():
+        space_components = space.get_components() if hasattr(space, 'get_components') else {}
+        if space_components:
+            for component_id, component in space_components.items():
                 try:
                     component_info = self._collect_component_details(component_id, component)
                     space_info["components"].append(component_info)
@@ -462,8 +464,9 @@ class InspectorDataCollector:
                 element_info["properties"][attr_name] = getattr(element, attr_name)
         
         # Collect components
-        if hasattr(element, 'components') and element.components:
-            for component_id, component in element.components.items():
+        element_components = element.get_components() if hasattr(element, 'get_components') else {}
+        if element_components:
+            for component_id, component in element_components.items():
                 try:
                     component_info = self._collect_component_details(component_id, component)
                     element_info["components"].append(component_info)
@@ -537,7 +540,7 @@ class InspectorDataCollector:
             "space_info": {
                 "type": type(inner_space).__name__,
                 "elements_count": len(inner_space.elements) if hasattr(inner_space, 'elements') and inner_space.elements else 0,
-                "components_count": len(inner_space.components) if hasattr(inner_space, 'components') and inner_space.components else 0,
+                "components_count": len(inner_space.get_components()) if hasattr(inner_space, 'get_components') else 0,
             },
             "agent_loop": None,
             "llm_provider": None,
@@ -552,8 +555,9 @@ class InspectorDataCollector:
                 agent_info["properties"][attr_name] = getattr(inner_space, attr_name)
         
         # Find agent loop component
-        if hasattr(inner_space, 'components') and inner_space.components:
-            for component_id, component in inner_space.components.items():
+        space_components = inner_space.get_components() if hasattr(inner_space, 'get_components') else {}
+        if space_components:
+            for component_id, component in space_components.items():
                 component_type = type(component).__name__
                 if 'AgentLoop' in component_type or 'Loop' in component_type:
                     agent_info["agent_loop"] = {
@@ -655,8 +659,9 @@ class InspectorDataCollector:
         
         # Find timeline component in the space
         timeline_component = None
-        if hasattr(space, 'components') and space.components:
-            for component_id, component in space.components.items():
+        space_components = space.get_components() if hasattr(space, 'get_components') else {}
+        if space_components:
+            for component_id, component in space_components.items():
                 if type(component).__name__ == "TimelineComponent":
                     timeline_component = component
                     timeline_info["summary"]["has_timeline_component"] = True
@@ -1031,8 +1036,9 @@ class InspectorDataCollector:
         """Find all VEIL producer components in a space."""
         veil_producers = []
         
-        if hasattr(space, 'components') and space.components:
-            for component_id, component in space.components.items():
+        space_components = space.get_components() if hasattr(space, 'get_components') else {}
+        if space_components:
+            for component_id, component in space_components.items():
                 # Check if component is a VEIL producer
                 if hasattr(component, 'get_facet_cache') or 'VeilProducer' in str(type(component)):
                     veil_producers.append((component_id, component))
