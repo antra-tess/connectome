@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Connectome Inspector UI</title>
+    
+    <!-- No external scripts needed for iframe approach -->
+    
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .header {
+            background: #16213e;
+            padding: 1rem;
+            border-bottom: 1px solid #0f3460;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            flex-shrink: 0;
+        }
+        
+        .header h1 {
+            color: #00d4aa;
+            font-size: 1.5rem;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+        
+        select, button {
+            background: #0f3460;
+            color: #eee;
+            border: 1px solid #00d4aa;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            font-size: 0.9rem;
+        }
+        
+        button {
+            background: #00d4aa;
+            color: #1a1a2e;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        
+        button:hover {
+            background: #00b894;
+        }
+        
+        button:disabled {
+            background: #555;
+            color: #999;
+            cursor: not-allowed;
+        }
+        
+        .loading {
+            color: #00d4aa;
+            font-style: italic;
+        }
+        
+        .content {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+            height: 100%;
+        }
+        
+        .sidebar {
+            width: 300px;
+            background: #16213e;
+            border-right: 1px solid #0f3460;
+            padding: 1rem;
+            overflow-y: auto;
+            flex-shrink: 0;
+        }
+        
+        .sidebar h3 {
+            color: #00d4aa;
+            margin-bottom: 0.5rem;
+            font-size: 1rem;
+        }
+        
+        .endpoint-list {
+            list-style: none;
+        }
+        
+        .endpoint-list li {
+            margin-bottom: 0.5rem;
+        }
+        
+        .endpoint-list a {
+            color: #74b9ff;
+            text-decoration: none;
+            font-size: 0.9rem;
+            display: block;
+            padding: 0.25rem 0;
+        }
+        
+        .endpoint-list a:hover {
+            color: #00d4aa;
+        }
+        
+        .endpoint-list a.active {
+            color: #00d4aa;
+            font-weight: 600;
+        }
+        
+        .main-content {
+            flex: 1;
+            overflow: hidden;
+            position: relative;
+        }
+        
+        #content {
+            height: 100%;
+        }
+        
+        #jsoncrack-container {
+            width: 100%;
+            height: 100%;
+            background: #1a1a2e;
+            border: none;
+        }
+        
+        .error {
+            color: #ff6b6b;
+            background: #2d1b1b;
+            padding: 1rem;
+            margin: 1rem;
+            border-radius: 4px;
+            border-left: 4px solid #ff6b6b;
+        }
+        
+        .info {
+            color: #999;
+            text-align: center;
+            padding: 2rem;
+            font-size: 1.1rem;
+        }
+        
+        .stats {
+            font-size: 0.8rem;
+            color: #999;
+            margin-top: 0.5rem;
+        }
+        
+        .toolbar {
+            background: #16213e;
+            border-bottom: 1px solid #0f3460;
+            padding: 0.5rem 1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .toolbar-info {
+            color: #999;
+            font-size: 0.85rem;
+        }
+        
+        .toolbar-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+        
+        .toolbar button {
+            padding: 0.25rem 0.5rem;
+            font-size: 0.8rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Connectome Inspector</h1>
+        <div class="controls">
+            <select id="endpointSelect">
+                <option value="">Select an endpoint...</option>
+                <option value="/status">System Status</option>
+                <option value="/spaces">Spaces</option>
+                <option value="/agents">Agents</option>
+                <option value="/adapters">Adapters</option>
+                <option value="/metrics">Metrics</option>
+                <option value="/timelines">Timelines</option>
+                <option value="/veil">VEIL Overview</option>
+                <option value="/health">Health Check</option>
+            </select>
+            <button id="loadBtn" onclick="loadAndVisualize()">Load & Visualize</button>
+            <span id="status" class="loading" style="display: none;">Loading...</span>
+        </div>
+    </div>
+    
+    <div class="content">
+        <div class="sidebar">
+            <h3>Available Endpoints</h3>
+            <ul class="endpoint-list">
+                <li><a href="#" onclick="selectEndpoint('/status')">System Status</a></li>
+                <li><a href="#" onclick="selectEndpoint('/spaces')">Spaces</a></li>
+                <li><a href="#" onclick="selectEndpoint('/agents')">Agents</a></li>
+                <li><a href="#" onclick="selectEndpoint('/adapters')">Adapters</a></li>
+                <li><a href="#" onclick="selectEndpoint('/metrics')">Metrics</a></li>
+                <li><a href="#" onclick="selectEndpoint('/timelines')">Timelines</a></li>
+                <li><a href="#" onclick="selectEndpoint('/veil')">VEIL Overview</a></li>
+                <li><a href="#" onclick="selectEndpoint('/health')">Health Check</a></li>
+            </ul>
+            
+            <div style="margin-top: 2rem; border-top: 1px solid #0f3460; padding-top: 1rem;">
+                <h3>Visualization Info</h3>
+                <p style="font-size: 0.8rem; color: #999; line-height: 1.4;">
+                    This interface uses JSONCrack to visualize the Connectome debugging data.
+                    Select an endpoint and click "Load & Visualize" to see the data structure.
+                </p>
+            </div>
+        </div>
+        
+        <div class="main-content">
+            <div class="toolbar" id="toolbar" style="display: none;">
+                <div class="toolbar-info">
+                    <span id="data-info"></span>
+                </div>
+                <div class="toolbar-actions">
+                    <button onclick="refreshData()">Refresh</button>
+                    <button onclick="resetVisualization()">Reset View</button>
+                </div>
+            </div>
+            
+            <div id="content">
+                <div class="info">
+                    Select an endpoint from the sidebar to load and visualize Connectome debugging data
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentData = null;
+        let currentEndpoint = null;
+        let jsoncrackInstance = null;
+        
+        function selectEndpoint(endpoint) {
+            document.getElementById('endpointSelect').value = endpoint;
+            
+            // Update active link
+            document.querySelectorAll('.endpoint-list a').forEach(a => a.classList.remove('active'));
+            event.target.classList.add('active');
+        }
+        
+        async function loadAndVisualize() {
+            const endpoint = document.getElementById('endpointSelect').value;
+            if (!endpoint) {
+                alert('Please select an endpoint first');
+                return;
+            }
+            
+            const statusEl = document.getElementById('status');
+            const loadBtn = document.getElementById('loadBtn');
+            const contentEl = document.getElementById('content');
+            const toolbar = document.getElementById('toolbar');
+            
+            statusEl.style.display = 'inline';
+            loadBtn.disabled = true;
+            
+            try {
+                statusEl.textContent = 'Loading data...';
+                
+                const response = await fetch(endpoint, {
+                    headers: {
+                        'Accept': 'application/json'
+                    }
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                currentData = data;
+                currentEndpoint = endpoint;
+                
+                statusEl.textContent = 'Initializing visualization...';
+                
+                // Show toolbar and update info
+                toolbar.style.display = 'flex';
+                updateDataInfo(data, endpoint);
+                
+                // Clear content and create JSONCrack container
+                contentEl.innerHTML = '<div id="jsoncrack-container"></div>';
+                
+                // Initialize JSONCrack visualization
+                await initializeJsonCrack(data);
+                
+            } catch (error) {
+                console.error('Error loading data:', error);
+                contentEl.innerHTML = `
+                    <div class="error">
+                        <strong>Error loading data from ${endpoint}:</strong><br>
+                        ${escapeHtml(error.message)}
+                    </div>
+                `;
+                currentData = null;
+                currentEndpoint = null;
+                toolbar.style.display = 'none';
+            } finally {
+                statusEl.style.display = 'none';
+                loadBtn.disabled = false;
+            }
+        }
+        
+        async function initializeJsonCrack(data) {
+            try {
+                const container = document.getElementById('jsoncrack-container');
+                if (!container) {
+                    throw new Error('JSONCrack container not found');
+                }
+                
+                const jsonString = JSON.stringify(data, null, 2);
+                
+                // Clear container
+                container.innerHTML = '';
+                container.style.position = 'relative';
+                
+                console.log('Initializing JSONCrack with postMessage approach');
+                
+                // Create iframe for JSONCrack widget
+                const iframe = document.createElement('iframe');
+                iframe.style.width = '100%';
+                iframe.style.height = '100%';
+                iframe.style.border = 'none';
+                iframe.style.backgroundColor = '#1a1a2e';
+                iframe.src = 'https://jsoncrack.com/widget';
+                
+                container.appendChild(iframe);
+                
+                // Set up postMessage communication
+                let widgetReady = false;
+                let fallbackTriggered = false;
+                
+                // Handle iframe load errors (but not content errors like Sentry)
+                iframe.addEventListener('error', (event) => {
+                    console.error('JSONCrack iframe failed to load:', event);
+                    if (!fallbackTriggered) {
+                        fallbackTriggered = true;
+                        showFallbackVisualization(data);
+                    }
+                });
+                
+                // Listen for messages from the iframe
+                const messageHandler = (event) => {
+                    if (event.origin !== 'https://jsoncrack.com') {
+                        console.log('Ignoring message from non-JSONCrack origin:', event.origin);
+                        return;
+                    }
+                    
+                    // Log the complete message object to see all fields
+                    console.log('Received JSONCrack message - Full event object:', event);
+                    console.log('Event.data:', event.data);
+                    console.log('Event.type:', event.type);
+                    console.log('Event.source:', event.source);
+                    console.log('Event.ports:', event.ports);
+                    
+                    // Treat ANY message from JSONCrack as ready signal (but only once)
+                    if (!widgetReady) {
+                        console.log('JSONCrack widget ready (any message), attempting to send data');
+                        widgetReady = true;
+                        sendDataToWidget();
+                    } else {
+                        console.log('Additional message from JSONCrack (widget already ready)');
+                    }
+                };
+                
+                const sendDataToWidget = () => {
+                    if (!widgetReady) {
+                        console.log('Widget not ready yet, waiting...');
+                        return;
+                    }
+                    
+                    console.log('Attempting to send data to JSONCrack widget...');
+                    console.log('iframe.contentWindow exists:', !!iframe.contentWindow);
+                    
+                    try {
+                        // Try multiple message formats based on JSONCrack docs
+                        const messages = [
+                            // Format from docs - basic
+                            {
+                                json: jsonString,
+                                options: {
+                                    theme: 'dark',
+                                    direction: 'RIGHT'
+                                }
+                            },
+                            // Alternative format - maybe they expect different structure
+                            {
+                                type: 'data',
+                                payload: {
+                                    json: jsonString,
+                                    options: {
+                                        theme: 'dark',
+                                        direction: 'RIGHT'
+                                    }
+                                }
+                            },
+                            // Simple format - just the JSON
+                            {
+                                json: jsonString
+                            }
+                        ];
+                        
+                        // Try each message format with a small delay
+                        messages.forEach((message, index) => {
+                            setTimeout(() => {
+                                console.log(`Sending message format ${index + 1}:`, message);
+                                iframe.contentWindow.postMessage(message, 'https://jsoncrack.com');
+                            }, index * 500);
+                        });
+                        
+                    } catch (error) {
+                        console.error('Error sending data to widget:', error);
+                        // Only fallback for actual postMessage errors, not Sentry/tracking errors
+                        if (error.name === 'DataCloneError' || error.message.includes('postMessage')) {
+                            if (!fallbackTriggered) {
+                                fallbackTriggered = true;
+                                showFallbackVisualization(data);
+                            }
+                        }
+                    }
+                };
+                
+                window.addEventListener('message', messageHandler);
+                
+                // Clean up event listener when resetting
+                if (jsoncrackInstance) {
+                    jsoncrackInstance.cleanup = () => {
+                        window.removeEventListener('message', messageHandler);
+                    };
+                }
+                
+                jsoncrackInstance = {
+                    iframe: iframe,
+                    cleanup: () => {
+                        window.removeEventListener('message', messageHandler);
+                    },
+                    sendData: sendDataToWidget
+                };
+                
+                // Manual trigger no longer needed since auto-detection works!
+                
+                // Fallback timeout - if widget doesn't respond in 15 seconds, show fallback
+                setTimeout(() => {
+                    if (!widgetReady && !fallbackTriggered) {
+                        console.log('JSONCrack widget timeout, showing fallback');
+                        fallbackTriggered = true;
+                        showFallbackVisualization(data);
+                    }
+                }, 15000); // Increased timeout to allow for debugging
+                
+            } catch (error) {
+                console.error('JSONCrack initialization error:', error);
+                // Only fallback for critical initialization errors, not third-party script errors
+                if (error.message.includes('container not found') || 
+                    error.message.includes('iframe') ||
+                    error.name === 'TypeError' && error.message.includes('appendChild')) {
+                    showFallbackVisualization(data);
+                } else {
+                    // Log but don't fallback for non-critical errors (like Sentry loading)
+                    console.warn('Non-critical JSONCrack error ignored:', error);
+                }
+            }
+        }
+        
+        function showFallbackVisualization(data) {
+            const container = document.getElementById('jsoncrack-container') || document.getElementById('content');
+            const jsonString = JSON.stringify(data, null, 2);
+            
+            container.innerHTML = `
+                <div style="padding: 1rem; background: #0f3460; border-radius: 4px; height: 100%; overflow: auto; display: flex; flex-direction: column;">
+                    <div style="margin-bottom: 1rem; color: #00d4aa; display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.5rem; border-bottom: 1px solid #555;">
+                        <strong>📊 Formatted JSON View</strong>
+                        <small style="color: #999;">JSONCrack unavailable</small>
+                    </div>
+                    <div style="flex: 1; overflow: auto;">
+                        <pre style="color: #eee; font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace; font-size: 0.85rem; line-height: 1.4; white-space: pre-wrap; margin: 0;">${escapeHtml(jsonString)}</pre>
+                    </div>
+                </div>
+            `;
+        }
+        
+        function updateDataInfo(data, endpoint) {
+            const dataInfo = document.getElementById('data-info');
+            const jsonString = JSON.stringify(data);
+            const size = formatBytes(jsonString.length);
+            const keys = typeof data === 'object' && data !== null ? Object.keys(data).length : 0;
+            
+            dataInfo.textContent = `${endpoint} • ${size} • ${keys} top-level keys`;
+        }
+        
+        async function refreshData() {
+            if (currentEndpoint) {
+                await loadAndVisualize();
+            }
+        }
+        
+        function resetVisualization() {
+            if (jsoncrackInstance && jsoncrackInstance.cleanup) {
+                jsoncrackInstance.cleanup();
+            }
+            if (currentData) {
+                initializeJsonCrack(currentData);
+            }
+        }
+        
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        // Handle Enter key in select
+        document.getElementById('endpointSelect').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                loadAndVisualize();
+            }
+        });
+        
+        // Auto-select first endpoint on load for demo purposes
+        window.addEventListener('load', function() {
+            // Optional: Auto-load status endpoint for demonstration
+            // selectEndpoint('/status');
+            // setTimeout(loadAndVisualize, 1000);
+        });
+    </script>
+</body>
+</html>

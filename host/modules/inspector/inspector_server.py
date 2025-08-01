@@ -54,6 +54,7 @@ class InspectorServer:
         
         # Add routes
         app.router.add_get('/', self.handle_root)
+        app.router.add_get('/ui/', self.handle_ui)
         app.router.add_get('/status', self.handle_status)
         app.router.add_get('/spaces', self.handle_spaces)
         app.router.add_get('/agents', self.handle_agents)
@@ -86,6 +87,7 @@ class InspectorServer:
             logger.info(f"Inspector server started on http://localhost:{self.port}")
             logger.info(f"Available endpoints:")
             logger.info(f"  GET http://localhost:{self.port}/ - API overview")
+            logger.info(f"  GET http://localhost:{self.port}/ui/ - Web UI with JSON visualization")
             logger.info(f"  GET http://localhost:{self.port}/status - System status")
             logger.info(f"  GET http://localhost:{self.port}/spaces - Space details")
             logger.info(f"  GET http://localhost:{self.port}/agents - Agent information")
@@ -166,6 +168,34 @@ class InspectorServer:
             }
         }
         return self._json_response(api_info)
+    
+    async def handle_ui(self, request: Request) -> Response:
+        """Handle UI visualization endpoint."""
+        import os
+        try:
+            # Get the path to the HTML file in the same directory as this module
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            html_file_path = os.path.join(current_dir, 'ui.html')
+            
+            with open(html_file_path, 'r', encoding='utf-8') as f:
+                html_content = f.read()
+            
+            return web.Response(
+                text=html_content,
+                content_type='text/html',
+                headers={
+                    'Access-Control-Allow-Origin': '*',
+                    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+                    'Access-Control-Allow-Headers': 'Content-Type'
+                }
+            )
+        except Exception as e:
+            logger.error(f"Error serving UI: {e}", exc_info=True)
+            return web.Response(
+                text=f"<html><body><h1>Error loading UI</h1><p>{str(e)}</p></body></html>",
+                content_type='text/html',
+                status=500
+            )
     
     async def handle_status(self, request: Request) -> Response:
         """Handle system status endpoint."""
