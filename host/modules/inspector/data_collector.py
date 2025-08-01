@@ -417,17 +417,27 @@ class InspectorDataCollector:
             if hasattr(space, attr_name):
                 space_info["properties"][attr_name] = getattr(space, attr_name)
         
-        # Collect elements
-        if hasattr(space, 'elements') and space.elements:
-            for element_id, element in space.elements.items():
+        # Collect elements through ContainerComponent
+        mounted_elements = {}
+        if hasattr(space, '_container') and space._container:
+            try:
+                mounted_elements = space._container.get_mounted_elements()
+            except Exception as e:
+                logger.debug(f"Error accessing mounted elements for space {space_id}: {e}")
+        
+        if mounted_elements:
+            for mount_id, element in mounted_elements.items():
                 try:
-                    element_info = await self._collect_element_details(element_id, element)
-                    space_info["elements"][element_id] = element_info
+                    element_info = await self._collect_element_details(element.id, element)
+                    # Store by element ID, but include mount_id info
+                    element_info["mount_id"] = mount_id
+                    space_info["elements"][element.id] = element_info
                 except Exception as e:
-                    logger.error(f"Error collecting element {element_id}: {e}", exc_info=True)
-                    space_info["elements"][element_id] = {
+                    logger.error(f"Error collecting element {element.id} (mount_id: {mount_id}): {e}", exc_info=True)
+                    space_info["elements"][element.id if hasattr(element, 'id') else mount_id] = {
                         "error": f"Failed to collect element data: {str(e)}",
-                        "type": type(element).__name__ if element else "Unknown"
+                        "type": type(element).__name__ if element else "Unknown",
+                        "mount_id": mount_id
                     }
         
         # Collect components directly on the space
@@ -539,7 +549,7 @@ class InspectorDataCollector:
             "description": getattr(inner_space, 'description', None),
             "space_info": {
                 "type": type(inner_space).__name__,
-                "elements_count": len(inner_space.elements) if hasattr(inner_space, 'elements') and inner_space.elements else 0,
+                "elements_count": len(inner_space._container.get_mounted_elements()) if hasattr(inner_space, '_container') and inner_space._container else 0,
                 "components_count": len(inner_space.get_components()) if hasattr(inner_space, 'get_components') else 0,
             },
             "agent_loop": None,
@@ -1149,16 +1159,22 @@ class InspectorDataCollector:
             })
             return element_info
         
-        # Check elements within the space
-        if hasattr(space, 'elements') and space.elements:
-            element = space.elements.get(element_id)
-            if element:
-                element_info.update({
-                    "found": True,
-                    "type": "element",
-                    "name": getattr(element, 'name', element_id),
-                    "class_name": type(element).__name__
-                })
+        # Check elements within the space through ContainerComponent
+        if hasattr(space, '_container') and space._container:
+            try:
+                mounted_elements = space._container.get_mounted_elements()
+                for mount_id, element in mounted_elements.items():
+                    if element.id == element_id:
+                        element_info.update({
+                            "found": True,
+                            "type": "element",
+                            "name": getattr(element, 'name', element_id),
+                            "class_name": type(element).__name__,
+                            "mount_id": mount_id
+                        })
+                        break
+            except Exception as e:
+                logger.debug(f"Error checking elements for element_id {element_id}: {e}")
         
         return element_info
 
