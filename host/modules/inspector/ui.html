@@ -237,6 +237,7 @@
                 <div class="toolbar-actions">
                     <button onclick="refreshData()">Refresh</button>
                     <button onclick="resetVisualization()">Reset View</button>
+                    <button id="viewToggle" onclick="toggleView()">Tree View</button>
                 </div>
             </div>
             
@@ -252,6 +253,7 @@
         let currentData = null;
         let currentEndpoint = null;
         let jsoncrackInstance = null;
+        let currentView = 'jsoncrack'; // 'jsoncrack' or 'tree'
         
         function selectEndpoint(endpoint) {
             document.getElementById('endpointSelect').value = endpoint;
@@ -298,6 +300,13 @@
                 // Show toolbar and update info
                 toolbar.style.display = 'flex';
                 updateDataInfo(data, endpoint);
+                
+                // Reset view mode to JSONCrack when loading new endpoint
+                currentView = 'jsoncrack';
+                const toggleBtn = document.getElementById('viewToggle');
+                if (toggleBtn) {
+                    toggleBtn.textContent = 'Tree View';
+                }
                 
                 // Clear content and create JSONCrack container
                 contentEl.innerHTML = '<div id="jsoncrack-container"></div>';
@@ -520,8 +529,160 @@
                 jsoncrackInstance.cleanup();
             }
             if (currentData) {
+                if (currentView === 'jsoncrack') {
+                    initializeJsonCrack(currentData);
+                } else {
+                    showTreeView(currentData);
+                }
+            }
+        }
+        
+        function toggleView() {
+            if (!currentData) return;
+            
+            const toggleBtn = document.getElementById('viewToggle');
+            
+            if (currentView === 'jsoncrack') {
+                currentView = 'tree';
+                toggleBtn.textContent = 'JSONCrack View';
+                showTreeView(currentData);
+            } else {
+                currentView = 'jsoncrack';
+                toggleBtn.textContent = 'Tree View';
                 initializeJsonCrack(currentData);
             }
+        }
+        
+        function showTreeView(data) {
+            const container = document.getElementById('jsoncrack-container') || document.getElementById('content');
+            
+            // Clean up any existing JSONCrack instance
+            if (jsoncrackInstance && jsoncrackInstance.cleanup) {
+                jsoncrackInstance.cleanup();
+            }
+            
+            container.innerHTML = `
+                <div style="padding: 1rem; background: #0f3460; border-radius: 4px; height: 100%; overflow: auto; display: flex; flex-direction: column;">
+                    <div style="margin-bottom: 1rem; color: #00d4aa; display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.5rem; border-bottom: 1px solid #555;">
+                        <strong>🌳 Interactive Tree View</strong>
+                        <small style="color: #999;">Click to expand/collapse</small>
+                    </div>
+                    <div style="flex: 1; overflow: auto;">
+                        <div id="tree-container"></div>
+                    </div>
+                </div>
+            `;
+            
+            // Build interactive tree
+            const treeContainer = document.getElementById('tree-container');
+            treeContainer.appendChild(createTreeNode('root', data, 0, true));
+        }
+        
+        function createTreeNode(key, value, depth, isExpanded = false) {
+            const nodeDiv = document.createElement('div');
+            nodeDiv.style.marginLeft = (depth * 20) + 'px';
+            
+            const isObject = typeof value === 'object' && value !== null;
+            const isArray = Array.isArray(value);
+            const hasChildren = isObject && Object.keys(value).length > 0;
+            
+            // Create node header
+            const headerDiv = document.createElement('div');
+            headerDiv.style.cssText = `
+                display: flex;
+                align-items: center;
+                padding: 2px 0;
+                cursor: ${hasChildren ? 'pointer' : 'default'};
+                color: #eee;
+                font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+                font-size: 0.85rem;
+                line-height: 1.4;
+            `;
+            
+            // Expand/collapse indicator
+            if (hasChildren) {
+                const indicator = document.createElement('span');
+                indicator.textContent = isExpanded ? '▼ ' : '▶ ';
+                indicator.style.color = '#00d4aa';
+                indicator.style.marginRight = '4px';
+                indicator.style.width = '12px';
+                headerDiv.appendChild(indicator);
+            } else {
+                const spacer = document.createElement('span');
+                spacer.style.marginRight = '16px';
+                headerDiv.appendChild(spacer);
+            }
+            
+            // Key name
+            const keySpan = document.createElement('span');
+            keySpan.textContent = key;
+            keySpan.style.color = '#74b9ff';
+            keySpan.style.fontWeight = '600';
+            headerDiv.appendChild(keySpan);
+            
+            // Type and value preview
+            const valueSpan = document.createElement('span');
+            if (isArray) {
+                valueSpan.textContent = `: Array(${value.length})`;
+                valueSpan.style.color = '#a29bfe';
+            } else if (isObject) {
+                valueSpan.textContent = `: Object(${Object.keys(value).length})`;
+                valueSpan.style.color = '#fd79a8';
+            } else {
+                const preview = String(value);
+                const truncated = preview.length > 100 ? preview.substring(0, 100) + '...' : preview;
+                valueSpan.textContent = `: ${JSON.stringify(truncated)}`;
+                valueSpan.style.color = getValueColor(typeof value);
+            }
+            headerDiv.appendChild(valueSpan);
+            
+            nodeDiv.appendChild(headerDiv);
+            
+            // Children container
+            if (hasChildren) {
+                const childrenDiv = document.createElement('div');
+                childrenDiv.style.display = isExpanded ? 'block' : 'none';
+                
+                // Add children
+                if (isArray) {
+                    value.forEach((item, index) => {
+                        childrenDiv.appendChild(createTreeNode(`[${index}]`, item, depth + 1, false));
+                    });
+                } else {
+                    Object.keys(value).forEach(childKey => {
+                        childrenDiv.appendChild(createTreeNode(childKey, value[childKey], depth + 1, false));
+                    });
+                }
+                
+                nodeDiv.appendChild(childrenDiv);
+                
+                // Click handler for expand/collapse
+                headerDiv.addEventListener('click', () => {
+                    const indicator = headerDiv.querySelector('span');
+                    const isCurrentlyExpanded = childrenDiv.style.display === 'block';
+                    
+                    if (isCurrentlyExpanded) {
+                        childrenDiv.style.display = 'none';
+                        indicator.textContent = '▶ ';
+                    } else {
+                        childrenDiv.style.display = 'block';
+                        indicator.textContent = '▼ ';
+                    }
+                });
+            }
+            
+            return nodeDiv;
+        }
+        
+        function getValueColor(type) {
+            const colors = {
+                string: '#00d4aa',
+                number: '#a29bfe',
+                boolean: '#6c5ce7',
+                undefined: '#999',
+                null: '#ff6b6b'
+            };
+            return colors[type] || '#eee';
         }
         
         function formatBytes(bytes) {
