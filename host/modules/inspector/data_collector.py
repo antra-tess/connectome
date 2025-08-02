@@ -733,7 +733,7 @@ class InspectorDataCollector:
         Collect VEIL system overview and statistics.
         
         Returns:
-            Dictionary containing VEIL system statistics
+            Dictionary containing VEIL system statistics and complete VEIL trees
         """
         try:
             veil_overview = {
@@ -756,7 +756,7 @@ class InspectorDataCollector:
                 
                 for space_id, space in spaces_dict.items():
                     try:
-                        space_veil_info = await self._collect_space_veil_summary(space_id, space)
+                        space_veil_info = await self._collect_space_veil_summary_with_trees(space_id, space)
                         if space_veil_info and space_veil_info.get("has_veil_producer"):
                             veil_overview["spaces"][space_id] = space_veil_info
                             veil_overview["summary"]["total_spaces_with_veil"] += 1
@@ -829,6 +829,22 @@ class InspectorDataCollector:
                 }
                 for comp_id, comp in veil_producers
             ]
+            
+            # Capture VEIL trees from all producers
+            veil_space_data["veil_trees"] = {}
+            for comp_id, comp in veil_producers:
+                if hasattr(comp, 'get_facet_cache'):
+                    try:
+                        facet_cache = comp.get_facet_cache()
+                        veil_tree = self._capture_veil_tree_from_producer(comp_id, comp, facet_cache)
+                        if veil_tree:
+                            veil_space_data["veil_trees"][comp_id] = veil_tree
+                    except Exception as e:
+                        logger.debug(f"Error capturing VEIL tree from producer {comp_id}: {e}")
+                        veil_space_data["veil_trees"][comp_id] = {
+                            "producer_id": comp_id,
+                            "error": str(e)
+                        }
             
             # Get combined facet cache from primary VEIL producer
             if veil_producers:
@@ -1042,6 +1058,58 @@ class InspectorDataCollector:
         
         return veil_info
 
+    async def _collect_space_veil_summary_with_trees(self, space_id: str, space: Space) -> Dict[str, Any]:
+        """Collect VEIL summary information for a specific space with complete VEIL trees."""
+        veil_info = {
+            "space_id": space_id,
+            "space_type": type(space).__name__,
+            "has_veil_producer": False,
+            "summary": {
+                "producers_count": 0,
+                "total_facets": 0,
+                "facet_types": {"event": 0, "status": 0, "ambient": 0}
+            },
+            "producers": [],
+            "veil_trees": {}
+        }
+        
+        # Find VEIL producers in the space
+        veil_producers = self._find_veil_producers_in_space(space)
+        veil_info["has_veil_producer"] = len(veil_producers) > 0
+        veil_info["summary"]["producers_count"] = len(veil_producers)
+        
+        for comp_id, comp in veil_producers:
+            producer_info = {
+                "component_id": comp_id,
+                "component_type": type(comp).__name__,
+                "facet_cache_size": 0
+            }
+            
+            # Get facet cache statistics and complete VEIL tree
+            if hasattr(comp, 'get_facet_cache'):
+                try:
+                    facet_cache = comp.get_facet_cache()
+                    cache_stats = self._get_facet_cache_stats(facet_cache)
+                    producer_info["facet_cache_size"] = cache_stats["total_facets"]
+                    veil_info["summary"]["total_facets"] += cache_stats["total_facets"]
+                    
+                    # Add to facet type counts
+                    for facet_type, count in cache_stats["facet_types"].items():
+                        veil_info["summary"]["facet_types"][facet_type] += count
+                    
+                    # Capture complete VEIL tree at render-time
+                    veil_tree = self._capture_veil_tree_from_producer(comp_id, comp, facet_cache)
+                    if veil_tree:
+                        veil_info["veil_trees"][comp_id] = veil_tree
+                        
+                except Exception as e:
+                    logger.debug(f"Error collecting facet cache stats from {comp_id}: {e}")
+                    producer_info["error"] = str(e)
+            
+            veil_info["producers"].append(producer_info)
+        
+        return veil_info
+
     def _find_veil_producers_in_space(self, space: Space) -> List[tuple]:
         """Find all VEIL producer components in a space."""
         veil_producers = []
@@ -1214,3 +1282,95 @@ class InspectorDataCollector:
                 }
         
         return neighbors
+
+    def _capture_veil_tree_from_producer(self, comp_id: str, producer_component, facet_cache) -> Dict[str, Any]:
+        """
+        Capture the complete VEIL tree from a producer at render-time.
+        
+        Args:
+            comp_id: Component ID of the producer
+            producer_component: The VeilProducer component instance
+            facet_cache: The VEILFacetCache from the producer
+            
+        Returns:
+            Dictionary containing the complete VEIL tree with facets converted to veil_dict format
+        """
+        try:
+            veil_tree = {
+                "producer_id": comp_id,
+                "producer_type": type(producer_component).__name__,
+                "capture_timestamp": time.time(),
+                "tree_structure": {
+                    "root_facets": [],
+                    "linked_facets": {},
+                    "temporal_sequence": []
+                },
+                "facets": {},
+                "metadata": {
+                    "total_facets": 0,
+                    "capture_method": "render_time_inspection"
+                }
+            }
+            
+            if not facet_cache or not hasattr(facet_cache, 'facets'):
+                return veil_tree
+            
+            all_facets = list(facet_cache.facets.values())
+            veil_tree["metadata"]["total_facets"] = len(all_facets)
+            
+            # Create temporal sequence (sorted by veil_timestamp)
+            temporal_facets = sorted(all_facets, key=lambda f: f.veil_timestamp)
+            veil_tree["tree_structure"]["temporal_sequence"] = [f.facet_id for f in temporal_facets]
+            
+            # Process each facet and convert to veil_dict format
+            root_facets = []
+            linked_facets = {}
+            
+            for facet in all_facets:
+                # Convert facet to veil_dict representation
+                try:
+                    if hasattr(facet, 'to_veil_dict'):
+                        facet_veil_dict = facet.to_veil_dict()
+                    else:
+                        # Fallback: create basic veil_dict manually
+                        facet_veil_dict = {
+                            "facet_id": getattr(facet, 'facet_id', str(facet)),
+                            "facet_type": getattr(facet, 'facet_type', {}).get('value', 'unknown') if hasattr(getattr(facet, 'facet_type', None), 'value') else str(getattr(facet, 'facet_type', 'unknown')),
+                            "veil_timestamp": getattr(facet, 'veil_timestamp', 0),
+                            "owner_element_id": getattr(facet, 'owner_element_id', 'unknown'),
+                            "links_to": getattr(facet, 'links_to', None),
+                            "properties": getattr(facet, 'properties', {}),
+                            "content_summary": facet.get_content_summary() if hasattr(facet, 'get_content_summary') else "No summary available"
+                        }
+                    
+                    veil_tree["facets"][facet.facet_id] = facet_veil_dict
+                    
+                    # Organize by linking structure
+                    if facet.links_to:
+                        if facet.links_to not in linked_facets:
+                            linked_facets[facet.links_to] = []
+                        linked_facets[facet.links_to].append(facet.facet_id)
+                    else:
+                        root_facets.append(facet.facet_id)
+                        
+                except Exception as e:
+                    logger.debug(f"Error converting facet {facet.facet_id} to veil_dict: {e}")
+                    # Add error information to tree
+                    veil_tree["facets"][getattr(facet, 'facet_id', f'error_{id(facet)}')] = {
+                        "error": f"Failed to convert facet to veil_dict: {str(e)}",
+                        "facet_type": str(type(facet).__name__),
+                        "facet_id": getattr(facet, 'facet_id', f'error_{id(facet)}')
+                    }
+            
+            veil_tree["tree_structure"]["root_facets"] = root_facets
+            veil_tree["tree_structure"]["linked_facets"] = linked_facets
+            
+            return veil_tree
+            
+        except Exception as e:
+            logger.error(f"Error capturing VEIL tree from producer {comp_id}: {e}", exc_info=True)
+            return {
+                "producer_id": comp_id,
+                "error": f"Failed to capture VEIL tree: {str(e)}",
+                "capture_timestamp": time.time()
+            }
