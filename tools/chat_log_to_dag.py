@@ -16,7 +16,9 @@ import csv
 import uuid
 import time
 import logging
-from datetime import datetime, timezone
+import hashlib
+import random
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional, Union
 from pathlib import Path
 
@@ -29,35 +31,44 @@ from storage import create_storage_from_env
 logger = logging.getLogger(__name__)
 
 class ChatMessage:
-    """Represents a normalized chat message from various input formats."""
+    """Represents a normalized chat message from various input formats.
+    
+    Only 'text' is mandatory - all other fields have intelligent defaults.
+    """
     
     def __init__(self, 
                  text: str,
-                 sender_id: str,
+                 sender_id: str = None,
                  sender_name: str = None,
-                 timestamp: Union[float, str, datetime] = None,
+                 timestamp: Union[float, str, datetime, None] = None,
                  message_id: str = None,
                  is_dm: bool = False,
                  mentions: List[str] = None,
                  attachments: List[Dict] = None,
                  conversation_id: str = None,
-                 metadata: Dict[str, Any] = None):
+                 metadata: Dict[str, Any] = None,
+                 _message_index: int = None):
         
-        self.text = text
-        self.sender_id = sender_id
-        self.sender_name = sender_name or sender_id
-        self.timestamp = self._normalize_timestamp(timestamp)
-        self.message_id = message_id or str(uuid.uuid4())
+        if not text or not isinstance(text, str):
+            raise ValueError("Text is required and must be a non-empty string")
+        
+        self.text = text.strip()
+        
+        # Generate intelligent defaults for missing fields
+        self.sender_id = sender_id or self._generate_sender_id()
+        self.sender_name = sender_name or self._generate_sender_name(self.sender_id)
+        self.timestamp = self._normalize_timestamp(timestamp, _message_index)
+        self.message_id = message_id or self._generate_message_id()
         self.is_dm = is_dm
         self.mentions = mentions or []
         self.attachments = attachments or []
-        self.conversation_id = conversation_id or "default_conversation"
+        self.conversation_id = conversation_id or "imported_conversation" 
         self.metadata = metadata or {}
 
-    def _normalize_timestamp(self, timestamp: Union[float, str, datetime, None]) -> float:
+    def _normalize_timestamp(self, timestamp: Union[float, str, datetime, None], message_index: int = None) -> float:
         """Normalize various timestamp formats to Unix timestamp float."""
         if timestamp is None:
-            return time.time()
+            return self._generate_timestamp(message_index)
         
         if isinstance(timestamp, (int, float)):
             return float(timestamp)
@@ -72,14 +83,82 @@ class ChatMessage:
                     # Try parsing as Unix timestamp string
                     return float(timestamp)
                 except ValueError:
-                    logger.warning(f"Could not parse timestamp '{timestamp}', using current time")
-                    return time.time()
+                    logger.warning(f"Could not parse timestamp '{timestamp}', generating procedural timestamp")
+                    return self._generate_timestamp(message_index)
         
         if isinstance(timestamp, datetime):
             return timestamp.timestamp()
         
-        logger.warning(f"Unknown timestamp type {type(timestamp)}, using current time")
-        return time.time()
+        logger.warning(f"Unknown timestamp type {type(timestamp)}, generating procedural timestamp")
+        return self._generate_timestamp(message_index)
+
+    def _generate_timestamp(self, message_index: int = None) -> float:
+        """Generate meaningful timestamps using procgen heuristics."""
+        base_time = datetime(2024, 1, 1, 9, 0, 0, tzinfo=timezone.utc)  # Start of 2024, 9 AM UTC
+        
+        if message_index is not None:
+            # Create realistic conversation flow with variable gaps
+            # First message at base time, subsequent messages with realistic delays
+            if message_index == 0:
+                return base_time.timestamp()
+            
+            # Generate conversation-like timing patterns
+            # Short bursts of messages, then longer pauses
+            burst_size = 3  # Messages in a conversational burst
+            
+            if message_index % (burst_size * 2) < burst_size:
+                # Within a burst - short delays (30 seconds to 3 minutes)
+                delay_minutes = random.uniform(0.5, 3)
+            else:
+                # Between bursts - longer delays (5 minutes to 2 hours)
+                delay_minutes = random.uniform(5, 120)
+            
+            # Add some randomness but keep it realistic
+            total_delay = message_index * delay_minutes + random.uniform(-delay_minutes * 0.2, delay_minutes * 0.2)
+            return (base_time + timedelta(minutes=total_delay)).timestamp()
+        
+        # Fallback: random time in the past year
+        days_ago = random.randint(1, 365)
+        hour = random.randint(8, 22)  # Realistic messaging hours
+        minute = random.randint(0, 59)
+        
+        random_time = base_time - timedelta(days=days_ago) + timedelta(hours=hour, minutes=minute)
+        return random_time.timestamp()
+
+    def _generate_sender_id(self) -> str:
+        """Generate a sender ID based on message content hash."""
+        # Use first few words of message to create consistent sender ID
+        words = self.text.lower().split()[:3]
+        content_hash = hashlib.md5(" ".join(words).encode()).hexdigest()[:8]
+        return f"user_{content_hash}"
+
+    def _generate_sender_name(self, sender_id: str) -> str:
+        """Generate a human-readable sender name from sender ID."""
+        # Extract the hash part and map to names
+        if sender_id.startswith("user_"):
+            hash_part = sender_id[5:]
+        else:
+            hash_part = hashlib.md5(sender_id.encode()).hexdigest()[:8]
+        
+        # Simple name generation based on hash
+        first_names = ["Alice", "Bob", "Charlie", "Diana", "Eve", "Frank", "Grace", "Henry", 
+                      "Iris", "Jack", "Kate", "Leo", "Maya", "Noah", "Olivia", "Paul"]
+        last_names = ["Smith", "Johnson", "Brown", "Davis", "Miller", "Wilson", "Moore", 
+                     "Taylor", "Anderson", "Thomas", "Jackson", "White", "Harris", "Martin"]
+        
+        # Use hash to deterministically select names
+        hash_int = int(hash_part, 16)
+        first_idx = hash_int % len(first_names)
+        last_idx = (hash_int // len(first_names)) % len(last_names)
+        
+        return f"{first_names[first_idx]} {last_names[last_idx]}"
+
+    def _generate_message_id(self) -> str:
+        """Generate a message ID based on content and timestamp."""
+        content_sample = self.text[:50].lower().replace(" ", "")
+        timestamp_str = str(int(self.timestamp))[-6:]  # Last 6 digits of timestamp
+        content_hash = hashlib.md5(content_sample.encode()).hexdigest()[:6]
+        return f"msg_{timestamp_str}_{content_hash}"
 
     def to_connectome_event_payload(self, adapter_id: str = "chat_log_importer") -> Dict[str, Any]:
         """Convert to Connectome event payload format."""
@@ -129,10 +208,32 @@ class ChatLogParser:
         else:
             message_list = data
         
-        for msg_data in message_list:
-            # Support various JSON schemas
-            text = msg_data.get("text") or msg_data.get("content") or msg_data.get("message", "")
-            sender_id = msg_data.get("sender_id") or msg_data.get("user_id") or msg_data.get("author", "unknown")
+        for idx, msg_data in enumerate(message_list):
+            # Handle simple string messages
+            if isinstance(msg_data, str):
+                if not msg_data.strip():
+                    logger.warning(f"Skipping empty message at index {idx}")
+                    continue
+                text = msg_data.strip()
+                # Create a ChatMessage with just text - all other fields will be auto-generated
+                message = ChatMessage(text=text, _message_index=idx)
+                messages.append(message)
+                continue
+            
+            # Handle dictionary messages  
+            if not isinstance(msg_data, dict):
+                logger.warning(f"Skipping message at index {idx}: unsupported type {type(msg_data)}")
+                continue
+                
+            # Support various JSON schemas - now more flexible with defaults
+            text = msg_data.get("text") or msg_data.get("content") or msg_data.get("message")
+            
+            # Skip empty messages
+            if not text:
+                logger.warning(f"Skipping message at index {idx}: no text content found")
+                continue
+            
+            sender_id = msg_data.get("sender_id") or msg_data.get("user_id") or msg_data.get("author")
             sender_name = msg_data.get("sender_name") or msg_data.get("username") or msg_data.get("display_name")
             timestamp = msg_data.get("timestamp") or msg_data.get("time") or msg_data.get("created_at")
             message_id = msg_data.get("message_id") or msg_data.get("id")
@@ -158,7 +259,8 @@ class ChatLogParser:
                 mentions=mentions,
                 attachments=attachments,
                 conversation_id=conversation_id,
-                metadata=metadata
+                metadata=metadata,
+                _message_index=idx
             )
             messages.append(message)
         
@@ -171,10 +273,16 @@ class ChatLogParser:
         
         with open(csv_path, 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
-            for row in reader:
-                # Map common CSV column names
-                text = row.get("text") or row.get("message") or row.get("content", "")
-                sender_id = row.get("sender_id") or row.get("user_id") or row.get("username", "unknown")
+            for idx, row in enumerate(reader):
+                # Map common CSV column names - now more flexible with defaults
+                text = row.get("text") or row.get("message") or row.get("content")
+                
+                # Skip empty messages
+                if not text:
+                    logger.warning(f"Skipping CSV row {idx + 1}: no text content found")
+                    continue
+                
+                sender_id = row.get("sender_id") or row.get("user_id") or row.get("username")
                 sender_name = row.get("sender_name") or row.get("display_name") or row.get("name")
                 timestamp = row.get("timestamp") or row.get("time") or row.get("date")
                 message_id = row.get("message_id") or row.get("id")
@@ -213,7 +321,8 @@ class ChatLogParser:
                     mentions=mentions,
                     attachments=attachments,
                     conversation_id=conversation_id,
-                    metadata=metadata
+                    metadata=metadata,
+                    _message_index=idx
                 )
                 messages.append(message)
         

@@ -38,31 +38,41 @@ python -m tools.chat_log_to_dag --input chat.json --output timeline.json --space
 
 ## Input Formats
 
+### Minimal Requirements
+
+**Only `text` is required** - all other fields are optional and will be auto-generated:
+
+- **Auto-generated timestamps** - Realistic conversation timing patterns
+- **Auto-generated sender IDs** - Content-based hashing for consistency  
+- **Auto-generated sender names** - Deterministic name selection
+- **Auto-generated message IDs** - Timestamp + content hash
+
 ### JSON Format
 
-Supports flexible schemas with these common field mappings:
+**Ultra-minimal (text-only array):**
+```json
+["Hello world!", "How are you?", "I'm doing great!"]
+```
 
-**Message Fields:**
-- `text`, `content`, `message` → message text
-- `sender_id`, `user_id`, `author` → sender identifier  
-- `sender_name`, `username`, `display_name` → sender display name
-- `timestamp`, `time`, `created_at` → message timestamp
-- `message_id`, `id` → message identifier
-- `is_dm`, `direct_message` → direct message flag
-- `conversation_id`, `channel_id`, `chat_id` → conversation identifier
-- `mentions` → list of mentioned users
-- `attachments` → list of file attachments
+**Minimal (object with text only):**
+```json
+[
+  {"text": "Hello world!"},
+  {"text": "How are you?"},
+  {"text": "I'm doing great!"} 
+]
+```
 
-**Example JSON:**
+**Full format with optional fields:**
 ```json
 {
   "messages": [
     {
-      "message_id": "msg_001",
       "text": "Hello everyone!",
-      "sender_id": "user123", 
-      "sender_name": "Alice Smith",
+      "sender_id": "user123",
+      "sender_name": "Alice Smith", 
       "timestamp": "2024-01-15T10:30:00Z",
+      "message_id": "msg_001",
       "conversation_id": "general_chat",
       "is_dm": false,
       "mentions": [],
@@ -72,15 +82,64 @@ Supports flexible schemas with these common field mappings:
 }
 ```
 
+**Supported field mappings:**
+- `text`, `content`, `message` → message text *(required)*
+- `sender_id`, `user_id`, `author` → sender identifier  
+- `sender_name`, `username`, `display_name` → sender display name
+- `timestamp`, `time`, `created_at` → message timestamp
+- `message_id`, `id` → message identifier
+- `is_dm`, `direct_message` → direct message flag
+- `conversation_id`, `channel_id`, `chat_id` → conversation identifier
+- `mentions` → list of mentioned users
+- `attachments` → list of file attachments
+
 ### CSV Format
+
+**Minimal CSV (text only):**
+```csv
+text
+"Hello world!"
+"How are you?"
+"I'm doing great!"
+```
+
+**Full CSV with optional fields:**
+```csv
+text,sender_id,sender_name,timestamp,conversation_id,is_dm,mentions
+"Hello everyone!",user123,"Alice Smith",2024-01-15T10:30:00Z,general_chat,false,[]
+```
 
 Maps CSV columns to message fields using the same field names as JSON. JSON-formatted strings are supported for complex fields like `mentions` and `attachments`.
 
-**Example CSV:**
-```csv
-message_id,text,sender_id,sender_name,timestamp,conversation_id,is_dm,mentions
-msg_001,"Hello everyone!",user123,"Alice Smith",2024-01-15T10:30:00Z,general_chat,false,[]
-```
+## Intelligent Defaults (Procgen Heuristics)
+
+When fields are missing, the tool generates meaningful defaults:
+
+### Timestamp Generation
+- **First message**: January 1, 2024, 9:00 AM UTC (realistic start time)
+- **Conversation patterns**: Realistic timing with bursts and pauses
+  - Within bursts: 30 seconds to 3 minutes between messages
+  - Between bursts: 5 minutes to 2 hours gaps
+  - Natural randomness added for realism
+
+### Sender ID Generation  
+- **Content-based hashing**: Uses first 3 words of message text
+- **Consistent mapping**: Same message content → same sender ID
+- **Format**: `user_abc12345` (8-character hash)
+
+### Sender Name Generation
+- **Deterministic selection**: Hash-based name picking
+- **Realistic names**: 16 first names × 14 last names = 224 combinations
+- **Examples**: "Alice Smith", "Bob Johnson", "Maya Martin"
+
+### Message ID Generation
+- **Format**: `msg_timestamp_hash` 
+- **Components**: Last 6 digits of timestamp + 6-character content hash
+- **Example**: `msg_099600_420e57`
+
+### Conversation ID
+- **Default**: `imported_conversation`
+- **Consistent grouping**: All messages in same conversation
 
 ## Output Format
 
