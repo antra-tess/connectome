@@ -28,7 +28,85 @@ from elements.elements.base import BaseElement
 from storage.file_storage import FileStorage
 from storage import create_storage_from_env
 
+# Import configuration system
+try:
+    from host.config import HostSettings, AgentConfig, ActivityAdapterConfig
+    CONFIG_AVAILABLE = True
+except ImportError:
+    CONFIG_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
+
+class ConnectomeConfigDiscovery:
+    """Discovers existing Connectome configuration for automatic Space/Agent assignment."""
+    
+    def __init__(self):
+        self.host_settings = None
+        self.agents = []
+        self.adapters = []
+        self.config_loaded = False
+        
+    def load_configuration(self) -> bool:
+        """Load Connectome configuration from environment variables."""
+        if not CONFIG_AVAILABLE:
+            logger.warning("Connectome configuration system not available - cannot auto-discover Spaces/Agents")
+            return False
+            
+        try:
+            self.host_settings = HostSettings()
+            
+            # Parse JSON configurations
+            import json
+            
+            # Parse activity adapters
+            try:
+                adapters_data = json.loads(self.host_settings.activity_client_adapter_configs_json)
+                self.adapters = [ActivityAdapterConfig(**item) for item in adapters_data]
+                logger.debug(f"Discovered {len(self.adapters)} activity adapters")
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(f"Failed to parse activity adapters JSON: {e}")
+                self.adapters = []
+            
+            # Parse agents
+            try:
+                agents_data = json.loads(self.host_settings.agents_json)
+                self.agents = [AgentConfig(**item) for item in agents_data]
+                logger.debug(f"Discovered {len(self.agents)} agents")
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(f"Failed to parse agents JSON: {e}")
+                self.agents = []
+            
+            self.config_loaded = True
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to load Connectome configuration: {e}", exc_info=True)
+            return False
+    
+    def get_first_agent(self) -> Optional[AgentConfig]:
+        """Get the first available agent from configuration."""
+        if not self.config_loaded:
+            self.load_configuration()
+        
+        return self.agents[0] if self.agents else None
+    
+    def get_first_adapter(self) -> Optional[ActivityAdapterConfig]:
+        """Get the first available activity adapter from configuration."""
+        if not self.config_loaded:
+            self.load_configuration()
+        
+        return self.adapters[0] if self.adapters else None
+    
+    def get_suggested_space_id(self, agent: AgentConfig) -> str:
+        """Generate a suggested space ID for the agent."""
+        return f"space_{agent.agent_id}_inner_space"
+    
+    def get_suggested_adapter_id(self) -> str:
+        """Get suggested adapter ID for chat log import."""
+        adapter = self.get_first_adapter()
+        if adapter:
+            return f"{adapter.id}_chat_import"
+        return "chat_log_importer"
 
 class ChatMessage:
     """Represents a normalized chat message from various input formats.
@@ -342,11 +420,45 @@ class MockElement(BaseElement):
 class ChatLogToDAGConverter:
     """Main converter class that creates DAG history files from chat logs."""
     
-    def __init__(self, space_id: str, adapter_id: str = "chat_log_importer"):
+    def __init__(self, space_id: str = None, adapter_id: str = None, auto_assign: bool = False):
         self.space_id = space_id
         self.adapter_id = adapter_id
+        self.auto_assign = auto_assign
         self.timeline_component = None
         self.mock_element = None
+        self.config_discovery = None
+        self.assigned_agent = None
+        
+        # Handle auto-assignment mode
+        if auto_assign:
+            self.config_discovery = ConnectomeConfigDiscovery()
+            success = self.config_discovery.load_configuration()
+            
+            if success:
+                # Get first available agent and adapter
+                self.assigned_agent = self.config_discovery.get_first_agent()
+                first_adapter = self.config_discovery.get_first_adapter()
+                
+                if self.assigned_agent:
+                    # Auto-assign space ID based on agent
+                    if not self.space_id:
+                        self.space_id = self.config_discovery.get_suggested_space_id(self.assigned_agent)
+                    logger.info(f"Auto-assigned to agent '{self.assigned_agent.agent_id}' ({self.assigned_agent.name})")
+                    logger.info(f"Using space ID: {self.space_id}")
+                else:
+                    logger.warning("No agents found in configuration - using defaults")
+                
+                if first_adapter and not self.adapter_id:
+                    self.adapter_id = self.config_discovery.get_suggested_adapter_id()
+                    logger.info(f"Using adapter ID: {self.adapter_id}")
+            else:
+                logger.warning("Failed to load configuration - using defaults")
+        
+        # Set defaults if not assigned
+        if not self.space_id:
+            self.space_id = "imported_space"
+        if not self.adapter_id:
+            self.adapter_id = "chat_log_importer"
         
     async def convert_messages_to_dag(self, messages: List[ChatMessage]) -> Dict[str, Any]:
         """Convert chat messages to Connectome DAG format."""
@@ -383,20 +495,42 @@ class ChatLogToDAGConverter:
         timeline_state = self._extract_timeline_state()
         timeline_events = self._extract_timeline_events()
         
+        # Enhanced metadata with agent information
+        metadata = {
+            "space_id": self.space_id,
+            "adapter_id": self.adapter_id,
+            "message_count": len(messages),
+            "time_range": {
+                "start": min(m.timestamp for m in messages) if messages else None,
+                "end": max(m.timestamp for m in messages) if messages else None
+            },
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generator": "chat_log_to_dag_converter",
+            "auto_assigned": self.auto_assign
+        }
+        
+        # Add agent information if auto-assigned
+        if self.auto_assign and self.assigned_agent:
+            metadata["assigned_agent"] = {
+                "agent_id": self.assigned_agent.agent_id,
+                "name": self.assigned_agent.name,
+                "description": self.assigned_agent.description,
+                "agent_loop_component_type": self.assigned_agent.agent_loop_component_type_name
+            }
+            
+        # Add adapter information if discovered
+        if self.config_discovery:
+            first_adapter = self.config_discovery.get_first_adapter()
+            if first_adapter:
+                metadata["source_adapter"] = {
+                    "adapter_id": first_adapter.id,
+                    "url": first_adapter.url
+                }
+        
         return {
             "timeline_state": timeline_state,
             "timeline_events": timeline_events,
-            "metadata": {
-                "space_id": self.space_id,
-                "adapter_id": self.adapter_id,
-                "message_count": len(messages),
-                "time_range": {
-                    "start": min(m.timestamp for m in messages) if messages else None,
-                    "end": max(m.timestamp for m in messages) if messages else None
-                },
-                "generated_at": datetime.now(timezone.utc).isoformat(),
-                "generator": "chat_log_to_dag_converter"
-            }
+            "metadata": metadata
         }
     
     def _extract_timeline_state(self) -> Dict[str, Any]:
@@ -428,7 +562,7 @@ class ChatLogToDAGConverter:
             'last_updated': time.time()
         }
 
-async def save_dag_to_storage_format(dag_data: Dict[str, Any], output_path: Path, space_id: str):
+async def save_dag_to_storage_format(dag_data: Dict[str, Any], output_path: Path, space_id: str, auto_assign: bool = False):
     """Save DAG data in Connectome storage format."""
     
     # Create timeline state file
@@ -445,12 +579,25 @@ async def save_dag_to_storage_format(dag_data: Dict[str, Any], output_path: Path
         "stored_at": datetime.now(timezone.utc).isoformat()
     }
     
-    # Save as separate files (matching FileStorage format)
-    output_dir = output_path.parent
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    state_file = output_dir / f"timeline_state_{space_id}.json"
-    events_file = output_dir / f"timeline_events_{space_id}.json"
+    # Determine output directory based on auto-assignment mode
+    if auto_assign and dag_data.get("metadata", {}).get("auto_assigned"):
+        # Place files in the system storage directory where Connectome will find them
+        storage_dir = Path("storage_data/system")
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        
+        state_file = storage_dir / f"timeline_state_{space_id}.json"
+        events_file = storage_dir / f"timeline_events_{space_id}.json"
+        
+        # Also create the human-readable output file in the specified location
+        output_dir = output_path.parent
+        output_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        # Save as separate files (matching FileStorage format)
+        output_dir = output_path.parent
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        state_file = output_dir / f"timeline_state_{space_id}.json"
+        events_file = output_dir / f"timeline_events_{space_id}.json"
     
     with open(state_file, 'w', encoding='utf-8') as f:
         json.dump(state_data, f, indent=2, ensure_ascii=False)
@@ -468,10 +615,26 @@ async def save_dag_to_storage_format(dag_data: Dict[str, Any], output_path: Path
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(combined_data, f, indent=2, ensure_ascii=False)
     
-    logger.info(f"DAG files saved:")
-    logger.info(f"  Timeline state: {state_file}")
-    logger.info(f"  Timeline events: {events_file}")
-    logger.info(f"  Combined format: {output_path}")
+    # Provide appropriate feedback based on mode
+    if auto_assign and dag_data.get("metadata", {}).get("auto_assigned"):
+        logger.info("DAG files saved for auto-discovered configuration:")
+        logger.info(f"  🏛️  Timeline state: {state_file} (ready for Connectome)")
+        logger.info(f"  📊 Timeline events: {events_file} (ready for Connectome)")
+        logger.info(f"  📋 Combined format: {output_path} (human-readable)")
+        
+        # Show assignment details
+        metadata = dag_data.get("metadata", {})
+        if "assigned_agent" in metadata:
+            agent_info = metadata["assigned_agent"]
+            logger.info(f"  🤖 Assigned to agent: {agent_info['name']} ({agent_info['agent_id']})")
+        if "source_adapter" in metadata:
+            adapter_info = metadata["source_adapter"]
+            logger.info(f"  🔌 Source adapter: {adapter_info['adapter_id']}")
+    else:
+        logger.info(f"DAG files saved:")
+        logger.info(f"  Timeline state: {state_file}")
+        logger.info(f"  Timeline events: {events_file}")
+        logger.info(f"  Combined format: {output_path}")
 
 def main():
     """Main CLI entry point."""
@@ -480,12 +643,14 @@ def main():
                        help="Input chat log file (JSON or CSV)")
     parser.add_argument("--output", "-o", required=True, type=Path,
                        help="Output DAG file path (JSON)")
-    parser.add_argument("--space-id", required=True,
-                       help="Space ID for the DAG")
+    parser.add_argument("--space-id", 
+                       help="Space ID for the DAG (auto-discovered if --auto-assign is used)")
     parser.add_argument("--format", choices=["json", "csv"], default="auto",
                        help="Input format (auto-detect by default)")
-    parser.add_argument("--adapter-id", default="chat_log_importer", 
-                       help="Adapter ID to use in events")
+    parser.add_argument("--adapter-id", 
+                       help="Adapter ID to use in events (auto-discovered if --auto-assign is used)")  
+    parser.add_argument("--auto-assign", action="store_true",
+                       help="Automatically assign to first found Space and Agent from Connectome configuration")
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], 
                        default="INFO", help="Logging level")
     
@@ -499,6 +664,11 @@ def main():
     
     async def convert():
         try:
+            # Validate arguments
+            if not args.auto_assign and not args.space_id:
+                logger.error("Either --space-id must be provided or --auto-assign must be used")
+                return 1
+                
             # Determine input format
             input_format = args.format
             if input_format == "auto":
@@ -520,14 +690,27 @@ def main():
                 logger.error("No messages found in input file")
                 return 1
             
-            # Convert to DAG format
-            converter = ChatLogToDAGConverter(args.space_id, args.adapter_id)
+            # Convert to DAG format with auto-assignment support
+            converter = ChatLogToDAGConverter(
+                space_id=args.space_id,
+                adapter_id=args.adapter_id,
+                auto_assign=args.auto_assign
+            )
             dag_data = await converter.convert_messages_to_dag(messages)
             
-            # Save output
-            await save_dag_to_storage_format(dag_data, args.output, args.space_id)
+            # Save output with auto-assignment awareness
+            await save_dag_to_storage_format(
+                dag_data, 
+                args.output, 
+                converter.space_id,  # Use the resolved space_id
+                auto_assign=args.auto_assign
+            )
             
-            logger.info("Conversion completed successfully!")
+            if args.auto_assign:
+                logger.info("🎉 Conversion completed! Files are ready for Connectome to load.")
+                logger.info("💡 Start Connectome with CONNECTOME_EVENT_REPLAY_MODE=enabled to load the imported chat history.")
+            else:
+                logger.info("Conversion completed successfully!")
             return 0
             
         except Exception as e:
