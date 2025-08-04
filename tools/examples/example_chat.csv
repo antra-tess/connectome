@@ -1,0 +1,6 @@
+message_id,text,sender_id,sender_name,timestamp,conversation_id,is_dm,mentions,attachments
+msg_001,"Hello everyone! How is everyone doing today?",user123,"Alice Smith",2024-01-15T10:30:00Z,general_chat,false,[],[]
+msg_002,"Hi Alice! I'm doing great, thanks for asking. Working on some interesting AI projects.",user456,"Bob Johnson",2024-01-15T10:32:15Z,general_chat,false,"[""user123""]",[]
+msg_003,"That sounds fascinating! What kind of AI projects?",user123,"Alice Smith",2024-01-15T10:35:30Z,general_chat,false,"[""user456""]",[]
+msg_004,"I'm working on autonomous agent frameworks, particularly around memory systems and conversation DAGs.",user456,"Bob Johnson",2024-01-15T10:37:45Z,general_chat,false,[],"[{""type"": ""image"", ""url"": ""https://example.com/diagram.png"", ""filename"": ""agent_architecture.png""}]"
+msg_005,"Hey Bob, can you send me those research papers privately?",user789,"Charlie Brown",2024-01-15T10:40:00Z,dm_charlie_bob,true,[],[]
