@@ -482,7 +482,10 @@ class ChatLogToDAGConverter:
             else:
                 logger.error(f"Failed to add message {i+1}: {message.text[:50]}...")
         
-        # Extract DAG data in Connectome format
+        # Let TimelineComponent persist to storage using its own logic
+        await self.timeline_component._persist_timeline_state()
+        
+        # Extract DAG data in Connectome format for human-readable output
         timeline_state = self._extract_timeline_state()
         timeline_events = self._extract_timeline_events()
         
@@ -562,41 +565,34 @@ async def save_dag_to_storage_format(dag_data: Dict[str, Any], output_path: Path
     
     # Determine where to save files based on auto-assignment mode
     if auto_assign and dag_data.get("metadata", {}).get("auto_assigned"):
-        # Use Connectome's storage system to place files where they'll be found
+        # TimelineComponent has already persisted to storage using correct naming
+        # We just need to create the human-readable combined file
         try:
-            # Get storage from environment (respects CONNECTOME_STORAGE_* env vars)
-            storage = create_storage_from_env()
-            
-            # Store timeline state and events using the storage interface
-            await storage.store_system_state(f"timeline_state_{space_id}", state_data)
-            await storage.store_system_state(f"timeline_events_{space_id}", events_data)
-            
-            logger.info("DAG data stored using Connectome storage system:")
-            logger.info(f"  🏛️  Timeline state: timeline_state_{space_id} (ready for Connectome)")
-            logger.info(f"  📊 Timeline events: timeline_events_{space_id} (ready for Connectome)")
-            
-            # Still create the human-readable combined file in the specified location
             output_dir = output_path.parent
             output_dir.mkdir(parents=True, exist_ok=True)
             
+            # TimelineComponent uses "space_" prefix in storage keys
+            storage_space_id = f"space_{space_id}"
             combined_data = {
                 "storage_keys": {
-                    "timeline_state": f"timeline_state_{space_id}",
-                    "timeline_events": f"timeline_events_{space_id}"
+                    "timeline_state": f"timeline_state_{storage_space_id}",
+                    "timeline_events": f"timeline_events_{storage_space_id}"
                 },
+                "note": "Data has been stored using TimelineComponent's native storage logic",
                 **dag_data
             }
             
             with open(output_path, 'w', encoding='utf-8') as f:
                 json.dump(combined_data, f, indent=2, ensure_ascii=False)
             
+            logger.info("DAG data stored using Connectome's native TimelineComponent:")
+            logger.info(f"  🏛️  Timeline state: timeline_state_{storage_space_id} (ready for Connectome)")
+            logger.info(f"  📊 Timeline events: timeline_events_{storage_space_id} (ready for Connectome)")
             logger.info(f"  📋 Combined format: {output_path} (human-readable)")
             
         except Exception as e:
-            logger.error(f"Failed to use Connectome storage system: {e}", exc_info=True)
-            logger.info("Falling back to direct file storage...")
-            # Fallback to direct file storage
-            auto_assign = False
+            logger.error(f"Failed to create human-readable output file: {e}", exc_info=True)
+            logger.info("Storage was successful, but combined file creation failed")
     
     if not auto_assign or not dag_data.get("metadata", {}).get("auto_assigned"):
         # Save as separate files for manual inspection/use
