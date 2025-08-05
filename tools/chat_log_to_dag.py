@@ -453,7 +453,8 @@ class ChatLogToDAGConverter:
         """Convert chat messages to Connectome DAG format."""
         
         # Create mock element and timeline component
-        self.mock_element = MockElement(f"mock_element_{self.space_id}")
+        # Use the actual space_id as element ID so TimelineComponent generates correct storage keys
+        self.mock_element = MockElement(self.space_id)
         self.mock_element.add_component(TimelineComponent)
         self.timeline_component = self.mock_element.get_component_by_type("TimelineComponent")
         
