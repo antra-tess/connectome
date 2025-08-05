@@ -88,10 +88,10 @@ class ConnectomeConfigDiscovery:
         return f"{agent.agent_id}_inner_space"
     
     def get_suggested_adapter_id(self) -> str:
-        """Get suggested adapter ID for chat log import."""
+        """Get the actual adapter ID from the first available adapter."""
         adapter = self.get_first_adapter()
         if adapter:
-            return f"{adapter.id}_chat_import"
+            return adapter.id  # Use the real adapter ID, not a fake one
         return "chat_log_importer"
 
 class ChatMessage:
@@ -224,14 +224,17 @@ class ChatMessage:
         content_hash = hashlib.md5(content_sample.encode()).hexdigest()[:6]
         return f"msg_{timestamp_str}_{content_hash}"
 
-    def to_connectome_event_payload(self, adapter_id: str = "chat_log_importer") -> Dict[str, Any]:
+    def to_connectome_event_payload(self, adapter_id: str = "chat_log_importer", force_dm: bool = None) -> Dict[str, Any]:
         """Convert to Connectome event payload format."""
+        # Use force_dm if provided, otherwise use the message's is_dm setting
+        is_dm_value = force_dm if force_dm is not None else self.is_dm
+        
         return {
             "event_type": "message_received",
             "payload": {
                 "source_adapter_id": adapter_id,
                 "external_conversation_id": self.conversation_id,
-                "is_dm": self.is_dm,
+                "is_dm": is_dm_value,
                 "text": self.text,
                 "sender_external_id": self.sender_id,
                 "sender_display_name": self.sender_name,
@@ -467,7 +470,9 @@ class ChatLogToDAGConverter:
         
         # Add messages as timeline events
         for i, message in enumerate(sorted_messages):
-            event_payload = message.to_connectome_event_payload(self.adapter_id)
+            # Force DMs when using auto-assign to ensure proper routing to agent
+            force_dm = self.auto_assign and self.assigned_agent is not None
+            event_payload = message.to_connectome_event_payload(self.adapter_id, force_dm=force_dm)
             
             # Add to primary timeline
             event_id = self.timeline_component.add_event_to_primary_timeline(event_payload)
