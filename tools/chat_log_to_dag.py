@@ -651,8 +651,8 @@ def main():
     parser = argparse.ArgumentParser(description="Convert chat logs to Connectome DAG format")
     parser.add_argument("--input", "-i", required=True, type=Path,
                        help="Input chat log file (JSON or CSV)")
-    parser.add_argument("--output", "-o", required=True, type=Path,
-                       help="Output DAG file path (JSON)")
+    parser.add_argument("--output", "-o", type=Path,
+                       help="Output DAG file path (JSON). Optional when using --auto-assign - will be auto-generated.")
     parser.add_argument("--space-id", 
                        help="Space ID for the DAG (auto-discovered if --auto-assign is used)")
     parser.add_argument("--format", choices=["json", "csv"], default="auto",
@@ -677,6 +677,10 @@ def main():
             # Validate arguments
             if not args.auto_assign and not args.space_id:
                 logger.error("Either --space-id must be provided or --auto-assign must be used")
+                return 1
+            
+            if not args.auto_assign and not args.output:
+                logger.error("--output is required when not using --auto-assign")
                 return 1
                 
             # Determine input format
@@ -708,10 +712,21 @@ def main():
             )
             dag_data = await converter.convert_messages_to_dag(messages)
             
+            # Auto-generate output path if not provided and using auto-assign
+            output_path = args.output
+            if not output_path and args.auto_assign:
+                # Generate meaningful output filename based on input and discovered config
+                input_stem = args.input.stem  # filename without extension
+                space_id = converter.space_id
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                output_filename = f"{input_stem}_to_{space_id}_{timestamp}.json"
+                output_path = args.input.parent / output_filename
+                logger.info(f"📄 Auto-generated output path: {output_path}")
+            
             # Save output with auto-assignment awareness
             await save_dag_to_storage_format(
                 dag_data, 
-                args.output, 
+                output_path, 
                 converter.space_id,  # Use the resolved space_id
                 auto_assign=args.auto_assign
             )
