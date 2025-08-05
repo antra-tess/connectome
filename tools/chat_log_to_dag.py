@@ -55,26 +55,12 @@ class ConnectomeConfigDiscovery:
         try:
             self.host_settings = HostSettings()
             
-            # Parse JSON configurations
-            import json
+            # Agents and adapters are already parsed in HostSettings.__init__
+            self.agents = self.host_settings.agents
+            self.adapters = self.host_settings.activity_client_adapter_configs
             
-            # Parse activity adapters
-            try:
-                adapters_data = json.loads(self.host_settings.activity_client_adapter_configs_json)
-                self.adapters = [ActivityAdapterConfig(**item) for item in adapters_data]
-                logger.debug(f"Discovered {len(self.adapters)} activity adapters")
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.warning(f"Failed to parse activity adapters JSON: {e}")
-                self.adapters = []
-            
-            # Parse agents
-            try:
-                agents_data = json.loads(self.host_settings.agents_json)
-                self.agents = [AgentConfig(**item) for item in agents_data]
-                logger.debug(f"Discovered {len(self.agents)} agents")
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.warning(f"Failed to parse agents JSON: {e}")
-                self.agents = []
+            logger.debug(f"Discovered {len(self.adapters)} activity adapters")
+            logger.debug(f"Discovered {len(self.agents)} agents")
             
             self.config_loaded = True
             return True
@@ -98,8 +84,8 @@ class ConnectomeConfigDiscovery:
         return self.adapters[0] if self.adapters else None
     
     def get_suggested_space_id(self, agent: AgentConfig) -> str:
-        """Generate a suggested space ID for the agent."""
-        return f"space_{agent.agent_id}_inner_space"
+        """Generate a suggested space ID for the agent's InnerSpace."""
+        return f"{agent.agent_id}_inner_space"
     
     def get_suggested_adapter_id(self) -> str:
         """Get suggested adapter ID for chat log import."""
@@ -563,66 +549,95 @@ class ChatLogToDAGConverter:
         }
 
 async def save_dag_to_storage_format(dag_data: Dict[str, Any], output_path: Path, space_id: str, auto_assign: bool = False):
-    """Save DAG data in Connectome storage format."""
+    """Save DAG data in Connectome storage format using the actual storage system."""
     
-    # Create timeline state file
-    state_data = {
-        "state_key": f"timeline_state_{space_id}",
-        "data": dag_data["timeline_state"],
-        "stored_at": datetime.now(timezone.utc).isoformat()
-    }
+    # Create timeline state and events data
+    state_data = dag_data["timeline_state"]
+    events_data = dag_data["timeline_events"]
     
-    # Create timeline events file  
-    events_data = {
-        "state_key": f"timeline_events_{space_id}",
-        "data": dag_data["timeline_events"],
-        "stored_at": datetime.now(timezone.utc).isoformat()
-    }
-    
-    # Determine output directory based on auto-assignment mode
+    # Determine where to save files based on auto-assignment mode
     if auto_assign and dag_data.get("metadata", {}).get("auto_assigned"):
-        # Place files in the system storage directory where Connectome will find them
-        storage_dir = Path("storage_data/system")
-        storage_dir.mkdir(parents=True, exist_ok=True)
-        
-        state_file = storage_dir / f"timeline_state_{space_id}.json"
-        events_file = storage_dir / f"timeline_events_{space_id}.json"
-        
-        # Also create the human-readable output file in the specified location
+        # Use Connectome's storage system to place files where they'll be found
+        try:
+            # Get storage from environment (respects CONNECTOME_STORAGE_* env vars)
+            storage = create_storage_from_env()
+            
+            # Store timeline state and events using the storage interface
+            await storage.store_system_state(f"timeline_state_{space_id}", state_data)
+            await storage.store_system_state(f"timeline_events_{space_id}", events_data)
+            
+            logger.info("DAG data stored using Connectome storage system:")
+            logger.info(f"  🏛️  Timeline state: timeline_state_{space_id} (ready for Connectome)")
+            logger.info(f"  📊 Timeline events: timeline_events_{space_id} (ready for Connectome)")
+            
+            # Still create the human-readable combined file in the specified location
+            output_dir = output_path.parent
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            combined_data = {
+                "storage_keys": {
+                    "timeline_state": f"timeline_state_{space_id}",
+                    "timeline_events": f"timeline_events_{space_id}"
+                },
+                **dag_data
+            }
+            
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(combined_data, f, indent=2, ensure_ascii=False)
+            
+            logger.info(f"  📋 Combined format: {output_path} (human-readable)")
+            
+        except Exception as e:
+            logger.error(f"Failed to use Connectome storage system: {e}", exc_info=True)
+            logger.info("Falling back to direct file storage...")
+            # Fallback to direct file storage
+            auto_assign = False
+    
+    if not auto_assign or not dag_data.get("metadata", {}).get("auto_assigned"):
+        # Save as separate files for manual inspection/use
         output_dir = output_path.parent
         output_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        # Save as separate files (matching FileStorage format)
-        output_dir = output_path.parent
-        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create timeline state file in FileStorage format
+        state_file_data = {
+            "state_key": f"timeline_state_{space_id}",
+            "data": state_data,
+            "stored_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        # Create timeline events file in FileStorage format
+        events_file_data = {
+            "state_key": f"timeline_events_{space_id}",
+            "data": events_data,
+            "stored_at": datetime.now(timezone.utc).isoformat()
+        }
         
         state_file = output_dir / f"timeline_state_{space_id}.json"
         events_file = output_dir / f"timeline_events_{space_id}.json"
-    
-    with open(state_file, 'w', encoding='utf-8') as f:
-        json.dump(state_data, f, indent=2, ensure_ascii=False)
-    
-    with open(events_file, 'w', encoding='utf-8') as f:
-        json.dump(events_data, f, indent=2, ensure_ascii=False)
-    
-    # Also save combined format for easier inspection
-    combined_data = {
-        "timeline_state_file": str(state_file),
-        "timeline_events_file": str(events_file),
-        **dag_data
-    }
-    
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(combined_data, f, indent=2, ensure_ascii=False)
-    
-    # Provide appropriate feedback based on mode
-    if auto_assign and dag_data.get("metadata", {}).get("auto_assigned"):
-        logger.info("DAG files saved for auto-discovered configuration:")
-        logger.info(f"  🏛️  Timeline state: {state_file} (ready for Connectome)")
-        logger.info(f"  📊 Timeline events: {events_file} (ready for Connectome)")
-        logger.info(f"  📋 Combined format: {output_path} (human-readable)")
         
-        # Show assignment details
+        with open(state_file, 'w', encoding='utf-8') as f:
+            json.dump(state_file_data, f, indent=2, ensure_ascii=False)
+        
+        with open(events_file, 'w', encoding='utf-8') as f:
+            json.dump(events_file_data, f, indent=2, ensure_ascii=False)
+        
+        # Also save combined format for easier inspection
+        combined_data = {
+            "timeline_state_file": str(state_file),
+            "timeline_events_file": str(events_file),
+            **dag_data
+        }
+        
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(combined_data, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"DAG files saved:")
+        logger.info(f"  Timeline state: {state_file}")
+        logger.info(f"  Timeline events: {events_file}")
+        logger.info(f"  Combined format: {output_path}")
+    
+    # Show assignment details for auto-assigned configurations
+    if auto_assign and dag_data.get("metadata", {}).get("auto_assigned"):
         metadata = dag_data.get("metadata", {})
         if "assigned_agent" in metadata:
             agent_info = metadata["assigned_agent"]
@@ -630,11 +645,6 @@ async def save_dag_to_storage_format(dag_data: Dict[str, Any], output_path: Path
         if "source_adapter" in metadata:
             adapter_info = metadata["source_adapter"]
             logger.info(f"  🔌 Source adapter: {adapter_info['adapter_id']}")
-    else:
-        logger.info(f"DAG files saved:")
-        logger.info(f"  Timeline state: {state_file}")
-        logger.info(f"  Timeline events: {events_file}")
-        logger.info(f"  Combined format: {output_path}")
 
 def main():
     """Main CLI entry point."""
