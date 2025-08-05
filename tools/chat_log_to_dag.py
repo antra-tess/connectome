@@ -225,36 +225,43 @@ class ChatMessage:
         return f"msg_{timestamp_str}_{content_hash}"
 
     def to_connectome_event_payload(self, adapter_id: str = "chat_log_importer", force_dm: bool = None) -> Dict[str, Any]:
-        """Convert to Connectome event payload format."""
+        """Convert to Connectome event payload format matching real system events."""
         # Use force_dm if provided, otherwise use the message's is_dm setting
         is_dm_value = force_dm if force_dm is not None else self.is_dm
         
+        # Create the nested payload data
+        payload_data = {
+            "source_adapter_id": adapter_id,
+            "external_conversation_id": self.conversation_id,
+            "is_dm": is_dm_value,
+            "text": self.text,
+            "sender_external_id": self.sender_id,
+            "sender_display_name": self.sender_name,
+            "timestamp": self.timestamp,
+            "original_message_id_external": self.message_id,
+            "mentions": self.mentions,
+            "attachments": self.attachments,
+            "adapter_type": "chat_log_importer",
+            "original_adapter_data": {
+                "message_id": self.message_id,
+                "text": self.text,
+                "sender": {
+                    "user_id": self.sender_id,
+                    "display_name": self.sender_name
+                },
+                "timestamp": self.timestamp,
+                "conversation_id": self.conversation_id,
+                "metadata": self.metadata
+            }
+        }
+        
+        # Return event with BOTH top-level and nested fields to match real system structure
         return {
             "event_type": "message_received",
-            "payload": {
-                "source_adapter_id": adapter_id,
-                "external_conversation_id": self.conversation_id,
-                "is_dm": is_dm_value,
-                "text": self.text,
-                "sender_external_id": self.sender_id,
-                "sender_display_name": self.sender_name,
-                "timestamp": self.timestamp,
-                "original_message_id_external": self.message_id,
-                "mentions": self.mentions,
-                "attachments": self.attachments,
-                "adapter_type": "chat_log_importer",
-                "original_adapter_data": {
-                    "message_id": self.message_id,
-                    "text": self.text,
-                    "sender": {
-                        "user_id": self.sender_id,
-                        "display_name": self.sender_name
-                    },
-                    "timestamp": self.timestamp,
-                    "conversation_id": self.conversation_id,
-                    "metadata": self.metadata
-                }
-            }
+            "source_adapter_id": adapter_id,                    # Top-level for ChatManager
+            "external_conversation_id": self.conversation_id,   # Top-level for ChatManager
+            "is_replayable": True,                              # Match real system events
+            "payload": payload_data                             # Nested for other components
         }
 
 class ChatLogParser:
