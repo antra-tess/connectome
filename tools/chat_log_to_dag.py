@@ -416,10 +416,13 @@ class MockElement(BaseElement):
 class ChatLogToDAGConverter:
     """Main converter class that creates DAG history files from chat logs."""
     
-    def __init__(self, space_id: str = None, adapter_id: str = None, auto_assign: bool = False):
+    def __init__(self, space_id: str = None, adapter_id: str = None, auto_assign: bool = False, 
+                 conversation_mode: str = "auto", dm_interlocutor_name: str = None):
         self.space_id = space_id
         self.adapter_id = adapter_id
         self.auto_assign = auto_assign
+        self.conversation_mode = conversation_mode  # "auto", "dm", or "group"
+        self.dm_interlocutor_name = dm_interlocutor_name
         self.timeline_component = None
         self.mock_element = None
         self.config_discovery = None
@@ -456,6 +459,57 @@ class ChatLogToDAGConverter:
         if not self.adapter_id:
             self.adapter_id = "chat_log_importer"
         
+    def _determine_conversation_mode_and_interlocutor(self, messages: List[ChatMessage]) -> tuple[bool, str]:
+        """Determine conversation mode and consistent interlocutor name for DM imports."""
+        
+        if self.conversation_mode == "group":
+            return False, None
+        elif self.conversation_mode == "dm":
+            # Use provided interlocutor name or generate consistent one
+            if self.dm_interlocutor_name:
+                return True, self.dm_interlocutor_name
+            
+            # Generate consistent interlocutor from all unique senders
+            unique_senders = set(msg.sender_name for msg in messages if msg.sender_name)
+            if len(unique_senders) == 1:
+                # Single sender - use their name
+                interlocutor_name = list(unique_senders)[0]
+            elif len(unique_senders) > 1:
+                # Multiple senders - create combined name
+                sorted_senders = sorted(unique_senders)
+                if len(sorted_senders) <= 3:
+                    interlocutor_name = ", ".join(sorted_senders)
+                else:
+                    interlocutor_name = f"{sorted_senders[0]} and {len(sorted_senders)-1} others"
+            else:
+                # No sender names - use generic
+                interlocutor_name = "Imported Chat Participants"
+            
+            return True, interlocutor_name
+        else:  # "auto" mode
+            # Auto-detect based on message patterns
+            # Use sender_name if available (more reliable than auto-generated sender_id)
+            unique_names = set(msg.sender_name for msg in messages if msg.sender_name)
+            if unique_names:
+                unique_senders = unique_names
+            else:
+                unique_senders = set(msg.sender_id for msg in messages if msg.sender_id)
+            
+            # If 2 or fewer unique senders, treat as DM
+            if len(unique_senders) <= 2:
+                # Generate consistent interlocutor name
+                unique_names = set(msg.sender_name for msg in messages if msg.sender_name)
+                if len(unique_names) == 1:
+                    interlocutor_name = list(unique_names)[0]
+                elif len(unique_names) == 2:
+                    interlocutor_name = " & ".join(sorted(unique_names))
+                else:
+                    interlocutor_name = "Chat Partner"
+                return True, interlocutor_name
+            else:
+                # Multiple senders - treat as group chat
+                return False, None
+
     async def convert_messages_to_dag(self, messages: List[ChatMessage]) -> Dict[str, Any]:
         """Convert chat messages to Connectome DAG format."""
         
@@ -476,11 +530,29 @@ class ChatLogToDAGConverter:
         # Sort messages by timestamp to ensure proper order
         sorted_messages = sorted(messages, key=lambda m: m.timestamp)
         
+        # Determine conversation mode and interlocutor consistency
+        is_dm_conversation, dm_interlocutor_name = self._determine_conversation_mode_and_interlocutor(sorted_messages)
+        
+        logger.info(f"Conversation mode: {'DM' if is_dm_conversation else 'Group'}")
+        if is_dm_conversation and dm_interlocutor_name:
+            logger.info(f"DM interlocutor: {dm_interlocutor_name}")
+        
         # Add messages as timeline events
         for i, message in enumerate(sorted_messages):
-            # Force DMs when using auto-assign to ensure proper routing to agent
-            force_dm = self.auto_assign and self.assigned_agent is not None
+            # Use determined conversation mode
+            force_dm = is_dm_conversation
+            
+            # For DM mode, ensure consistent interlocutor name
+            if is_dm_conversation and dm_interlocutor_name:
+                # Override the sender name to maintain consistency
+                original_sender_name = message.sender_name
+                message.sender_name = dm_interlocutor_name
+                
             event_payload = message.to_connectome_event_payload(self.adapter_id, force_dm=force_dm)
+            
+            # Restore original sender name after creating payload
+            if is_dm_conversation and dm_interlocutor_name:
+                message.sender_name = original_sender_name
             
             # Add to primary timeline
             event_id = self.timeline_component.add_event_to_primary_timeline(event_payload)
@@ -670,6 +742,10 @@ def main():
                        help="Adapter ID to use in events (auto-discovered if --auto-assign is used)")  
     parser.add_argument("--auto-assign", action="store_true",
                        help="Automatically assign to first found Space and Agent from Connectome configuration")
+    parser.add_argument("--conversation-mode", choices=["auto", "dm", "group"], default="auto",
+                       help="How to treat the conversation: auto-detect (default), force DM, or force group chat")
+    parser.add_argument("--dm-interlocutor-name", 
+                       help="Name to use for DM partner (auto-generated if not provided)")
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], 
                        default="INFO", help="Logging level")
     
@@ -717,7 +793,9 @@ def main():
             converter = ChatLogToDAGConverter(
                 space_id=args.space_id,
                 adapter_id=args.adapter_id,
-                auto_assign=args.auto_assign
+                auto_assign=args.auto_assign,
+                conversation_mode=args.conversation_mode,
+                dm_interlocutor_name=args.dm_interlocutor_name
             )
             dag_data = await converter.convert_messages_to_dag(messages)
             
