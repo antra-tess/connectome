@@ -100,6 +100,9 @@ class ChatMessage:
     Only 'text' is mandatory - all other fields have intelligent defaults.
     """
     
+    # Class-level accumulator for timestamp generation
+    _timestamp_accumulator = 0.0
+    
     def __init__(self, 
                  text: str,
                  sender_id: str = None,
@@ -164,26 +167,27 @@ class ChatMessage:
             # Create realistic conversation flow with variable gaps
             # First message at base time, subsequent messages with realistic delays
             if message_index == 0:
+                # Reset accumulator for new conversation
+                ChatMessage._timestamp_accumulator = 0.0
                 return base_time.timestamp()
             
             # Generate conversation-like timing patterns
             # Short bursts of messages, then longer pauses
             burst_size = 3  # Messages in a conversational burst
             
-            # Calculate cumulative delay by adding small increments for each message
-            cumulative_minutes = 0
-            for i in range(1, message_index + 1):
-                if i % (burst_size * 2) <= burst_size:
-                    # Within a burst - short delays (30 seconds to 3 minutes)
-                    increment_minutes = random.uniform(0.5, 3)
-                else:
-                    # Between bursts - longer delays (5 minutes to 30 minutes)
-                    increment_minutes = random.uniform(5, 30)
-                
-                cumulative_minutes += increment_minutes
+            # Calculate increment for this message
+            if message_index % (burst_size * 2) <= burst_size:
+                # Within a burst - short delays (30 seconds to 3 minutes)
+                increment_minutes = random.uniform(0.5, 3)
+            else:
+                # Between bursts - longer delays (5 minutes to 30 minutes)
+                increment_minutes = random.uniform(5, 30)
+            
+            # Add increment to class-level accumulator
+            ChatMessage._timestamp_accumulator += increment_minutes
             
             # Add the cumulative delay to base time
-            return (base_time + timedelta(minutes=cumulative_minutes)).timestamp()
+            return (base_time + timedelta(minutes=ChatMessage._timestamp_accumulator)).timestamp()
 
     def _generate_sender_id(self) -> str:
         """Generate a sender ID based on message content hash."""
