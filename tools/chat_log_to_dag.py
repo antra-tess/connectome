@@ -300,15 +300,41 @@ class ChatLogParser:
                 continue
                 
             # Support various JSON schemas - now more flexible with defaults
-            text = msg_data.get("text") or msg_data.get("content") or msg_data.get("message")
+            text = msg_data.get("text") or msg_data.get("message")
+            
+            # Handle typingcloud format content
+            if not text and "content" in msg_data:
+                content = msg_data["content"]
+                if isinstance(content, str):
+                    text = content
+                elif isinstance(content, list):
+                    # Extract text from content array (typingcloud format)
+                    text_parts = []
+                    for item in content:
+                        if isinstance(item, dict) and "text" in item:
+                            text_parts.append(item["text"])
+                        elif isinstance(item, str):
+                            text_parts.append(item)
+                    text = "".join(text_parts) if text_parts else None
+            
+            # Handle typingcloud tool messages - initialize metadata early if needed
+            extra_metadata = {}
+            if msg_data.get("role") == "tool" and "name" in msg_data:
+                tool_name = msg_data["name"]
+                tool_content = msg_data.get("content", "")
+                if not text:
+                    text = f"[Tool: {tool_name}] {tool_content}"
+                # Store tool information in metadata
+                extra_metadata["tool_name"] = tool_name
+                extra_metadata["tool_content"] = tool_content
             
             # Skip empty messages
             if not text:
                 logger.warning(f"Skipping message at index {idx}: no text content found")
                 continue
             
-            sender_id = msg_data.get("sender_id") or msg_data.get("user_id") or msg_data.get("author")
-            sender_name = msg_data.get("sender_name") or msg_data.get("username") or msg_data.get("display_name")
+            sender_id = msg_data.get("sender_id") or msg_data.get("user_id") or msg_data.get("author") or msg_data.get("role")
+            sender_name = msg_data.get("sender_name") or msg_data.get("username") or msg_data.get("display_name") or msg_data.get("role")
             timestamp = msg_data.get("timestamp") or msg_data.get("time") or msg_data.get("created_at")
             message_id = msg_data.get("message_id") or msg_data.get("id")
             is_dm = msg_data.get("is_dm", msg_data.get("direct_message", False))
@@ -321,7 +347,9 @@ class ChatLogParser:
                        if k not in ["text", "content", "message", "sender_id", "user_id", "author",
                                    "sender_name", "username", "display_name", "timestamp", "time", 
                                    "created_at", "message_id", "id", "is_dm", "direct_message",
-                                   "mentions", "attachments", "conversation_id", "channel_id", "chat_id"]}
+                                   "mentions", "attachments", "conversation_id", "channel_id", "chat_id", "role", "name"]}
+            # Merge with tool metadata
+            metadata.update(extra_metadata)
             
             message = ChatMessage(
                 text=text,
