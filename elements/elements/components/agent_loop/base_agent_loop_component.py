@@ -189,7 +189,7 @@ class BaseAgentLoopComponent(Component):
         if not self._hud_component:
             self._hud_component = self.parent_inner_space.get_hud()
             if not self._hud_component:
-                 logger.error(f"{self.agent_loop_name} ({self.id}): HUDComponent could not be retrieved on demand.")
+                logger.error(f"{self.agent_loop_name} ({self.id}): HUDComponent could not be retrieved on demand.")
         return self._hud_component
 
     def _get_llm_provider(self) -> Optional['LLMProvider']:
