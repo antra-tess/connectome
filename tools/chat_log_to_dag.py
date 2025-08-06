@@ -170,16 +170,20 @@ class ChatMessage:
             # Short bursts of messages, then longer pauses
             burst_size = 3  # Messages in a conversational burst
             
-            if message_index % (burst_size * 2) < burst_size:
-                # Within a burst - short delays (30 seconds to 3 minutes)
-                delay_minutes = random.uniform(0.5, 3)
-            else:
-                # Between bursts - longer delays (5 minutes to 2 hours)
-                delay_minutes = random.uniform(5, 120)
+            # Calculate cumulative delay by adding small increments for each message
+            cumulative_minutes = 0
+            for i in range(1, message_index + 1):
+                if i % (burst_size * 2) <= burst_size:
+                    # Within a burst - short delays (30 seconds to 3 minutes)
+                    increment_minutes = random.uniform(0.5, 3)
+                else:
+                    # Between bursts - longer delays (5 minutes to 30 minutes)
+                    increment_minutes = random.uniform(5, 30)
+                
+                cumulative_minutes += increment_minutes
             
-            # Add some randomness but keep it realistic
-            total_delay = message_index * delay_minutes + random.uniform(-delay_minutes * 0.2, delay_minutes * 0.2)
-            return (base_time + timedelta(minutes=total_delay)).timestamp()
+            # Add the cumulative delay to base time
+            return (base_time + timedelta(minutes=cumulative_minutes)).timestamp()
         
         # Fallback: random time in the past year
         days_ago = random.randint(1, 365)
