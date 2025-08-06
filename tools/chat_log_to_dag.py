@@ -430,6 +430,52 @@ class ChatLogParser:
         
         return messages
 
+    @staticmethod
+    def parse_raw_chat_messages(file_path: Path) -> List[ChatMessage]:
+        """Parse raw chat export format.
+        
+        Format: Each message terminated by two newlines, speaker denoted by first semicolon.
+        Example: "John Smith: Hello world\n\n"
+        """
+        messages = []
+        
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Split by double newlines to get individual messages
+        raw_messages = content.split('\n\n')
+        
+        for idx, raw_message in enumerate(raw_messages):
+            # Skip empty messages
+            raw_message = raw_message.strip()
+            if not raw_message:
+                continue
+            
+            # Find the first semicolon to separate sender from message
+            if ':' in raw_message:
+                sender_name, text = raw_message.split(':', 1)
+                sender_name = sender_name.strip()
+                text = text.strip()
+                
+                # Skip if no text content
+                if not text:
+                    logger.warning(f"Skipping message at index {idx}: no text content after sender")
+                    continue
+            else:
+                # No semicolon found - treat entire message as text with unknown sender
+                logger.warning(f"No sender found in message at index {idx}, treating as anonymous message")
+                sender_name = None
+                text = raw_message
+            
+            message = ChatMessage(
+                text=text,
+                sender_name=sender_name,
+                _message_index=idx
+            )
+            messages.append(message)
+        
+        return messages
+
 class MockElement(BaseElement):
     """Mock element for TimelineComponent testing."""
     
@@ -764,7 +810,7 @@ def main():
                        help="Output DAG file path (JSON). Optional when using --auto-assign - will be auto-generated.")
     parser.add_argument("--space-id", 
                        help="Space ID for the DAG (auto-discovered if --auto-assign is used)")
-    parser.add_argument("--format", choices=["json", "csv"], default="auto",
+    parser.add_argument("--format", choices=["json", "csv", "raw"], default="auto",
                        help="Input format (auto-detect by default)")
     parser.add_argument("--adapter-id", 
                        help="Adapter ID to use in events (auto-discovered if --auto-assign is used)")  
@@ -799,7 +845,13 @@ def main():
             # Determine input format
             input_format = args.format
             if input_format == "auto":
-                input_format = "json" if args.input.suffix.lower() == ".json" else "csv"
+                if args.input.suffix.lower() == ".json":
+                    input_format = "json"
+                elif args.input.suffix.lower() == ".csv":
+                    input_format = "csv"
+                else:
+                    # Default to raw format for .txt and other files
+                    input_format = "raw"
             
             logger.info(f"Reading {input_format.upper()} chat log from {args.input}")
             
@@ -808,8 +860,10 @@ def main():
                 with open(args.input, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 messages = ChatLogParser.parse_json_messages(data)
-            else:  # csv
+            elif input_format == "csv":
                 messages = ChatLogParser.parse_csv_messages(args.input)
+            else:  # raw
+                messages = ChatLogParser.parse_raw_chat_messages(args.input)
             
             logger.info(f"Parsed {len(messages)} messages")
             
