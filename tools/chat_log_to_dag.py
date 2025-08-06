@@ -710,7 +710,7 @@ class ChatLogToDAGConverter:
             'last_updated': time.time()
         }
 
-async def save_dag_to_storage_format(dag_data: Dict[str, Any], output_path: Path, space_id: str, auto_assign: bool = False):
+async def save_dag_to_storage_format(dag_data: Dict[str, Any], output_path: Path = None, space_id: str = None, auto_assign: bool = False):
     """Save DAG data in Connectome storage format using the actual storage system."""
     
     # Create timeline state and events data
@@ -720,33 +720,36 @@ async def save_dag_to_storage_format(dag_data: Dict[str, Any], output_path: Path
     # Determine where to save files based on auto-assignment mode
     if auto_assign and dag_data.get("metadata", {}).get("auto_assigned"):
         # TimelineComponent has already persisted to storage using correct naming
-        # We just need to create the human-readable combined file
-        try:
-            output_dir = output_path.parent
-            output_dir.mkdir(parents=True, exist_ok=True)
-            
-            # TimelineComponent uses "space_" prefix in storage keys
-            storage_space_id = f"space_{space_id}"
-            combined_data = {
-                "storage_keys": {
-                    "timeline_state": f"timeline_state_{storage_space_id}",
-                    "timeline_events": f"timeline_events_{storage_space_id}"
-                },
-                "note": "Data has been stored using TimelineComponent's native storage logic",
-                **dag_data
-            }
-            
-            with open(output_path, 'w', encoding='utf-8') as f:
-                json.dump(combined_data, f, indent=2, ensure_ascii=False)
-            
-            logger.info("DAG data stored using Connectome's native TimelineComponent:")
-            logger.info(f"  🏛️  Timeline state: timeline_state_{storage_space_id} (ready for Connectome)")
-            logger.info(f"  📊 Timeline events: timeline_events_{storage_space_id} (ready for Connectome)")
-            logger.info(f"  📋 Combined format: {output_path} (human-readable)")
-            
-        except Exception as e:
-            logger.error(f"Failed to create human-readable output file: {e}", exc_info=True)
-            logger.info("Storage was successful, but combined file creation failed")
+        # In default auto mode, we don't create additional files - data is already in storage
+        storage_space_id = f"space_{space_id}"
+        
+        logger.info("DAG data stored using Connectome's native TimelineComponent:")
+        logger.info(f"  🏛️  Timeline state: timeline_state_{storage_space_id} (ready for Connectome)")
+        logger.info(f"  📊 Timeline events: timeline_events_{storage_space_id} (ready for Connectome)")
+        
+        # Only create human-readable file if output_path is explicitly provided
+        if output_path:
+            try:
+                output_dir = output_path.parent
+                output_dir.mkdir(parents=True, exist_ok=True)
+                
+                combined_data = {
+                    "storage_keys": {
+                        "timeline_state": f"timeline_state_{storage_space_id}",
+                        "timeline_events": f"timeline_events_{storage_space_id}"
+                    },
+                    "note": "Data has been stored using TimelineComponent's native storage logic",
+                    **dag_data
+                }
+                
+                with open(output_path, 'w', encoding='utf-8') as f:
+                    json.dump(combined_data, f, indent=2, ensure_ascii=False)
+                
+                logger.info(f"  📋 Human-readable format: {output_path}")
+                
+            except Exception as e:
+                logger.error(f"Failed to create human-readable output file: {e}", exc_info=True)
+                logger.info("Storage was successful, but combined file creation failed")
     
     if not auto_assign or not dag_data.get("metadata", {}).get("auto_assigned"):
         # Save as separate files for manual inspection/use
@@ -837,10 +840,6 @@ def main():
             if not args.auto_assign and not args.space_id:
                 logger.error("Either --space-id must be provided or --auto-assign must be used")
                 return 1
-            
-            if not args.auto_assign and not args.output:
-                logger.error("--output is required when not using --auto-assign")
-                return 1
                 
             # Determine input format
             input_format = args.format
@@ -881,16 +880,16 @@ def main():
             )
             dag_data = await converter.convert_messages_to_dag(messages)
             
-            # Auto-generate output path if not provided and using auto-assign
+            # In auto-assignment mode, only create output file if explicitly requested
             output_path = args.output
-            if not output_path and args.auto_assign:
-                # Generate meaningful output filename based on input and discovered config
-                input_stem = args.input.stem  # filename without extension
-                space_id = converter.space_id
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                output_filename = f"{input_stem}_to_{space_id}_{timestamp}.json"
-                output_path = args.input.parent / output_filename
-                logger.info(f"📄 Auto-generated output path: {output_path}")
+            if args.auto_assign and not output_path:
+                # In auto mode, we don't create additional files by default
+                # Data goes straight to storage via TimelineComponent
+                output_path = None
+            elif not output_path and not args.auto_assign:
+                # Non-auto mode still needs an output path
+                logger.error("--output is required when not using --auto-assign")
+                return 1
             
             # Save output with auto-assignment awareness
             await save_dag_to_storage_format(
