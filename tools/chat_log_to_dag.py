@@ -184,14 +184,6 @@ class ChatMessage:
             
             # Add the cumulative delay to base time
             return (base_time + timedelta(minutes=cumulative_minutes)).timestamp()
-        
-        # Fallback: random time in the past year
-        days_ago = random.randint(1, 365)
-        hour = random.randint(8, 22)  # Realistic messaging hours
-        minute = random.randint(0, 59)
-        
-        random_time = base_time - timedelta(days=days_ago) + timedelta(hours=hour, minutes=minute)
-        return random_time.timestamp()
 
     def _generate_sender_id(self) -> str:
         """Generate a sender ID based on message content hash."""
