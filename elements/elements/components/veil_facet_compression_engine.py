@@ -8,8 +8,9 @@ Implements per-container memorization, focus-dependent rendering, and memory Eve
 import logging
 import time
 import asyncio
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Set
 from datetime import datetime
+from pathlib import Path
 
 from opentelemetry import trace
 from host.observability import get_tracer
@@ -20,9 +21,92 @@ from elements.elements.components.veil.veil_facet import VEILFacet
 from elements.elements.components.veil.facet_types import VEILFacetType, EventFacet, StatusFacet, AmbientFacet
 from elements.elements.components.veil.facet_cache import VEILFacetCache
 from elements.elements.components.veil.temporal_system import ConnectomeEpoch
+from .memory_compressor_interface import MemoryCompressor, estimate_veil_tokens
 
 logger = logging.getLogger(__name__)
 tracer = get_tracer(__name__)
+
+class IncrementalRollingWindow:
+    """
+    Manages rolling window with incremental chunk building for VEILFacet compression.
+    
+    This class determines which chunks are within the active window and which chunks
+    are outside the window and need memories for efficient rendering.
+    
+    Key insight: Last chunk is always incomplete, so we need X-1 complete 
+    chunks + 1 incomplete chunk in window.
+    """
+    
+    def __init__(self, container_id: str):
+        self.container_id = container_id
+        self.window_size_focused = 8      # 8 complete chunks when focused
+        self.window_size_unfocused = 2    # 2 complete chunks when unfocused  
+        self.compression_chunk_size = 4000 # Trigger memory at 4k tokens
+        
+    def get_compression_boundary(self, n_chunks: List[Dict], is_focused: bool) -> int:
+        """
+        Determine which chunks are outside the window and need memories.
+        
+        Args:
+            n_chunks: List of N-chunk structures
+            is_focused: Whether container is currently focused
+            
+        Returns:
+            Compression boundary index. Chunks before this index are outside 
+            window and need memories for rendering.
+        """
+        total_chunks = len(n_chunks)
+        if total_chunks == 0:
+            return -1
+            
+        window_size = self.window_size_focused if is_focused else self.window_size_unfocused
+        
+        # Chunks before this boundary are outside window and need memories
+        # We keep window_size complete chunks + 1 incomplete chunk in window
+        compression_boundary = max(0, total_chunks - window_size - 1)
+        
+        logger.debug(f"Container {self.container_id}: {total_chunks} chunks, "
+                    f"{'focused' if is_focused else 'unfocused'} window size {window_size}, "
+                    f"compression boundary at index {compression_boundary}")
+        
+        return compression_boundary
+        
+    def get_chunks_needing_memories(self, n_chunks: List[Dict], is_focused: bool) -> List[int]:
+        """
+        Get list of chunk indices that are outside window and need memories.
+        
+        Args:
+            n_chunks: List of N-chunk structures
+            is_focused: Whether container is currently focused
+            
+        Returns:
+            List of chunk indices that need memories for rendering
+        """
+        compression_boundary = self.get_compression_boundary(n_chunks, is_focused)
+        
+        if compression_boundary <= 0:
+            return []
+            
+        # Return indices of chunks that are outside window
+        chunks_needing_memories = list(range(compression_boundary))
+        
+        logger.debug(f"Container {self.container_id}: chunks {chunks_needing_memories} need memories")
+        return chunks_needing_memories
+        
+    def is_chunk_in_window(self, chunk_index: int, n_chunks: List[Dict], is_focused: bool) -> bool:
+        """
+        Check if a specific chunk is within the active window.
+        
+        Args:
+            chunk_index: Index of chunk to check
+            n_chunks: List of N-chunk structures  
+            is_focused: Whether container is currently focused
+            
+        Returns:
+            True if chunk is within active window, False if it needs memory
+        """
+        compression_boundary = self.get_compression_boundary(n_chunks, is_focused)
+        return chunk_index >= compression_boundary
 
 
 @register_component
@@ -357,24 +441,28 @@ class VEILFacetCompressionEngine(Component):
                                                  is_focused_container: bool,
                                                  full_facet_cache: VEILFacetCache) -> List[VEILFacet]:
         """
-        Process a container with incremental N-chunk/M-chunk memorization logic.
+        Process a container with rolling window memorization logic.
         
-        NEW ARCHITECTURE: Always chunk first, compress individual chunks when they exceed 4k tokens.
-        No more container-level threshold checks - compression happens incrementally per chunk.
+        ROLLING WINDOW ARCHITECTURE: 
+        - Triggers memory formation immediately when chunks complete (4k tokens)
+        - Uses compressed context for memory formation (same view agent will see)
+        - Memory creation happens in background via AgentMemoryCompressor
+        - Rendering checks memory states and falls back to raw chunks when needed
+        - Ensures consistent context between memory formation and runtime
         
         Args:
             container_id: ID of container being processed
             event_facets: EventFacets linked to this container
-            is_focused_container: Whether this container is being compressed (focused)
-            full_facet_cache: Complete VEILFacetCache for context
+            is_focused_container: Whether this container is focused (affects window size)
+            full_facet_cache: Complete VEILFacetCache for compressed context building
             
         Returns:
-            List of processed VEILFacets (mix of EventFacets and memory EventFacets)
+            List of processed VEILFacets using rolling window memory management
         """
         try:
-            logger.debug(f"Processing container {container_id} with {len(event_facets)} EventFacets (incremental chunking)")
+            logger.debug(f"Processing container {container_id} with {len(event_facets)} EventFacets (rolling window)")
             
-            # ALWAYS get or create chunk structure - no threshold checks
+            # ROLLING WINDOW: Get or create chunk structure  
             chunk_structure = await self._get_or_create_container_chunks(container_id, event_facets)
             
             # Log token distribution for debugging
@@ -382,17 +470,19 @@ class VEILFacetCompressionEngine(Component):
             regular_tokens = self._calculate_event_facets_tokens(regular_facets)
             total_tokens = self._calculate_event_facets_tokens(event_facets)
             
-            logger.debug(f"Container {container_id}: {regular_tokens} regular tokens, {total_tokens - regular_tokens} memory tokens, {total_tokens} total (processing all chunks)")
+            logger.debug(f"Container {container_id}: {regular_tokens} regular tokens, {total_tokens - regular_tokens} memory tokens, {total_tokens} total (rolling window)")
             
-            # ALWAYS process chunk boundaries and trigger incremental compression
-            await self._process_container_chunk_boundaries(container_id, chunk_structure, full_facet_cache)
+            # ROLLING WINDOW: Detect new facets and update with immediate memory formation
+            new_facets = await self._detect_new_event_facets(chunk_structure, event_facets)
+            if new_facets:
+                await self._update_chunks_with_new_facets(chunk_structure, new_facets, full_facet_cache)
             
             # Render container according to focus rules
             rendered_facets = await self._render_container_with_focus_rules(
                 container_id, chunk_structure, is_focused_container
             )
             
-            logger.debug(f"Container {container_id} processed: {len(event_facets)} → {len(rendered_facets)} facets (incremental)")
+            logger.debug(f"Container {container_id} processed: {len(event_facets)} → {len(rendered_facets)} facets (rolling window)")
             return rendered_facets
             
         except Exception as e:
@@ -419,7 +509,7 @@ class VEILFacetCompressionEngine(Component):
             else:
                 # Update existing structure with new EventFacets
                 chunk_structure = self._container_chunks[container_id]
-                await self._update_chunks_with_new_facets(chunk_structure, event_facets)
+                # Note: full_facet_cache is not available here, will be passed when needed
             
             return self._container_chunks[container_id]
             
@@ -979,7 +1069,7 @@ class VEILFacetCompressionEngine(Component):
             logger.warning(f"Error calculating chunk tokens: {e}")
             return 0
 
-    async def _update_chunks_with_new_facets(self, chunk_structure: Dict[str, Any], event_facets: List[EventFacet]):
+    async def _update_chunks_with_new_facets(self, chunk_structure: Dict[str, Any], event_facets: List[EventFacet], full_facet_cache: VEILFacetCache = None):
         """
         Update chunk structure with incremental chunking architecture.
         
@@ -1020,10 +1110,13 @@ class VEILFacetCompressionEngine(Component):
                 chunk_structure["m_chunks"].extend(new_m_chunks)
                 logger.info(f"Added {len(new_memory_facets)} new memory EventFacets to M-stream for {container_id}")
             
-            # INCREMENTAL CHUNKING: Add new regular facets to N-stream with dynamic chunk creation
+            # ROLLING WINDOW: Add new regular facets to N-stream with immediate memory formation
             if new_regular_facets:
-                await self._add_facets_to_n_stream_incrementally(chunk_structure, new_regular_facets, container_id)
-                logger.info(f"Added {len(new_regular_facets)} new EventFacets to N-stream for {container_id} (incremental)")
+                # Pass full_facet_cache for compressed context building
+                await self._add_facets_to_n_stream_incrementally(
+                    chunk_structure, new_regular_facets, container_id, full_facet_cache
+                )
+                logger.info(f"Added {len(new_regular_facets)} new EventFacets to N-stream for {container_id} (rolling window)")
             else:
                 logger.debug(f"No new regular EventFacets detected for {container_id}")
             
@@ -1040,19 +1133,21 @@ class VEILFacetCompressionEngine(Component):
     
     async def _add_facets_to_n_stream_incrementally(self, chunk_structure: Dict[str, Any], 
                                                   new_facets: List[EventFacet], 
-                                                  container_id: str):
+                                                  container_id: str,
+                                                  full_facet_cache: VEILFacetCache = None):
         """
-        Add new EventFacets to N-stream with fixed incremental chunk creation.
+        Add new EventFacets to N-stream with rolling window memory formation.
         
-        FIXED LOGIC:
-        - Allow chunks to overflow during creation (compression handles this later)
-        - Don't add to chunks that are ALREADY over the limit
-        - Track chronologically latest chunk properly
+        ENHANCED FOR ROLLING WINDOW:
+        - Triggers immediate memory formation when chunks complete (4k tokens)
+        - Uses compressed context for memory formation
+        - Background memory creation starts before chunks age out of window
         
         Args:
             chunk_structure: Chunk structure to update
             new_facets: New EventFacets to add
             container_id: Container ID for logging
+            full_facet_cache: Complete VEILFacetCache for compressed context building
         """
         try:
             n_chunks = chunk_structure.get("n_chunks", [])
@@ -1067,7 +1162,8 @@ class VEILFacetCompressionEngine(Component):
                     "chunk_index": 0,
                     "created_at": datetime.now(),
                     "is_complete": False,
-                    "has_memory_chunk": False
+                    "has_memory_chunk": False,
+                    "container_id": container_id
                 }
                 n_chunks.append(current_chunk)
                 logger.debug(f"Created first N-chunk for {container_id}")
@@ -1106,15 +1202,29 @@ class VEILFacetCompressionEngine(Component):
                         "chunk_index": len(n_chunks),
                         "created_at": datetime.now(),
                         "is_complete": False,
-                        "has_memory_chunk": False
+                        "has_memory_chunk": False,
+                        "container_id": container_id
                     }
                     n_chunks.append(new_chunk)
                     current_chunk = new_chunk
                 
-                # FIXED: Don't add to chunks that are ALREADY over the limit  
-                # But allow overflow if chunk is currently under the limit
+                # ROLLING WINDOW: Check if current chunk should be completed before adding
                 elif current_tokens >= self.COMPRESSION_CHUNK_SIZE and current_chunk.get("event_facets"):
-                    # Current chunk is already full, create new one
+                    # Current chunk is full - complete it and trigger memory formation
+                    current_chunk["is_complete"] = True
+                    
+                    # ROLLING WINDOW: Trigger immediate memory formation for completed chunk
+                    if not current_chunk.get("has_memory_chunk", False) and full_facet_cache:
+                        chunk_index = current_chunk.get("chunk_index", len(n_chunks) - 1)
+                        logger.info(f"Rolling window: triggering memory formation for completed chunk {chunk_index} "
+                                   f"({current_tokens} tokens >= {self.COMPRESSION_CHUNK_SIZE})")
+                        
+                        await self._trigger_chunk_memory_formation(
+                            container_id, current_chunk, chunk_index, 
+                            chunk_structure, full_facet_cache
+                        )
+                    
+                    # Create new chunk for this facet
                     new_chunk = {
                         "chunk_type": "n_chunk",
                         "event_facets": [facet],
@@ -1122,17 +1232,35 @@ class VEILFacetCompressionEngine(Component):
                         "chunk_index": len(n_chunks),
                         "created_at": datetime.now(),
                         "is_complete": False,
-                        "has_memory_chunk": False
+                        "has_memory_chunk": False,
+                        "container_id": container_id
                     }
                     n_chunks.append(new_chunk)
                     current_chunk = new_chunk
                     
                 else:
-                    # Add to current chunk (allow overflow - compression will handle it)
+                    # Add to current chunk (allow overflow - rolling window will handle completion)
                     current_chunk["event_facets"].append(facet)
                     current_chunk["token_count"] = current_tokens + facet_tokens
                     
-                    new_total = current_tokens + facet_tokens            
+                    new_total = current_tokens + facet_tokens
+                    
+                    # ROLLING WINDOW: Check if chunk just completed with this facet
+                    if (new_total >= self.COMPRESSION_CHUNK_SIZE and 
+                        not current_chunk.get("is_complete", False) and 
+                        not current_chunk.get("has_memory_chunk", False) and 
+                        full_facet_cache):
+                        
+                        current_chunk["is_complete"] = True
+                        chunk_index = current_chunk.get("chunk_index", len(n_chunks) - 1)
+                        
+                        logger.info(f"Rolling window: chunk {chunk_index} completed with new facet "
+                                   f"({new_total} tokens >= {self.COMPRESSION_CHUNK_SIZE}), triggering memory formation")
+                        
+                        await self._trigger_chunk_memory_formation(
+                            container_id, current_chunk, chunk_index,
+                            chunk_structure, full_facet_cache
+                        )            
             # Update chunk structure
             chunk_structure["n_chunks"] = n_chunks
             
@@ -1634,15 +1762,13 @@ class VEILFacetCompressionEngine(Component):
     
     async def _render_container_with_focus_rules(self, container_id: str, chunk_structure: Dict[str, Any], is_focused_container: bool) -> List[VEILFacet]:
         """
-        Render container according to focus rules from user clarification.
+        Render container using rolling window approach with memory state checking.
         
-        Given: N(1) to N(X) chunks where N(X) is incomplete, and M(1) to M(X-1) memories
-        
-        Focus Rules:
-        - Focused: N(X-8) to N(X) raw chunks (8 recent completed + incomplete), 
-                  prepend M(1) to M(X-9) if X-8 > 1
-        - Unfocused: M(1) to M(X-2) memories + N(X-1) to N(X) raw chunks 
-                    (all memories except last completed + 2 recent raw)
+        ROLLING WINDOW APPROACH:
+        - Uses IncrementalRollingWindow to determine which chunks need memories
+        - Checks AgentMemoryCompressor for memory states before using memories
+        - Falls back to raw chunks when memories are not ready
+        - Ensures consistent view between memory formation and runtime
         
         Args:
             container_id: ID of container being rendered
@@ -1650,72 +1776,48 @@ class VEILFacetCompressionEngine(Component):
             is_focused_container: Whether this container is focused
             
         Returns:
-            List of VEILFacets according to corrected focus rules
+            List of VEILFacets using rolling window memory management
         """
         try:
             rendered_facets = []
             n_chunks = chunk_structure.get("n_chunks", [])
-            m_chunks = chunk_structure.get("m_chunks", [])
             
             if not n_chunks:
                 logger.debug(f"No N-chunks for {container_id}, returning empty")
                 return []
             
-            X = len(n_chunks)  # Total chunks (N1 to NX where NX is incomplete)
-            valid_m_chunks = [m for m in m_chunks if not m.get("is_invalid", False)]
+            # ROLLING WINDOW: Use IncrementalRollingWindow to determine boundaries
+            window = IncrementalRollingWindow(container_id)
+            compression_boundary = window.get_compression_boundary(n_chunks, is_focused_container)
             
-            logger.debug(f"Container {container_id}: X={X} N-chunks, {len(valid_m_chunks)} valid M-chunks")
+            logger.debug(f"Rolling window {container_id}: {len(n_chunks)} chunks, "
+                        f"{'focused' if is_focused_container else 'unfocused'}, "
+                        f"compression boundary at {compression_boundary}")
             
-            if is_focused_container:
-                # FOCUSED: N(X-8) to N(X) raw chunks, prepend M(1) to M(X-9) if X-8 > 1
-                start_chunk_index = max(0, X - 9)  # 0-based indexing: X-9 becomes X-9 in 0-based
-                
-                # Add memories for chunks before start_chunk_index
-                if start_chunk_index > 0:
-                    memory_end_index = min(start_chunk_index, len(valid_m_chunks))
-                    for i in range(memory_end_index):
-                        memory_facet = valid_m_chunks[i].get("memory_facet")
-                        if memory_facet:
-                            rendered_facets.append(memory_facet)
+            memories_used = 0
+            raw_chunks_used = 0
+            
+            # Process each chunk based on its position relative to the window
+            for i, chunk in enumerate(n_chunks):
+                if i < compression_boundary:
+                    # ROLLING WINDOW: Chunk is outside window - try to use memory
+                    memory_used = await self._try_use_memory_for_chunk(
+                        container_id, chunk, i, rendered_facets
+                    )
                     
-                    logger.debug(f"Focused {container_id}: Added {memory_end_index} memories M(1) to M({memory_end_index})")
-                
-                # Add raw chunks from start_chunk_index to end
-                selected_n_chunks = n_chunks[start_chunk_index:]
-                for n_chunk in selected_n_chunks:
-                    event_facets = n_chunk.get("event_facets", [])
-                    rendered_facets.extend(event_facets)
-                
-                memory_count = start_chunk_index if start_chunk_index > 0 else 0
-                raw_chunk_count = len(selected_n_chunks)
-                logger.debug(f"Focused {container_id}: {memory_count} memories + {raw_chunk_count} raw chunks (N({start_chunk_index+1}) to N({X}))")
-                
-            else:
-                # UNFOCUSED: M(1) to M(X-2) + N(X-1) to N(X)
-                
-                # Add memories M(1) to M(X-2) - all except memory of last completed chunk
-                if X >= 2:  # Only if we have at least 2 chunks
-                    memory_end_index = min(X - 2, len(valid_m_chunks))  # M(1) to M(X-2)
-                    for i in range(memory_end_index):
-                        memory_facet = valid_m_chunks[i].get("memory_facet")
-                        if memory_facet:
-                            rendered_facets.append(memory_facet)
-                    
-                    logger.debug(f"Unfocused {container_id}: Added {memory_end_index} memories M(1) to M({memory_end_index})")
-                
-                # Add raw chunks N(X-1) to N(X) - last completed + incomplete
-                if X >= 2:
-                    recent_n_chunks = n_chunks[-2:]  # Last 2 chunks: N(X-1), N(X)
+                    if memory_used:
+                        memories_used += 1
+                    else:
+                        # Memory not ready - fall back to raw facets
+                        event_facets = chunk.get("event_facets", [])
+                        rendered_facets.extend(event_facets)
+                        raw_chunks_used += 1
+                        logger.debug(f"Rolling window: chunk {i} outside window but memory not ready, using raw facets")
                 else:
-                    recent_n_chunks = n_chunks  # All available if less than 2
-                
-                for n_chunk in recent_n_chunks:
-                    event_facets = n_chunk.get("event_facets", [])
+                    # ROLLING WINDOW: Chunk is within window - use raw facets
+                    event_facets = chunk.get("event_facets", [])
                     rendered_facets.extend(event_facets)
-                
-                memory_count = min(X - 2, len(valid_m_chunks)) if X >= 2 else 0
-                raw_chunk_count = len(recent_n_chunks)
-                logger.debug(f"Unfocused {container_id}: {memory_count} memories + {raw_chunk_count} raw chunks (last {raw_chunk_count} chunks)")
+                    raw_chunks_used += 1
             
             # Sort by temporal order for consistent rendering
             rendered_facets.sort(key=lambda f: f.get_temporal_key())
@@ -1723,7 +1825,9 @@ class VEILFacetCompressionEngine(Component):
             total_memory_facets = len([f for f in rendered_facets if f.get_property("event_type") == "compressed_memory"])
             total_regular_facets = len(rendered_facets) - total_memory_facets
             
-            logger.info(f"Rendered {container_id} ({'focused' if is_focused_container else 'unfocused'}): {len(rendered_facets)} facets ({total_memory_facets} memories + {total_regular_facets} raw)")
+            logger.info(f"Rolling window rendered {container_id} ({'focused' if is_focused_container else 'unfocused'}): "
+                       f"{len(rendered_facets)} facets ({memories_used} memories used, {raw_chunks_used} raw chunks, "
+                       f"boundary at {compression_boundary})")
             
             return rendered_facets
             
@@ -1738,6 +1842,157 @@ class VEILFacetCompressionEngine(Component):
                 if memory_facet and not m_chunk.get("is_invalid", False):
                     all_facets.append(memory_facet)
             return all_facets
+
+    async def _try_use_memory_for_chunk(self,
+                                      container_id: str,
+                                      chunk: Dict[str, Any],
+                                      chunk_index: int,
+                                      rendered_facets: List[VEILFacet]) -> bool:
+        """
+        Try to use memory for a chunk that's outside the rolling window.
+        
+        ROLLING WINDOW: Checks AgentMemoryCompressor for memory state and loads
+        memory if available, otherwise indicates fallback to raw facets needed.
+        
+        Args:
+            container_id: ID of container being rendered
+            chunk: The chunk that needs memory
+            chunk_index: Index of the chunk
+            rendered_facets: List to append memory facet to if successful
+            
+        Returns:
+            True if memory was used, False if raw facets should be used
+        """
+        try:
+            if not self._memory_compressor:
+                logger.debug(f"No memory compressor available for chunk {chunk_index}")
+                return False
+            
+            # Generate memory_id using actual facet IDs (content-based, not chunk-based)
+            # This ensures memory ID is deterministic based on actual content
+            facet_ids = [facet.facet_id for facet in chunk.get("event_facets", [])]
+            if not facet_ids:
+                logger.warning(f"No facet IDs found for chunk {chunk_index}")
+                return False
+            memory_id = self._memory_compressor.generate_memory_id(facet_ids)
+            
+            logger.debug(f"Rolling window: checking memory for chunk {chunk_index} with {len(facet_ids)} facets, memory_id: {memory_id}")
+            
+            # Check memory state from AgentMemoryCompressor using correct memory_id
+            memory_state = await self._memory_compressor.get_memory_state(memory_id)
+            
+            if memory_state == "existing":
+                # Memory is ready - load and use it
+                logger.debug(f"Rolling window: loading existing memory for chunk {chunk_index} (memory_id: {memory_id})")
+                
+                memory_data = await self._memory_compressor.load_memory(memory_id)
+                if memory_data and memory_data.get("memorized_node"):
+                    # Create memory EventFacet from loaded data
+                    memory_facet = await self._create_memory_facet_from_loaded_data(
+                        memory_data, container_id, chunk_index
+                    )
+                    
+                    if memory_facet:
+                        rendered_facets.append(memory_facet)
+                        logger.debug(f"Rolling window: used existing memory for chunk {chunk_index}")
+                        return True
+                    else:
+                        logger.warning(f"Failed to create memory facet from loaded data for chunk {chunk_index}")
+                        return False
+                else:
+                    logger.warning(f"Memory data incomplete for chunk {chunk_index}, falling back to raw")
+                    return False
+                    
+            elif memory_state == "forming":
+                # Memory is being created in background - use raw facets for now
+                logger.debug(f"Rolling window: memory forming for chunk {chunk_index}, using raw facets")
+                return False
+                
+            elif memory_state == "needs_formation":
+                # Memory hasn't been created yet - trigger formation and use raw facets
+                logger.debug(f"Rolling window: triggering memory formation for chunk {chunk_index}")
+                
+                # This can happen if chunk completion didn't trigger memory formation
+                # (e.g., system restart, missed trigger, etc.)
+                # We don't have full_facet_cache here, so mark for future formation
+                chunk["needs_memory_formation"] = True
+                chunk["memory_formation_requested_at"] = datetime.now().isoformat()
+                
+                return False
+            else:
+                logger.warning(f"Unknown memory state {memory_state} for chunk {chunk_index}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error checking memory for chunk {chunk_index}: {e}", exc_info=True)
+            return False
+
+    async def _create_memory_facet_from_loaded_data(self,
+                                                  memory_data: Dict[str, Any],
+                                                  container_id: str,
+                                                  chunk_index: int) -> Optional[EventFacet]:
+        """
+        Create memory EventFacet from loaded AgentMemoryCompressor data.
+        
+        Args:
+            memory_data: Memory data from AgentMemoryCompressor.load_memory()
+            container_id: ID of container
+            chunk_index: Index of the chunk
+            
+        Returns:
+            Memory EventFacet or None if failed
+        """
+        try:
+            memorized_node = memory_data.get("memorized_node", {})
+            properties = memorized_node.get("properties", {})
+            
+            memory_summary = properties.get("memory_summary", "")
+            memory_id = properties.get("memory_id", f"mem_{chunk_index}")
+            token_count = properties.get("token_count", 0)
+            own_token_count = properties.get("own_token_count", 0)
+            compression_timestamp = properties.get("compression_timestamp", "")
+            
+            # Parse timestamp for veil_timestamp
+            try:
+                from datetime import datetime
+                if compression_timestamp:
+                    # Remove 'Z' suffix if present and parse
+                    clean_timestamp = compression_timestamp.rstrip('Z')
+                    parsed_time = datetime.fromisoformat(clean_timestamp)
+                    veil_timestamp = parsed_time.timestamp()
+                else:
+                    veil_timestamp = ConnectomeEpoch.get_veil_timestamp()
+            except Exception as e:
+                logger.warning(f"Error parsing compression timestamp {compression_timestamp}: {e}")
+                veil_timestamp = ConnectomeEpoch.get_veil_timestamp()
+            
+            # Create memory EventFacet
+            memory_facet = EventFacet(
+                facet_id=f"loaded_memory_{container_id}_chunk_{chunk_index}_{memory_id}",
+                veil_timestamp=veil_timestamp,
+                owner_element_id=container_id,
+                event_type="compressed_memory",
+                content=memory_summary,
+                links_to=container_id
+            )
+            
+            # Add memory properties
+            memory_facet.properties.update({
+                "is_compressed_memory": True,
+                "memory_id": memory_id,
+                "token_count": token_count,
+                "own_token_count": own_token_count,
+                "source_chunk_index": chunk_index,
+                "compression_approach": "rolling_window_loaded",
+                "loaded_from_storage": True
+            })
+            
+            logger.debug(f"Created memory facet from loaded data: {memory_summary[:100]}...")
+            return memory_facet
+            
+        except Exception as e:
+            logger.error(f"Error creating memory facet from loaded data: {e}", exc_info=True)
+            return None
 
     # --- MEMORY EVENTFACET CREATION ---
     
@@ -1775,13 +2030,13 @@ class VEILFacetCompressionEngine(Component):
                 container_id, full_facet_cache, event_facets
             )
             
-            # Call AgentMemoryCompressor with EventFacets directly (no conversion needed!)
-            # FIXED: Include chunk_index to ensure unique memory_id per chunk
-            chunk_element_id = f"{container_id}_chunk_{chunk_index}"
-            logger.debug(f"Calling AgentMemoryCompressor for {chunk_element_id} with {len(event_facets)} EventFacets (turn-based context)")
+            # Call AgentMemoryCompressor with EventFacets directly using facet IDs
+            # FIXED: Use actual facet IDs for content-based memory identification
+            facet_ids = [facet.facet_id for facet in event_facets]
+            logger.debug(f"Calling AgentMemoryCompressor for {len(facet_ids)} EventFacets with facet IDs (turn-based context)")
             memory_result = await self._memory_compressor.compress_event_facets(
                 event_facets=event_facets,
-                element_ids=[chunk_element_id],
+                element_ids=facet_ids,
                 compression_context=compression_context
             )
             
@@ -1842,6 +2097,241 @@ class VEILFacetCompressionEngine(Component):
         except Exception as e:
             logger.error(f"Error creating turn-based memory EventFacet for {container_id}: {e}", exc_info=True)
             return None
+
+    async def _build_compressed_context_for_chunk(self,
+                                                 container_id: str,
+                                                 chunk_structure: Dict[str, Any],
+                                                 target_chunk_index: int) -> VEILFacetCache:
+        """
+        Build compressed context for memory creation - rolling window approach.
+        
+        The memory should see the same compressed view the agent will see,
+        which means including existing memories for earlier chunks and raw
+        content for chunks within the window.
+        
+        Args:
+            container_id: ID of container being processed
+            chunk_structure: Current chunk structure with N-chunks and M-chunks
+            target_chunk_index: Index of chunk we're creating memory for
+            
+        Returns:
+            VEILFacetCache with compressed context for memory formation
+        """
+        try:
+            n_chunks = chunk_structure.get("n_chunks", [])
+            m_chunks = chunk_structure.get("m_chunks", [])
+            
+            # Create synthetic facet cache for compressed context
+            compressed_cache = VEILFacetCache()
+            
+            logger.debug(f"Building compressed context for {container_id} chunk {target_chunk_index}")
+            
+            # Add existing memories for chunks before target
+            memories_added = 0
+            for i in range(target_chunk_index):
+                chunk = n_chunks[i]
+                
+                if chunk.get("has_memory_chunk", False):
+                    # Chunk has memory - use it instead of raw content
+                    memory_index = chunk.get("memory_chunk_index")
+                    if memory_index is not None and memory_index < len(m_chunks):
+                        memory_facet = m_chunks[memory_index].get("memory_facet")
+                        if memory_facet and not m_chunks[memory_index].get("is_invalid", False):
+                            compressed_cache.add_facet(memory_facet)
+                            memories_added += 1
+                            continue
+                
+                # Chunk doesn't have memory yet - include raw facets
+                raw_facets_added = 0
+                for facet in chunk.get("event_facets", []):
+                    compressed_cache.add_facet(facet)
+                    raw_facets_added += 1
+                
+                if raw_facets_added > 0:
+                    logger.debug(f"Added {raw_facets_added} raw facets from chunk {i} (no memory available)")
+            
+            # Add the target chunk's raw facets (what we're memorizing)
+            target_chunk = n_chunks[target_chunk_index]
+            target_facets_added = 0
+            for facet in target_chunk.get("event_facets", []):
+                compressed_cache.add_facet(facet)
+                target_facets_added += 1
+            
+            # Add any chunks after target (recent content within window)
+            future_facets_added = 0
+            for i in range(target_chunk_index + 1, len(n_chunks)):
+                for facet in n_chunks[i].get("event_facets", []):
+                    compressed_cache.add_facet(facet)
+                    future_facets_added += 1
+            
+            logger.debug(f"Compressed context for {container_id} chunk {target_chunk_index}: "
+                        f"{memories_added} memories + {target_facets_added} target facets + "
+                        f"{future_facets_added} future facets = {len(compressed_cache.facets)} total")
+            
+            return compressed_cache
+            
+        except Exception as e:
+            logger.error(f"Error building compressed context for {container_id} chunk {target_chunk_index}: {e}", exc_info=True)
+            # Fallback to empty cache
+            return VEILFacetCache()
+
+    async def _trigger_chunk_memory_formation(self,
+                                            container_id: str,
+                                            chunk: Dict[str, Any],
+                                            chunk_index: int,
+                                            chunk_structure: Dict[str, Any],
+                                            full_facet_cache: VEILFacetCache) -> None:
+        """
+        Trigger memory formation for a completed chunk - rolling window approach.
+        
+        This is called immediately when a chunk completes (reaches 4k tokens),
+        starting background memory formation using compressed context.
+        
+        Args:
+            container_id: ID of container being processed
+            chunk: The chunk that just completed
+            chunk_index: Index of the completed chunk
+            chunk_structure: Current chunk structure
+            full_facet_cache: Complete VEILFacetCache for context
+        """
+        try:
+            event_facets = chunk.get("event_facets", [])
+            
+            if not event_facets:
+                logger.warning(f"No event facets to memorize in chunk {chunk_index} for {container_id}")
+                return
+            
+            logger.info(f"Triggering memory formation for {container_id} chunk {chunk_index} "
+                       f"with {len(event_facets)} facets (rolling window, content-based ID)")
+            
+            # Build compressed context for this specific chunk
+            compressed_cache = await self._build_compressed_context_for_chunk(
+                container_id, chunk_structure, chunk_index
+            )
+            
+            # Get turn-based compression context using compressed cache
+            compression_context = await self._get_compression_context_from_hud_with_content(
+                container_id, compressed_cache, event_facets
+            )
+            
+            # Enhanced context for rolling window approach
+            compression_context.update({
+                "compression_reason": "chunk_completion_rolling_window",
+                "chunk_index": chunk_index,
+                "is_rolling_window": True,
+                "uses_compressed_context": True,
+                "compressed_cache_facets": len(compressed_cache.facets)
+            })
+            
+            # Call AgentMemoryCompressor with compressed context using facet IDs
+            facet_ids = [facet.facet_id for facet in event_facets]
+            # Generate expected memory ID for debugging (uses actual facet IDs)
+            expected_memory_id = self._memory_compressor.generate_memory_id(facet_ids) if self._memory_compressor else "unknown"
+            
+            logger.debug(f"Calling AgentMemoryCompressor for {len(facet_ids)} facets with compressed context "
+                        f"({len(compressed_cache.facets)} facets), expected memory_id: {expected_memory_id}")
+            
+            memory_result = await self._memory_compressor.compress_event_facets(
+                event_facets=event_facets,
+                element_ids=facet_ids,
+                compression_context=compression_context
+            )
+            
+            # AgentMemoryCompressor returns:
+            # - Existing memory dict if ready (shouldn't happen for new chunks)
+            # - None if forming (background processing) 
+            # - None if needs formation (queued)
+            
+            if memory_result:
+                # Memory was already ready (unusual for new chunks)
+                logger.info(f"Memory was immediately ready for {container_id} chunk {chunk_index}")
+                await self._apply_memory_to_chunk(chunk, chunk_index, memory_result, chunk_structure)
+            else:
+                # Memory is forming in background - this is expected
+                logger.debug(f"Memory formation queued for {container_id} chunk {chunk_index}")
+                # Mark chunk as having background memory formation in progress
+                chunk["memory_formation_triggered"] = True
+                chunk["memory_formation_timestamp"] = datetime.now().isoformat()
+            
+        except Exception as e:
+            logger.error(f"Error triggering memory formation for {container_id} chunk {chunk_index}: {e}", exc_info=True)
+
+    async def _apply_memory_to_chunk(self,
+                                   chunk: Dict[str, Any],
+                                   chunk_index: int,
+                                   memory_result: Dict[str, Any],
+                                   chunk_structure: Dict[str, Any]) -> None:
+        """
+        Apply a ready memory result to a chunk structure.
+        
+        Args:
+            chunk: The N-chunk to update
+            chunk_index: Index of the chunk
+            memory_result: Memory result from AgentMemoryCompressor
+            chunk_structure: Chunk structure to update
+        """
+        try:
+            # Create memory EventFacet from the result
+            memory_props = memory_result.get("properties", {})
+            memory_summary = memory_props.get("memory_summary", "")
+            memory_id = memory_props.get("memory_id", f"mem_{chunk_index}")
+            token_count = memory_props.get("token_count", 0)
+            own_token_count = memory_props.get("own_token_count", 0)
+            
+            # Calculate mean timestamp from original facets
+            event_facets = chunk.get("event_facets", [])
+            timestamps = [facet.veil_timestamp for facet in event_facets]
+            mean_timestamp = sum(timestamps) / len(timestamps) if timestamps else ConnectomeEpoch.get_veil_timestamp()
+            
+            # Create memory EventFacet
+            container_id = chunk.get("container_id", "unknown")
+            memory_facet = EventFacet(
+                facet_id=f"memory_{memory_id}",
+                veil_timestamp=mean_timestamp,
+                owner_element_id=event_facets[0].owner_element_id if event_facets else container_id,
+                event_type="compressed_memory",
+                content=memory_summary,
+                links_to=container_id
+            )
+            
+            # Add memory properties
+            memory_facet.properties.update({
+                "is_compressed_memory": True,
+                "memory_id": memory_id,
+                "original_facet_count": len(event_facets),
+                "token_count": token_count,
+                "own_token_count": own_token_count,
+                "source_chunk_index": chunk_index,
+                "compression_approach": "rolling_window_background",
+                "replaced_facet_ids": [facet.facet_id for facet in event_facets]
+            })
+            
+            # Create M-chunk
+            m_chunk = {
+                "chunk_type": "m_chunk",
+                "memory_facet": memory_facet,
+                "token_count": token_count,
+                "own_token_count": own_token_count,
+                "chunk_index": len(chunk_structure.get("m_chunks", [])),
+                "created_at": datetime.now(),
+                "is_complete": True,
+                "source_n_chunk_index": chunk_index,
+                "replaced_facet_count": len(event_facets)
+            }
+            
+            # Add to M-chunks
+            if "m_chunks" not in chunk_structure:
+                chunk_structure["m_chunks"] = []
+            chunk_structure["m_chunks"].append(m_chunk)
+            
+            # Mark N-chunk as having memory
+            chunk["has_memory_chunk"] = True
+            chunk["memory_chunk_index"] = m_chunk["chunk_index"]
+            
+            logger.info(f"Applied ready memory to chunk {chunk_index}: {memory_summary[:100]}...")
+            
+        except Exception as e:
+            logger.error(f"Error applying memory to chunk {chunk_index}: {e}", exc_info=True)
 
     def _detect_timeline_divergence(self, 
                                    memory_facet: EventFacet,
@@ -2070,3 +2560,4 @@ class VEILFacetCompressionEngine(Component):
         except Exception as e:
             logger.warning(f"Error getting HUD component: {e}")
             return None
+

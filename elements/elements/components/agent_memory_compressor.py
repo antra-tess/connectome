@@ -438,7 +438,7 @@ class AgentMemoryCompressor(MemoryCompressor):
             await self.ensure_background_processor_running()
             
             # Generate memory ID
-            memory_id = self._generate_memory_id(element_ids)
+            memory_id = self.generate_memory_id(element_ids)
             logger.debug(f"Agent {self.agent_id}: Generated memory_id {memory_id} for elements {element_ids}")
             
             # Check memory state
@@ -1293,9 +1293,12 @@ MEMORY SUMMARY:"""
             logger.error(f"Error getting memory statistics: {e}", exc_info=True)
             return {"error": str(e)}
     
-    def _generate_memory_id(self, element_ids: List[str]) -> str:
+    def generate_memory_id(self, element_ids: List[str]) -> str:
         """
         Generate a deterministic memory ID for a set of element IDs.
+        
+        PUBLIC METHOD: This can be called externally to ensure consistent 
+        memory ID generation across different components.
         
         FIXED: Now generates truly deterministic IDs based on element content,
         ensuring the same elements always get the same memory ID.
