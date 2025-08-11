@@ -1,0 +1,70 @@
+{
+  "messages": [
+    {
+      "message_id": "msg_001",
+      "text": "Hello everyone! How is everyone doing today?",
+      "sender_id": "user123",
+      "sender_name": "Alice Smith",
+      "timestamp": "2024-01-15T10:30:00Z",
+      "conversation_id": "general_chat",
+      "is_dm": false,
+      "mentions": [],
+      "attachments": []
+    },
+    {
+      "message_id": "msg_002", 
+      "text": "Hi Alice! I'm doing great, thanks for asking. Working on some interesting AI projects.",
+      "sender_id": "user456",
+      "sender_name": "Bob Johnson",
+      "timestamp": "2024-01-15T10:32:15Z",
+      "conversation_id": "general_chat",
+      "is_dm": false,
+      "mentions": ["user123"],
+      "attachments": []
+    },
+    {
+      "message_id": "msg_003",
+      "text": "That sounds fascinating! What kind of AI projects?",
+      "sender_id": "user123", 
+      "sender_name": "Alice Smith",
+      "timestamp": "2024-01-15T10:35:30Z",
+      "conversation_id": "general_chat",
+      "is_dm": false,
+      "mentions": ["user456"],
+      "attachments": []
+    },
+    {
+      "message_id": "msg_004",
+      "text": "I'm working on autonomous agent frameworks, particularly around memory systems and conversation DAGs.",
+      "sender_id": "user456",
+      "sender_name": "Bob Johnson", 
+      "timestamp": "2024-01-15T10:37:45Z",
+      "conversation_id": "general_chat",
+      "is_dm": false,
+      "mentions": [],
+      "attachments": [
+        {
+          "type": "image",
+          "url": "https://example.com/diagram.png",
+          "filename": "agent_architecture.png"
+        }
+      ]
+    },
+    {
+      "message_id": "msg_005",
+      "text": "Hey Bob, can you send me those research papers privately?",
+      "sender_id": "user789",
+      "sender_name": "Charlie Brown",
+      "timestamp": "2024-01-15T10:40:00Z", 
+      "conversation_id": "dm_charlie_bob",
+      "is_dm": true,
+      "mentions": [],
+      "attachments": []
+    }
+  ],
+  "metadata": {
+    "export_date": "2024-01-15T12:00:00Z",
+    "platform": "example_chat",
+    "version": "1.0"
+  }
+}
