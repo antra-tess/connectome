@@ -158,7 +158,6 @@ class FacetAwareHUDComponent(Component):
                 facet_cache=facet_cache,
                 focus_info=focus_info  # Pass structured focus info instead of focus_context
             )
-
             # NEW: Process facets into turn-based messages
             turn_based_messages = await self._process_facets_into_turns(processed_facets, options, tools)
 

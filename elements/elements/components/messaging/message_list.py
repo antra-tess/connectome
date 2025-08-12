@@ -390,40 +390,32 @@ class MessageListComponent(Component):
 
         current_status = message_to_update.get('status', 'received')
 
-        if current_status == "pending_delete":
-            # Scenario 2: This is confirmation of our agent's pending deletion
-            pending_agent_id = message_to_update.get('pending_delete_by_agent_id')
-            logger.info(f"[{self.owner.id}] Confirmed deletion of message '{original_external_id}' that was pending delete by agent '{pending_agent_id}'")
+        # if current_status == "pending_delete":
+        #     # Scenario 2: This is confirmation of our agent's pending deletion
+        #     pending_agent_id = message_to_update.get('pending_delete_by_agent_id')
+        #     logger.info(f"[{self.owner.id}] Confirmed deletion of message '{original_external_id}' that was pending delete by agent '{pending_agent_id}'")
 
-            # Update to confirmed deleted state (keep as tombstone for context)
-            message_to_update['text'] = "[🗑️ Message deleted]"
-            message_to_update['status'] = "deleted"
-            message_to_update['deleted_timestamp'] = delete_content.get('timestamp', time.time())
-            message_to_update['confirmed_deleted'] = True
+        #     # Update to confirmed deleted state (keep as tombstone for context)
+        #     message_to_update['text'] = "[🗑️ Message deleted]"
+        #     message_to_update['status'] = "deleted"
+        #     message_to_update['deleted_timestamp'] = delete_content.get('timestamp', time.time())
+        #     message_to_update['confirmed_deleted'] = True
 
-            # Clean up pending state
-            message_to_update.pop('original_text_before_pending_delete', None)
-            message_to_update.pop('pending_delete_by_agent_id', None)
-            message_to_update.pop('pending_delete_timestamp', None)
+        #     # Clean up pending state
+        #     message_to_update.pop('original_text_before_pending_delete', None)
+        #     message_to_update.pop('pending_delete_by_agent_id', None)
+        #     message_to_update.pop('pending_delete_timestamp', None)
 
-        else:
+        # else:
             # Scenario 1: External deletion (another user deleted the message)
-            logger.info(f"[{self.owner.id}] External deletion of message '{original_external_id}' (was status: {current_status})")
+        logger.debug(f"[{self.owner.id}] External deletion of message '{original_external_id}' (was status: {current_status})")
 
-            # Keep message as tombstone but mark as externally deleted
-            message_to_update['text'] = "[🗑️ Message was deleted]"
-            message_to_update['status'] = "deleted"
-            message_to_update['deleted_timestamp'] = delete_content.get('timestamp', time.time())
-            message_to_update['externally_deleted'] = True
-
-            # Store original text for potential debugging/recovery
-            if 'original_text_before_delete' not in message_to_update:
-                original_text = message_to_update.get('original_text_before_pending_delete') or message_to_update.get('text')
-                message_to_update['original_text_before_delete'] = original_text
+        self._state['_message_map'].pop(message_to_update['internal_id'])
+        self._state['_messages'].pop(message_index)
 
         # IMPORTANT: Keep message in list as tombstone for conversation context
         # Agents need to see that messages existed but were deleted
-        logger.info(f"[{self.owner.id}] Message '{original_external_id}' marked as deleted (tombstone preserved)")
+        logger.info(f"[{self.owner.id}] Message '{original_external_id}' removed from list")
         return True
 
     def _handle_edit_message(self, edit_content: Dict[str, Any]) -> bool:
@@ -1312,76 +1304,76 @@ class MessageListComponent(Component):
         except Exception as e:
             logger.error(f"[{self.owner.id}] Error emitting send failure activation: {e}", exc_info=True)
 
-    # --- NEW: Methods for immediate local state updates (called by tools before external confirmation) ---
-    def mark_message_pending_delete(self, external_message_id: str, requesting_agent_id: str) -> bool:
-        """
-        Immediately marks a message as pending deletion in local state.
-        Called by delete_message tool before external confirmation.
+    # # --- NEW: Methods for immediate local state updates (called by tools before external confirmation) ---
+    # def mark_message_pending_delete(self, external_message_id: str, requesting_agent_id: str) -> bool:
+    #     """
+    #     Immediately marks a message as pending deletion in local state.
+    #     Called by delete_message tool before external confirmation.
 
-        Args:
-            external_message_id: External ID of message to mark as pending delete
-            requesting_agent_id: ID of agent requesting the deletion
+    #     Args:
+    #         external_message_id: External ID of message to mark as pending delete
+    #         requesting_agent_id: ID of agent requesting the deletion
 
-        Returns:
-            True if message found and marked, False otherwise
-        """
-        message_to_update = None
-        for msg in self._state['_messages']:
-            if msg.get('original_external_id') == external_message_id:
-                message_to_update = msg
-                break
+    #     Returns:
+    #         True if message found and marked, False otherwise
+    #     """
+    #     message_to_update = None
+    #     for msg in self._state['_messages']:
+    #         if msg.get('original_external_id') == external_message_id:
+    #             message_to_update = msg
+    #             break
 
-        if message_to_update:
-            # Store original text for potential restore if deletion fails
-            if 'original_text_before_pending_delete' not in message_to_update:
-                message_to_update['original_text_before_pending_delete'] = message_to_update.get('text')
+    #     if message_to_update:
+    #         # Store original text for potential restore if deletion fails
+    #         if 'original_text_before_pending_delete' not in message_to_update:
+    #             message_to_update['original_text_before_pending_delete'] = message_to_update.get('text')
 
-            message_to_update['text'] = "[🗑️ Deleting message...]"
-            message_to_update['status'] = "pending_delete"
-            message_to_update['pending_delete_by_agent_id'] = requesting_agent_id
-            message_to_update['pending_delete_timestamp'] = time.time()
+    #         message_to_update['text'] = "[🗑️ Deleting message...]"
+    #         message_to_update['status'] = "pending_delete"
+    #         message_to_update['pending_delete_by_agent_id'] = requesting_agent_id
+    #         message_to_update['pending_delete_timestamp'] = time.time()
 
-            logger.info(f"[{self.owner.id}] Marked message '{external_message_id}' as pending deletion by agent '{requesting_agent_id}'")
-            return True
-        else:
-            logger.warning(f"[{self.owner.id}] Cannot mark message '{external_message_id}' as pending delete: Message not found")
-            return False
+    #         logger.info(f"[{self.owner.id}] Marked message '{external_message_id}' as pending deletion by agent '{requesting_agent_id}'")
+    #         return True
+    #     else:
+    #         logger.warning(f"[{self.owner.id}] Cannot mark message '{external_message_id}' as pending delete: Message not found")
+    #         return False
 
-    def mark_message_pending_edit(self, external_message_id: str, new_text: str, requesting_agent_id: str) -> bool:
-        """
-        Immediately shows edited text with pending status in local state.
-        Called by edit_message tool before external confirmation.
+    # def mark_message_pending_edit(self, external_message_id: str, new_text: str, requesting_agent_id: str) -> bool:
+    #     """
+    #     Immediately shows edited text with pending status in local state.
+    #     Called by edit_message tool before external confirmation.
 
-        Args:
-            external_message_id: External ID of message to edit
-            new_text: New text content to show
-            requesting_agent_id: ID of agent requesting the edit
+    #     Args:
+    #         external_message_id: External ID of message to edit
+    #         new_text: New text content to show
+    #         requesting_agent_id: ID of agent requesting the edit
 
-        Returns:
-            True if message found and updated, False otherwise
-        """
-        message_to_update = None
-        for msg in self._state['_messages']:
-            if msg.get('original_external_id') == external_message_id:
-                message_to_update = msg
-                break
+    #     Returns:
+    #         True if message found and updated, False otherwise
+    #     """
+    #     message_to_update = None
+    #     for msg in self._state['_messages']:
+    #         if msg.get('original_external_id') == external_message_id:
+    #             message_to_update = msg
+    #             break
 
-        if message_to_update:
-            # Store original text for potential restore if edit fails
-            if 'original_text_before_pending_edit' not in message_to_update:
-                message_to_update['original_text_before_pending_edit'] = message_to_update.get('text')
+    #     if message_to_update:
+    #         # Store original text for potential restore if edit fails
+    #         if 'original_text_before_pending_edit' not in message_to_update:
+    #             message_to_update['original_text_before_pending_edit'] = message_to_update.get('text')
 
-            message_to_update['text'] = f"{new_text} ✏️"  # Show new text with edit indicator
-            message_to_update['status'] = "pending_edit"
-            message_to_update['pending_edit_by_agent_id'] = requesting_agent_id
-            message_to_update['pending_edit_timestamp'] = time.time()
-            message_to_update['pending_new_text'] = new_text  # Store clean version
+    #         message_to_update['text'] = f"{new_text} ✏️"  # Show new text with edit indicator
+    #         message_to_update['status'] = "pending_edit"
+    #         message_to_update['pending_edit_by_agent_id'] = requesting_agent_id
+    #         message_to_update['pending_edit_timestamp'] = time.time()
+    #         message_to_update['pending_new_text'] = new_text  # Store clean version
 
-            logger.info(f"[{self.owner.id}] Marked message '{external_message_id}' as pending edit by agent '{requesting_agent_id}'")
-            return True
-        else:
-            logger.warning(f"[{self.owner.id}] Cannot mark message '{external_message_id}' as pending edit: Message not found")
-            return False
+    #         logger.info(f"[{self.owner.id}] Marked message '{external_message_id}' as pending edit by agent '{requesting_agent_id}'")
+    #         return True
+    #     else:
+    #         logger.warning(f"[{self.owner.id}] Cannot mark message '{external_message_id}' as pending edit: Message not found")
+    #         return False
 
     def add_pending_reaction(self, external_message_id: str, emoji: str, requesting_agent_id: str) -> bool:
         """

@@ -339,6 +339,7 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
                                 parameters[attr_name] = attr_value
 
                         if tool_name:
+                            logger.critical(f"Parsed ultra-concise XML tool call: {tool_name} with params: {list(parameters.keys())}")
                             parsed_call = ParsedToolCall(
                                 tool_name=tool_name,
                                 parameters=parameters,
