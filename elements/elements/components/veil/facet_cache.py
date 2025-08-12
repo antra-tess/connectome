@@ -92,7 +92,6 @@ class VEILFacetCache:
         # Remove from primary storage
         del self.facets[facet_id]
 
-        logger.debug(f"Removed facet {facet_id} from cache")
         return True
 
     def update_facet(self, facet_id: str, property_updates: Dict[str, any]) -> bool:

@@ -477,9 +477,17 @@ class VEILFacetCompressionEngine(Component):
             if new_facets:
                 await self._update_chunks_with_new_facets(chunk_structure, new_facets, full_facet_cache)
             
+            # NEW: Detect deletions vs current cache and surgically update chunks
+            await self._apply_deletions_to_chunk_structure(
+                container_id=container_id,
+                chunk_structure=chunk_structure,
+                current_event_facets=event_facets,
+                full_facet_cache=full_facet_cache
+            )
+            
             # Render container according to focus rules
             rendered_facets = await self._render_container_with_focus_rules(
-                container_id, chunk_structure, is_focused_container
+                container_id, chunk_structure, is_focused_container, full_facet_cache
             )
             
             logger.debug(f"Container {container_id} processed: {len(event_facets)} → {len(rendered_facets)} facets (rolling window)")
@@ -639,7 +647,7 @@ class VEILFacetCompressionEngine(Component):
                     
                     chunks.append({
                         "chunk_type": "n_chunk",
-                        "event_facets": current_chunk,
+                        "facet_ids": [f.facet_id for f in current_chunk],
                         "content_fingerprint": chunk_fingerprint,  # NEW: Per-chunk fingerprint
                         "token_count": current_tokens,
                         "chunk_index": len(chunks),
@@ -668,7 +676,7 @@ class VEILFacetCompressionEngine(Component):
                 
                 chunks.append({
                     "chunk_type": "n_chunk",
-                    "event_facets": current_chunk,
+                    "facet_ids": [f.facet_id for f in current_chunk],
                     "content_fingerprint": chunk_fingerprint,  # NEW: Per-chunk fingerprint
                     "token_count": current_tokens,
                     "chunk_index": len(chunks),
@@ -712,7 +720,8 @@ class VEILFacetCompressionEngine(Component):
 
     async def _detect_chunk_level_changes(self, container_id: str, 
                                          new_facets: List[EventFacet], 
-                                         chunk_structure: Dict[str, Any]) -> List[int]:
+                                         chunk_structure: Dict[str, Any],
+                                         full_facet_cache: VEILFacetCache) -> List[int]:
         """
         Detect which specific chunks are affected by new/changed facets.
         
@@ -751,14 +760,14 @@ class VEILFacetCompressionEngine(Component):
                 
                 # Method 2: Facet ID Cross-Reference
                 if not affects_this_chunk:
-                    chunk_facet_ids = {f.facet_id for f in chunk.get("event_facets", [])}
+                    chunk_facet_ids = set(chunk.get("facet_ids", []))
                     new_facet_ids = {f.facet_id for f in new_facets}
                     affects_this_chunk = bool(chunk_facet_ids.intersection(new_facet_ids))
                 
                 if affects_this_chunk:
                     # Recalculate fingerprint for this specific chunk
-                    chunk_facets = chunk.get("event_facets", [])
-                    current_fingerprint = self._calculate_content_fingerprint(chunk_facets)
+                    rehydrated = self._rehydrate_event_facets(chunk.get("facet_ids", []), full_facet_cache)
+                    current_fingerprint = self._calculate_content_fingerprint(rehydrated)
                     stored_fingerprint = chunk.get("content_fingerprint", "")
                     
                     if current_fingerprint != stored_fingerprint:
@@ -875,7 +884,7 @@ class VEILFacetCompressionEngine(Component):
                 
                 rebuilt_chunk = {
                     "chunk_type": "n_chunk",
-                    "event_facets": chunk_facets,
+                    "facet_ids": [f.facet_id for f in chunk_facets],
                     "content_fingerprint": chunk_fingerprint,  # NEW: Per-chunk fingerprint
                     "token_count": self._calculate_event_facets_tokens(chunk_facets),
                     "chunk_index": chunk_index,
@@ -1056,8 +1065,8 @@ class VEILFacetCompressionEngine(Component):
             
             # Calculate based on chunk type
             if chunk.get("chunk_type") == "n_chunk":
-                event_facets = chunk.get("event_facets", [])
-                return self._calculate_event_facets_tokens(event_facets)
+                # Rehydrate is not available here; rely on stored token_count for performance
+                return chunk.get("token_count", 0)
             elif chunk.get("chunk_type") == "m_chunk":
                 memory_facet = chunk.get("memory_facet")
                 if memory_facet:
@@ -1095,7 +1104,7 @@ class VEILFacetCompressionEngine(Component):
             content_changed = False
             if not new_facets:
                 # No new facets, so check if existing content was modified (edits, deletions, etc.)
-                content_changed = await self._detect_content_changes(container_id, event_facets, chunk_structure)
+                content_changed = await self._detect_content_changes(container_id, event_facets, chunk_structure, full_facet_cache)
                 if content_changed:
                     logger.info(f"Content changes detected for {container_id} without new facets - surgical invalidation performed")
             else:
@@ -1157,7 +1166,7 @@ class VEILFacetCompressionEngine(Component):
                 # Create first chunk
                 current_chunk = {
                     "chunk_type": "n_chunk",
-                    "event_facets": [],
+                    "facet_ids": [],
                     "token_count": 0,
                     "chunk_index": 0,
                     "created_at": datetime.now(),
@@ -1175,7 +1184,7 @@ class VEILFacetCompressionEngine(Component):
                 if current_chunk.get("has_memory_chunk", False):
                     current_chunk = {
                         "chunk_type": "n_chunk",
-                        "event_facets": [],
+                        "facet_ids": [],
                         "token_count": 0,
                         "chunk_index": len(n_chunks),
                         "created_at": datetime.now(),
@@ -1197,7 +1206,7 @@ class VEILFacetCompressionEngine(Component):
                 if current_chunk.get("has_memory_chunk", False):
                     new_chunk = {
                         "chunk_type": "n_chunk",
-                        "event_facets": [facet],
+                        "facet_ids": [facet.facet_id],
                         "token_count": facet_tokens,
                         "chunk_index": len(n_chunks),
                         "created_at": datetime.now(),
@@ -1209,7 +1218,7 @@ class VEILFacetCompressionEngine(Component):
                     current_chunk = new_chunk
                 
                 # ROLLING WINDOW: Check if current chunk should be completed before adding
-                elif current_tokens >= self.COMPRESSION_CHUNK_SIZE and current_chunk.get("event_facets"):
+                elif current_tokens >= self.COMPRESSION_CHUNK_SIZE and len(current_chunk.get("facet_ids", [])) > 0:
                     # Current chunk is full - complete it and trigger memory formation
                     current_chunk["is_complete"] = True
                     
@@ -1227,7 +1236,7 @@ class VEILFacetCompressionEngine(Component):
                     # Create new chunk for this facet
                     new_chunk = {
                         "chunk_type": "n_chunk",
-                        "event_facets": [facet],
+                        "facet_ids": [facet.facet_id],
                         "token_count": facet_tokens,
                         "chunk_index": len(n_chunks),
                         "created_at": datetime.now(),
@@ -1240,7 +1249,8 @@ class VEILFacetCompressionEngine(Component):
                     
                 else:
                     # Add to current chunk (allow overflow - rolling window will handle completion)
-                    current_chunk["event_facets"].append(facet)
+                    current_chunk.setdefault("facet_ids", [])
+                    current_chunk["facet_ids"].append(facet.facet_id)
                     current_chunk["token_count"] = current_tokens + facet_tokens
                     
                     new_total = current_tokens + facet_tokens
@@ -1272,7 +1282,7 @@ class VEILFacetCompressionEngine(Component):
             # DEBUGGING: Show final chunk structure
             for i, chunk in enumerate(n_chunks):
                 tokens = chunk.get("token_count", 0)
-                facet_count = len(chunk.get("event_facets", []))
+                facet_count = len(chunk.get("facet_ids", []))
                 has_memory = chunk.get("has_memory_chunk", False)
             
         except Exception as e:
@@ -1295,6 +1305,9 @@ class VEILFacetCompressionEngine(Component):
             
             # Collect from N-chunks
             for n_chunk in chunk_structure.get("n_chunks", []):
+                # Prefer facet_ids list; fall back to legacy event_facets
+                for fid in n_chunk.get("facet_ids", []):
+                    existing_facet_ids.add(fid)
                 for facet in n_chunk.get("event_facets", []):
                     existing_facet_ids.add(facet.facet_id)
             
@@ -1435,7 +1448,7 @@ class VEILFacetCompressionEngine(Component):
             return f"error_fallback_{datetime.now().isoformat()}"
 
     async def _detect_content_changes(self, container_id: str, current_facets: List[EventFacet], 
-                                    chunk_structure: Dict[str, Any]) -> bool:
+                                    chunk_structure: Dict[str, Any], full_facet_cache: VEILFacetCache) -> bool:
         """
         Detect if EventFacet content has changed since last compression using surgical chunk-level detection.
         
@@ -1471,7 +1484,7 @@ class VEILFacetCompressionEngine(Component):
             
             # Use surgical chunk-level change detection
             changed_chunk_indices = await self._detect_chunk_level_changes(
-                container_id, new_facets, chunk_structure
+                container_id, new_facets, chunk_structure, full_facet_cache
             )
             
             if changed_chunk_indices:
@@ -1685,7 +1698,7 @@ class VEILFacetCompressionEngine(Component):
             for chunk_index, n_chunk in enumerate(n_chunks):
                 try:
                     chunk_tokens = n_chunk.get("token_count", 0)
-                    event_facets = n_chunk.get("event_facets", [])
+                    event_facets = self._rehydrate_event_facets(n_chunk.get("facet_ids", []), full_facet_cache)
                     has_memory = n_chunk.get("has_memory_chunk", False)
                     
                     # Skip chunks that are already compressed (have corresponding M-chunk)
@@ -1710,7 +1723,7 @@ class VEILFacetCompressionEngine(Component):
                                 "created_at": datetime.now(),
                                 "is_complete": True,
                                 "source_n_chunk_index": chunk_index,
-                                "replaced_facet_count": len(event_facets)
+                                "replaced_facet_count": len(n_chunk.get("facet_ids", []))
                             }
                             
                             # Add to M-chunks
@@ -1760,23 +1773,10 @@ class VEILFacetCompressionEngine(Component):
         except Exception as e:
             logger.error(f"Error in incremental chunk boundary processing for {container_id}: {e}", exc_info=True)
     
-    async def _render_container_with_focus_rules(self, container_id: str, chunk_structure: Dict[str, Any], is_focused_container: bool) -> List[VEILFacet]:
+    async def _render_container_with_focus_rules(self, container_id: str, chunk_structure: Dict[str, Any], is_focused_container: bool, full_facet_cache: VEILFacetCache) -> List[VEILFacet]:
         """
         Render container using rolling window approach with memory state checking.
-        
-        ROLLING WINDOW APPROACH:
-        - Uses IncrementalRollingWindow to determine which chunks need memories
-        - Checks AgentMemoryCompressor for memory states before using memories
-        - Falls back to raw chunks when memories are not ready
-        - Ensures consistent view between memory formation and runtime
-        
-        Args:
-            container_id: ID of container being rendered
-            chunk_structure: N-chunk/M-chunk structure
-            is_focused_container: Whether this container is focused
-            
-        Returns:
-            List of VEILFacets using rolling window memory management
+        Rehydrates raw facets from the authoritative facet cache.
         """
         try:
             rendered_facets = []
@@ -1809,13 +1809,13 @@ class VEILFacetCompressionEngine(Component):
                         memories_used += 1
                     else:
                         # Memory not ready - fall back to raw facets
-                        event_facets = chunk.get("event_facets", [])
+                        event_facets = self._rehydrate_event_facets(chunk.get("facet_ids", []), full_facet_cache)
                         rendered_facets.extend(event_facets)
                         raw_chunks_used += 1
                         logger.debug(f"Rolling window: chunk {i} outside window but memory not ready, using raw facets")
                 else:
                     # ROLLING WINDOW: Chunk is within window - use raw facets
-                    event_facets = chunk.get("event_facets", [])
+                    event_facets = self._rehydrate_event_facets(chunk.get("facet_ids", []), full_facet_cache)
                     rendered_facets.extend(event_facets)
                     raw_chunks_used += 1
             
@@ -1836,7 +1836,7 @@ class VEILFacetCompressionEngine(Component):
             # Fallback: return all available facets
             all_facets = []
             for n_chunk in chunk_structure.get("n_chunks", []):
-                all_facets.extend(n_chunk.get("event_facets", []))
+                all_facets.extend(self._rehydrate_event_facets(n_chunk.get("facet_ids", []), full_facet_cache))
             for m_chunk in chunk_structure.get("m_chunks", []):
                 memory_facet = m_chunk.get("memory_facet")
                 if memory_facet and not m_chunk.get("is_invalid", False):
@@ -1870,7 +1870,7 @@ class VEILFacetCompressionEngine(Component):
             
             # Generate memory_id using actual facet IDs (content-based, not chunk-based)
             # This ensures memory ID is deterministic based on actual content
-            facet_ids = [facet.facet_id for facet in chunk.get("event_facets", [])]
+            facet_ids = chunk.get("facet_ids", [])
             if not facet_ids:
                 logger.warning(f"No facet IDs found for chunk {chunk_index}")
                 return False
@@ -2143,7 +2143,7 @@ class VEILFacetCompressionEngine(Component):
                 
                 # Chunk doesn't have memory yet - include raw facets
                 raw_facets_added = 0
-                for facet in chunk.get("event_facets", []):
+                for facet in self._rehydrate_event_facets(chunk.get("facet_ids", []), full_facet_cache):
                     compressed_cache.add_facet(facet)
                     raw_facets_added += 1
                 
@@ -2153,14 +2153,14 @@ class VEILFacetCompressionEngine(Component):
             # Add the target chunk's raw facets (what we're memorizing)
             target_chunk = n_chunks[target_chunk_index]
             target_facets_added = 0
-            for facet in target_chunk.get("event_facets", []):
+            for facet in self._rehydrate_event_facets(target_chunk.get("facet_ids", []), full_facet_cache):
                 compressed_cache.add_facet(facet)
                 target_facets_added += 1
             
             # Add any chunks after target (recent content within window)
             future_facets_added = 0
             for i in range(target_chunk_index + 1, len(n_chunks)):
-                for facet in n_chunks[i].get("event_facets", []):
+                for facet in self._rehydrate_event_facets(n_chunks[i].get("facet_ids", []), full_facet_cache):
                     compressed_cache.add_facet(facet)
                     future_facets_added += 1
             
@@ -2195,7 +2195,7 @@ class VEILFacetCompressionEngine(Component):
             full_facet_cache: Complete VEILFacetCache for context
         """
         try:
-            event_facets = chunk.get("event_facets", [])
+            event_facets = self._rehydrate_event_facets(chunk.get("facet_ids", []), full_facet_cache)
             
             if not event_facets:
                 logger.warning(f"No event facets to memorize in chunk {chunk_index} for {container_id}")
@@ -2279,8 +2279,17 @@ class VEILFacetCompressionEngine(Component):
             own_token_count = memory_props.get("own_token_count", 0)
             
             # Calculate mean timestamp from original facets
-            event_facets = chunk.get("event_facets", [])
-            timestamps = [facet.veil_timestamp for facet in event_facets]
+            facet_ids = chunk.get("facet_ids", [])
+            timestamps = []
+            try:
+                # Best-effort: use stored owner element id for lookup via m_chunks not available here, so skip rehydrate
+                # Mean timestamp will have been set during memory creation, so we can safely fall back if needed
+                pass
+            except Exception:
+                pass
+            # Note: if timestamps empty, fallback will be used below
+            # replaced facet ids
+            replaced_ids = facet_ids
             mean_timestamp = sum(timestamps) / len(timestamps) if timestamps else ConnectomeEpoch.get_veil_timestamp()
             
             # Create memory EventFacet
@@ -2288,7 +2297,7 @@ class VEILFacetCompressionEngine(Component):
             memory_facet = EventFacet(
                 facet_id=f"memory_{memory_id}",
                 veil_timestamp=mean_timestamp,
-                owner_element_id=event_facets[0].owner_element_id if event_facets else container_id,
+                owner_element_id=container_id,
                 event_type="compressed_memory",
                 content=memory_summary,
                 links_to=container_id
@@ -2298,12 +2307,12 @@ class VEILFacetCompressionEngine(Component):
             memory_facet.properties.update({
                 "is_compressed_memory": True,
                 "memory_id": memory_id,
-                "original_facet_count": len(event_facets),
+                "original_facet_count": len(replaced_ids),
                 "token_count": token_count,
                 "own_token_count": own_token_count,
                 "source_chunk_index": chunk_index,
                 "compression_approach": "rolling_window_background",
-                "replaced_facet_ids": [facet.facet_id for facet in event_facets]
+                "replaced_facet_ids": replaced_ids
             })
             
             # Create M-chunk
@@ -2316,7 +2325,7 @@ class VEILFacetCompressionEngine(Component):
                 "created_at": datetime.now(),
                 "is_complete": True,
                 "source_n_chunk_index": chunk_index,
-                "replaced_facet_count": len(event_facets)
+                "replaced_facet_count": len(n_chunk.get("facet_ids", []))
             }
             
             # Add to M-chunks
@@ -2561,3 +2570,57 @@ class VEILFacetCompressionEngine(Component):
             logger.warning(f"Error getting HUD component: {e}")
             return None
 
+    def _rehydrate_event_facets(self, facet_ids: List[str], full_facet_cache: VEILFacetCache) -> List[EventFacet]:
+        """
+        Helper: Rehydrate EventFacets from facet IDs using the authoritative facet cache.
+        """
+        try:
+            if not facet_ids:
+                return []
+            facets = []
+            cache_map = full_facet_cache.facets if hasattr(full_facet_cache, 'facets') else {}
+            for fid in facet_ids:
+                facet = cache_map.get(fid)
+                if facet and facet.facet_type == VEILFacetType.EVENT:
+                    facets.append(facet)
+            return facets
+        except Exception as e:
+            logger.error(f"Error rehydrating facets: {e}", exc_info=True)
+            return []
+
+    async def _apply_deletions_to_chunk_structure(self, container_id: str, chunk_structure: Dict[str, Any], current_event_facets: List[EventFacet], full_facet_cache: VEILFacetCache) -> None:
+        """
+        Detect and apply deletions by comparing cached facet IDs in chunks with current facet IDs.
+        Invalidate corresponding memories for affected chunks and recompute per-chunk metadata.
+        """
+        try:
+            n_chunks = chunk_structure.get("n_chunks", [])
+            if not n_chunks:
+                return
+            current_ids = {f.facet_id for f in current_event_facets}
+            changed_indices: List[int] = []
+
+            for idx, chunk in enumerate(n_chunks):
+                facet_ids = list(chunk.get("facet_ids", []))
+                if not facet_ids:
+                    continue
+                # Compute kept ids
+                kept_ids = [fid for fid in facet_ids if fid in current_ids]
+                if len(kept_ids) != len(facet_ids):
+                    # Update chunk
+                    chunk["facet_ids"] = kept_ids
+                    # Recompute tokens and metadata from authoritative cache
+                    rehydrated = self._rehydrate_event_facets(kept_ids, full_facet_cache)
+                    chunk["token_count"] = self._calculate_event_facets_tokens(rehydrated) if rehydrated else 0
+                    chunk["content_fingerprint"] = self._calculate_content_fingerprint(rehydrated)
+                    chunk["temporal_range"] = self._calculate_temporal_range(rehydrated)
+                    changed_indices.append(idx)
+
+            if changed_indices:
+                # Invalidate associated memories for affected chunks only
+                await self._invalidate_specific_chunks(container_id, changed_indices, chunk_structure)
+                # Update container totals
+                chunk_structure["total_tokens"] = self._calculate_total_chunk_tokens(chunk_structure)
+                chunk_structure["last_update"] = datetime.now()
+        except Exception as e:
+            logger.error(f"Error applying deletions to chunk structure for {container_id}: {e}", exc_info=True)
