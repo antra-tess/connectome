@@ -136,8 +136,8 @@ class CLIInspector:
             for endpoint, desc in data.get('endpoints', {}).items():
                 summary_lines.append(f"  {endpoint} - {desc}")
         
-        elif "spaces" in data and "summary" in data:
-            # Spaces data
+        elif "summary" in data and "total_spaces" in data.get("summary", {}):
+            # Spaces data (identified by total_spaces field in summary)
             summary = data["summary"]
             summary_lines.append(f"🏢 Spaces Overview:")
             summary_lines.append(f"  Total: {summary.get('total_spaces', 0)}")
