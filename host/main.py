@@ -6,6 +6,7 @@ Initializes infrastructure modules, SpaceRegistry, and InnerSpace instances for 
 import logging
 import asyncio
 import sys
+import time
 from typing import Dict, Any, Optional # Added Optional
 import os
 
@@ -24,8 +25,10 @@ from host.modules.routing.host_router import HostRouter
 # from host.modules.activities.activity_listener import ActivityListener
 from host.modules.activities.activity_client import ActivityClient
 
-# Inspector module
+# Inspector modules
 from host.modules.inspector.inspector_server import InspectorServer
+from host.modules.inspector.cli_handler import register_cli_commands
+from host.modules.inspector.ipc_server import IPCServer, create_socket_info_file
 
 # Agent/InnerSpace
 from elements.elements.inner_space import InnerSpace
@@ -256,8 +259,11 @@ async def amain():
     logger.info("Starting Activity Client connections...")
     await activity_client.connect_to_all_adapters()
 
-    # Initialize Inspector Server (if enabled)
+    # Initialize Inspector components (if enabled)
     inspector_server = None
+    cli_handler = None
+    ipc_server = None
+    
     if settings.inspector_enabled:
         logger.info(f"Starting Inspector Server on port {settings.inspector_port}...")
         try:
@@ -270,8 +276,40 @@ async def amain():
                 'settings': settings
             })()
             
+            # Start web inspector server
             inspector_server = InspectorServer(host_instance, port=settings.inspector_port)
             await inspector_server.start()
+            
+            # Start CLI plugin (if enabled)
+            if settings.inspector_cli_enabled:
+                logger.info("Starting Inspector CLI plugin...")
+                try:
+                    # Register CLI command handler
+                    cli_handler = register_cli_commands(host_instance)
+                    
+                    # Start IPC server for external CLI clients
+                    ipc_server = IPCServer(cli_handler, socket_path=settings.inspector_ipc_socket_path)
+                    await ipc_server.start()
+                    
+                    # Create socket info file for client discovery
+                    socket_info_file = create_socket_info_file(
+                        ipc_server.get_socket_path(),
+                        {
+                            "inspector_port": settings.inspector_port,
+                            "started_at": time.time(),
+                            "host_id": f"connectome_{os.getpid()}"
+                        }
+                    )
+                    
+                    logger.info(f"Inspector CLI plugin started - IPC socket: {ipc_server.get_socket_path()}")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to start Inspector CLI plugin: {e}", exc_info=True)
+                    cli_handler = None
+                    ipc_server = None
+            else:
+                logger.info("Inspector CLI plugin disabled by configuration")
+                
         except Exception as e:
             logger.error(f"Failed to start Inspector Server: {e}", exc_info=True)
             inspector_server = None
@@ -299,6 +337,10 @@ async def amain():
              await activity_client.shutdown()
          if inspector_server:
              await inspector_server.stop()
+         if ipc_server:
+             await ipc_server.stop()
+         if cli_handler:
+             cli_handler.stop()
          logger.info("Shutdown sequence complete.")
 
 async def shutdown_all_spaces_gracefully(space_registry):
