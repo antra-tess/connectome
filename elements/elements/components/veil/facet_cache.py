@@ -215,7 +215,7 @@ class VEILFacetCache:
         # NEW: Filter out external messages that have corresponding synthetic responses in the cache
         # as their existence causes issues when turn structure is applied
         if only_synthetic_agent_responses_in_history:
-            return self._filter_out_facets_with_synthetic_responses(sorted_candidates)
+            return self._filter_out_original_agent_messages(sorted_candidates)
 
         return sorted_candidates
 
@@ -349,7 +349,7 @@ class VEILFacetCache:
             "span": max(timestamps) - min(timestamps)
         }
 
-    def _filter_out_facets_with_synthetic_responses(self, facets: List[VEILFacet]) -> List[VEILFacet]:
+    def _filter_out_original_agent_messages(self, facets: List[VEILFacet]) -> List[VEILFacet]:
         """
         Fliter out facets with external messages that have corresponding synthetic responses in the cache.
 
@@ -362,11 +362,14 @@ class VEILFacetCache:
         if not facets:
             return []
 
-        index_of_last_facet = len(facets) - 1
-        filtered_facets = [
-            facet for i, facet in enumerate(facets)
-            if i == index_of_last_facet or f"synthetic_response_{facet.facet_id}" not in facets[i + 1].facet_id
-        ]
+        filtered_facets = []
+
+        for facet in facets:
+            if facet.properties.get('event_type', None) == 'message_added' \
+               and facet.properties.get('is_from_current_agent', False):
+                continue
+
+            filtered_facets.append(facet)
 
         return filtered_facets
 
