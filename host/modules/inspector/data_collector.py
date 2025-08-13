@@ -13,6 +13,7 @@ from typing import Dict, Any, List, Optional, Union
 import traceback
 import psutil
 import os
+import sys
 
 from elements.space_registry import SpaceRegistry
 from elements.elements.base import BaseElement
@@ -58,7 +59,7 @@ class InspectorDataCollector:
                 "timestamp": time.time(),
                 "system": {
                     "process_id": os.getpid(),
-                    "python_version": f"{psutil.PYTHON}",
+                    "python_version": f"{sys.version}",
                     "uptime_seconds": time.time() - psutil.Process().create_time(),
                 },
                 "memory": {

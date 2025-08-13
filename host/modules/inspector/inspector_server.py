@@ -12,7 +12,7 @@ from aiohttp import web, ClientSession
 from aiohttp.web import Application, Request, Response
 import time
 
-from .data_collector import InspectorDataCollector
+from .endpoint_handlers import InspectorEndpointHandlers
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ class InspectorServer:
         self.app: Optional[Application] = None
         self.runner: Optional[web.AppRunner] = None
         self.site: Optional[web.TCPSite] = None
-        self.data_collector = InspectorDataCollector(host_instance)
+        self.handlers = InspectorEndpointHandlers(host_instance)
         
         # Server metrics
         self.start_time = time.time()
@@ -145,29 +145,8 @@ class InspectorServer:
     
     async def handle_root(self, request: Request) -> Response:
         """Handle root endpoint - API overview."""
-        api_info = {
-            "service": "Connectome Inspector",
-            "version": "1.0.0",
-            "uptime_seconds": time.time() - self.start_time,
-            "request_count": self.request_count,
-            "endpoints": {
-                "/": "API overview (this page)",
-                "/status": "Overall system status and health",
-                "/spaces": "Detailed information about all spaces and elements",
-                "/agents": "Agent configurations and current status",
-                "/adapters": "Activity adapter connection status",
-                "/metrics": "System performance metrics",
-                "/timelines": "Timeline DAG overview for all spaces",
-                "/timelines/{space_id}": "Timeline details for specific space",
-                "/timelines/{space_id}/{timeline_id}": "Specific timeline events and details",
-                "/veil": "VEIL system overview and statistics",
-                "/veil/{space_id}": "VEIL cache state for specific space",
-                "/veil/{space_id}/facets": "All VEIL facets in space with filtering",
-                "/veil/{space_id}/facets/{facet_id}": "Detailed information about specific facet",
-                "/health": "Simple health check"
-            }
-        }
-        return self._json_response(api_info)
+        data = await self.handlers.handle_root()
+        return self._json_response(data)
     
     async def handle_ui(self, request: Request) -> Response:
         """Handle UI visualization endpoint."""
@@ -199,188 +178,96 @@ class InspectorServer:
     
     async def handle_status(self, request: Request) -> Response:
         """Handle system status endpoint."""
-        try:
-            status_data = await self.data_collector.collect_system_status()
-            return self._json_response(status_data)
-        except Exception as e:
-            logger.error(f"Error collecting system status: {e}", exc_info=True)
-            return self._json_response(
-                {"error": "Failed to collect system status", "details": str(e)},
-                status=500
-            )
+        data = await self.handlers.handle_status()
+        status_code = 500 if "error" in data else 200
+        return self._json_response(data, status=status_code)
     
     async def handle_spaces(self, request: Request) -> Response:
         """Handle spaces inspection endpoint."""
-        try:
-            spaces_data = await self.data_collector.collect_spaces_data()
-            return self._json_response(spaces_data)
-        except Exception as e:
-            logger.error(f"Error collecting spaces data: {e}", exc_info=True)
-            return self._json_response(
-                {"error": "Failed to collect spaces data", "details": str(e)},
-                status=500
-            )
+        data = await self.handlers.handle_spaces()
+        status_code = 500 if "error" in data else 200
+        return self._json_response(data, status=status_code)
     
     async def handle_agents(self, request: Request) -> Response:
         """Handle agents inspection endpoint."""
-        try:
-            agents_data = await self.data_collector.collect_agents_data()
-            return self._json_response(agents_data)
-        except Exception as e:
-            logger.error(f"Error collecting agents data: {e}", exc_info=True)
-            return self._json_response(
-                {"error": "Failed to collect agents data", "details": str(e)},
-                status=500
-            )
+        data = await self.handlers.handle_agents()
+        status_code = 500 if "error" in data else 200
+        return self._json_response(data, status=status_code)
     
     async def handle_adapters(self, request: Request) -> Response:
         """Handle adapters inspection endpoint."""
-        try:
-            adapters_data = await self.data_collector.collect_adapters_data()
-            return self._json_response(adapters_data)
-        except Exception as e:
-            logger.error(f"Error collecting adapters data: {e}", exc_info=True)
-            return self._json_response(
-                {"error": "Failed to collect adapters data", "details": str(e)},
-                status=500
-            )
+        data = await self.handlers.handle_adapters()
+        status_code = 500 if "error" in data else 200
+        return self._json_response(data, status=status_code)
     
     async def handle_metrics(self, request: Request) -> Response:
         """Handle system metrics endpoint."""
-        try:
-            metrics_data = await self.data_collector.collect_metrics_data()
-            return self._json_response(metrics_data)
-        except Exception as e:
-            logger.error(f"Error collecting metrics data: {e}", exc_info=True)
-            return self._json_response(
-                {"error": "Failed to collect metrics data", "details": str(e)},
-                status=500
-            )
+        data = await self.handlers.handle_metrics()
+        status_code = 500 if "error" in data else 200
+        return self._json_response(data, status=status_code)
     
     async def handle_timelines(self, request: Request) -> Response:
         """Handle timeline overview endpoint."""
-        try:
-            timeline_data = await self.data_collector.collect_timeline_data()
-            return self._json_response(timeline_data)
-        except Exception as e:
-            logger.error(f"Error collecting timeline data: {e}", exc_info=True)
-            return self._json_response(
-                {"error": "Failed to collect timeline data", "details": str(e)},
-                status=500
-            )
+        data = await self.handlers.handle_timelines()
+        status_code = 500 if "error" in data else 200
+        return self._json_response(data, status=status_code)
     
     async def handle_timeline_details(self, request: Request) -> Response:
         """Handle timeline details endpoint for specific space/timeline."""
+        space_id = request.match_info.get('space_id')
+        timeline_id = request.match_info.get('timeline_id')  # Optional
+        
+        # Get optional query parameters
         try:
-            space_id = request.match_info.get('space_id')
-            timeline_id = request.match_info.get('timeline_id')  # Optional
-            
-            # Get optional query parameters
             limit = int(request.query.get('limit', 100))
-            limit = min(max(limit, 1), 1000)  # Clamp between 1 and 1000
-            
-            if not space_id:
-                return self._json_response(
-                    {"error": "space_id is required"},
-                    status=400
-                )
-            
-            timeline_details = await self.data_collector.collect_timeline_details(
-                space_id, timeline_id, limit
-            )
-            return self._json_response(timeline_details)
-        except Exception as e:
-            logger.error(f"Error collecting timeline details: {e}", exc_info=True)
-            return self._json_response(
-                {"error": "Failed to collect timeline details", "details": str(e)},
-                status=500
-            )
+        except (ValueError, TypeError):
+            limit = 100
+        
+        data = await self.handlers.handle_timeline_details(space_id, timeline_id, limit)
+        status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if "error" in data else 200)
+        return self._json_response(data, status=status_code)
     
     async def handle_veil(self, request: Request) -> Response:
         """Handle VEIL system overview endpoint."""
-        try:
-            veil_data = await self.data_collector.collect_veil_overview()
-            return self._json_response(veil_data)
-        except Exception as e:
-            logger.error(f"Error collecting VEIL overview: {e}", exc_info=True)
-            return self._json_response(
-                {"error": "Failed to collect VEIL overview", "details": str(e)},
-                status=500
-            )
+        _ = request  # Request parameter required by aiohttp interface
+        data = await self.handlers.handle_veil()
+        status_code = 500 if "error" in data else 200
+        return self._json_response(data, status=status_code)
 
     async def handle_veil_space(self, request: Request) -> Response:
         """Handle VEIL cache state for specific space endpoint."""
-        try:
-            space_id = request.match_info.get('space_id')
-            if not space_id:
-                return self._json_response(
-                    {"error": "space_id is required"},
-                    status=400
-                )
-            
-            veil_space_data = await self.data_collector.collect_veil_space_data(space_id)
-            return self._json_response(veil_space_data)
-        except Exception as e:
-            logger.error(f"Error collecting VEIL space data: {e}", exc_info=True)
-            return self._json_response(
-                {"error": "Failed to collect VEIL space data", "details": str(e)},
-                status=500
-            )
+        space_id = request.match_info.get('space_id')
+        data = await self.handlers.handle_veil_space(space_id)
+        status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if "error" in data else 200)
+        return self._json_response(data, status=status_code)
 
     async def handle_veil_facets(self, request: Request) -> Response:
         """Handle all VEIL facets in space with filtering endpoint."""
+        space_id = request.match_info.get('space_id')
+        
+        # Get optional query parameters for filtering
+        facet_type = request.query.get('type')  # event, status, ambient
+        owner_id = request.query.get('owner')
         try:
-            space_id = request.match_info.get('space_id')
-            if not space_id:
-                return self._json_response(
-                    {"error": "space_id is required"},
-                    status=400
-                )
-            
-            # Get optional query parameters for filtering
-            facet_type = request.query.get('type')  # event, status, ambient
-            owner_id = request.query.get('owner')
             limit = int(request.query.get('limit', 100))
-            limit = min(max(limit, 1), 1000)  # Clamp between 1 and 1000
-            
-            veil_facets_data = await self.data_collector.collect_veil_facets_data(
-                space_id, facet_type, owner_id, limit
-            )
-            return self._json_response(veil_facets_data)
-        except Exception as e:
-            logger.error(f"Error collecting VEIL facets data: {e}", exc_info=True)
-            return self._json_response(
-                {"error": "Failed to collect VEIL facets data", "details": str(e)},
-                status=500
-            )
+        except (ValueError, TypeError):
+            limit = 100
+        
+        data = await self.handlers.handle_veil_facets(space_id, facet_type, owner_id, limit)
+        status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if "error" in data else 200)
+        return self._json_response(data, status=status_code)
 
     async def handle_veil_facet_details(self, request: Request) -> Response:
         """Handle detailed information about specific facet endpoint."""
-        try:
-            space_id = request.match_info.get('space_id')
-            facet_id = request.match_info.get('facet_id')
-            
-            if not space_id or not facet_id:
-                return self._json_response(
-                    {"error": "Both space_id and facet_id are required"},
-                    status=400
-                )
-            
-            facet_details = await self.data_collector.collect_veil_facet_details(space_id, facet_id)
-            return self._json_response(facet_details)
-        except Exception as e:
-            logger.error(f"Error collecting VEIL facet details: {e}", exc_info=True)
-            return self._json_response(
-                {"error": "Failed to collect VEIL facet details", "details": str(e)},
-                status=500
-            )
+        space_id = request.match_info.get('space_id')
+        facet_id = request.match_info.get('facet_id')
+        
+        data = await self.handlers.handle_veil_facet_details(space_id, facet_id)
+        status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if "error" in data else 200)
+        return self._json_response(data, status=status_code)
 
     async def handle_health(self, request: Request) -> Response:
         """Handle health check endpoint."""
-        health_data = {
-            "status": "healthy",
-            "timestamp": time.time(),
-            "uptime_seconds": time.time() - self.start_time,
-            "request_count": self.request_count
-        }
-        return self._json_response(health_data)
+        _ = request  # Request parameter required by aiohttp interface
+        data = await self.handlers.handle_health()
+        return self._json_response(data)
