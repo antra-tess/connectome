@@ -184,6 +184,95 @@
             padding: 0.25rem 0.5rem;
             font-size: 0.8rem;
         }
+        
+        /* Edit functionality styles */
+        .edit-btn {
+            background: #00d4aa !important;
+            color: #1a1a2e !important;
+            border: none !important;
+            padding: 2px 6px !important;
+            margin-left: 8px !important;
+            font-size: 0.7rem !important;
+            border-radius: 3px !important;
+            cursor: pointer !important;
+            opacity: 0.7;
+            transition: opacity 0.2s;
+        }
+        
+        .edit-btn:hover {
+            opacity: 1;
+            background: #00b894 !important;
+        }
+        
+        .edit-input {
+            background: #16213e !important;
+            color: #eee !important;
+            border: 1px solid #00d4aa !important;
+            padding: 2px 4px !important;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace !important;
+            font-size: 0.85rem !important;
+            border-radius: 3px !important;
+            margin-left: 4px !important;
+            min-width: 100px !important;
+        }
+        
+        .edit-input:focus {
+            outline: none !important;
+            border-color: #00b894 !important;
+            box-shadow: 0 0 0 2px rgba(0, 212, 170, 0.3) !important;
+        }
+        
+        .edit-actions {
+            margin-left: 8px !important;
+            display: inline-flex !important;
+            gap: 4px !important;
+        }
+        
+        .edit-save, .edit-cancel {
+            background: #00d4aa !important;
+            color: #1a1a2e !important;
+            border: none !important;
+            padding: 2px 6px !important;
+            font-size: 0.7rem !important;
+            border-radius: 3px !important;
+            cursor: pointer !important;
+        }
+        
+        .edit-cancel {
+            background: #ff6b6b !important;
+            color: white !important;
+        }
+        
+        .edit-save:hover {
+            background: #00b894 !important;
+        }
+        
+        .edit-cancel:hover {
+            background: #e55656 !important;
+        }
+        
+        .editable-node {
+            position: relative;
+        }
+        
+        .editable-node:hover .edit-btn {
+            opacity: 1;
+        }
+        
+        .edit-status {
+            margin-left: 8px !important;
+            font-size: 0.7rem !important;
+            color: #999 !important;
+            font-style: italic;
+        }
+        
+        .edit-success {
+            color: #00d4aa !important;
+        }
+        
+        .edit-error {
+            color: #ff6b6b !important;
+        }
     </style>
 </head>
 <body>
@@ -578,16 +667,21 @@
             treeContainer.appendChild(createTreeNode('root', data, 0, true));
         }
         
-        function createTreeNode(key, value, depth, isExpanded = false) {
+        function createTreeNode(key, value, depth, isExpanded = false, path = []) {
             const nodeDiv = document.createElement('div');
             nodeDiv.style.marginLeft = (depth * 20) + 'px';
             
             const isObject = typeof value === 'object' && value !== null;
             const isArray = Array.isArray(value);
             const hasChildren = isObject && Object.keys(value).length > 0;
+            const currentPath = [...path, key];
+            
+            // Determine if this node is editable
+            const isEditable = !hasChildren && isEditableField(currentPath, value);
             
             // Create node header
             const headerDiv = document.createElement('div');
+            headerDiv.className = isEditable ? 'editable-node' : '';
             headerDiv.style.cssText = `
                 display: flex;
                 align-items: center;
@@ -622,6 +716,8 @@
             
             // Type and value preview
             const valueSpan = document.createElement('span');
+            valueSpan.setAttribute('data-path', JSON.stringify(currentPath));
+            
             if (isArray) {
                 valueSpan.textContent = `: Array(${value.length})`;
                 valueSpan.style.color = '#a29bfe';
@@ -636,6 +732,19 @@
             }
             headerDiv.appendChild(valueSpan);
             
+            // Add edit button for editable fields
+            if (isEditable) {
+                const editBtn = document.createElement('button');
+                editBtn.textContent = '✏️';
+                editBtn.className = 'edit-btn';
+                editBtn.title = 'Edit this field';
+                editBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    startEdit(headerDiv, currentPath, value);
+                };
+                headerDiv.appendChild(editBtn);
+            }
+            
             nodeDiv.appendChild(headerDiv);
             
             // Children container
@@ -646,29 +755,31 @@
                 // Add children
                 if (isArray) {
                     value.forEach((item, index) => {
-                        childrenDiv.appendChild(createTreeNode(`[${index}]`, item, depth + 1, false));
+                        childrenDiv.appendChild(createTreeNode(`[${index}]`, item, depth + 1, false, currentPath));
                     });
                 } else {
                     Object.keys(value).forEach(childKey => {
-                        childrenDiv.appendChild(createTreeNode(childKey, value[childKey], depth + 1, false));
+                        childrenDiv.appendChild(createTreeNode(childKey, value[childKey], depth + 1, false, currentPath));
                     });
                 }
                 
                 nodeDiv.appendChild(childrenDiv);
                 
-                // Click handler for expand/collapse
-                headerDiv.addEventListener('click', () => {
-                    const indicator = headerDiv.querySelector('span');
-                    const isCurrentlyExpanded = childrenDiv.style.display === 'block';
-                    
-                    if (isCurrentlyExpanded) {
-                        childrenDiv.style.display = 'none';
-                        indicator.textContent = '▶ ';
-                    } else {
-                        childrenDiv.style.display = 'block';
-                        indicator.textContent = '▼ ';
-                    }
-                });
+                // Click handler for expand/collapse (only for containers, not editable items)
+                if (!isEditable) {
+                    headerDiv.addEventListener('click', () => {
+                        const indicator = headerDiv.querySelector('span');
+                        const isCurrentlyExpanded = childrenDiv.style.display === 'block';
+                        
+                        if (isCurrentlyExpanded) {
+                            childrenDiv.style.display = 'none';
+                            indicator.textContent = '▶ ';
+                        } else {
+                            childrenDiv.style.display = 'block';
+                            indicator.textContent = '▼ ';
+                        }
+                    });
+                }
             }
             
             return nodeDiv;
@@ -697,6 +808,272 @@
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
+        }
+        
+        // Edit functionality
+        function isEditableField(path, value) {
+            // Only allow editing of simple values (not objects or arrays)
+            if (typeof value === 'object' && value !== null) {
+                return false;
+            }
+            
+            // Determine what type of data we're dealing with based on path
+            const pathStr = path.join('.');
+            
+            // Timeline event fields (events are identifiable by having an 'id' field)
+            if (pathStr.includes('events') && (
+                pathStr.endsWith('timestamp') ||
+                pathStr.includes('payload.') ||
+                pathStr.endsWith('parent_ids') ||
+                pathStr.endsWith('timeline_id')
+            )) {
+                return true;
+            }
+            
+            // VEIL facet fields (facets are identifiable by having 'facet_id' field)
+            if (pathStr.includes('facets') && (
+                pathStr.endsWith('veil_timestamp') ||
+                pathStr.endsWith('owner_element_id') ||
+                pathStr.endsWith('links_to') ||
+                pathStr.includes('properties.')
+            )) {
+                return true;
+            }
+            
+            return false;
+        }
+        
+        function findEditableContext(path) {
+            const pathStr = path.join('.');
+            
+            // Look for timeline event context
+            const eventMatch = pathStr.match(/.*events\.([^.]+)/);
+            if (eventMatch) {
+                const eventId = eventMatch[1];
+                // Find the event data to get space_id and timeline_id
+                const eventData = getValueAtPath(currentData, path.slice(0, -1));
+                return {
+                    type: 'timeline_event',
+                    eventId: eventId,
+                    spaceId: getSpaceIdFromPath(path),
+                    timelineId: eventData?.timeline_id
+                };
+            }
+            
+            // Look for VEIL facet context
+            const facetMatch = pathStr.match(/.*facets\.([^.]+)/);
+            if (facetMatch) {
+                const facetId = facetMatch[1];
+                const spaceId = getSpaceIdFromPath(path);
+                return {
+                    type: 'veil_facet',
+                    facetId: facetId,
+                    spaceId: spaceId
+                };
+            }
+            
+            return null;
+        }
+        
+        function getSpaceIdFromPath(path) {
+            // Look for space ID patterns in the path
+            const pathStr = path.join('.');
+            const spaceMatch = pathStr.match(/spaces\.([^.]+)/);
+            return spaceMatch ? spaceMatch[1] : null;
+        }
+        
+        function getValueAtPath(obj, path) {
+            return path.reduce((current, key) => {
+                if (current === null || current === undefined) return undefined;
+                return current[key];
+            }, obj);
+        }
+        
+        function startEdit(headerDiv, path, currentValue) {
+            // Don't start edit if already editing
+            if (headerDiv.querySelector('.edit-input')) {
+                return;
+            }
+            
+            const context = findEditableContext(path);
+            if (!context) {
+                console.warn('Could not determine edit context for path:', path);
+                return;
+            }
+            
+            const valueSpan = headerDiv.querySelector('span[data-path]');
+            if (!valueSpan) return;
+            
+            // Create input field
+            const input = document.createElement('input');
+            input.className = 'edit-input';
+            input.type = typeof currentValue === 'number' ? 'number' : 'text';
+            input.value = typeof currentValue === 'string' ? currentValue : JSON.stringify(currentValue);
+            
+            // Create action buttons
+            const actionsDiv = document.createElement('div');
+            actionsDiv.className = 'edit-actions';
+            
+            const saveBtn = document.createElement('button');
+            saveBtn.textContent = '✓';
+            saveBtn.className = 'edit-save';
+            saveBtn.title = 'Save (Enter)';
+            
+            const cancelBtn = document.createElement('button');
+            cancelBtn.textContent = '✗';
+            cancelBtn.className = 'edit-cancel';
+            cancelBtn.title = 'Cancel (Esc)';
+            
+            actionsDiv.appendChild(saveBtn);
+            actionsDiv.appendChild(cancelBtn);
+            
+            // Replace value span with input
+            const originalDisplay = valueSpan.style.display;
+            valueSpan.style.display = 'none';
+            valueSpan.parentNode.insertBefore(input, valueSpan.nextSibling);
+            valueSpan.parentNode.insertBefore(actionsDiv, input.nextSibling);
+            
+            // Focus input and select text
+            input.focus();
+            input.select();
+            
+            // Save function
+            const saveEdit = async () => {
+                const newValue = input.type === 'number' ? parseFloat(input.value) : 
+                                input.value.startsWith('{') || input.value.startsWith('[') ? 
+                                JSON.parse(input.value) : input.value;
+                
+                await commitEdit(context, path, newValue, headerDiv);
+                cleanupEdit();
+            };
+            
+            // Cancel function
+            const cancelEdit = () => {
+                cleanupEdit();
+            };
+            
+            // Cleanup function
+            const cleanupEdit = () => {
+                input.remove();
+                actionsDiv.remove();
+                valueSpan.style.display = originalDisplay;
+            };
+            
+            // Event handlers
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    saveEdit();
+                } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    cancelEdit();
+                }
+                e.stopPropagation();
+            });
+            
+            saveBtn.onclick = (e) => {
+                e.stopPropagation();
+                saveEdit();
+            };
+            
+            cancelBtn.onclick = (e) => {
+                e.stopPropagation();
+                cancelEdit();
+            };
+            
+            // Click outside to cancel
+            const clickOutsideHandler = (e) => {
+                if (!headerDiv.contains(e.target)) {
+                    cancelEdit();
+                    document.removeEventListener('click', clickOutsideHandler);
+                }
+            };
+            setTimeout(() => {
+                document.addEventListener('click', clickOutsideHandler);
+            }, 100);
+        }
+        
+        async function commitEdit(context, path, newValue, headerDiv) {
+            // Show status
+            const statusSpan = document.createElement('span');
+            statusSpan.className = 'edit-status';
+            statusSpan.textContent = 'Saving...';
+            headerDiv.appendChild(statusSpan);
+            
+            try {
+                let response;
+                const fieldName = path[path.length - 1];
+                
+                if (context.type === 'timeline_event') {
+                    // Update timeline event
+                    const updateData = {};
+                    
+                    // Handle nested payload fields
+                    if (path.includes('payload') && path.length > 2) {
+                        const payloadField = path[path.length - 1];
+                        updateData.payload = { [payloadField]: newValue };
+                    } else {
+                        updateData[fieldName] = newValue;
+                    }
+                    
+                    console.log('Updating timeline event:', context.eventId, updateData);
+                    
+                    const url = `/events/${context.eventId}`;
+                    response = await fetch(url, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(updateData)
+                    });
+                    
+                } else if (context.type === 'veil_facet') {
+                    // Update VEIL facet
+                    const updateData = {};
+                    
+                    // Handle nested properties fields
+                    if (path.includes('properties') && path.length > 2) {
+                        const propertyField = path[path.length - 1];
+                        updateData.properties = { [propertyField]: newValue };
+                    } else {
+                        updateData[fieldName] = newValue;
+                    }
+                    
+                    console.log('Updating VEIL facet:', context.spaceId, context.facetId, updateData);
+                    
+                    const url = `/veil/${context.spaceId}/facets/${context.facetId}`;
+                    response = await fetch(url, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(updateData)
+                    });
+                }
+                
+                if (response && response.ok) {
+                    const result = await response.json();
+                    console.log('Edit successful:', result);
+                    
+                    statusSpan.textContent = 'Saved ✓';
+                    statusSpan.className = 'edit-status edit-success';
+                    
+                    // Refresh the data after successful edit
+                    setTimeout(async () => {
+                        await refreshData();
+                        statusSpan.remove();
+                    }, 1000);
+                    
+                } else {
+                    throw new Error(`HTTP ${response?.status}: ${response?.statusText || 'Unknown error'}`);
+                }
+                
+            } catch (error) {
+                console.error('Edit failed:', error);
+                statusSpan.textContent = `Error: ${error.message}`;
+                statusSpan.className = 'edit-status edit-error';
+                
+                // Remove error message after 3 seconds
+                setTimeout(() => {
+                    statusSpan.remove();
+                }, 3000);
+            }
         }
         
         // Handle Enter key in select
