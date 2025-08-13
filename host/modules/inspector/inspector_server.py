@@ -69,6 +69,12 @@ class InspectorServer:
         app.router.add_get('/veil/{space_id}/facets/{facet_id}', self.handle_veil_facet_details)
         app.router.add_get('/health', self.handle_health)
         
+        # Write endpoints
+        app.router.add_put('/events/{event_id}', self.handle_update_timeline_event)
+        app.router.add_patch('/events/{event_id}', self.handle_update_timeline_event)
+        app.router.add_put('/veil/{space_id}/facets/{facet_id}', self.handle_update_veil_facet)
+        app.router.add_patch('/veil/{space_id}/facets/{facet_id}', self.handle_update_veil_facet)
+        
         # Add middleware for request counting
         app.middlewares.append(self.request_counter_middleware)
         
@@ -100,6 +106,8 @@ class InspectorServer:
             logger.info(f"  GET http://localhost:{self.port}/veil/{{space_id}} - VEIL cache for specific space")
             logger.info(f"  GET http://localhost:{self.port}/veil/{{space_id}}/facets - All facets in space")
             logger.info(f"  GET http://localhost:{self.port}/veil/{{space_id}}/facets/{{facet_id}} - Specific facet details")
+            logger.info(f"  PUT/PATCH http://localhost:{self.port}/events/{{event_id}} - Update timeline event")
+            logger.info(f"  PUT/PATCH http://localhost:{self.port}/veil/{{space_id}}/facets/{{facet_id}} - Update VEIL facet")
             
         except Exception as e:
             logger.error(f"Failed to start inspector server: {e}", exc_info=True)
@@ -138,7 +146,7 @@ class InspectorServer:
             status=status,
             headers={
                 'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Methods': 'GET, OPTIONS',
+                'Access-Control-Allow-Methods': 'GET, PUT, PATCH, OPTIONS',
                 'Access-Control-Allow-Headers': 'Content-Type'
             }
         )
@@ -271,3 +279,50 @@ class InspectorServer:
         _ = request  # Request parameter required by aiohttp interface
         data = await self.handlers.handle_health()
         return self._json_response(data)
+
+    async def handle_update_timeline_event(self, request: Request) -> Response:
+        """Handle timeline event update endpoint."""
+        event_id = request.match_info.get('event_id')
+        
+        # Parse JSON body
+        try:
+            body = await request.json()
+        except Exception as e:
+            return self._json_response({
+                "error": "Invalid JSON in request body",
+                "details": str(e),
+                "success": False
+            }, status=400)
+        
+        # Extract update data and optional parameters
+        update_data = body.get('update_data', body)  # Support both wrapped and direct format
+        space_id = body.get('space_id') or request.query.get('space_id')
+        timeline_id = body.get('timeline_id') or request.query.get('timeline_id')
+        
+        data = await self.handlers.handle_update_timeline_event(
+            event_id, update_data, space_id, timeline_id
+        )
+        status_code = 400 if not data.get("success", False) and "required" in data.get("error", "") else (500 if not data.get("success", False) else 200)
+        return self._json_response(data, status=status_code)
+
+    async def handle_update_veil_facet(self, request: Request) -> Response:
+        """Handle VEIL facet update endpoint."""
+        space_id = request.match_info.get('space_id')
+        facet_id = request.match_info.get('facet_id')
+        
+        # Parse JSON body
+        try:
+            body = await request.json()
+        except Exception as e:
+            return self._json_response({
+                "error": "Invalid JSON in request body",
+                "details": str(e),
+                "success": False
+            }, status=400)
+        
+        # Extract update data
+        update_data = body.get('update_data', body)  # Support both wrapped and direct format
+        
+        data = await self.handlers.handle_update_veil_facet(space_id, facet_id, update_data)
+        status_code = 400 if not data.get("success", False) and "required" in data.get("error", "") else (500 if not data.get("success", False) else 200)
+        return self._json_response(data, status=status_code)

@@ -60,7 +60,9 @@ class InspectorEndpointHandlers:
                 "/veil/{space_id}": "VEIL cache state for specific space",
                 "/veil/{space_id}/facets": "All VEIL facets in space with filtering",
                 "/veil/{space_id}/facets/{facet_id}": "Detailed information about specific facet",
-                "/health": "Simple health check"
+                "/health": "Simple health check",
+                "PUT/PATCH /events/{event_id}": "Update timeline event by globally unique event ID",
+                "PUT/PATCH /veil/{space_id}/facets/{facet_id}": "Update VEIL facet"
             }
         }
         return api_info
@@ -276,3 +278,68 @@ class InspectorEndpointHandlers:
             "request_count": self.request_count
         }
         return health_data
+    
+    async def handle_update_timeline_event(self, event_id: str, update_data: Dict[str, Any],
+                                         space_id: Optional[str] = None, timeline_id: Optional[str] = None) -> Dict[str, Any]:
+        """Handle timeline event update endpoint."""
+        self.request_count += 1
+        
+        try:
+            if not event_id:
+                return {
+                    "error": "event_id is required",
+                    "success": False,
+                    "timestamp": time.time()
+                }
+            
+            if not update_data:
+                return {
+                    "error": "update_data is required",
+                    "success": False,
+                    "timestamp": time.time()
+                }
+            
+            result = await self.data_collector.update_timeline_event(
+                event_id, update_data, space_id, timeline_id
+            )
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error handling timeline event update: {e}", exc_info=True)
+            return {
+                "error": "Failed to handle timeline event update", 
+                "details": str(e),
+                "success": False,
+                "timestamp": time.time()
+            }
+    
+    async def handle_update_veil_facet(self, space_id: str, facet_id: str, update_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle VEIL facet update endpoint."""
+        self.request_count += 1
+        
+        try:
+            if not space_id or not facet_id:
+                return {
+                    "error": "Both space_id and facet_id are required",
+                    "success": False,
+                    "timestamp": time.time()
+                }
+            
+            if not update_data:
+                return {
+                    "error": "update_data is required",
+                    "success": False,
+                    "timestamp": time.time()
+                }
+            
+            result = await self.data_collector.update_veil_facet(space_id, facet_id, update_data)
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error handling VEIL facet update: {e}", exc_info=True)
+            return {
+                "error": "Failed to handle VEIL facet update", 
+                "details": str(e),
+                "success": False,
+                "timestamp": time.time()
+            }

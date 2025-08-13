@@ -1375,3 +1375,248 @@ class InspectorDataCollector:
                 "error": f"Failed to capture VEIL tree: {str(e)}",
                 "capture_timestamp": time.time()
             }
+    
+    async def update_timeline_event(self, event_id: str, update_data: Dict[str, Any], 
+                                  space_id: Optional[str] = None, timeline_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Update a specific timeline event by its globally unique ID.
+        
+        Args:
+            event_id: The globally unique ID of the event to update
+            update_data: Dictionary containing the fields to update
+            space_id: Optional space ID for validation (if provided, will validate event is in this space)
+            timeline_id: Optional timeline ID for validation (if provided, will validate event is in this timeline)
+            
+        Returns:
+            Dictionary containing the result of the update operation
+        """
+        try:
+            if not self.space_registry:
+                return {"error": "Space registry not available", "success": False}
+            
+            # Find the event across all spaces since event IDs are globally unique
+            target_space = None
+            target_timeline_component = None
+            event = None
+            
+            spaces_dict = self.space_registry.get_spaces()
+            for sid, space in spaces_dict.items():
+                # Skip if space_id is specified and doesn't match
+                if space_id and sid != space_id:
+                    continue
+                    
+                # Find timeline component in this space
+                timeline_component = None
+                space_components = space.get_components() if hasattr(space, 'get_components') else {}
+                if space_components:
+                    for component_id, component in space_components.items():
+                        if type(component).__name__ == "TimelineComponent":
+                            timeline_component = component
+                            break
+                
+                if not timeline_component:
+                    continue
+                
+                # Check if event exists in this space
+                all_events = timeline_component._state.get('_all_events', {})
+                if event_id in all_events:
+                    event = all_events[event_id]
+                    target_space = space
+                    target_timeline_component = timeline_component
+                    
+                    # Validate timeline_id if specified
+                    if timeline_id and event.get('timeline_id') != timeline_id:
+                        return {
+                            "error": f"Event '{event_id}' found but is in timeline '{event.get('timeline_id')}', not '{timeline_id}'",
+                            "success": False
+                        }
+                    break
+            
+            if not event:
+                if space_id:
+                    return {"error": f"Event '{event_id}' not found in space '{space_id}'", "success": False}
+                else:
+                    return {"error": f"Event '{event_id}' not found in any space", "success": False}
+            
+            # Apply updates to the event
+            updated_fields = []
+            
+            for field, new_value in update_data.items():
+                if field in event:
+                    old_value = event[field]
+                    event[field] = new_value
+                    updated_fields.append({
+                        "field": field,
+                        "old_value": old_value,
+                        "new_value": new_value
+                    })
+                elif field == "payload" and isinstance(event.get("payload"), dict) and isinstance(new_value, dict):
+                    # Handle nested payload updates
+                    for payload_field, payload_value in new_value.items():
+                        if payload_field in event["payload"]:
+                            old_value = event["payload"][payload_field]
+                            event["payload"][payload_field] = payload_value
+                            updated_fields.append({
+                                "field": f"payload.{payload_field}",
+                                "old_value": old_value,
+                                "new_value": payload_value
+                            })
+                        else:
+                            # Add new field to payload
+                            event["payload"][payload_field] = payload_value
+                            updated_fields.append({
+                                "field": f"payload.{payload_field}",
+                                "old_value": None,
+                                "new_value": payload_value
+                            })
+                else:
+                    # Add new field to event
+                    event[field] = new_value
+                    updated_fields.append({
+                        "field": field,
+                        "old_value": None,
+                        "new_value": new_value
+                    })
+            
+            # Trigger async persistence if available
+            if hasattr(target_timeline_component, '_persist_timeline_state'):
+                try:
+                    import asyncio
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(target_timeline_component._persist_timeline_state())
+                except RuntimeError:
+                    pass  # No event loop running
+            
+            return {
+                "success": True,
+                "timestamp": time.time(),
+                "space_id": target_space.id if hasattr(target_space, 'id') else "unknown",
+                "timeline_id": event.get('timeline_id'),
+                "event_id": event_id,
+                "updated_fields": updated_fields,
+                "updated_event": dict(event)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error updating timeline event {event_id}: {e}", exc_info=True)
+            return {
+                "error": "Failed to update timeline event",
+                "details": str(e),
+                "success": False,
+                "timestamp": time.time()
+            }
+    
+    async def update_veil_facet(self, space_id: str, facet_id: str, 
+                              update_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Update a specific VEIL facet.
+        
+        Args:
+            space_id: The ID of the space containing the facet
+            facet_id: The ID of the facet to update
+            update_data: Dictionary containing the fields to update
+            
+        Returns:
+            Dictionary containing the result of the update operation
+        """
+        try:
+            if not self.space_registry:
+                return {"error": "Space registry not available", "success": False}
+            
+            spaces_dict = self.space_registry.get_spaces()
+            space = spaces_dict.get(space_id)
+            
+            if not space:
+                return {"error": f"Space '{space_id}' not found", "success": False}
+            
+            # Find VEIL producer and get facet cache
+            veil_producers = self._find_veil_producers_in_space(space)
+            if not veil_producers:
+                return {"error": "No VEIL producers found in space", "success": False}
+            
+            primary_producer = veil_producers[0][1]
+            if not hasattr(primary_producer, 'get_facet_cache'):
+                return {"error": "VEIL producer does not support facet cache access", "success": False}
+            
+            facet_cache = primary_producer.get_facet_cache()
+            facet = facet_cache.facets.get(facet_id)
+            
+            if not facet:
+                return {"error": f"Facet '{facet_id}' not found in space '{space_id}'", "success": False}
+            
+            # Apply updates to the facet
+            updated_fields = []
+            
+            for field, new_value in update_data.items():
+                if hasattr(facet, field):
+                    old_value = getattr(facet, field)
+                    
+                    # Handle special cases for certain fields
+                    if field == "properties" and isinstance(new_value, dict):
+                        # Update properties dictionary
+                        for prop_key, prop_value in new_value.items():
+                            old_prop_value = facet.properties.get(prop_key)
+                            facet.properties[prop_key] = prop_value
+                            updated_fields.append({
+                                "field": f"properties.{prop_key}",
+                                "old_value": old_prop_value,
+                                "new_value": prop_value
+                            })
+                    elif field == "links_to":
+                        # Validate that the target facet exists if linking
+                        if new_value and new_value not in facet_cache.facets:
+                            return {"error": f"Target facet '{new_value}' not found for linking", "success": False}
+                        setattr(facet, field, new_value)
+                        updated_fields.append({
+                            "field": field,
+                            "old_value": old_value,
+                            "new_value": new_value
+                        })
+                    elif field in ["veil_timestamp", "owner_element_id"]:
+                        # Allow updates to these fields with validation
+                        setattr(facet, field, new_value)
+                        updated_fields.append({
+                            "field": field,
+                            "old_value": old_value,
+                            "new_value": new_value
+                        })
+                    else:
+                        # For other fields, set directly if they exist
+                        setattr(facet, field, new_value)
+                        updated_fields.append({
+                            "field": field,
+                            "old_value": old_value,
+                            "new_value": new_value
+                        })
+                else:
+                    # For fields that don't exist, try to set them anyway (for extensibility)
+                    try:
+                        setattr(facet, field, new_value)
+                        updated_fields.append({
+                            "field": field,
+                            "old_value": None,
+                            "new_value": new_value
+                        })
+                    except Exception as e:
+                        logger.warning(f"Could not set field '{field}' on facet: {e}")
+            
+            # Note: No need to mark as "modified" since this is direct inspector editing,
+            # not external modification events from adapters
+            
+            return {
+                "success": True,
+                "timestamp": time.time(),
+                "space_id": space_id,
+                "facet_id": facet_id,
+                "updated_fields": updated_fields,
+                "updated_facet": self._serialize_facet(facet, include_detailed=True)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error updating VEIL facet {space_id}/{facet_id}: {e}", exc_info=True)
+            return {
+                "error": "Failed to update VEIL facet",
+                "details": str(e),
+                "success": False,
+                "timestamp": time.time()
+            }
