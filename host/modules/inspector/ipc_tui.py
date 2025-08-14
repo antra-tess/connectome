@@ -448,16 +448,48 @@ class IPCTUIInspector:
         self.terminal.set_color('bright_green', bold=True)
         print("Select an option:")
         
-        # Menu items
-        for i, (name, cmd, description) in enumerate(self.main_menu_items):
-            row = 8 + i
-            if row >= rows - 3:
-                break
-                
+        # Calculate available space for menu items
+        # Reserve space for header (6 rows), scroll indicators (1 row each), and footer (3 rows)
+        content_rows = rows - 12  # More conservative calculation
+        
+        # Adjust scroll offset to ensure current selection is visible
+        if self.current_menu_index < self.scroll_offset:
+            self.scroll_offset = self.current_menu_index
+        elif self.current_menu_index >= self.scroll_offset + content_rows:
+            self.scroll_offset = self.current_menu_index - content_rows + 1
+        
+        # Ensure scroll offset doesn't go beyond bounds
+        max_scroll = max(0, len(self.main_menu_items) - content_rows)
+        self.scroll_offset = min(self.scroll_offset, max_scroll)
+        
+        # Show up arrow if there are items above
+        if self.scroll_offset > 0:
+            self.terminal.move_cursor(7, 2)
+            self.terminal.set_color('bright_yellow', bold=True)
+            print("↑ ↑ ↑  More items above  ↑ ↑ ↑")
+            self.terminal.reset_colors()
+        else:
+            # Clear the line if no scroll indicator needed
+            self.terminal.move_cursor(7, 1)
+            print(' ' * (cols - 1))
+        
+        # Clear the menu content area
+        menu_start_row = 8
+        for i in range(content_rows):
+            self.terminal.move_cursor(menu_start_row + i, 1)
+            print(' ' * (cols - 1))  # Clear entire line
+        
+        # Menu items with scrolling
+        visible_items = self.main_menu_items[self.scroll_offset:self.scroll_offset + content_rows]
+        for display_idx, (menu_idx, (name, cmd, description)) in enumerate(zip(
+            range(self.scroll_offset, min(len(self.main_menu_items), self.scroll_offset + content_rows)),
+            visible_items
+        )):
+            row = menu_start_row + display_idx
             self.terminal.move_cursor(row, 4)
             
             # Highlight current selection
-            if i == self.current_menu_index:
+            if menu_idx == self.current_menu_index:
                 self.terminal.set_color('black', 'bright_cyan', bold=True)
                 print(f"► {name}")
                 self.terminal.move_cursor(row, 6 + len(name) + 2)
@@ -471,6 +503,18 @@ class IPCTUIInspector:
                 print(f"- {description}")
             
             self.terminal.reset_colors()
+        
+        # Show down arrow if there are more items below
+        down_arrow_row = menu_start_row + content_rows
+        if self.scroll_offset + content_rows < len(self.main_menu_items):
+            self.terminal.move_cursor(down_arrow_row, 2)
+            self.terminal.set_color('bright_yellow', bold=True)
+            print("↓ ↓ ↓  More items below  ↓ ↓ ↓")
+            self.terminal.reset_colors()
+        else:
+            # Clear the line if no scroll indicator needed
+            self.terminal.move_cursor(down_arrow_row, 1)
+            print(' ' * (cols - 1))
     
     async def _render_tree_view(self):
         """Render the tree navigation view."""
