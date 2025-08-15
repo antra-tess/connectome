@@ -192,6 +192,11 @@ class IPCTUIInspector:
         self.edit_buffer = ""
         self.search_query = ""
         
+        # Detail view state
+        self._detail_tree_root = None
+        self._detail_tree_node_id = None
+        self._detail_current_node = None
+        
         # Available hosts
         self.available_hosts = []
         self.current_host_index = 0
@@ -643,7 +648,7 @@ class IPCTUIInspector:
             return str_val
     
     async def _render_detail_view(self):
-        """Render detailed view of selected node."""
+        """Render detailed view of selected node as a foldable tree."""
         if not self.current_tree_node or not self.current_tree_node.data:
             self.terminal.move_cursor(4, 2)
             self.terminal.set_color('yellow')
@@ -653,39 +658,65 @@ class IPCTUIInspector:
         
         rows, cols = self.terminal.get_terminal_size()
         
-        # Node info
+        # Node info header
         self.terminal.move_cursor(4, 2)
         self.terminal.set_color('bright_green', bold=True)
         print(f"Details: {self.current_tree_node.label}")
         
-        # Data display
-        data_str = json.dumps(self.current_tree_node.data, indent=2, default=str)
-        data_lines = data_str.split('\n')
+        # Initialize detail tree if needed
+        if not hasattr(self, '_detail_tree_root') or self._detail_tree_node_id != self.current_tree_node.id:
+            await self._build_detail_tree()
         
+        # Render as foldable tree using the same logic as main tree view
         content_rows = rows - 8
         
-        for i, line in enumerate(data_lines[self.scroll_offset:]):
+        # Get visible nodes from detail tree
+        visible_nodes = self._get_visible_detail_tree_nodes()
+        
+        for i, (node, depth, is_current) in enumerate(visible_nodes[self.scroll_offset:]):
             if i >= content_rows:
                 break
             
             row = 6 + i
-            self.terminal.move_cursor(row, 2)
+            col = 2 + (depth * 2)
             
-            # Syntax highlighting for JSON
-            if line.strip().startswith('"') and ':' in line:
-                self.terminal.set_color('cyan')
-            elif line.strip() in ['{', '}', '[', ']']:
-                self.terminal.set_color('bright_white', bold=True)
+            self.terminal.move_cursor(row, col)
+            
+            # Selection highlighting
+            if is_current:
+                self.terminal.set_color('black', 'bright_yellow', bold=True)
             else:
-                self.terminal.set_color('white')
+                self.terminal.reset_colors()
             
-            # Truncate long lines
-            if len(line) > cols - 4:
-                line = line[:cols-7] + "..."
+            # Tree structure symbols
+            if node.children:
+                expand_symbol = "▼" if node.is_expanded else "▶"
+                tree_line = f"{expand_symbol} "
+            else:
+                tree_line = "  "
             
-            print(line)
-        
-        self.terminal.reset_colors()
+            # Node icon and label
+            if node.is_editable:
+                icon = "📝"
+            elif node.children:
+                icon = "📁"
+            else:
+                icon = "📄"
+            
+            # For leaf nodes, show the value alongside the key
+            if not node.children:
+                value_str = self._format_value_for_display(node.data)
+                display_text = f"{tree_line}{icon} {node.label}: {value_str}"
+            else:
+                display_text = f"{tree_line}{icon} {node.label}"
+            
+            # Truncate if too long
+            max_width = cols - col - 2
+            if len(display_text) > max_width:
+                display_text = display_text[:max_width-3] + "..."
+            
+            print(display_text)
+            self.terminal.reset_colors()
     
     async def _render_edit_mode(self):
         """Render edit mode interface."""
@@ -756,7 +787,7 @@ class IPCTUIInspector:
         elif self.mode == NavigationMode.TREE_VIEW:
             controls = "↑↓: Navigate • →: Expand • ←: Collapse • Enter: Details • E: Edit • B: Back • R: Refresh • Q: Quit"
         elif self.mode == NavigationMode.DETAIL_VIEW:
-            controls = "↑↓: Scroll • E: Edit • B: Back • Q: Quit"
+            controls = "↑↓: Navigate • →: Expand • ←: Collapse • E: Edit • B: Back • Q: Quit"
         elif self.mode == NavigationMode.EDIT_MODE:
             controls = "Type to edit • Ctrl+S: Save • Esc: Cancel"
         else:
@@ -832,13 +863,19 @@ class IPCTUIInspector:
     async def _handle_detail_view_input(self, key: str):
         """Handle input in detail view mode."""
         if key == 'ESC[A':  # Up arrow
-            self.scroll_offset = max(0, self.scroll_offset - 1)
+            await self._navigate_detail_tree_up()
         elif key == 'ESC[B':  # Down arrow
-            self.scroll_offset += 1
+            await self._navigate_detail_tree_down()
+        elif key == 'ESC[C':  # Right arrow
+            await self._expand_detail_node()
+        elif key == 'ESC[D':  # Left arrow
+            await self._collapse_detail_node()
         elif key in ['e', 'E']:
-            await self._edit_current_node()
+            await self._edit_detail_node()
         elif key in ['b', 'B']:
             self.mode = NavigationMode.TREE_VIEW
+            # Reset scroll offset when going back
+            self.scroll_offset = 0
     
     async def _handle_edit_mode_input(self, key: str):
         """Handle input in edit mode."""
@@ -1041,6 +1078,9 @@ class IPCTUIInspector:
             else:
                 self.mode = NavigationMode.DETAIL_VIEW
                 self.scroll_offset = 0
+                # Reset detail tree state to force rebuild
+                self._detail_tree_root = None
+                self._detail_tree_node_id = None
     
     async def _execute_command_node(self):
         """Execute a command node."""
@@ -1224,6 +1264,149 @@ class IPCTUIInspector:
                 return found
         
         return None
+    
+    async def _build_detail_tree(self):
+        """Build a tree structure for the detail view of the current node."""
+        if not self.current_tree_node:
+            return
+        
+        self._detail_tree_node_id = self.current_tree_node.id
+        self._detail_tree_root = TreeNode("detail_root", f"Details: {self.current_tree_node.label}")
+        
+        # Build tree from the node's data
+        def build_detail_node(obj: Any, label: str, parent: TreeNode, path: str = "", depth: int = 0) -> TreeNode:
+            node = TreeNode(path or label, label, obj, parent=parent)
+            
+            if isinstance(obj, dict):
+                node.children = []
+                for key, value in obj.items():
+                    child_path = f"{path}.{key}" if path else key
+                    child = build_detail_node(value, key, node, child_path, depth + 1)
+                    node.children.append(child)
+                    
+                # Make leaf string/number fields editable in detail view
+                for child in node.children:
+                    if not child.children and isinstance(child.data, (str, int, float, bool)) or child.data is None:
+                        child.is_editable = True
+                        
+            elif isinstance(obj, list) and obj:
+                node.children = []
+                for i, item in enumerate(obj):
+                    child_path = f"{path}[{i}]" if path else f"[{i}]"
+                    child = build_detail_node(item, f"Item {i}", node, child_path, depth + 1)
+                    node.children.append(child)
+            
+            return node
+        
+        # Build the detail tree from current node's data
+        if self.current_tree_node.data is not None:
+            detail_child = build_detail_node(
+                self.current_tree_node.data, 
+                "Data", 
+                self._detail_tree_root, 
+                "data", 
+                0
+            )
+            self._detail_tree_root.children.append(detail_child)
+            
+            # Auto-expand first few levels for better navigation
+            detail_child.is_expanded = True
+            for child in detail_child.children[:5]:  # Expand first 5 children
+                child.is_expanded = True
+        
+        # Set initial selection to first expandable node or first child
+        self._detail_current_node = None
+        if self._detail_tree_root.children:
+            first_child = self._detail_tree_root.children[0]
+            if first_child.children:
+                self._detail_current_node = first_child
+            else:
+                self._detail_current_node = first_child
+    
+    def _get_visible_detail_tree_nodes(self) -> List[Tuple[TreeNode, int, bool]]:
+        """Get list of visible detail tree nodes with depth and selection info."""
+        visible = []
+        
+        def traverse(node: TreeNode, depth: int):
+            is_current = node == self._detail_current_node
+            visible.append((node, depth, is_current))
+            
+            if node.is_expanded:
+                for child in node.children:
+                    traverse(child, depth + 1)
+        
+        if self._detail_tree_root:
+            for child in self._detail_tree_root.children:
+                traverse(child, 0)
+        
+        return visible
+    
+    async def _navigate_detail_tree_up(self):
+        """Navigate up in the detail tree view."""
+        visible_nodes = self._get_visible_detail_tree_nodes()
+        if not visible_nodes:
+            return
+        
+        current_index = -1
+        for i, (node, _, is_current) in enumerate(visible_nodes):
+            if is_current:
+                current_index = i
+                break
+        
+        if current_index > 0:
+            self._detail_current_node = visible_nodes[current_index - 1][0]
+            
+            # Adjust scroll offset if needed
+            if current_index - 1 < self.scroll_offset:
+                self.scroll_offset = max(0, current_index - 1)
+        elif not self._detail_current_node and visible_nodes:
+            # If no current selection, select first node
+            self._detail_current_node = visible_nodes[0][0]
+    
+    async def _navigate_detail_tree_down(self):
+        """Navigate down in the detail tree view."""
+        visible_nodes = self._get_visible_detail_tree_nodes()
+        if not visible_nodes:
+            return
+        
+        current_index = -1
+        for i, (node, _, is_current) in enumerate(visible_nodes):
+            if is_current:
+                current_index = i
+                break
+        
+        if current_index < len(visible_nodes) - 1:
+            self._detail_current_node = visible_nodes[current_index + 1][0]
+            
+            # Adjust scroll offset if needed
+            rows, _ = self.terminal.get_terminal_size()
+            content_rows = rows - 8
+            if current_index + 1 >= self.scroll_offset + content_rows:
+                self.scroll_offset = current_index + 1 - content_rows + 1
+        elif not self._detail_current_node and visible_nodes:
+            # If no current selection, select first node
+            self._detail_current_node = visible_nodes[0][0]
+    
+    async def _expand_detail_node(self):
+        """Expand the current detail tree node."""
+        if self._detail_current_node and self._detail_current_node.children:
+            self._detail_current_node.is_expanded = True
+    
+    async def _collapse_detail_node(self):
+        """Collapse the current detail tree node."""
+        if self._detail_current_node and self._detail_current_node.children:
+            self._detail_current_node.is_expanded = False
+    
+    async def _edit_detail_node(self):
+        """Enter edit mode for the current detail node."""
+        if self._detail_current_node and self._detail_current_node.is_editable:
+            # Switch to edit mode for the detail node
+            self.mode = NavigationMode.EDIT_MODE
+            self.edit_buffer = str(self._detail_current_node.data) if self._detail_current_node.data is not None else ""
+            # Set the current_tree_node to the detail node for edit operations
+            self.current_tree_node = self._detail_current_node
+        else:
+            self.status_message = "This item is not editable"
 
 
 async def main_ipc_tui(socket_path: str = None, timeout: float = 30.0):
