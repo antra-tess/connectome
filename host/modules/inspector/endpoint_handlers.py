@@ -58,7 +58,7 @@ class InspectorEndpointHandlers:
                 "/timelines/{space_id}/{timeline_id}": "Specific timeline events and details",
                 "/veil": "VEIL system overview and statistics",
                 "/veil/{space_id}": "VEIL cache state for specific space",
-                "/veil/{space_id}/facets": "All VEIL facets in space with filtering",
+                "/veil/{space_id}/facets": "All VEIL facets in space with filtering and pagination",
                 "/veil/{space_id}/facets/{facet_id}": "Detailed information about specific facet",
                 "/health": "Simple health check",
                 "PUT/PATCH /events/{event_id}": "Update timeline event by globally unique event ID",
@@ -220,7 +220,7 @@ class InspectorEndpointHandlers:
             }
 
     async def handle_veil_facets(self, space_id: str, facet_type: str = None, 
-                               owner_id: str = None, limit: int = 100) -> Dict[str, Any]:
+                               owner_id: str = None, limit: int = 100, after_facet_id: str = None) -> Dict[str, Any]:
         """Handle all VEIL facets in space with filtering endpoint."""
         self.request_count += 1
         
@@ -235,7 +235,7 @@ class InspectorEndpointHandlers:
             limit = min(max(limit, 1), 1000)
             
             veil_facets_data = await self.data_collector.collect_veil_facets_data(
-                space_id, facet_type, owner_id, limit
+                space_id, facet_type, owner_id, limit, after_facet_id
             )
             return veil_facets_data
         except Exception as e:

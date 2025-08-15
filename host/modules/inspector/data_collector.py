@@ -757,7 +757,7 @@ class InspectorDataCollector:
                 
                 for space_id, space in spaces_dict.items():
                     try:
-                        space_veil_info = await self._collect_space_veil_summary_with_trees(space_id, space)
+                        space_veil_info = await self._collect_space_veil_summary(space_id, space)
                         if space_veil_info and space_veil_info.get("has_veil_producer"):
                             veil_overview["spaces"][space_id] = space_veil_info
                             veil_overview["summary"]["total_spaces_with_veil"] += 1
@@ -866,7 +866,7 @@ class InspectorDataCollector:
             }
 
     async def collect_veil_facets_data(self, space_id: str, facet_type: str = None, 
-                                     owner_id: str = None, limit: int = 100) -> Dict[str, Any]:
+                                     owner_id: str = None, limit: int = 100, after_facet_id: str = None) -> Dict[str, Any]:
         """
         Collect all VEIL facets in space with filtering.
         
@@ -875,6 +875,7 @@ class InspectorDataCollector:
             facet_type: Optional filter by facet type (event, status, ambient)
             owner_id: Optional filter by owner element ID
             limit: Maximum number of facets to return
+            after_facet_id: Optional cursor for pagination - return facets after this ID
             
         Returns:
             Dictionary containing filtered facet data
@@ -895,13 +896,15 @@ class InspectorDataCollector:
                 "filters": {
                     "facet_type": facet_type,
                     "owner_id": owner_id,
-                    "limit": limit
+                    "limit": limit,
+                    "after_facet_id": after_facet_id
                 },
                 "facets": [],
                 "summary": {
                     "total_matching": 0,
                     "returned": 0,
-                    "limited": False
+                    "limited": False,
+                    "next_cursor": None
                 }
             }
             
@@ -917,9 +920,20 @@ class InspectorDataCollector:
             facet_cache = primary_producer.get_facet_cache()
             all_facets = list(facet_cache.facets.values())
             
+            # Sort by timestamp (newest first) first, before filtering
+            all_facets.sort(key=lambda f: f.veil_timestamp, reverse=True)
+            
             # Apply filters
             filtered_facets = []
+            skip_until_found = after_facet_id is not None
+            
             for facet in all_facets:
+                # Handle pagination cursor
+                if skip_until_found:
+                    if facet.facet_id == after_facet_id:
+                        skip_until_found = False
+                    continue
+                
                 # Filter by facet type
                 if facet_type and facet.facet_type.value != facet_type:
                     continue
@@ -930,14 +944,15 @@ class InspectorDataCollector:
                     
                 filtered_facets.append(facet)
             
-            # Sort by timestamp (newest first)
-            filtered_facets.sort(key=lambda f: f.veil_timestamp, reverse=True)
-            
-            # Apply limit
+            # Apply limit and set pagination info
             facets_data["summary"]["total_matching"] = len(filtered_facets)
             limited_facets = filtered_facets[:limit]
             facets_data["summary"]["returned"] = len(limited_facets)
             facets_data["summary"]["limited"] = len(filtered_facets) > limit
+            
+            # Set next cursor if there are more results
+            if len(filtered_facets) > limit:
+                facets_data["summary"]["next_cursor"] = limited_facets[-1].facet_id
             
             # Serialize facets
             facets_data["facets"] = [
