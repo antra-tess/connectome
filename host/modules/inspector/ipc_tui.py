@@ -50,6 +50,7 @@ class TreeNode:
     node_type: str = "data"  # data, command, action
     command_path: Optional[str] = None  # For executable commands
     write_endpoint: Optional[str] = None  # For editable nodes
+    drill_down_endpoint: Optional[str] = None  # For nodes that support detail drilling
 
 
 class TerminalController:
@@ -573,6 +574,13 @@ class IPCTUIInspector:
             else:
                 display_text = f"{tree_line}{icon} {node.label}"
             
+            # Add detail inspection indicator for nodes that support meaningful detail views
+            if (node.children or  # Non-leaf nodes with complex structures
+                node.node_type in ["command", "action"] or  # Interactive nodes
+                node.is_editable or  # Editable nodes
+                node.drill_down_endpoint):  # Nodes with drill-down endpoints
+                display_text += " [Enter - 🔎]"
+            
             # Truncate if too long
             max_width = cols - col - 2
             if len(display_text) > max_width:
@@ -922,6 +930,22 @@ class IPCTUIInspector:
                                 child.is_editable = True
                                 child.write_endpoint = f"write_{endpoint}"
                                 child.command_path = f"{endpoint}.{child.id}"
+                
+                # Special drill-down endpoints for VEIL overview
+                if endpoint == "veil" and depth == 1:
+                    # Spaces in VEIL overview can drill down to detailed space VEIL
+                    if label in ["spaces"] and isinstance(obj, dict):
+                        for child in node.children:
+                            # Each space can drill down to /veil/{space_id}
+                            child.drill_down_endpoint = f"veil_space_{child.label}"
+                
+                # For other endpoints, add drill-down logic based on patterns
+                if endpoint == "spaces" and depth == 0:
+                    # Individual spaces can drill down to their timelines, veil, etc.
+                    node.drill_down_endpoint = f"veil_space_{label}"
+                elif endpoint == "agents" and depth == 0:
+                    # Individual agents can drill down to their inner space details
+                    node.drill_down_endpoint = f"agent_details_{label}"
                             
             elif isinstance(obj, list) and obj:
                 node.children = []
@@ -1011,6 +1035,9 @@ class IPCTUIInspector:
             if self.current_tree_node.node_type == "command":
                 # Execute command node
                 await self._execute_command_node()
+            elif self.current_tree_node.drill_down_endpoint:
+                # Drill down to detailed endpoint
+                await self._drill_down_to_endpoint()
             else:
                 self.mode = NavigationMode.DETAIL_VIEW
                 self.scroll_offset = 0
@@ -1037,6 +1064,71 @@ class IPCTUIInspector:
                 
         except Exception as e:
             self.status_message = f"Execution error: {str(e)}"
+    
+    async def _drill_down_to_endpoint(self):
+        """Drill down to a detailed endpoint for the current node."""
+        if not self.current_tree_node or not self.current_tree_node.drill_down_endpoint:
+            return
+        
+        try:
+            drill_endpoint = self.current_tree_node.drill_down_endpoint
+            
+            # Parse the drill-down endpoint to get the actual endpoint name
+            if drill_endpoint.startswith("veil_space_"):
+                space_id = drill_endpoint.replace("veil_space_", "")
+                endpoint_name = f"veil_space"
+                endpoint_args = {"space_id": space_id}
+                display_name = f"VEIL for Space {space_id}"
+            elif drill_endpoint.startswith("agent_details_"):
+                agent_id = drill_endpoint.replace("agent_details_", "")
+                endpoint_name = f"agent_details" 
+                endpoint_args = {"agent_id": agent_id}
+                display_name = f"Agent Details for {agent_id}"
+            else:
+                # Generic case - use the drill_endpoint as-is
+                endpoint_name = drill_endpoint
+                endpoint_args = {}
+                display_name = f"Details for {self.current_tree_node.label}"
+            
+            self.status_message = f"Loading {display_name}..."
+            
+            # Fetch data from the drill-down endpoint
+            data = await self._fetch_drill_down_data(endpoint_name, endpoint_args)
+            
+            # Build new tree with the detailed data
+            self.tree_root = await self._build_tree_from_data(data, display_name, endpoint_name)
+            self.current_tree_node = self.tree_root.children[0] if self.tree_root.children else None
+            self.mode = NavigationMode.TREE_VIEW
+            self.scroll_offset = 0
+            self.status_message = f"Loaded {display_name}"
+            self._current_endpoint = endpoint_name  # Track for refresh
+            
+        except Exception as e:
+            self.status_message = f"Error drilling down: {str(e)}"
+    
+    async def _fetch_drill_down_data(self, endpoint_name: str, endpoint_args: Dict[str, str]) -> Dict[str, Any]:
+        """Fetch data from a drill-down endpoint."""
+        if not self.current_host:
+            raise ConnectionError("Not connected to any host")
+        
+        # Map endpoint names to actual IPC command names
+        if endpoint_name == "veil_space":
+            command = "veil-space"
+            command_args = endpoint_args
+        elif endpoint_name == "agent_details":
+            command = "agent_details"
+            command_args = endpoint_args
+        else:
+            # Fallback to using endpoint_name directly
+            command = endpoint_name
+            command_args = endpoint_args
+        
+        response = await self.executor.execute_command(command, command_args)
+        
+        if response.get("error"):
+            raise RuntimeError(response["error"])
+        
+        return response.get("result", {})
     
     async def _edit_current_node(self):
         """Enter edit mode for the current node."""
