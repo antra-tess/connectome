@@ -565,7 +565,13 @@ class IPCTUIInspector:
             else:
                 icon = "📄"
             
-            display_text = f"{tree_line}{icon} {node.label}"
+            # For leaf nodes, show the value alongside the key
+            if not node.children:
+                # Format the value for display
+                value_str = self._format_value_for_display(node.data)
+                display_text = f"{tree_line}{icon} {node.label}: {value_str}"
+            else:
+                display_text = f"{tree_line}{icon} {node.label}"
             
             # Truncate if too long
             max_width = cols - col - 2
@@ -592,6 +598,41 @@ class IPCTUIInspector:
                 traverse(child, 0)
         
         return visible
+    
+    def _format_value_for_display(self, value: Any) -> str:
+        """Format a value for display in the tree view."""
+        if value is None:
+            return "null"
+        elif isinstance(value, bool):
+            return "true" if value else "false"
+        elif isinstance(value, str):
+            # Escape and limit string length
+            escaped = value.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+            if len(escaped) > 50:
+                return f'"{escaped[:47]}..."'
+            return f'"{escaped}"'
+        elif isinstance(value, (int, float)):
+            return str(value)
+        elif isinstance(value, (list, tuple)):
+            if len(value) == 0:
+                return "[]"
+            elif len(value) == 1:
+                return f"[1 item]"
+            else:
+                return f"[{len(value)} items]"
+        elif isinstance(value, dict):
+            if len(value) == 0:
+                return "{}"
+            elif len(value) == 1:
+                return "{1 key}"
+            else:
+                return f"{{{len(value)} keys}}"
+        else:
+            # For other types, convert to string and limit length
+            str_val = str(value)
+            if len(str_val) > 50:
+                return f"{str_val[:47]}..."
+            return str_val
     
     async def _render_detail_view(self):
         """Render detailed view of selected node."""
