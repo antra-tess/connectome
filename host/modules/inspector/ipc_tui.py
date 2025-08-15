@@ -922,7 +922,7 @@ class IPCTUIInspector:
         self.status_message = f"Loading {name}..."
         try:
             data = await self._fetch_endpoint_data(cmd)
-            self.tree_root = await self._build_tree_from_data(data, name, cmd)
+            self.tree_root = await self._build_tree_from_data(data, name, cmd, {})
             self.current_tree_node = self.tree_root.children[0] if self.tree_root.children else None
             self.mode = NavigationMode.TREE_VIEW
             self.scroll_offset = 0
@@ -943,9 +943,10 @@ class IPCTUIInspector:
         
         return response.get("result", {})
     
-    async def _build_tree_from_data(self, data: Any, root_label: str, endpoint: str) -> TreeNode:
+    async def _build_tree_from_data(self, data: Any, root_label: str, endpoint: str, context: Dict[str, Any] = None) -> TreeNode:
         """Build a tree structure from the data."""
         root = TreeNode("root", root_label)
+        context = context or {}
         
         def build_node(obj: Any, label: str, parent: TreeNode, path: str = "", depth: int = 0) -> TreeNode:
             node = TreeNode(path or label, label, obj, parent=parent)
@@ -975,6 +976,27 @@ class IPCTUIInspector:
                         for child in node.children:
                             # Each space can drill down to /veil/{space_id}
                             child.drill_down_endpoint = f"veil_space_{child.label}"
+                
+                # Add drill-down for individual spaces in VEIL overview to go directly to facets
+                if endpoint == "veil" and depth == 1 and parent and parent.label == "spaces":
+                    # This is an individual space under veil/spaces/  
+                    # Add drill-down to see the facets list directly
+                    space_id = label  # The space ID is the label at this level
+                    node.drill_down_endpoint = f"veil_facets_{space_id}"
+                
+                # For VEIL space details, add facets drill-down
+                if endpoint.startswith("veil_space") and depth == 1:
+                    if label in ["facet_cache", "combined_cache_stats"] and isinstance(obj, dict):
+                        # Extract space_id from the context
+                        space_id = context.get('space_id', 'unknown')
+                        node.drill_down_endpoint = f"veil_facets_{space_id}"
+                
+                # Add drill-down for individual spaces in timeline overview to go directly to events
+                if endpoint == "timelines" and depth == 1 and parent and parent.label == "spaces":
+                    # This is an individual space under timelines/spaces/
+                    # Add drill-down to see the timeline events directly
+                    space_id = label  # The space ID is the label at this level  
+                    node.drill_down_endpoint = f"timeline_details_{space_id}"
                 
                 # For other endpoints, add drill-down logic based on patterns
                 if endpoint == "spaces" and depth == 0:
@@ -1119,6 +1141,16 @@ class IPCTUIInspector:
                 endpoint_name = f"veil_space"
                 endpoint_args = {"space_id": space_id}
                 display_name = f"VEIL for Space {space_id}"
+            elif drill_endpoint.startswith("veil_facets_"):
+                space_id = drill_endpoint.replace("veil_facets_", "")
+                endpoint_name = f"veil_facets"
+                endpoint_args = {"space_id": space_id}
+                display_name = f"VEIL Facets for Space {space_id}"
+            elif drill_endpoint.startswith("timeline_details_"):
+                space_id = drill_endpoint.replace("timeline_details_", "")
+                endpoint_name = f"timeline_details"
+                endpoint_args = {"space_id": space_id}
+                display_name = f"Timeline Events for Space {space_id}"
             elif drill_endpoint.startswith("agent_details_"):
                 agent_id = drill_endpoint.replace("agent_details_", "")
                 endpoint_name = f"agent_details" 
@@ -1135,8 +1167,20 @@ class IPCTUIInspector:
             # Fetch data from the drill-down endpoint
             data = await self._fetch_drill_down_data(endpoint_name, endpoint_args)
             
+            # Add pagination info to display name if available
+            if endpoint_name in ["veil_facets", "timeline_details"]:
+                summary = data.get("summary", {})
+                if summary:
+                    returned = summary.get("returned", 0)
+                    total = summary.get("total_matching", 0)
+                    limited = summary.get("limited", False)
+                    if limited:
+                        display_name += f" ({returned} of {total}, paginated)"
+                    else:
+                        display_name += f" ({returned} items)"
+            
             # Build new tree with the detailed data
-            self.tree_root = await self._build_tree_from_data(data, display_name, endpoint_name)
+            self.tree_root = await self._build_tree_from_data(data, display_name, endpoint_name, endpoint_args)
             self.current_tree_node = self.tree_root.children[0] if self.tree_root.children else None
             self.mode = NavigationMode.TREE_VIEW
             self.scroll_offset = 0
@@ -1144,7 +1188,12 @@ class IPCTUIInspector:
             self._current_endpoint = endpoint_name  # Track for refresh
             
         except Exception as e:
-            self.status_message = f"Error drilling down: {str(e)}"
+            # Check if it's an IPC buffer overflow and provide helpful message
+            error_str = str(e)
+            if "chunk is longer than limit" in error_str:
+                self.status_message = f"Error: Too much data to display. Try reducing pagination limit."
+            else:
+                self.status_message = f"Error drilling down: {error_str}"
     
     async def _fetch_drill_down_data(self, endpoint_name: str, endpoint_args: Dict[str, str]) -> Dict[str, Any]:
         """Fetch data from a drill-down endpoint."""
@@ -1155,6 +1204,18 @@ class IPCTUIInspector:
         if endpoint_name == "veil_space":
             command = "veil-space"
             command_args = endpoint_args
+        elif endpoint_name == "veil_facets":
+            command = "veil-facets"
+            command_args = endpoint_args.copy()
+            # Add conservative limit to avoid IPC overflow (tested safe threshold is 44, using 20 for safety)
+            if 'limit' not in command_args:
+                command_args['limit'] = 20
+        elif endpoint_name == "timeline_details":
+            command = "timeline-details"
+            command_args = endpoint_args.copy()
+            # Add conservative limit for timeline events to avoid IPC overflow (tested safe threshold is ~125, using 50 for safety)
+            if 'limit' not in command_args:
+                command_args['limit'] = 50
         elif endpoint_name == "agent_details":
             command = "agent_details"
             command_args = endpoint_args
@@ -1239,7 +1300,8 @@ class IPCTUIInspector:
             try:
                 self.status_message = "Refreshing..."
                 data = await self._fetch_endpoint_data(self._current_endpoint)
-                self.tree_root = await self._build_tree_from_data(data, self.tree_root.label, self._current_endpoint)
+                # For refresh, we may not have the original context, so pass empty dict
+                self.tree_root = await self._build_tree_from_data(data, self.tree_root.label, self._current_endpoint, {})
                 
                 # Try to maintain current selection
                 if self.current_tree_node:
