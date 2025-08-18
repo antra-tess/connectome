@@ -1241,9 +1241,25 @@ class IPCTUIInspector:
         else:
             # Leaf node - make certain fields editable
             if isinstance(value, (str, int, float, bool)) or value is None:
-                if label in ["name", "description", "enabled", "timeout", "max_retries", "log_level"]:
+                # Use same logic as main tree building method
+                if (parent and parent.label in ["configuration", "settings", "metadata", "properties", "data", "payload"] or
+                    label in ["name", "description", "enabled", "timeout", "max_retries", "log_level", 
+                             "facet_type", "facet_id", "owner_element_id", "event_type", "timestamp",
+                             "message", "content", "status", "priority", "category", "tags"]):
                     node.is_editable = True
-                    node.write_endpoint = "write_veil_facets"
+                    # Use appropriate write endpoint based on the context
+                    # Walk up the tree to find the root to determine the context
+                    root_node = parent
+                    while root_node and root_node.parent:
+                        root_node = root_node.parent
+                    
+                    if root_node and root_node.id == "events_root":
+                        node.write_endpoint = "write_timeline_events"
+                    elif root_node and root_node.id == "facets_root":
+                        node.write_endpoint = "write_veil_facets"
+                    else:
+                        # Fallback logic for other contexts
+                        node.write_endpoint = "write_veil_facets"
                     node.command_path = path
         
         return node
@@ -1594,6 +1610,17 @@ class IPCTUIInspector:
                 for child in node.children:
                     if not child.children and isinstance(child.data, (str, int, float, bool)) or child.data is None:
                         child.is_editable = True
+                        # Set appropriate write endpoint for detail view
+                        if hasattr(self, '_current_endpoint'):
+                            if self._current_endpoint == "veil_facets":
+                                child.write_endpoint = "write_veil_facets"
+                            elif self._current_endpoint == "timeline_details":
+                                child.write_endpoint = "write_timeline_events"
+                            else:
+                                child.write_endpoint = "write_veil_facets"  # Default fallback
+                        else:
+                            child.write_endpoint = "write_veil_facets"  # Default fallback
+                        child.command_path = child.id
                         
             elif isinstance(obj, list) and obj:
                 node.children = []
