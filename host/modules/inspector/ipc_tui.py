@@ -1079,6 +1079,19 @@ class IPCTUIInspector:
                     space_id = label  # The space ID is the label at this level  
                     node.drill_down_endpoint = f"timeline_details_{space_id}"
                 
+                # Add drill-down for individual timelines: any node that is a direct child of a "timelines" container
+                # This should work in both "timelines" (overview) and "timeline_details" (specific space timeline) views
+                if endpoint in ["timelines", "timeline_details"] and parent and parent.label == "timelines":
+                    # This is an individual timeline under any "timelines" container
+                    # We need to find the space_id by walking up the tree to find the space node
+                    timeline_id = label  # The timeline ID is the current label
+                    
+                    # Walk up the tree to find the space_id (the node that contains the "timelines" container)
+                    space_node = parent.parent  # Parent is "timelines", parent.parent should be the space
+                    if space_node:
+                        space_id = space_node.label
+                        node.drill_down_endpoint = f"timeline_events_{space_id}_{timeline_id}"
+                
                 # For other endpoints, add drill-down logic based on patterns
                 if endpoint == "spaces" and depth == 1 and parent and parent.label == "details":
                     # Individual spaces under details can drill down to their timelines, veil, etc.
@@ -1158,6 +1171,50 @@ class IPCTUIInspector:
                 facet_node.is_expanded = True
             
             root.children.append(facet_node)
+        
+        return root
+    
+    async def _build_timeline_events_tree(self, events_data: Dict[str, Any], root_label: str) -> TreeNode:
+        """Build a simplified tree structure for timeline events drill-down without container metadata."""
+        root = TreeNode("events_root", root_label)
+        
+        # Get the events array from the response
+        events = events_data.get("events", [])
+        
+        # Create nodes directly for each event without any container structure
+        for i, event in enumerate(events):
+            # Use event_id as the node ID if available, otherwise use index
+            event_id = event.get("event_id", f"event_{i}")
+            payload = event.get("payload", {})
+            event_type = payload.get("event_type", "unknown")
+            timestamp = event.get("timestamp", 0)
+            
+            # Create a readable label for the event
+            # Format timestamp for display
+            import datetime
+            try:
+                dt = datetime.datetime.fromtimestamp(timestamp)
+                time_str = dt.strftime("%H:%M:%S")
+            except (ValueError, OSError):
+                time_str = str(timestamp)[:10]  # Fallback to truncated timestamp
+            
+            label = f"{event_id} ({event_type}) at {time_str}"
+            
+            # Build the event node with expandable structure
+            event_node = TreeNode(event_id, label, event, parent=root)
+            
+            # Make event data expandable by creating child nodes for event properties
+            if isinstance(event, dict):
+                event_node.children = []
+                for key, value in event.items():
+                    child_path = f"{event_id}.{key}"
+                    child = self._build_node_from_value(value, key, event_node, child_path, 1)
+                    event_node.children.append(child)
+                    
+                # Auto-expand the event to show its properties  
+                event_node.is_expanded = True
+            
+            root.children.append(event_node)
         
         return root
     
@@ -1273,6 +1330,24 @@ class IPCTUIInspector:
                 endpoint_name = f"timeline_details"
                 endpoint_args = {"space_id": space_id}
                 display_name = f"Timeline Events for Space {space_id}"
+            elif drill_endpoint.startswith("timeline_events_"):
+                # Parse timeline_events_{space_id}_{timeline_id}
+                # This is tricky because both space_id and timeline_id can contain underscores
+                # We need to split from the end to get the timeline_id, then the rest is space_id
+                remaining = drill_endpoint.replace("timeline_events_", "")
+                parts = remaining.rsplit("_", 1)  # Split from the right to get the last part as timeline_id
+                if len(parts) >= 2:
+                    space_id = parts[0]
+                    timeline_id = parts[1]
+                    endpoint_name = f"timeline_details"
+                    endpoint_args = {"space_id": space_id, "timeline_id": timeline_id}
+                    display_name = f"Events for Timeline {timeline_id} in Space {space_id}"
+                else:
+                    # Fallback if parsing fails - treat the whole string as space_id
+                    space_id = remaining
+                    endpoint_name = f"timeline_details"
+                    endpoint_args = {"space_id": space_id}
+                    display_name = f"Timeline Events for Space {space_id}"
             elif drill_endpoint.startswith("agent_details_"):
                 agent_id = drill_endpoint.replace("agent_details_", "")
                 endpoint_name = f"agent_details" 
@@ -1321,6 +1396,12 @@ class IPCTUIInspector:
                 self.tree_root = await self._build_facets_tree(data, display_name)
                 # Store space_id for refresh functionality
                 self._current_space_id = endpoint_args.get("space_id", "unknown")
+            elif endpoint_name == "timeline_details" and endpoint_args.get("timeline_id"):
+                # Special handling for timeline events - show events in flat list similar to facets
+                self.tree_root = await self._build_timeline_events_tree(data, display_name)
+                # Store space_id and timeline_id for refresh functionality
+                self._current_space_id = endpoint_args.get("space_id", "unknown")
+                self._current_timeline_id = endpoint_args.get("timeline_id", "unknown")
             else:
                 self.tree_root = await self._build_tree_from_data(data, display_name, endpoint_name, endpoint_args)
             
@@ -1450,6 +1531,13 @@ class IPCTUIInspector:
                     endpoint_args = {"space_id": space_id}
                     data = await self._fetch_drill_down_data(self._current_endpoint, endpoint_args)
                     self.tree_root = await self._build_facets_tree(data, self.tree_root.label)
+                elif self._current_endpoint == "timeline_details" and hasattr(self, '_current_timeline_id'):
+                    # Special handling for timeline events refresh
+                    space_id = getattr(self, '_current_space_id', 'unknown')
+                    timeline_id = getattr(self, '_current_timeline_id', 'unknown')
+                    endpoint_args = {"space_id": space_id, "timeline_id": timeline_id}
+                    data = await self._fetch_drill_down_data(self._current_endpoint, endpoint_args)
+                    self.tree_root = await self._build_timeline_events_tree(data, self.tree_root.label)
                 else:
                     data = await self._fetch_endpoint_data(self._current_endpoint)
                     # For refresh, we may not have the original context, so pass empty dict
