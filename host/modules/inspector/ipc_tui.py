@@ -1433,8 +1433,9 @@ class IPCTUIInspector:
             command = "timeline-details"
             command_args = endpoint_args.copy()
             # Add conservative limit for timeline events to avoid IPC overflow (tested safe threshold is ~125, using 50 for safety)
+            # Use negative limit to get older events (reverse chronological order)
             if 'limit' not in command_args:
-                command_args['limit'] = 50
+                command_args['limit'] = -50
         elif endpoint_name == "agent_details":
             command = "agent_details"
             command_args = endpoint_args
@@ -1958,6 +1959,11 @@ class IPCTUIInspector:
                 # Add cursor if we have one
                 if self._pagination_cursor:
                     endpoint_args["after_facet_id"] = self._pagination_cursor
+                
+                # Debug: log what we're sending
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.debug(f"Veil facets pagination request: args={endpoint_args}")
                     
                 data = await self._fetch_drill_down_data(self._current_endpoint, endpoint_args)
                 await self._append_facets_to_tree(data)
@@ -1968,11 +1974,16 @@ class IPCTUIInspector:
                 endpoint_args = {
                     "space_id": space_id,
                     "timeline_id": timeline_id,
-                    "limit": self._pagination_limit
+                    "limit": self._pagination_limit  # Negative limit for older events
                 }
                 # Add cursor if we have one
                 if self._pagination_cursor:
                     endpoint_args["offset"] = self._pagination_cursor
+                
+                # Debug: log what we're sending
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.debug(f"Timeline pagination request: args={endpoint_args}")
                     
                 data = await self._fetch_drill_down_data(self._current_endpoint, endpoint_args)
                 await self._append_timeline_events_to_tree(data)
@@ -1992,14 +2003,30 @@ class IPCTUIInspector:
         # Get the facets array from the response
         facets = data.get("facets", [])
         
+        # Debug: log facet data structure
+        import logging
+        logger = logging.getLogger(__name__)
+        if facets:
+            first_facet = facets[0]
+            last_facet = facets[-1]
+            logger.debug(f"Facets structure - first: {first_facet.keys() if isinstance(first_facet, dict) else type(first_facet)}")
+            logger.debug(f"First facet ID: {first_facet.get('facet_id') if isinstance(first_facet, dict) else 'N/A'}")
+            logger.debug(f"Last facet ID: {last_facet.get('facet_id') if isinstance(last_facet, dict) else 'N/A'}")
+        
         # Update pagination state
         summary = data.get("summary", {})
         self._pagination_has_more = summary.get("limited", False)
         
-        # Set cursor to the last facet ID for next batch
-        if facets and self._pagination_has_more:
-            last_facet = facets[-1]
-            self._pagination_cursor = last_facet.get("facet_id", None)
+        # Set cursor to the next_cursor provided by the API (more reliable than manual extraction)
+        if self._pagination_has_more:
+            self._pagination_cursor = summary.get("next_cursor", None)
+            # Debug: log cursor info
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.debug(f"Veil facets pagination: cursor={self._pagination_cursor}, has_more={self._pagination_has_more}, facets_count={len(facets)}")
+            logger.debug(f"Summary: {summary}")
+            if facets:
+                logger.debug(f"Last facet ID: {facets[-1].get('facet_id') if facets else 'None'}")
         
         # Append new facets to existing tree
         for i, facet in enumerate(facets):
@@ -2031,14 +2058,31 @@ class IPCTUIInspector:
         # Get the events array from the response
         events = data.get("events", [])
         
+        # Debug: log event data structure
+        import logging
+        logger = logging.getLogger(__name__)
+        if events:
+            first_event = events[0]
+            last_event = events[-1]
+            logger.debug(f"Events structure - first: {first_event.keys() if isinstance(first_event, dict) else type(first_event)}")
+            logger.debug(f"First event timestamp: {first_event.get('timestamp') if isinstance(first_event, dict) else 'N/A'}")
+            logger.debug(f"Last event timestamp: {last_event.get('timestamp') if isinstance(last_event, dict) else 'N/A'}")
+        
         # Update pagination state
         pagination = data.get("pagination", {})
         self._pagination_has_more = pagination.get("has_more", False)
         
         # Set cursor to the last event timestamp for next batch
+        # Since we're using negative limit (reverse chronological), the last event is the oldest
         if events and self._pagination_has_more:
-            last_event = events[-1]
+            last_event = events[-1]  # This should be the oldest event
             self._pagination_cursor = last_event.get("timestamp", None)
+            # Debug: log cursor info
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.debug(f"Timeline pagination: cursor={self._pagination_cursor}, has_more={self._pagination_has_more}, events_count={len(events)}")
+            logger.debug(f"First event timestamp: {events[0].get('timestamp') if events else 'None'}")
+            logger.debug(f"Last event timestamp: {last_event.get('timestamp') if isinstance(last_event, dict) else 'None'}")
         
         # Append new events to existing tree
         for i, event in enumerate(events):
@@ -2079,17 +2123,16 @@ class IPCTUIInspector:
             facets = data.get("facets", [])
             self._pagination_limit = 20  # Keep same limit as initial fetch
             self._pagination_has_more = summary.get("limited", False)
-            # Set cursor to last facet ID if there are more items
-            if facets and self._pagination_has_more:
-                last_facet = facets[-1]
-                self._pagination_cursor = last_facet.get("facet_id", None)
+            # Set cursor to next_cursor provided by API if there are more items
+            if self._pagination_has_more:
+                self._pagination_cursor = summary.get("next_cursor", None)
             else:
                 self._pagination_cursor = None
                 
         elif endpoint_name == "timeline_details":
             pagination = data.get("pagination", {})
             events = data.get("events", [])
-            self._pagination_limit = 50  # Keep same limit as initial fetch
+            self._pagination_limit = 50  # Keep same limit as initial fetch (will be made negative when used)
             self._pagination_has_more = pagination.get("has_more", False)
             # Set cursor to last event timestamp if there are more items
             if events and self._pagination_has_more:

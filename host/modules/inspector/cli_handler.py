@@ -306,7 +306,8 @@ class CLICommandHandler:
         space_id = args.get('space_id')
         timeline_id = args.get('timeline_id')
         limit = args.get('limit', 100)
-        return await self.handlers.handle_timeline_details(space_id, timeline_id, limit)
+        offset = args.get('offset')
+        return await self.handlers.handle_timeline_details(space_id, timeline_id, limit, offset)
     
     async def _handle_veil(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Handle veil command."""
@@ -323,7 +324,8 @@ class CLICommandHandler:
         facet_type = args.get('facet_type')
         owner_id = args.get('owner_id')
         limit = args.get('limit', 100)
-        return await self.handlers.handle_veil_facets(space_id, facet_type, owner_id, limit)
+        after_facet_id = args.get('after_facet_id')
+        return await self.handlers.handle_veil_facets(space_id, facet_type, owner_id, limit, after_facet_id)
     
     async def _handle_veil_facet_details(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Handle veil-facet-details command."""

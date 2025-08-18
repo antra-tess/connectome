@@ -1062,11 +1062,18 @@ class InspectorDataCollector:
             filtered_facets = []
             skip_until_found = after_facet_id is not None
             
+            # Debug pagination
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.debug(f"Veil facets pagination: after_facet_id={after_facet_id}, skip_until_found={skip_until_found}, total_facets={len(all_facets)}")
+            
             for facet in all_facets:
                 # Handle pagination cursor
                 if skip_until_found:
                     if facet.facet_id == after_facet_id:
+                        logger.debug(f"Found cursor facet: {facet.facet_id}, stopping skip")
                         skip_until_found = False
+                        # Continue to skip this exact facet (we want items AFTER it)
                     continue
                 
                 # Filter by facet type
@@ -1079,6 +1086,10 @@ class InspectorDataCollector:
                     
                 filtered_facets.append(facet)
             
+            # Debug: log first few facets added
+            if len(filtered_facets) <= 3:
+                logger.debug(f"Added facet {len(filtered_facets)}: {facet.facet_id}")
+            
             # Apply limit and set pagination info
             facets_data["summary"]["total_matching"] = len(filtered_facets)
             limited_facets = filtered_facets[:limit]
@@ -1088,6 +1099,9 @@ class InspectorDataCollector:
             # Set next cursor if there are more results
             if len(filtered_facets) > limit:
                 facets_data["summary"]["next_cursor"] = limited_facets[-1].facet_id
+                logger.debug(f"Set next_cursor to: {facets_data['summary']['next_cursor']}")
+            else:
+                logger.debug("No more results, next_cursor not set")
             
             # Serialize facets
             facets_data["facets"] = [
