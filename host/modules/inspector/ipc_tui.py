@@ -676,20 +676,20 @@ class IPCTUIInspector:
                 # Collapse behavior: if expanded, collapse; if already collapsed, go to parent
                 if current_node.is_expanded:
                     current_node.is_expanded = False
-                elif current_node.parent and current_node.parent.id not in ["root", "detail_root", "facets_root"]:
+                elif current_node.parent and current_node.parent.id not in ["root", "detail_root", "facets_root", "events_root"]:
                     # Node is already collapsed, snap to parent
                     self._set_current_node(current_node.parent, is_detail_mode)
                     self._adjust_scroll_to_current_node(is_detail_mode)
-                elif current_node.parent and current_node.parent.id in ["root", "detail_root", "facets_root"]:
+                elif current_node.parent and current_node.parent.id in ["root", "detail_root", "facets_root", "events_root"]:
                     # Top-level node that would snap to root - instead collapse all siblings
                     self._collapse_siblings_of_node(current_node, is_detail_mode)
         elif current_node and not current_node.children:
             # Leaf node: snap to parent if collapse is requested
             if not expand:
-                if current_node.parent and current_node.parent.id not in ["root", "detail_root", "facets_root"]:
+                if current_node.parent and current_node.parent.id not in ["root", "detail_root", "facets_root", "events_root"]:
                     self._set_current_node(current_node.parent, is_detail_mode)
                     self._adjust_scroll_to_current_node(is_detail_mode)
-                elif current_node.parent and current_node.parent.id in ["root", "detail_root", "facets_root"]:
+                elif current_node.parent and current_node.parent.id in ["root", "detail_root", "facets_root", "events_root"]:
                     # Top-level leaf node - collapse all siblings
                     self._collapse_siblings_of_node(current_node, is_detail_mode)
     
