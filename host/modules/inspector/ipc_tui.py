@@ -676,13 +676,34 @@ class IPCTUIInspector:
                 # Collapse behavior: if expanded, collapse; if already collapsed, go to parent
                 if current_node.is_expanded:
                     current_node.is_expanded = False
-                elif current_node.parent and current_node.parent.id != "root" and current_node.parent.id != "detail_root" and current_node.parent.id != "facets_root":
+                elif current_node.parent and current_node.parent.id not in ["root", "detail_root", "facets_root"]:
                     # Node is already collapsed, snap to parent
                     self._set_current_node(current_node.parent, is_detail_mode)
+                elif current_node.parent and current_node.parent.id in ["root", "detail_root", "facets_root"]:
+                    # Top-level node that would snap to root - instead collapse all siblings
+                    self._collapse_siblings_of_node(current_node, is_detail_mode)
         elif current_node and not current_node.children:
             # Leaf node: snap to parent if collapse is requested
-            if not expand and current_node.parent and current_node.parent.id != "root" and current_node.parent.id != "detail_root" and current_node.parent.id != "facets_root":
-                self._set_current_node(current_node.parent, is_detail_mode)
+            if not expand:
+                if current_node.parent and current_node.parent.id not in ["root", "detail_root", "facets_root"]:
+                    self._set_current_node(current_node.parent, is_detail_mode)
+                elif current_node.parent and current_node.parent.id in ["root", "detail_root", "facets_root"]:
+                    # Top-level leaf node - collapse all siblings
+                    self._collapse_siblings_of_node(current_node, is_detail_mode)
+    
+    def _collapse_siblings_of_node(self, current_node: TreeNode, is_detail_mode: bool):
+        """Collapse all siblings of the current node, creating a 'focus' effect."""
+        if not current_node or not current_node.parent:
+            return
+        
+        # Collapse all siblings (other children of the same parent)
+        for sibling in current_node.parent.children:
+            if sibling != current_node and sibling.children:
+                sibling.is_expanded = False
+        
+        # Also ensure the current node is expanded if it has children, to create the focus effect
+        if current_node.children:
+            current_node.is_expanded = True
     
     def _format_value_for_display(self, value: Any) -> str:
         """Format a value for display in the tree view."""
