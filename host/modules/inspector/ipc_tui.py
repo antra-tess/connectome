@@ -580,8 +580,7 @@ class IPCTUIInspector:
                 display_text = f"{tree_line}{icon} {node.label}"
             
             # Add detail inspection indicator for nodes that support meaningful detail views
-            if (node.children or  # Non-leaf nodes with complex structures
-                node.node_type in ["command", "action"] or  # Interactive nodes
+            if (node.node_type in ["command", "action"] or  # Interactive nodes
                 node.is_editable or  # Editable nodes
                 node.drill_down_endpoint):  # Nodes with drill-down endpoints
                 display_text += " [Enter - 🔎]"
@@ -1089,7 +1088,7 @@ class IPCTUIInspector:
             self.current_tree_node.is_expanded = False
     
     async def _view_node_details(self):
-        """Switch to detail view for the current node."""
+        """Switch to detail view for the current node or expand if it's just a regular tree node."""
         if self.current_tree_node:
             if self.current_tree_node.node_type == "command":
                 # Execute command node
@@ -1097,12 +1096,19 @@ class IPCTUIInspector:
             elif self.current_tree_node.drill_down_endpoint:
                 # Drill down to detailed endpoint
                 await self._drill_down_to_endpoint()
-            else:
+            elif (self.current_tree_node.is_editable or 
+                  self.current_tree_node.node_type in ["action"] or
+                  not self.current_tree_node.children):
+                # Only switch to detail view for editable nodes, action nodes, or leaf nodes
+                # that don't have drill-down endpoints
                 self.mode = NavigationMode.DETAIL_VIEW
                 self.scroll_offset = 0
                 # Reset detail tree state to force rebuild
                 self._detail_tree_root = None
                 self._detail_tree_node_id = None
+            else:
+                # For regular tree nodes with children, just expand them
+                await self._expand_current_node()
     
     async def _execute_command_node(self):
         """Execute a command node."""
@@ -1169,15 +1175,29 @@ class IPCTUIInspector:
             
             # Add pagination info to display name if available
             if endpoint_name in ["veil_facets", "timeline_details"]:
-                summary = data.get("summary", {})
-                if summary:
-                    returned = summary.get("returned", 0)
-                    total = summary.get("total_matching", 0)
-                    limited = summary.get("limited", False)
-                    if limited:
-                        display_name += f" ({returned} of {total}, paginated)"
-                    else:
-                        display_name += f" ({returned} items)"
+                # Handle different pagination response formats
+                if endpoint_name == "veil_facets":
+                    # VEIL facets uses 'summary' format
+                    summary = data.get("summary", {})
+                    if summary:
+                        returned = summary.get("returned", 0)
+                        total = summary.get("total_matching", 0)
+                        limited = summary.get("limited", False)
+                        if limited:
+                            display_name += f" ({returned} of {total}, paginated)"
+                        else:
+                            display_name += f" ({returned} items)"
+                elif endpoint_name == "timeline_details":
+                    # Timeline details uses 'pagination' format
+                    pagination = data.get("pagination", {})
+                    if pagination:
+                        returned = pagination.get("events_returned", 0)
+                        has_more = pagination.get("has_more", False)
+                        total_events = data.get("timeline_info", {}).get("total_events", 0)
+                        if has_more:
+                            display_name += f" ({returned} of {total_events}, paginated)"
+                        else:
+                            display_name += f" ({returned} items)"
             
             # Build new tree with the detailed data
             self.tree_root = await self._build_tree_from_data(data, display_name, endpoint_name, endpoint_args)
