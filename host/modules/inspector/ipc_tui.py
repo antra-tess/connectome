@@ -1532,7 +1532,11 @@ class IPCTUIInspector:
                     )
                     
                     if response.get("error"):
-                        self.status_message = f"Save failed: {response['error']}"
+                        error_msg = response['error']
+                        if "Unknown command" in error_msg:
+                            self.status_message = f"Command not available: {node.write_endpoint}. Host may need restart."
+                        else:
+                            self.status_message = f"Save failed: {error_msg}"
                     else:
                         # Update the node with new value
                         node.data = new_value
