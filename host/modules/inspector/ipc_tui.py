@@ -1044,6 +1044,67 @@ class IPCTUIInspector:
         
         return root
     
+    async def _build_facets_tree(self, facets_data: Dict[str, Any], root_label: str) -> TreeNode:
+        """Build a simplified tree structure for facets drill-down without container metadata."""
+        root = TreeNode("facets_root", root_label)
+        
+        # Get the facets array from the response
+        facets = facets_data.get("facets", [])
+        
+        # Create nodes directly for each facet without any container structure
+        for i, facet in enumerate(facets):
+            # Use facet_id as the node ID if available, otherwise use index
+            facet_id = facet.get("facet_id", f"facet_{i}")
+            facet_type = facet.get("facet_type", "unknown")
+            owner_id = facet.get("owner_element_id", "unknown")
+            
+            # Create a readable label for the facet
+            label = f"{facet_id} ({facet_type})"
+            
+            # Build the facet node with expandable structure
+            facet_node = TreeNode(facet_id, label, facet, parent=root)
+            
+            # Make facet data expandable by creating child nodes for facet properties
+            if isinstance(facet, dict):
+                facet_node.children = []
+                for key, value in facet.items():
+                    child_path = f"{facet_id}.{key}"
+                    child = self._build_node_from_value(value, key, facet_node, child_path, 1)
+                    facet_node.children.append(child)
+                    
+                # Auto-expand the facet to show its properties  
+                facet_node.is_expanded = True
+            
+            root.children.append(facet_node)
+        
+        return root
+    
+    def _build_node_from_value(self, value: Any, label: str, parent: TreeNode, path: str, depth: int) -> TreeNode:
+        """Build a tree node from a value, similar to the main build_node function."""
+        node = TreeNode(path, label, value, parent=parent)
+        
+        if isinstance(value, dict):
+            node.children = []
+            for key, child_value in value.items():
+                child_path = f"{path}.{key}"
+                child = self._build_node_from_value(child_value, key, node, child_path, depth + 1)
+                node.children.append(child)
+        elif isinstance(value, list) and value:
+            node.children = []
+            for i, item in enumerate(value):
+                child_path = f"{path}[{i}]"
+                child = self._build_node_from_value(item, f"Item {i}", node, child_path, depth + 1)
+                node.children.append(child)
+        else:
+            # Leaf node - make certain fields editable
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                if label in ["name", "description", "enabled", "timeout", "max_retries", "log_level"]:
+                    node.is_editable = True
+                    node.write_endpoint = "write_veil_facets"
+                    node.command_path = path
+        
+        return node
+    
     async def _navigate_tree_up(self):
         """Navigate up in the tree view."""
         visible_nodes = self._get_visible_tree_nodes()
@@ -1207,7 +1268,14 @@ class IPCTUIInspector:
                             display_name += f" ({returned} items)"
             
             # Build new tree with the detailed data
-            self.tree_root = await self._build_tree_from_data(data, display_name, endpoint_name, endpoint_args)
+            if endpoint_name == "veil_facets":
+                # Special handling for facets - show only facets without container structure
+                self.tree_root = await self._build_facets_tree(data, display_name)
+                # Store space_id for refresh functionality
+                self._current_space_id = endpoint_args.get("space_id", "unknown")
+            else:
+                self.tree_root = await self._build_tree_from_data(data, display_name, endpoint_name, endpoint_args)
+            
             self.current_tree_node = self.tree_root.children[0] if self.tree_root.children else None
             self.mode = NavigationMode.TREE_VIEW
             self.scroll_offset = 0
@@ -1326,9 +1394,18 @@ class IPCTUIInspector:
         if self.mode == NavigationMode.TREE_VIEW and hasattr(self, '_current_endpoint'):
             try:
                 self.status_message = "Refreshing..."
-                data = await self._fetch_endpoint_data(self._current_endpoint)
-                # For refresh, we may not have the original context, so pass empty dict
-                self.tree_root = await self._build_tree_from_data(data, self.tree_root.label, self._current_endpoint, {})
+                
+                if self._current_endpoint == "veil_facets":
+                    # Special handling for facets refresh using drill-down data fetching
+                    # Extract space_id from the current tree root label or stored context
+                    space_id = getattr(self, '_current_space_id', 'unknown')
+                    endpoint_args = {"space_id": space_id}
+                    data = await self._fetch_drill_down_data(self._current_endpoint, endpoint_args)
+                    self.tree_root = await self._build_facets_tree(data, self.tree_root.label)
+                else:
+                    data = await self._fetch_endpoint_data(self._current_endpoint)
+                    # For refresh, we may not have the original context, so pass empty dict
+                    self.tree_root = await self._build_tree_from_data(data, self.tree_root.label, self._current_endpoint, {})
                 
                 # Try to maintain current selection
                 if self.current_tree_node:
