@@ -524,24 +524,67 @@ class IPCTUIInspector:
     
     async def _render_tree_view(self):
         """Render the tree navigation view."""
-        if not self.tree_root:
-            self.terminal.move_cursor(4, 2)
+        self._render_tree_generic(is_detail_mode=False)
+    
+    def _get_visible_tree_nodes(self) -> List[Tuple[TreeNode, int, bool]]:
+        """Get list of visible tree nodes with depth and selection info."""
+        return self._get_visible_nodes(is_detail_mode=False)
+    
+    def _get_tree_state(self, is_detail_mode: bool) -> Tuple[TreeNode, TreeNode, int]:
+        """Get the current tree state (root, current_node, start_row) for the given mode."""
+        if is_detail_mode:
+            return (self._detail_tree_root, self._detail_current_node, 6)
+        else:
+            return (self.tree_root, self.current_tree_node, 4)
+    
+    def _set_current_node(self, node: TreeNode, is_detail_mode: bool):
+        """Set the current node for the given mode."""
+        if is_detail_mode:
+            self._detail_current_node = node
+        else:
+            self.current_tree_node = node
+    
+    def _get_visible_nodes(self, is_detail_mode: bool) -> List[Tuple[TreeNode, int, bool]]:
+        """Get list of visible tree nodes with depth and selection info for either mode."""
+        visible = []
+        tree_root, current_node, _ = self._get_tree_state(is_detail_mode)
+        
+        def traverse(node: TreeNode, depth: int):
+            is_current = node == current_node
+            visible.append((node, depth, is_current))
+            
+            if node.is_expanded:
+                for child in node.children:
+                    traverse(child, depth + 1)
+        
+        if tree_root:
+            for child in tree_root.children:
+                traverse(child, 0)
+        
+        return visible
+    
+    def _render_tree_generic(self, is_detail_mode: bool):
+        """Generic tree rendering for both tree view and detail view modes."""
+        tree_root, current_node, start_row = self._get_tree_state(is_detail_mode)
+        
+        if not tree_root:
+            self.terminal.move_cursor(start_row, 2)
             self.terminal.set_color('yellow')
-            print("Loading data...")
+            print("Loading data..." if not is_detail_mode else "No data to display")
             self.terminal.reset_colors()
             return
         
         rows, cols = self.terminal.get_terminal_size()
-        content_rows = rows - 6
+        content_rows = rows - (8 if is_detail_mode else 6)
         
         # Render tree
-        visible_nodes = self._get_visible_tree_nodes()
+        visible_nodes = self._get_visible_nodes(is_detail_mode)
         
         for i, (node, depth, is_current) in enumerate(visible_nodes[self.scroll_offset:]):
             if i >= content_rows:
                 break
             
-            row = 4 + i
+            row = start_row + i
             col = 2 + (depth * 2)
             
             self.terminal.move_cursor(row, col)
@@ -562,9 +605,9 @@ class IPCTUIInspector:
             # Node icon and label
             if node.is_editable:
                 icon = "📝"
-            elif node.node_type == "command":
+            elif not is_detail_mode and node.node_type == "command":
                 icon = "⚡"
-            elif node.node_type == "action":
+            elif not is_detail_mode and node.node_type == "action":
                 icon = "🔧"
             elif node.children:
                 icon = "📁"
@@ -579,10 +622,8 @@ class IPCTUIInspector:
             else:
                 display_text = f"{tree_line}{icon} {node.label}"
             
-            # Add detail inspection indicator for nodes that support meaningful detail views
-            if (node.node_type in ["command", "action"] or  # Interactive nodes
-                node.is_editable or  # Editable nodes
-                node.drill_down_endpoint):  # Nodes with drill-down endpoints
+            # Add detail inspection indicator for nodes that support meaningful detail views (only in tree view)
+            if not is_detail_mode and (node.node_type in ["command", "action"] or node.is_editable or node.drill_down_endpoint):
                 display_text += " [Enter - 🔎]"
             
             # Truncate if too long
@@ -593,23 +634,42 @@ class IPCTUIInspector:
             print(display_text)
             self.terminal.reset_colors()
     
-    def _get_visible_tree_nodes(self) -> List[Tuple[TreeNode, int, bool]]:
-        """Get list of visible tree nodes with depth and selection info."""
-        visible = []
+    def _navigate_tree_generic(self, direction: str, is_detail_mode: bool):
+        """Generic tree navigation for both modes."""
+        visible_nodes = self._get_visible_nodes(is_detail_mode)
+        if not visible_nodes:
+            return
         
-        def traverse(node: TreeNode, depth: int):
-            is_current = node == self.current_tree_node
-            visible.append((node, depth, is_current))
-            
-            if node.is_expanded:
-                for child in node.children:
-                    traverse(child, depth + 1)
+        current_index = -1
+        for i, (node, _, is_current) in enumerate(visible_nodes):
+            if is_current:
+                current_index = i
+                break
         
-        if self.tree_root:
-            for child in self.tree_root.children:
-                traverse(child, 0)
+        # Handle case where no node is currently selected
+        if current_index == -1:
+            if visible_nodes:
+                self._set_current_node(visible_nodes[0][0], is_detail_mode)
+            return
         
-        return visible
+        if direction == "up" and current_index > 0:
+            self._set_current_node(visible_nodes[current_index - 1][0], is_detail_mode)
+            # Adjust scroll offset if needed
+            if current_index - 1 < self.scroll_offset:
+                self.scroll_offset = max(0, current_index - 1)
+        elif direction == "down" and current_index < len(visible_nodes) - 1:
+            self._set_current_node(visible_nodes[current_index + 1][0], is_detail_mode)
+            # Adjust scroll offset if needed
+            rows, _ = self.terminal.get_terminal_size()
+            content_rows = rows - (8 if is_detail_mode else 6)
+            if current_index + 1 >= self.scroll_offset + content_rows:
+                self.scroll_offset = current_index + 1 - content_rows + 1
+    
+    def _expand_collapse_node_generic(self, expand: bool, is_detail_mode: bool):
+        """Generic expand/collapse for both modes."""
+        _, current_node, _ = self._get_tree_state(is_detail_mode)
+        if current_node and current_node.children:
+            current_node.is_expanded = expand
     
     def _format_value_for_display(self, value: Any) -> str:
         """Format a value for display in the tree view."""
@@ -655,67 +715,18 @@ class IPCTUIInspector:
             self.terminal.reset_colors()
             return
         
-        rows, cols = self.terminal.get_terminal_size()
-        
         # Node info header
         self.terminal.move_cursor(4, 2)
         self.terminal.set_color('bright_green', bold=True)
         print(f"Details: {self.current_tree_node.label}")
+        self.terminal.reset_colors()
         
         # Initialize detail tree if needed
         if not hasattr(self, '_detail_tree_root') or self._detail_tree_node_id != self.current_tree_node.id:
             await self._build_detail_tree()
         
-        # Render as foldable tree using the same logic as main tree view
-        content_rows = rows - 8
-        
-        # Get visible nodes from detail tree
-        visible_nodes = self._get_visible_detail_tree_nodes()
-        
-        for i, (node, depth, is_current) in enumerate(visible_nodes[self.scroll_offset:]):
-            if i >= content_rows:
-                break
-            
-            row = 6 + i
-            col = 2 + (depth * 2)
-            
-            self.terminal.move_cursor(row, col)
-            
-            # Selection highlighting
-            if is_current:
-                self.terminal.set_color('black', 'bright_yellow', bold=True)
-            else:
-                self.terminal.reset_colors()
-            
-            # Tree structure symbols
-            if node.children:
-                expand_symbol = "▼" if node.is_expanded else "▶"
-                tree_line = f"{expand_symbol} "
-            else:
-                tree_line = "  "
-            
-            # Node icon and label
-            if node.is_editable:
-                icon = "📝"
-            elif node.children:
-                icon = "📁"
-            else:
-                icon = "📄"
-            
-            # For leaf nodes, show the value alongside the key
-            if not node.children:
-                value_str = self._format_value_for_display(node.data)
-                display_text = f"{tree_line}{icon} {node.label}: {value_str}"
-            else:
-                display_text = f"{tree_line}{icon} {node.label}"
-            
-            # Truncate if too long
-            max_width = cols - col - 2
-            if len(display_text) > max_width:
-                display_text = display_text[:max_width-3] + "..."
-            
-            print(display_text)
-            self.terminal.reset_colors()
+        # Render using unified tree rendering
+        self._render_tree_generic(is_detail_mode=True)
     
     async def _render_edit_mode(self):
         """Render edit mode interface."""
@@ -1107,53 +1118,19 @@ class IPCTUIInspector:
     
     async def _navigate_tree_up(self):
         """Navigate up in the tree view."""
-        visible_nodes = self._get_visible_tree_nodes()
-        if not visible_nodes:
-            return
-        
-        current_index = -1
-        for i, (node, _, is_current) in enumerate(visible_nodes):
-            if is_current:
-                current_index = i
-                break
-        
-        if current_index > 0:
-            self.current_tree_node = visible_nodes[current_index - 1][0]
-            
-            # Adjust scroll offset if needed
-            if current_index - 1 < self.scroll_offset:
-                self.scroll_offset = max(0, current_index - 1)
+        self._navigate_tree_generic("up", is_detail_mode=False)
     
     async def _navigate_tree_down(self):
         """Navigate down in the tree view."""
-        visible_nodes = self._get_visible_tree_nodes()
-        if not visible_nodes:
-            return
-        
-        current_index = -1
-        for i, (node, _, is_current) in enumerate(visible_nodes):
-            if is_current:
-                current_index = i
-                break
-        
-        if current_index < len(visible_nodes) - 1:
-            self.current_tree_node = visible_nodes[current_index + 1][0]
-            
-            # Adjust scroll offset if needed
-            rows, _ = self.terminal.get_terminal_size()
-            content_rows = rows - 6
-            if current_index + 1 >= self.scroll_offset + content_rows:
-                self.scroll_offset = current_index + 1 - content_rows + 1
+        self._navigate_tree_generic("down", is_detail_mode=False)
     
     async def _expand_current_node(self):
         """Expand the current tree node."""
-        if self.current_tree_node and self.current_tree_node.children:
-            self.current_tree_node.is_expanded = True
+        self._expand_collapse_node_generic(expand=True, is_detail_mode=False)
     
     async def _collapse_current_node(self):
         """Collapse the current tree node."""
-        if self.current_tree_node and self.current_tree_node.children:
-            self.current_tree_node.is_expanded = False
+        self._expand_collapse_node_generic(expand=False, is_detail_mode=False)
     
     async def _view_node_details(self):
         """Switch to detail view for the current node or expand if it's just a regular tree node."""
@@ -1491,77 +1468,23 @@ class IPCTUIInspector:
     
     def _get_visible_detail_tree_nodes(self) -> List[Tuple[TreeNode, int, bool]]:
         """Get list of visible detail tree nodes with depth and selection info."""
-        visible = []
-        
-        def traverse(node: TreeNode, depth: int):
-            is_current = node == self._detail_current_node
-            visible.append((node, depth, is_current))
-            
-            if node.is_expanded:
-                for child in node.children:
-                    traverse(child, depth + 1)
-        
-        if self._detail_tree_root:
-            for child in self._detail_tree_root.children:
-                traverse(child, 0)
-        
-        return visible
+        return self._get_visible_nodes(is_detail_mode=True)
     
     async def _navigate_detail_tree_up(self):
         """Navigate up in the detail tree view."""
-        visible_nodes = self._get_visible_detail_tree_nodes()
-        if not visible_nodes:
-            return
-        
-        current_index = -1
-        for i, (node, _, is_current) in enumerate(visible_nodes):
-            if is_current:
-                current_index = i
-                break
-        
-        if current_index > 0:
-            self._detail_current_node = visible_nodes[current_index - 1][0]
-            
-            # Adjust scroll offset if needed
-            if current_index - 1 < self.scroll_offset:
-                self.scroll_offset = max(0, current_index - 1)
-        elif not self._detail_current_node and visible_nodes:
-            # If no current selection, select first node
-            self._detail_current_node = visible_nodes[0][0]
+        self._navigate_tree_generic("up", is_detail_mode=True)
     
     async def _navigate_detail_tree_down(self):
         """Navigate down in the detail tree view."""
-        visible_nodes = self._get_visible_detail_tree_nodes()
-        if not visible_nodes:
-            return
-        
-        current_index = -1
-        for i, (node, _, is_current) in enumerate(visible_nodes):
-            if is_current:
-                current_index = i
-                break
-        
-        if current_index < len(visible_nodes) - 1:
-            self._detail_current_node = visible_nodes[current_index + 1][0]
-            
-            # Adjust scroll offset if needed
-            rows, _ = self.terminal.get_terminal_size()
-            content_rows = rows - 8
-            if current_index + 1 >= self.scroll_offset + content_rows:
-                self.scroll_offset = current_index + 1 - content_rows + 1
-        elif not self._detail_current_node and visible_nodes:
-            # If no current selection, select first node
-            self._detail_current_node = visible_nodes[0][0]
+        self._navigate_tree_generic("down", is_detail_mode=True)
     
     async def _expand_detail_node(self):
         """Expand the current detail tree node."""
-        if self._detail_current_node and self._detail_current_node.children:
-            self._detail_current_node.is_expanded = True
+        self._expand_collapse_node_generic(expand=True, is_detail_mode=True)
     
     async def _collapse_detail_node(self):
         """Collapse the current detail tree node."""
-        if self._detail_current_node and self._detail_current_node.children:
-            self._detail_current_node.is_expanded = False
+        self._expand_collapse_node_generic(expand=False, is_detail_mode=True)
     
     async def _edit_detail_node(self):
         """Enter edit mode for the current detail node."""
