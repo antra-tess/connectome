@@ -68,7 +68,7 @@ class ActivityClient:
         self._pending_io_requests: Dict[str, Dict[str, Any]] = {}
 
         # NEW: Keepalive and idle state management
-        self._keepalive_interval = 120  # Send keepalive every 2 minutes
+        self._keepalive_interval = 30  # Send keepalive every 30 seconds (must be less than Socket.IO timeout of 60s)
         self._idle_threshold = 300  # Consider connection idle after 5 minutes
         self._last_activity: Dict[str, float] = {}  # adapter_id -> timestamp of last activity
         self._keepalive_tasks: Dict[str, asyncio.Task] = {}  # adapter_id -> keepalive task
