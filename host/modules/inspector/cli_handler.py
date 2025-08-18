@@ -78,6 +78,9 @@ class CLICommandHandler:
             'veil-facets': self._handle_veil_facets,
             'veil-facet-details': self._handle_veil_facet_details,
             'health': self._handle_health,
+            # Write commands
+            'update-timeline-event': self._handle_update_timeline_event,
+            'update-veil-facet': self._handle_update_veil_facet,
         }
     
     def start(self):
@@ -331,6 +334,21 @@ class CLICommandHandler:
     async def _handle_health(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Handle health command."""
         return await self.handlers.handle_health()
+    
+    async def _handle_update_timeline_event(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle update-timeline-event command."""
+        event_id = args.get('event_id')
+        update_data = args.get('update_data')
+        space_id = args.get('space_id')
+        timeline_id = args.get('timeline_id')
+        return await self.handlers.handle_update_timeline_event(event_id, update_data, space_id, timeline_id)
+    
+    async def _handle_update_veil_facet(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle update-veil-facet command."""
+        space_id = args.get('space_id')
+        facet_id = args.get('facet_id')
+        update_data = args.get('update_data')
+        return await self.handlers.handle_update_veil_facet(space_id, facet_id, update_data)
 
 
 def register_cli_commands(host_instance) -> CLICommandHandler:

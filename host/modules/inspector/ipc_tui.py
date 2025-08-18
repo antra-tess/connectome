@@ -14,6 +14,8 @@ import logging
 import termios
 import tty
 import signal
+import subprocess
+import tempfile
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Tuple, Union
 from dataclasses import dataclass, field
@@ -33,7 +35,6 @@ class NavigationMode(Enum):
     MAIN_MENU = "main_menu"
     TREE_VIEW = "tree_view"
     DETAIL_VIEW = "detail_view"
-    EDIT_MODE = "edit_mode"
     HOST_SELECTION = "host_selection"
 
 
@@ -189,7 +190,6 @@ class IPCTUIInspector:
         self.tree_root = None
         self.scroll_offset = 0
         self.status_message = ""
-        self.edit_buffer = ""
         self.search_query = ""
         
         # Detail view state
@@ -330,8 +330,6 @@ class IPCTUIInspector:
             await self._render_tree_view()
         elif self.mode == NavigationMode.DETAIL_VIEW:
             await self._render_detail_view()
-        elif self.mode == NavigationMode.EDIT_MODE:
-            await self._render_edit_mode()
         
         # Render footer
         await self._render_footer()
@@ -356,8 +354,6 @@ class IPCTUIInspector:
             breadcrumb = f" > {self.current_tree_node.label}"
         elif self.mode == NavigationMode.DETAIL_VIEW and self.current_tree_node:
             breadcrumb = f" > {self.current_tree_node.label} > Details"
-        elif self.mode == NavigationMode.EDIT_MODE and self.current_tree_node:
-            breadcrumb = f" > {self.current_tree_node.label} > Edit"
         elif self.mode == NavigationMode.HOST_SELECTION:
             breadcrumb = " > Select Host"
         
@@ -799,49 +795,6 @@ class IPCTUIInspector:
         # Render using unified tree rendering
         self._render_tree_generic(is_detail_mode=True)
     
-    async def _render_edit_mode(self):
-        """Render edit mode interface."""
-        rows, cols = self.terminal.get_terminal_size()
-        
-        # Edit header
-        self.terminal.move_cursor(4, 2)
-        self.terminal.set_color('bright_yellow', bold=True)
-        print(f"Editing: {self.current_tree_node.label if self.current_tree_node else 'Unknown'}")
-        
-        # Current value
-        if self.current_tree_node and self.current_tree_node.data is not None:
-            self.terminal.move_cursor(6, 2)
-            self.terminal.set_color('white')
-            print("Original value:")
-            self.terminal.move_cursor(7, 4)
-            self.terminal.set_color('bright_black')
-            original = json.dumps(self.current_tree_node.data, default=str)
-            if len(original) > cols - 8:
-                original = original[:cols-11] + "..."
-            print(original)
-        
-        # Edit buffer
-        self.terminal.move_cursor(9, 2)
-        self.terminal.set_color('white')
-        print("New value:")
-        
-        self.terminal.move_cursor(10, 2)
-        self.terminal.set_color('black', 'white')
-        edit_display = self.edit_buffer
-        if len(edit_display) > cols - 6:
-            edit_display = edit_display[:cols-9] + "..."
-        print(f" {edit_display} ")
-        
-        # Instructions
-        self.terminal.move_cursor(12, 2)
-        self.terminal.set_color('bright_cyan')
-        print("Type new value, then:")
-        self.terminal.move_cursor(13, 4)
-        print("• Ctrl+S: Save changes")
-        self.terminal.move_cursor(14, 4)
-        print("• Esc: Cancel editing")
-        
-        self.terminal.reset_colors()
     
     async def _render_footer(self):
         """Render footer with controls and status."""
@@ -869,8 +822,6 @@ class IPCTUIInspector:
             controls = "↑↓: Navigate • →: Expand • ←: Collapse • Enter: Details • E: Edit • B: Back • R: Refresh • Q: Quit"
         elif self.mode == NavigationMode.DETAIL_VIEW:
             controls = "↑↓: Navigate • →: Expand • ←: Collapse • E: Edit • B: Back • Q: Quit"
-        elif self.mode == NavigationMode.EDIT_MODE:
-            controls = "Type to edit • Ctrl+S: Save • Esc: Cancel"
         else:
             controls = "Q: Quit"
         
@@ -882,7 +833,7 @@ class IPCTUIInspector:
     
     async def _handle_input(self, key: str):
         """Handle keyboard input based on current mode."""
-        if key in ['q', 'Q'] and self.mode != NavigationMode.EDIT_MODE:
+        if key in ['q', 'Q']:
             self.running = False
             return
         
@@ -898,8 +849,6 @@ class IPCTUIInspector:
             await self._handle_tree_view_input(key)
         elif self.mode == NavigationMode.DETAIL_VIEW:
             await self._handle_detail_view_input(key)
-        elif self.mode == NavigationMode.EDIT_MODE:
-            await self._handle_edit_mode_input(key)
     
     async def _handle_host_selection_input(self, key: str):
         """Handle input in host selection mode."""
@@ -958,18 +907,6 @@ class IPCTUIInspector:
             # Reset scroll offset when going back
             self.scroll_offset = 0
     
-    async def _handle_edit_mode_input(self, key: str):
-        """Handle input in edit mode."""
-        if key == '\x1b':  # Escape
-            self.mode = NavigationMode.DETAIL_VIEW
-            self.edit_buffer = ""
-        elif key == '\x13':  # Ctrl+S
-            await self._save_edit()
-        elif key == '\x08' or key == '\x7f':  # Backspace
-            if self.edit_buffer:
-                self.edit_buffer = self.edit_buffer[:-1]
-        elif len(key) == 1 and ord(key) >= 32:  # Printable characters
-            self.edit_buffer += key
     
     async def _select_host(self):
         """Select and connect to a host."""
@@ -1254,12 +1191,12 @@ class IPCTUIInspector:
                         root_node = root_node.parent
                     
                     if root_node and root_node.id == "events_root":
-                        node.write_endpoint = "write_timeline_events"
+                        node.write_endpoint = "update-timeline-event"
                     elif root_node and root_node.id == "facets_root":
-                        node.write_endpoint = "write_veil_facets"
+                        node.write_endpoint = "update-veil-facet"
                     else:
                         # Fallback logic for other contexts
-                        node.write_endpoint = "write_veil_facets"
+                        node.write_endpoint = "update-veil-facet"
                     node.command_path = path
         
         return node
@@ -1476,67 +1413,285 @@ class IPCTUIInspector:
         return response.get("result", {})
     
     async def _edit_current_node(self):
-        """Enter edit mode for the current node."""
+        """Edit the current node using external editor."""
         if self.current_tree_node and self.current_tree_node.is_editable:
-            self.mode = NavigationMode.EDIT_MODE
-            self.edit_buffer = str(self.current_tree_node.data) if self.current_tree_node.data is not None else ""
+            await self._edit_with_external_editor(self.current_tree_node)
         else:
             self.status_message = "This item is not editable"
     
-    async def _save_edit(self):
-        """Save the current edit via IPC."""
-        if not self.current_tree_node:
+    async def _edit_with_external_editor(self, node: 'TreeNode'):
+        """Edit a node using external editor."""
+        if not node:
             return
-        
+            
+        try:
+            # Get the editor from environment variable, default to vi
+            editor = os.environ.get('EDITOR', 'vi')
+            
+            # Prepare the content to edit
+            if node.data is not None:
+                # Pretty-format JSON if possible, otherwise use string representation
+                try:
+                    content = json.dumps(node.data, indent=2, default=str)
+                except (TypeError, ValueError):
+                    content = str(node.data)
+            else:
+                content = ""
+            
+            # Create a temporary file with appropriate extension
+            with tempfile.NamedTemporaryFile(mode='w+', suffix='.json', delete=False) as tmp_file:
+                tmp_file.write(content)
+                tmp_file_path = tmp_file.name
+            
+            # Store terminal state and restore to normal mode
+            self.terminal.restore_terminal()
+            self.terminal.show_cursor()
+            self.terminal.reset_colors()
+            
+            # Clear screen and show editing message
+            print("\033[2J\033[H", end='')
+            print(f"Opening {node.label} in {editor}...")
+            print(f"Temporary file: {tmp_file_path}")
+            print("Save and exit the editor to apply changes, or exit without saving to cancel.")
+            print()
+            
+            # Launch the external editor
+            result = subprocess.run([editor, tmp_file_path], cwd=os.getcwd())
+            
+            if result.returncode == 0:
+                # Read the modified content
+                try:
+                    with open(tmp_file_path, 'r') as tmp_file:
+                        modified_content = tmp_file.read().strip()
+                    
+                    if modified_content != content.strip():
+                        # Content was changed, parse and save
+                        await self._save_external_edit(node, modified_content)
+                    else:
+                        self.status_message = f"No changes made to {node.label}"
+                except Exception as e:
+                    self.status_message = f"Error reading edited file: {str(e)}"
+            else:
+                self.status_message = f"Editor exited with code {result.returncode}"
+            
+        except Exception as e:
+            self.status_message = f"Editor error: {str(e)}"
+        finally:
+            # Clean up temporary file
+            try:
+                if 'tmp_file_path' in locals():
+                    os.unlink(tmp_file_path)
+            except OSError:
+                pass
+                
+            # Restore terminal state
+            self.terminal.setup_terminal()
+            self.terminal.hide_cursor()
+    
+    async def _save_external_edit(self, node: 'TreeNode', content: str):
+        """Save the content from external editor."""
         try:
             # Parse the new value
             try:
-                new_value = json.loads(self.edit_buffer)
+                new_value = json.loads(content)
             except json.JSONDecodeError:
                 # If not JSON, try to infer the type based on the original value
-                original_type = type(self.current_tree_node.data)
-                if original_type == bool:
-                    new_value = self.edit_buffer.lower() in ('true', '1', 'yes', 'on')
-                elif original_type == int:
-                    new_value = int(self.edit_buffer)
-                elif original_type == float:
-                    new_value = float(self.edit_buffer)
+                if node.data is not None:
+                    original_type = type(node.data)
+                    if original_type == bool:
+                        new_value = content.lower() in ('true', '1', 'yes', 'on')
+                    elif original_type == int:
+                        new_value = int(content)
+                    elif original_type == float:
+                        new_value = float(content)
+                    else:
+                        new_value = content
                 else:
-                    new_value = self.edit_buffer
+                    new_value = content
             
             # Send write command via IPC
-            if self.current_tree_node.write_endpoint and self.current_tree_node.command_path:
+            if node.write_endpoint and node.command_path:
                 self.status_message = "Saving changes..."
                 
-                write_args = {
-                    "path": self.current_tree_node.command_path,
-                    "value": new_value
-                }
-                
-                response = await self.executor.execute_command(
-                    self.current_tree_node.write_endpoint,
-                    write_args
-                )
-                
-                if response.get("error"):
-                    self.status_message = f"Save failed: {response['error']}"
+                # Construct arguments based on the write endpoint type
+                if node.write_endpoint == "update-veil-facet":
+                    write_args = await self._build_veil_facet_update_args(node, new_value)
+                elif node.write_endpoint == "update-timeline-event":
+                    write_args = await self._build_timeline_event_update_args(node, new_value)
                 else:
-                    # Update the node with new value
-                    self.current_tree_node.data = new_value
-                    self.status_message = f"Saved {self.current_tree_node.label}"
-                    self.mode = NavigationMode.DETAIL_VIEW
-                    self.edit_buffer = ""
+                    # Fallback for unknown endpoints
+                    write_args = {
+                        "path": node.command_path,
+                        "value": new_value
+                    }
+                
+                if write_args:
+                    response = await self.executor.execute_command(
+                        node.write_endpoint,
+                        write_args
+                    )
+                    
+                    if response.get("error"):
+                        self.status_message = f"Save failed: {response['error']}"
+                    else:
+                        # Update the node with new value
+                        node.data = new_value
+                        self.status_message = f"Saved {node.label}"
+                else:
+                    # Provide more detailed error information
+                    tree_path = []
+                    current = node
+                    while current:
+                        tree_path.append(f"{current.id}({current.label})")
+                        current = current.parent
+                    path_str = ' -> '.join(reversed(tree_path))
+                    self.status_message = f"Could not determine update parameters. Path: {path_str[:100]}..."
             else:
                 # Local update only (for read-only data)
-                self.current_tree_node.data = new_value
-                self.status_message = f"Updated locally: {self.current_tree_node.label}"
-                self.mode = NavigationMode.DETAIL_VIEW
-                self.edit_buffer = ""
+                node.data = new_value
+                self.status_message = f"Updated locally: {node.label}"
                 
         except ValueError as e:
             self.status_message = f"Invalid value: {str(e)}"
         except Exception as e:
             self.status_message = f"Save error: {str(e)}"
+    
+    async def _build_veil_facet_update_args(self, node: 'TreeNode', new_value: Any) -> Optional[Dict[str, Any]]:
+        """Build arguments for update-veil-facet command."""
+        try:
+            logger.debug(f"Building VEIL facet update args for node: {node.id} (label: {node.label})")
+            
+            # Extract space_id and facet_id from the tree structure
+            # Walk up the tree to find the facet root and space info
+            facet_node = node
+            
+            # Debug: log the tree path
+            path_debug = []
+            current = node
+            while current:
+                path_debug.append(f"{current.id}({current.label})")
+                current = current.parent
+            logger.debug(f"Tree path: {' -> '.join(reversed(path_debug))}")
+            
+            # Look for a facet node - could be direct parent of the field being edited
+            # In VEIL facets, the structure is usually: facets_root -> facet_node -> properties -> field
+            while facet_node and facet_node.parent:
+                # Check if this node represents a facet (not the root and has facet-like data)
+                if (facet_node.parent and 
+                    facet_node.parent.id == "facets_root" and 
+                    facet_node.id != "facets_root"):
+                    # This should be the actual facet node
+                    break
+                facet_node = facet_node.parent
+            
+            if not facet_node or facet_node.id == "facets_root":
+                logger.error(f"Could not find facet node in tree path")
+                return None
+            
+            facet_id = facet_node.id
+            logger.debug(f"Extracted facet_id: {facet_id}")
+            
+            # Extract space_id from the current context
+            space_id = getattr(self, '_current_space_id', 'unknown')
+            logger.debug(f"Space ID from context: {space_id}")
+            
+            if space_id == 'unknown':
+                # Try to extract from the tree root label or other context
+                tree_root = node
+                while tree_root and tree_root.parent:
+                    tree_root = tree_root.parent
+                # Extract space_id from label if available
+                if hasattr(tree_root, 'label'):
+                    label = tree_root.label
+                    logger.debug(f"Tree root label: {label}")
+                    
+                    # Try different patterns for space ID extraction
+                    if 'Space' in label:
+                        parts = label.split()
+                        for i, part in enumerate(parts):
+                            if part == 'Space' and i + 1 < len(parts):
+                                space_id = parts[i + 1]
+                                logger.debug(f"Extracted space_id from 'Space X' pattern: {space_id}")
+                                break
+                    elif 'for Space' in label:
+                        # Pattern: "VEIL Facets for Space space_id"
+                        match = label.split('for Space ')
+                        if len(match) > 1:
+                            space_id = match[1].strip()
+                            logger.debug(f"Extracted space_id from 'for Space X' pattern: {space_id}")
+                    elif '_inner_space' in facet_id:
+                        # Try to extract from facet_id pattern like "conversation_facet_AdapterOfPlatform_inner_space_12345"
+                        space_id = facet_id.split('_inner_space')[0].replace('conversation_facet_', '').replace('_facet_', '_')
+                        if space_id:
+                            space_id = space_id + '_inner_space'
+                            logger.debug(f"Extracted space_id from facet_id pattern: {space_id}")
+            
+            if space_id == 'unknown' or not space_id:
+                logger.error(f"Could not determine space_id from context or labels")
+                return None
+                
+            result = {
+                "space_id": space_id,
+                "facet_id": facet_id,
+                "update_data": new_value
+            }
+            logger.debug(f"Built VEIL facet update args: {result}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error building veil facet update args: {e}", exc_info=True)
+            return None
+    
+    async def _build_timeline_event_update_args(self, node: 'TreeNode', new_value: Any) -> Optional[Dict[str, Any]]:
+        """Build arguments for update-timeline-event command."""
+        try:
+            logger.debug(f"Building timeline event update args for node: {node.id} (label: {node.label})")
+            
+            # Extract event_id from the tree structure
+            event_node = node
+            
+            # Debug: log the tree path
+            path_debug = []
+            current = node
+            while current:
+                path_debug.append(f"{current.id}({current.label})")
+                current = current.parent
+            logger.debug(f"Tree path: {' -> '.join(reversed(path_debug))}")
+            
+            # Look for an event node - structure is usually: events_root -> event_node -> payload/properties -> field
+            while event_node and event_node.parent:
+                # Check if this node represents an event (not the root and has event-like data)
+                if (event_node.parent and 
+                    event_node.parent.id == "events_root" and 
+                    event_node.id != "events_root"):
+                    # This should be the actual event node
+                    break
+                event_node = event_node.parent
+            
+            if not event_node or event_node.id == "events_root":
+                logger.error(f"Could not find event node in tree path")
+                return None
+                
+            event_id = event_node.id
+            logger.debug(f"Extracted event_id: {event_id}")
+            
+            # Extract space_id and timeline_id from current context
+            space_id = getattr(self, '_current_space_id', None)
+            timeline_id = getattr(self, '_current_timeline_id', None)
+            logger.debug(f"Space ID from context: {space_id}, Timeline ID: {timeline_id}")
+            
+            result = {
+                "event_id": event_id,
+                "update_data": new_value,
+                "space_id": space_id,
+                "timeline_id": timeline_id
+            }
+            logger.debug(f"Built timeline event update args: {result}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error building timeline event update args: {e}", exc_info=True)
+            return None
     
     async def _refresh_current_data(self):
         """Refresh the current data view."""
@@ -1613,13 +1768,13 @@ class IPCTUIInspector:
                         # Set appropriate write endpoint for detail view
                         if hasattr(self, '_current_endpoint'):
                             if self._current_endpoint == "veil_facets":
-                                child.write_endpoint = "write_veil_facets"
+                                child.write_endpoint = "update-veil-facet"
                             elif self._current_endpoint == "timeline_details":
-                                child.write_endpoint = "write_timeline_events"
+                                child.write_endpoint = "update-timeline-event"
                             else:
-                                child.write_endpoint = "write_veil_facets"  # Default fallback
+                                child.write_endpoint = "update-veil-facet"  # Default fallback
                         else:
-                            child.write_endpoint = "write_veil_facets"  # Default fallback
+                            child.write_endpoint = "update-veil-facet"  # Default fallback
                         child.command_path = child.id
                         
             elif isinstance(obj, list) and obj:
@@ -1677,13 +1832,9 @@ class IPCTUIInspector:
         self._expand_collapse_node_generic(expand=False, is_detail_mode=True)
     
     async def _edit_detail_node(self):
-        """Enter edit mode for the current detail node."""
+        """Edit the current detail node using external editor."""
         if self._detail_current_node and self._detail_current_node.is_editable:
-            # Switch to edit mode for the detail node
-            self.mode = NavigationMode.EDIT_MODE
-            self.edit_buffer = str(self._detail_current_node.data) if self._detail_current_node.data is not None else ""
-            # Set the current_tree_node to the detail node for edit operations
-            self.current_tree_node = self._detail_current_node
+            await self._edit_with_external_editor(self._detail_current_node)
         else:
             self.status_message = "This item is not editable"
 
