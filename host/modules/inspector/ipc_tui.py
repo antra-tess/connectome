@@ -619,7 +619,8 @@ class IPCTUIInspector:
                 display_text = f"{tree_line}{icon} {node.label}"
             
             # Add detail inspection indicator for nodes that support meaningful detail views (only in tree view)
-            if not is_detail_mode and (node.node_type in ["command", "action"] or node.is_editable or node.drill_down_endpoint):
+            # Exclude editable nodes since they should open the editor directly, not inspection view
+            if not is_detail_mode and (node.node_type in ["command", "action"] or node.drill_down_endpoint) and not node.is_editable:
                 display_text += " [Enter - 🔎]"
             
             # Truncate if too long
@@ -1226,10 +1227,12 @@ class IPCTUIInspector:
             elif self.current_tree_node.drill_down_endpoint:
                 # Drill down to detailed endpoint
                 await self._drill_down_to_endpoint()
-            elif (self.current_tree_node.is_editable or 
-                  self.current_tree_node.node_type in ["action"] or
+            elif self.current_tree_node.is_editable:
+                # For editable nodes, open the editor directly instead of detail view
+                await self._edit_current_node()
+            elif (self.current_tree_node.node_type in ["action"] or
                   not self.current_tree_node.children):
-                # Only switch to detail view for editable nodes, action nodes, or leaf nodes
+                # Only switch to detail view for action nodes or leaf nodes
                 # that don't have drill-down endpoints
                 self.mode = NavigationMode.DETAIL_VIEW
                 self.scroll_offset = 0
