@@ -157,7 +157,7 @@ class InspectorEndpointHandlers:
                 "timestamp": time.time()
             }
     
-    async def handle_timeline_details(self, space_id: str, timeline_id: str = None, limit: int = 100) -> Dict[str, Any]:
+    async def handle_timeline_details(self, space_id: str, timeline_id: str = None, limit: int = 100, offset: float = None) -> Dict[str, Any]:
         """Handle timeline details endpoint for specific space/timeline."""
         self.request_count += 1
         
@@ -168,11 +168,16 @@ class InspectorEndpointHandlers:
                     "timestamp": time.time()
                 }
             
-            # Clamp limit between 1 and 1000
-            limit = min(max(limit, 1), 1000)
+            # Clamp limit between -1000 and 1000 (allow negative for reverse direction)
+            if limit > 1000:
+                limit = 1000
+            elif limit < -1000:
+                limit = -1000
+            elif limit == 0:
+                limit = 100
             
             timeline_details = await self.data_collector.collect_timeline_details(
-                space_id, timeline_id, limit
+                space_id, timeline_id, limit, offset
             )
             return timeline_details
         except Exception as e:

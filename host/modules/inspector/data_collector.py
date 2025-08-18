@@ -292,17 +292,18 @@ class InspectorDataCollector:
                 "timestamp": time.time()
             }
     
-    async def collect_timeline_details(self, space_id: str, timeline_id: str = None, limit: int = 100) -> Dict[str, Any]:
+    async def collect_timeline_details(self, space_id: str, timeline_id: str = None, limit: int = 100, offset: float = None) -> Dict[str, Any]:
         """
-        Collect detailed information about a specific timeline in a space.
+        Collect timeline information for a space or specific timeline.
         
         Args:
-            space_id: The ID of the space containing the timeline
-            timeline_id: The ID of the timeline (optional, defaults to primary)
-            limit: Maximum number of events to return (default: 100)
+            space_id: The ID of the space containing the timeline(s)
+            timeline_id: The ID of the timeline (if None, returns timeline list for space)
+            limit: Maximum number of events to return (for specific timeline)
+            offset: Timestamp offset for pagination (for specific timeline)
         
         Returns:
-            Dictionary containing detailed timeline information
+            Dictionary containing timeline information or event data
         """
         try:
             if not self.space_registry:
@@ -326,33 +327,12 @@ class InspectorDataCollector:
             if not timeline_component:
                 return {"error": f"No timeline component found in space '{space_id}'"}
             
-            # Get timeline details
-            target_timeline_id = timeline_id
-            if not target_timeline_id:
-                target_timeline_id = timeline_component.get_primary_timeline()
-                if not target_timeline_id:
-                    return {"error": "No timeline specified and no primary timeline found"}
+            # If no timeline_id specified, return timeline list for the space
+            if timeline_id is None:
+                return await self._collect_space_timeline_list(space_id, timeline_component)
             
-            timeline_events = timeline_component.get_timeline_events(target_timeline_id, limit=limit)
-            
-            # Get timeline metadata
-            timeline_info = timeline_component._state.get('_timelines', {}).get(target_timeline_id, {})
-            
-            result = {
-                "timestamp": time.time(),
-                "space_id": space_id,
-                "timeline_id": target_timeline_id,
-                "timeline_info": {
-                    "is_primary": timeline_info.get('is_primary', False),
-                    "head_event_ids": list(timeline_info.get('head_event_ids', [])),
-                    "total_events": len(timeline_component._state.get('_all_events', {}))
-                },
-                "events": timeline_events[:limit] if timeline_events else [],
-                "events_returned": len(timeline_events) if timeline_events else 0,
-                "events_limited": len(timeline_events) > limit if timeline_events else False
-            }
-            
-            return result
+            # Otherwise, return events for the specific timeline
+            return await self._collect_specific_timeline_events(space_id, timeline_id, timeline_component, limit, offset)
             
         except Exception as e:
             logger.error(f"Error collecting timeline details for {space_id}/{timeline_id}: {e}", exc_info=True)
@@ -720,6 +700,161 @@ class InspectorDataCollector:
         
         return timeline_info
     
+    async def _collect_space_timeline_list(self, space_id: str, timeline_component) -> Dict[str, Any]:
+        """
+        Collect timeline list for a space without event data.
+
+        Args:
+            space_id: The ID of the space
+            timeline_component: The timeline component instance
+            
+        Returns:
+            Dictionary containing timeline list with statistics
+        """
+        try:
+            # Get primary timeline ID
+            primary_timeline_id = timeline_component.get_primary_timeline()
+            
+            # Get all timelines information
+            timelines_state = timeline_component._state.get('_timelines', {})
+            all_events = timeline_component._state.get('_all_events', {})
+            
+            result = {
+                "timestamp": time.time(),
+                "space_id": space_id,
+                "summary": {
+                    "total_timelines": len(timelines_state),
+                    "total_events": len(all_events),
+                    "primary_timeline": primary_timeline_id
+                },
+                "timelines": {}
+            }
+            
+            for timeline_id, timeline_data in timelines_state.items():
+                head_event_ids = timeline_data.get('head_event_ids', set())
+                if isinstance(head_event_ids, set):
+                    head_event_ids = list(head_event_ids)
+                
+                # Count events in this timeline
+                timeline_events_count = 0
+                for event_id, event in all_events.items():
+                    if event.get('timeline_id') == timeline_id:
+                        timeline_events_count += 1
+                
+                result["timelines"][timeline_id] = {
+                    "timeline_id": timeline_id,
+                    "is_primary": timeline_data.get('is_primary', False),
+                    "head_event_ids": head_event_ids,
+                    "total_events": timeline_events_count
+                }
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error collecting timeline list for space {space_id}: {e}", exc_info=True)
+            return {
+                "error": "Failed to collect timeline list",
+                "details": str(e),
+                "timestamp": time.time()
+            }
+    
+    async def _collect_specific_timeline_events(self, space_id: str, timeline_id: str, timeline_component, limit: int, offset: float = None) -> Dict[str, Any]:
+        """
+        Collect events for a specific timeline with timestamp-based pagination.
+
+        Args:
+            space_id: The ID of the space
+            timeline_id: The ID of the timeline
+            timeline_component: The timeline component instance
+            limit: Maximum number of events to return (negative for reverse direction)
+            offset: Timestamp offset for pagination
+            
+        Returns:
+            Dictionary containing timeline events with pagination info
+        """
+        try:
+            # Validate timeline exists
+            timelines_state = timeline_component._state.get('_timelines', {})
+            if timeline_id not in timelines_state:
+                return {"error": f"Timeline '{timeline_id}' not found in space '{space_id}'"}
+            
+            # Get all events for this timeline
+            all_events = timeline_component._state.get('_all_events', {})
+            timeline_events = []
+            
+            for event_id, event in all_events.items():
+                if event.get('timeline_id') == timeline_id:
+                    timeline_events.append(event)
+            
+            # Sort by timestamp (newest first by default)
+            timeline_events.sort(key=lambda e: e.get('timestamp', 0), reverse=True)
+            
+            # Apply timestamp filtering if offset is provided
+            filtered_events = timeline_events
+            if offset is not None:
+                if limit >= 0:
+                    # Forward pagination: events after the offset timestamp
+                    filtered_events = [e for e in timeline_events if e.get('timestamp', 0) < offset]
+                else:
+                    # Reverse pagination: events before the offset timestamp
+                    filtered_events = [e for e in timeline_events if e.get('timestamp', 0) > offset]
+                    filtered_events.sort(key=lambda e: e.get('timestamp', 0), reverse=False)  # Oldest first for reverse
+            
+            # Apply limit
+            abs_limit = abs(limit) if limit != 0 else 100
+            limited_events = filtered_events[:abs_limit]
+            
+            # Get timeline metadata
+            timeline_info = timelines_state.get(timeline_id, {})
+            head_event_ids = timeline_info.get('head_event_ids', set())
+            if isinstance(head_event_ids, set):
+                head_event_ids = list(head_event_ids)
+            
+            # Determine pagination info
+            has_more = len(filtered_events) > abs_limit
+            next_offset = None
+            prev_offset = None
+            
+            if limited_events:
+                if limit >= 0:
+                    # Forward pagination
+                    next_offset = limited_events[-1].get('timestamp') if has_more else None
+                    prev_offset = limited_events[0].get('timestamp') if offset is not None else None
+                else:
+                    # Reverse pagination
+                    next_offset = limited_events[0].get('timestamp') if offset is not None else None
+                    prev_offset = limited_events[-1].get('timestamp') if has_more else None
+            
+            result = {
+                "timestamp": time.time(),
+                "space_id": space_id,
+                "timeline_id": timeline_id,
+                "timeline_info": {
+                    "is_primary": timeline_info.get('is_primary', False),
+                    "head_event_ids": head_event_ids,
+                    "total_events": len(timeline_events)
+                },
+                "pagination": {
+                    "limit": limit,
+                    "offset": offset,
+                    "events_returned": len(limited_events),
+                    "has_more": has_more,
+                    "next_offset": next_offset,
+                    "prev_offset": prev_offset
+                },
+                "events": limited_events
+            }
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error collecting events for timeline {space_id}/{timeline_id}: {e}", exc_info=True)
+            return {
+                "error": "Failed to collect timeline events",
+                "details": str(e),
+                "timestamp": time.time()
+            }
+
     def _get_event_types_summary(self, events: List[Dict[str, Any]]) -> Dict[str, int]:
         """Get a summary of event types from a list of events."""
         event_types = {}
