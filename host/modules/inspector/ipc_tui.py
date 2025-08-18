@@ -669,7 +669,20 @@ class IPCTUIInspector:
         """Generic expand/collapse for both modes."""
         _, current_node, _ = self._get_tree_state(is_detail_mode)
         if current_node and current_node.children:
-            current_node.is_expanded = expand
+            if expand:
+                # Expand the current node
+                current_node.is_expanded = expand
+            else:
+                # Collapse behavior: if expanded, collapse; if already collapsed, go to parent
+                if current_node.is_expanded:
+                    current_node.is_expanded = False
+                elif current_node.parent and current_node.parent.id != "root" and current_node.parent.id != "detail_root" and current_node.parent.id != "facets_root":
+                    # Node is already collapsed, snap to parent
+                    self._set_current_node(current_node.parent, is_detail_mode)
+        elif current_node and not current_node.children:
+            # Leaf node: snap to parent if collapse is requested
+            if not expand and current_node.parent and current_node.parent.id != "root" and current_node.parent.id != "detail_root" and current_node.parent.id != "facets_root":
+                self._set_current_node(current_node.parent, is_detail_mode)
     
     def _format_value_for_display(self, value: Any) -> str:
         """Format a value for display in the tree view."""
