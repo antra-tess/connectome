@@ -1634,10 +1634,34 @@ class IPCTUIInspector:
                 logger.error(f"Could not determine space_id from context or labels")
                 return None
                 
+            # Extract the field path relative to the facet
+            # The node.id contains the full path, we need to remove the facet_id prefix
+            field_path = node.id
+            if field_path.startswith(facet_id + "."):
+                field_path = field_path[len(facet_id + "."):]
+            else:
+                # Fallback to using the label if path parsing fails
+                field_path = node.label
+            
+            logger.debug(f"Field path being updated: {field_path}")
+            
+            # Handle nested properties specially
+            if field_path.startswith("properties."):
+                # Extract the property name
+                prop_name = field_path[len("properties."):]
+                update_data = {
+                    "properties": {prop_name: new_value}
+                }
+                logger.debug(f"Updating nested property: {prop_name}")
+            else:
+                # Direct field update
+                update_data = {field_path: new_value}
+                logger.debug(f"Updating direct field: {field_path}")
+            
             result = {
                 "space_id": space_id,
                 "facet_id": facet_id,
-                "update_data": new_value
+                "update_data": update_data
             }
             logger.debug(f"Built VEIL facet update args: {result}")
             return result

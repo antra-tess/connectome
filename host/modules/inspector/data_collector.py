@@ -1670,6 +1670,7 @@ class InspectorDataCollector:
             Dictionary containing the result of the update operation
         """
         try:
+            logger.info(f"Starting VEIL facet update - space_id: {space_id}, facet_id: {facet_id}, update_data: {update_data}")
             if not self.space_registry:
                 return {"error": "Space registry not available", "success": False}
             
