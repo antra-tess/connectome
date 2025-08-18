@@ -1432,10 +1432,10 @@ class IPCTUIInspector:
         elif endpoint_name == "timeline_details":
             command = "timeline-details"
             command_args = endpoint_args.copy()
-            # Add conservative limit for timeline events to avoid IPC overflow (tested safe threshold is ~125, using 50 for safety)
+            # Add conservative limit for timeline events to avoid IPC overflow (using 20 to match veil facets)
             # Use negative limit to get older events (reverse chronological order)
             if 'limit' not in command_args:
-                command_args['limit'] = -50
+                command_args['limit'] = -20
         elif endpoint_name == "agent_details":
             command = "agent_details"
             command_args = endpoint_args
@@ -1974,7 +1974,7 @@ class IPCTUIInspector:
                 endpoint_args = {
                     "space_id": space_id,
                     "timeline_id": timeline_id,
-                    "limit": self._pagination_limit  # Negative limit for older events
+                    "limit": -self._pagination_limit  # Negative limit for older events
                 }
                 # Add cursor if we have one
                 if self._pagination_cursor:
@@ -2132,7 +2132,7 @@ class IPCTUIInspector:
         elif endpoint_name == "timeline_details":
             pagination = data.get("pagination", {})
             events = data.get("events", [])
-            self._pagination_limit = 50  # Keep same limit as initial fetch (will be made negative when used)
+            self._pagination_limit = 20  # Keep same limit as initial fetch (will be made negative when used)
             self._pagination_has_more = pagination.get("has_more", False)
             # Set cursor to last event timestamp if there are more items
             if events and self._pagination_has_more:

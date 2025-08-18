@@ -794,11 +794,10 @@ class InspectorDataCollector:
             if offset is not None:
                 if limit >= 0:
                     # Forward pagination: events after the offset timestamp
-                    filtered_events = [e for e in timeline_events if e.get('timestamp', 0) < offset]
-                else:
-                    # Reverse pagination: events before the offset timestamp
                     filtered_events = [e for e in timeline_events if e.get('timestamp', 0) > offset]
-                    filtered_events.sort(key=lambda e: e.get('timestamp', 0), reverse=False)  # Oldest first for reverse
+                else:
+                    # Reverse pagination: events before the offset timestamp (older events)
+                    filtered_events = [e for e in timeline_events if e.get('timestamp', 0) < offset]
             
             # Apply limit
             abs_limit = abs(limit) if limit != 0 else 100
