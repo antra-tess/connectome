@@ -145,6 +145,19 @@ class TerminalController:
                     next_char = sys.stdin.read(1)
                     if next_char == '[':
                         third_char = sys.stdin.read(1)
+                        # Handle extended escape sequences like Page Up/Down, End, Home
+                        if third_char in ['5', '6', '4', '1']:  # Page Up, Page Down, End, Home
+                            # Read the trailing '~' character
+                            try:
+                                tilde = sys.stdin.read(1)
+                                if tilde == '~':
+                                    return f'ESC[{third_char}~'
+                            except:
+                                pass
+                        elif third_char == 'F':  # Alternative End key
+                            return 'ESC[F'
+                        elif third_char == 'H':  # Alternative Home key
+                            return 'ESC[H'
                         return f'ESC[{third_char}'
                 except:
                     return 'ESC'
@@ -907,6 +920,14 @@ class IPCTUIInspector:
             await self._expand_current_node()
         elif key == 'ESC[D':  # Left arrow
             await self._collapse_current_node()
+        elif key == 'ESC[6~':  # Page Down
+            await self._navigate_tree_page_down()
+        elif key == 'ESC[5~':  # Page Up
+            await self._navigate_tree_page_up()
+        elif key in ['ESC[4~', 'ESC[F']:  # End key
+            await self._navigate_tree_end()
+        elif key in ['ESC[1~', 'ESC[H']:  # Home key
+            await self._navigate_tree_home()
         elif key == '\r' or key == '\n':  # Enter
             await self._view_node_details()
         elif key in ['e', 'E']:
@@ -928,6 +949,14 @@ class IPCTUIInspector:
             await self._expand_detail_node()
         elif key == 'ESC[D':  # Left arrow
             await self._collapse_detail_node()
+        elif key == 'ESC[6~':  # Page Down
+            await self._navigate_detail_tree_page_down()
+        elif key == 'ESC[5~':  # Page Up
+            await self._navigate_detail_tree_page_up()
+        elif key in ['ESC[4~', 'ESC[F']:  # End key
+            await self._navigate_detail_tree_end()
+        elif key in ['ESC[1~', 'ESC[H']:  # Home key
+            await self._navigate_detail_tree_home()
         elif key in ['e', 'E']:
             await self._edit_detail_node()
         elif key in ['b', 'B']:
@@ -1240,6 +1269,76 @@ class IPCTUIInspector:
         """Navigate down in the tree view."""
         self._last_scroll_direction = "down"
         self._navigate_tree_generic("down", is_detail_mode=False)
+    
+    async def _navigate_tree_page_down(self):
+        """Navigate down by a page in the tree view and trigger pagination if needed."""
+        self._last_scroll_direction = "down"
+        
+        # Jump by pagination limit (default 20 items)
+        visible_nodes = self._get_visible_nodes(is_detail_mode=False)
+        if not visible_nodes:
+            return
+            
+        # Find current node index
+        current_index = self._find_current_node_index(visible_nodes)
+        if current_index == -1:
+            return
+            
+        # Jump by page size (pagination limit)
+        jump_size = self._pagination_limit
+        new_index = min(current_index + jump_size, len(visible_nodes) - 1)
+        
+        # Move to the new position
+        self._move_to_node_index(new_index, visible_nodes, is_detail_mode=False)
+        
+        # Check if we need to load more data
+        await self._check_pagination_on_scroll("down")
+    
+    async def _navigate_tree_page_up(self):
+        """Navigate up by a page in the tree view."""
+        self._last_scroll_direction = "up"
+        
+        # Jump by pagination limit (default 20 items)
+        visible_nodes = self._get_visible_nodes(is_detail_mode=False)
+        if not visible_nodes:
+            return
+            
+        # Find current node index
+        current_index = self._find_current_node_index(visible_nodes)
+        if current_index == -1:
+            return
+            
+        # Jump by page size (pagination limit)  
+        jump_size = self._pagination_limit
+        new_index = max(current_index - jump_size, 0)
+        
+        # Move to the new position
+        self._move_to_node_index(new_index, visible_nodes, is_detail_mode=False)
+    
+    async def _navigate_tree_end(self):
+        """Navigate to the end of the current tree view, loading more data if needed."""
+        self._last_scroll_direction = "down"
+        
+        # Keep loading until we reach the absolute end
+        while self._pagination_has_more:
+            await self._load_more_paginated_data()
+        
+        # Move to the last item
+        visible_nodes = self._get_visible_nodes(is_detail_mode=False)
+        if visible_nodes:
+            self._move_to_node_index(len(visible_nodes) - 1, visible_nodes, is_detail_mode=False)
+    
+    async def _navigate_tree_home(self):
+        """Navigate to the beginning of the current tree view, loading fresh data if needed."""
+        self._last_scroll_direction = "up"
+        
+        # Check for fresh entries at the beginning
+        await self._load_fresh_data_at_beginning()
+        
+        # Move to the first item
+        visible_nodes = self._get_visible_nodes(is_detail_mode=False)
+        if visible_nodes:
+            self._move_to_node_index(0, visible_nodes, is_detail_mode=False)
     
     async def _expand_current_node(self):
         """Expand the current tree node."""
@@ -1893,6 +1992,76 @@ class IPCTUIInspector:
         self._last_scroll_direction = "down"
         self._navigate_tree_generic("down", is_detail_mode=True)
     
+    async def _navigate_detail_tree_page_down(self):
+        """Navigate down by a page in the detail tree view and trigger pagination if needed."""
+        self._last_scroll_direction = "down"
+        
+        # Jump by pagination limit (default 20 items)
+        visible_nodes = self._get_visible_nodes(is_detail_mode=True)
+        if not visible_nodes:
+            return
+            
+        # Find current node index
+        current_index = self._find_current_node_index(visible_nodes)
+        if current_index == -1:
+            return
+            
+        # Jump by page size (pagination limit)
+        jump_size = self._pagination_limit
+        new_index = min(current_index + jump_size, len(visible_nodes) - 1)
+        
+        # Move to the new position
+        self._move_to_node_index(new_index, visible_nodes, is_detail_mode=True)
+        
+        # Check if we need to load more data
+        await self._check_pagination_on_scroll("down")
+    
+    async def _navigate_detail_tree_page_up(self):
+        """Navigate up by a page in the detail tree view."""
+        self._last_scroll_direction = "up"
+        
+        # Jump by pagination limit (default 20 items)
+        visible_nodes = self._get_visible_nodes(is_detail_mode=True)
+        if not visible_nodes:
+            return
+            
+        # Find current node index
+        current_index = self._find_current_node_index(visible_nodes)
+        if current_index == -1:
+            return
+            
+        # Jump by page size (pagination limit)  
+        jump_size = self._pagination_limit
+        new_index = max(current_index - jump_size, 0)
+        
+        # Move to the new position
+        self._move_to_node_index(new_index, visible_nodes, is_detail_mode=True)
+    
+    async def _navigate_detail_tree_end(self):
+        """Navigate to the end of the current detail tree view, loading more data if needed."""
+        self._last_scroll_direction = "down"
+        
+        # Keep loading until we reach the absolute end
+        while self._pagination_has_more:
+            await self._load_more_paginated_data()
+        
+        # Move to the last item
+        visible_nodes = self._get_visible_nodes(is_detail_mode=True)
+        if visible_nodes:
+            self._move_to_node_index(len(visible_nodes) - 1, visible_nodes, is_detail_mode=True)
+    
+    async def _navigate_detail_tree_home(self):
+        """Navigate to the beginning of the current detail tree view, loading fresh data if needed."""
+        self._last_scroll_direction = "up"
+        
+        # Check for fresh entries at the beginning
+        await self._load_fresh_data_at_beginning()
+        
+        # Move to the first item
+        visible_nodes = self._get_visible_nodes(is_detail_mode=True)
+        if visible_nodes:
+            self._move_to_node_index(0, visible_nodes, is_detail_mode=True)
+    
     async def _expand_detail_node(self):
         """Expand the current detail tree node."""
         self._expand_collapse_node_generic(expand=True, is_detail_mode=True)
@@ -2156,6 +2325,157 @@ class IPCTUIInspector:
         self._pagination_has_more = False
         self._pagination_loading = False
         self._last_scroll_direction = None
+    
+    def _find_current_node_index(self, visible_nodes):
+        """Find the index of the currently selected node in the visible nodes list."""
+        for i, (node, _, is_current) in enumerate(visible_nodes):
+            if is_current:
+                return i
+        return -1
+    
+    def _move_to_node_index(self, new_index, visible_nodes, is_detail_mode):
+        """Move the current selection to the node at the specified index."""
+        if 0 <= new_index < len(visible_nodes):
+            self._set_current_node(visible_nodes[new_index][0], is_detail_mode)
+            self._adjust_scroll_to_current_node(is_detail_mode)
+    
+    async def _load_fresh_data_at_beginning(self):
+        """Load fresh entries at the beginning using negative limit queries to check for new data."""
+        if not hasattr(self, '_current_endpoint') or self._current_endpoint not in ["veil_facets", "timeline_details"]:
+            return
+        
+        try:
+            self.status_message = "Checking for fresh data..."
+            
+            # Determine current endpoint and args for checking fresh data
+            if self._current_endpoint == "veil_facets":
+                space_id = getattr(self, '_current_space_id', 'unknown')
+                
+                # Get the first facet ID from our current tree to use as reference
+                first_facet_id = self._get_first_facet_id()
+                if not first_facet_id:
+                    self.status_message = "No reference point for fresh data check"
+                    return
+                
+                endpoint_args = {
+                    "space_id": space_id,
+                    "limit": -self._pagination_limit,  # Negative limit to get newer entries
+                    "before_facet_id": first_facet_id  # Get entries before (newer than) our first entry
+                }
+                
+                # Debug: log what we're sending
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.debug(f"Veil facets fresh data request: args={endpoint_args}")
+                    
+                data = await self._fetch_drill_down_data(self._current_endpoint, endpoint_args)
+                await self._prepend_facets_to_tree(data)
+                
+            elif self._current_endpoint == "timeline_details":
+                space_id = getattr(self, '_current_space_id', 'unknown')
+                timeline_id = getattr(self, '_current_timeline_id', 'unknown')
+                
+                # Get the first event timestamp from our current tree to use as reference
+                first_event_timestamp = self._get_first_event_timestamp()
+                if not first_event_timestamp:
+                    self.status_message = "No reference point for fresh data check"
+                    return
+                
+                endpoint_args = {
+                    "space_id": space_id,
+                    "timeline_id": timeline_id,
+                    "limit": self._pagination_limit,  # Positive limit for newer events
+                    "after_timestamp": first_event_timestamp  # Get events after our first event
+                }
+                
+                # Debug: log what we're sending
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.debug(f"Timeline fresh data request: args={endpoint_args}")
+                    
+                data = await self._fetch_drill_down_data(self._current_endpoint, endpoint_args)
+                await self._prepend_timeline_events_to_tree(data)
+            
+            self.status_message = "Fresh data loaded" if self.status_message == "Checking for fresh data..." else self.status_message
+            
+        except Exception as e:
+            self.status_message = f"Error loading fresh data: {str(e)}"
+    
+    def _get_first_facet_id(self):
+        """Get the ID of the first facet in the current tree for reference."""
+        if not self.tree_root or self.tree_root.id != "facets_root":
+            return None
+        
+        # Find the first facet node
+        for child in self.tree_root.children:
+            if child.id.startswith("facet_"):
+                # Extract facet ID from node data
+                if hasattr(child, 'data') and isinstance(child.data, dict):
+                    return child.data.get('id', None)
+        return None
+    
+    def _get_first_event_timestamp(self):
+        """Get the timestamp of the first event in the current tree for reference."""
+        if not self.tree_root or self.tree_root.id != "events_root":
+            return None
+        
+        # Find the first event node
+        for child in self.tree_root.children:
+            if child.id.startswith("event_"):
+                # Extract timestamp from node data
+                if hasattr(child, 'data') and isinstance(child.data, dict):
+                    return child.data.get('timestamp', None)
+        return None
+    
+    async def _prepend_facets_to_tree(self, data):
+        """Prepend new facets to the beginning of the existing tree."""
+        if not self.tree_root or self.tree_root.id != "facets_root":
+            return
+        
+        # Get the facets array from the response
+        facets = data.get("facets", [])
+        if not facets:
+            self.status_message = "No new facets found"
+            return
+        
+        # Create new facet nodes and prepend them
+        new_nodes = []
+        for i, facet in enumerate(facets):
+            facet_id = facet.get('id', f'unknown_{i}')
+            node_id = f"facet_{facet_id}"
+            label = f"Facet {facet_id}"
+            new_node = TreeNode(node_id, label, facet, parent=self.tree_root)
+            new_nodes.append(new_node)
+        
+        # Prepend new nodes to the beginning of children list
+        self.tree_root.children = new_nodes + self.tree_root.children
+        
+        self.status_message = f"Added {len(facets)} new facets"
+    
+    async def _prepend_timeline_events_to_tree(self, data):
+        """Prepend new timeline events to the beginning of the existing tree."""
+        if not self.tree_root or self.tree_root.id != "events_root":
+            return
+        
+        # Get the events array from the response
+        events = data.get("events", [])
+        if not events:
+            self.status_message = "No new events found"
+            return
+        
+        # Create new event nodes and prepend them
+        new_nodes = []
+        for i, event in enumerate(events):
+            event_id = event.get('id', f'unknown_{i}')
+            node_id = f"event_{event_id}"
+            label = f"Event {event_id}"
+            new_node = TreeNode(node_id, label, event, parent=self.tree_root)
+            new_nodes.append(new_node)
+        
+        # Prepend new nodes to the beginning of children list
+        self.tree_root.children = new_nodes + self.tree_root.children
+        
+        self.status_message = f"Added {len(events)} new events"
 
 
 async def main_ipc_tui(socket_path: str = None, timeout: float = 30.0):
