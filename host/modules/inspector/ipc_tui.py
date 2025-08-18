@@ -679,6 +679,7 @@ class IPCTUIInspector:
                 elif current_node.parent and current_node.parent.id not in ["root", "detail_root", "facets_root"]:
                     # Node is already collapsed, snap to parent
                     self._set_current_node(current_node.parent, is_detail_mode)
+                    self._adjust_scroll_to_current_node(is_detail_mode)
                 elif current_node.parent and current_node.parent.id in ["root", "detail_root", "facets_root"]:
                     # Top-level node that would snap to root - instead collapse all siblings
                     self._collapse_siblings_of_node(current_node, is_detail_mode)
@@ -687,9 +688,45 @@ class IPCTUIInspector:
             if not expand:
                 if current_node.parent and current_node.parent.id not in ["root", "detail_root", "facets_root"]:
                     self._set_current_node(current_node.parent, is_detail_mode)
+                    self._adjust_scroll_to_current_node(is_detail_mode)
                 elif current_node.parent and current_node.parent.id in ["root", "detail_root", "facets_root"]:
                     # Top-level leaf node - collapse all siblings
                     self._collapse_siblings_of_node(current_node, is_detail_mode)
+    
+    def _adjust_scroll_to_current_node(self, is_detail_mode: bool):
+        """Adjust scroll offset to ensure current node is visible."""
+        visible_nodes = self._get_visible_nodes(is_detail_mode)
+        if not visible_nodes:
+            return
+        
+        tree_root, current_node, _ = self._get_tree_state(is_detail_mode)
+        if not current_node:
+            return
+        
+        # Find the index of the current node in visible nodes
+        current_index = -1
+        for i, (node, _, is_current) in enumerate(visible_nodes):
+            if node == current_node:
+                current_index = i
+                break
+        
+        if current_index == -1:
+            return
+        
+        # Adjust scroll offset to ensure current node is visible
+        rows, _ = self.terminal.get_terminal_size()
+        content_rows = rows - (8 if is_detail_mode else 6)
+        
+        # If current node is above visible area, scroll up
+        if current_index < self.scroll_offset:
+            self.scroll_offset = max(0, current_index)
+        # If current node is below visible area, scroll down
+        elif current_index >= self.scroll_offset + content_rows:
+            self.scroll_offset = current_index - content_rows + 1
+        
+        # Ensure scroll offset doesn't exceed bounds
+        max_scroll = max(0, len(visible_nodes) - content_rows)
+        self.scroll_offset = min(self.scroll_offset, max_scroll)
     
     def _collapse_siblings_of_node(self, current_node: TreeNode, is_detail_mode: bool):
         """Collapse all siblings of the current node, creating a 'focus' effect."""
