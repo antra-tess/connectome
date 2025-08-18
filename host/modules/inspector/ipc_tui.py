@@ -760,9 +760,10 @@ class IPCTUIInspector:
             if sibling != current_node and sibling.children:
                 sibling.is_expanded = False
         
-        # Also ensure the current node is expanded if it has children, to create the focus effect
-        if current_node.children:
-            current_node.is_expanded = True
+        # Do not expand the current node - back should never expand, only collapse siblings
+        
+        # Adjust scroll to ensure current node remains visible after sibling collapse
+        self._adjust_scroll_to_current_node(is_detail_mode)
     
     def _format_value_for_display(self, value: Any) -> str:
         """Format a value for display in the tree view."""
