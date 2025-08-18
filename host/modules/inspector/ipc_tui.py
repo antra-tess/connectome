@@ -1083,14 +1083,18 @@ class IPCTUIInspector:
                 # This should work in both "timelines" (overview) and "timeline_details" (specific space timeline) views
                 if endpoint in ["timelines", "timeline_details"] and parent and parent.label == "timelines":
                     # This is an individual timeline under any "timelines" container
-                    # We need to find the space_id by walking up the tree to find the space node
                     timeline_id = label  # The timeline ID is the current label
                     
-                    # Walk up the tree to find the space_id (the node that contains the "timelines" container)
-                    space_node = parent.parent  # Parent is "timelines", parent.parent should be the space
-                    if space_node:
-                        space_id = space_node.label
+                    # For timeline_details endpoint, use the space_id from context instead of tree walking
+                    if endpoint == "timeline_details" and context and "space_id" in context:
+                        space_id = context["space_id"]
                         node.drill_down_endpoint = f"timeline_events_{space_id}_{timeline_id}"
+                    else:
+                        # Walk up the tree to find the space_id (for timelines overview)
+                        space_node = parent.parent  # Parent is "timelines", parent.parent should be the space
+                        if space_node:
+                            space_id = space_node.label
+                            node.drill_down_endpoint = f"timeline_events_{space_id}_{timeline_id}"
                 
                 # For other endpoints, add drill-down logic based on patterns
                 if endpoint == "spaces" and depth == 1 and parent and parent.label == "details":
@@ -1183,8 +1187,8 @@ class IPCTUIInspector:
         
         # Create nodes directly for each event without any container structure
         for i, event in enumerate(events):
-            # Use event_id as the node ID if available, otherwise use index
-            event_id = event.get("event_id", f"event_{i}")
+            # Use id as the node ID if available, otherwise use index
+            event_id = event.get("id", f"event_{i}")
             payload = event.get("payload", {})
             event_type = payload.get("event_type", "unknown")
             timestamp = event.get("timestamp", 0)
