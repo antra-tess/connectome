@@ -219,6 +219,14 @@ class IPCTUIInspector:
         # Track if we're running
         self.running = True
         
+        # Pagination state
+        self._pagination_cursor = None  # Cursor for next batch (after_facet_id or offset)
+        self._pagination_limit = 20  # Default limit
+        self._pagination_has_more = False
+        self._pagination_loading = False  # Prevent recursive loading
+        self._last_scroll_direction = None  # Track last scroll direction for pagination
+        self._rendering = False  # Prevent tree modifications during rendering
+        
     async def start(self):
         """Start the IPC TUI inspector."""
         try:
@@ -307,6 +315,11 @@ class IPCTUIInspector:
                 # Handle input based on current mode
                 await self._handle_input(key)
                 
+                # Check for pagination after input handling (safe from recursion)
+                if self._last_scroll_direction == "down":
+                    await self._check_pagination_on_scroll(self._last_scroll_direction)
+                self._last_scroll_direction = None  # Reset after check
+                
             except KeyboardInterrupt:
                 break
             except Exception as e:
@@ -316,23 +329,27 @@ class IPCTUIInspector:
     
     async def _render_screen(self):
         """Render the current screen based on mode."""
-        self.terminal.clear_screen()
-        
-        # Render header
-        await self._render_header()
-        
-        # Render content based on mode
-        if self.mode == NavigationMode.HOST_SELECTION:
-            await self._render_host_selection()
-        elif self.mode == NavigationMode.MAIN_MENU:
-            await self._render_main_menu()
-        elif self.mode == NavigationMode.TREE_VIEW:
-            await self._render_tree_view()
-        elif self.mode == NavigationMode.DETAIL_VIEW:
-            await self._render_detail_view()
-        
-        # Render footer
-        await self._render_footer()
+        self._rendering = True
+        try:
+            self.terminal.clear_screen()
+            
+            # Render header
+            await self._render_header()
+            
+            # Render content based on mode
+            if self.mode == NavigationMode.HOST_SELECTION:
+                await self._render_host_selection()
+            elif self.mode == NavigationMode.MAIN_MENU:
+                await self._render_main_menu()
+            elif self.mode == NavigationMode.TREE_VIEW:
+                await self._render_tree_view()
+            elif self.mode == NavigationMode.DETAIL_VIEW:
+                await self._render_detail_view()
+            
+            # Render footer
+            await self._render_footer()
+        finally:
+            self._rendering = False
     
     async def _render_header(self):
         """Render the header with title and breadcrumbs."""
@@ -544,14 +561,22 @@ class IPCTUIInspector:
         """Get list of visible tree nodes with depth and selection info for either mode."""
         visible = []
         tree_root, current_node, _ = self._get_tree_state(is_detail_mode)
+        visited = set()  # Prevent infinite recursion from circular references
         
         def traverse(node: TreeNode, depth: int):
+            # Prevent infinite recursion
+            if node.id in visited or depth > 50:  # Max depth safety limit
+                return
+            visited.add(node.id)
+            
             is_current = node == current_node
             visible.append((node, depth, is_current))
             
             if node.is_expanded:
                 for child in node.children:
                     traverse(child, depth + 1)
+            
+            visited.remove(node.id)  # Allow same node at different levels
         
         if tree_root:
             for child in tree_root.children:
@@ -888,6 +913,7 @@ class IPCTUIInspector:
         elif key in ['b', 'B']:
             self.mode = NavigationMode.MAIN_MENU
             self.status_message = ""
+            self._reset_pagination_state()
         elif key in ['r', 'R']:
             await self._refresh_current_data()
     
@@ -907,6 +933,7 @@ class IPCTUIInspector:
             self.mode = NavigationMode.TREE_VIEW
             # Reset scroll offset when going back
             self.scroll_offset = 0
+            self._reset_pagination_state()
     
     
     async def _select_host(self):
@@ -946,6 +973,7 @@ class IPCTUIInspector:
             self.mode = NavigationMode.TREE_VIEW
             self.scroll_offset = 0
             self.status_message = f"Loaded {name}"
+            self._reset_pagination_state()
             self._current_endpoint = cmd  # Track for refresh
         except Exception as e:
             self.status_message = f"Error loading {name}: {str(e)}"
@@ -1204,10 +1232,12 @@ class IPCTUIInspector:
     
     async def _navigate_tree_up(self):
         """Navigate up in the tree view."""
+        self._last_scroll_direction = "up"
         self._navigate_tree_generic("up", is_detail_mode=False)
     
     async def _navigate_tree_down(self):
         """Navigate down in the tree view."""
+        self._last_scroll_direction = "down"
         self._navigate_tree_generic("down", is_detail_mode=False)
     
     async def _expand_current_node(self):
@@ -1236,6 +1266,7 @@ class IPCTUIInspector:
                 # that don't have drill-down endpoints
                 self.mode = NavigationMode.DETAIL_VIEW
                 self.scroll_offset = 0
+                self._reset_pagination_state()
                 # Reset detail tree state to force rebuild
                 self._detail_tree_root = None
                 self._detail_tree_node_id = None
@@ -1356,12 +1387,16 @@ class IPCTUIInspector:
                 self.tree_root = await self._build_facets_tree(data, display_name)
                 # Store space_id for refresh functionality
                 self._current_space_id = endpoint_args.get("space_id", "unknown")
+                # Initialize pagination state
+                await self._initialize_pagination_state(data, endpoint_name)
             elif endpoint_name == "timeline_details" and endpoint_args.get("timeline_id"):
                 # Special handling for timeline events - show events in flat list similar to facets
                 self.tree_root = await self._build_timeline_events_tree(data, display_name)
                 # Store space_id and timeline_id for refresh functionality
                 self._current_space_id = endpoint_args.get("space_id", "unknown")
                 self._current_timeline_id = endpoint_args.get("timeline_id", "unknown")
+                # Initialize pagination state
+                await self._initialize_pagination_state(data, endpoint_name)
             else:
                 self.tree_root = await self._build_tree_from_data(data, display_name, endpoint_name, endpoint_args)
             
@@ -1848,10 +1883,12 @@ class IPCTUIInspector:
     
     async def _navigate_detail_tree_up(self):
         """Navigate up in the detail tree view."""
+        self._last_scroll_direction = "up"
         self._navigate_tree_generic("up", is_detail_mode=True)
     
     async def _navigate_detail_tree_down(self):
         """Navigate down in the detail tree view."""
+        self._last_scroll_direction = "down"
         self._navigate_tree_generic("down", is_detail_mode=True)
     
     async def _expand_detail_node(self):
@@ -1868,6 +1905,213 @@ class IPCTUIInspector:
             await self._edit_with_external_editor(self._detail_current_node)
         else:
             self.status_message = "This item is not editable"
+    
+    async def _check_pagination_on_scroll(self, direction: str):
+        """Check if we need to load more data when scrolling near the end."""
+        if self._pagination_loading or not self._pagination_has_more or self._rendering:
+            return
+        
+        # Only trigger pagination for supported endpoints
+        if not hasattr(self, '_current_endpoint') or self._current_endpoint not in ["veil_facets", "timeline_details"]:
+            return
+        
+        # Only check when scrolling down
+        if direction != "down":
+            return
+        
+        # Get current tree state based on mode
+        is_detail_mode = self.mode == NavigationMode.DETAIL_VIEW
+        visible_nodes = self._get_visible_nodes(is_detail_mode)
+        
+        if not visible_nodes:
+            return
+        
+        # Find current node index
+        current_index = -1
+        tree_root, current_node, _ = self._get_tree_state(is_detail_mode)
+        
+        for i, (node, _, is_current) in enumerate(visible_nodes):
+            if is_current:
+                current_index = i
+                break
+        
+        # Check if we're near the end (within 5 items)
+        if current_index >= len(visible_nodes) - 5:
+            await self._load_more_paginated_data()
+    
+    async def _load_more_paginated_data(self):
+        """Load additional paginated data and append to current tree."""
+        if self._pagination_loading:
+            return  # Prevent concurrent loading
+        
+        try:
+            self._pagination_loading = True
+            self.status_message = "Loading more..."
+            
+            # Determine current endpoint and args
+            if self._current_endpoint == "veil_facets":
+                space_id = getattr(self, '_current_space_id', 'unknown')
+                endpoint_args = {
+                    "space_id": space_id,
+                    "limit": self._pagination_limit
+                }
+                # Add cursor if we have one
+                if self._pagination_cursor:
+                    endpoint_args["after_facet_id"] = self._pagination_cursor
+                    
+                data = await self._fetch_drill_down_data(self._current_endpoint, endpoint_args)
+                await self._append_facets_to_tree(data)
+                
+            elif self._current_endpoint == "timeline_details":
+                space_id = getattr(self, '_current_space_id', 'unknown')
+                timeline_id = getattr(self, '_current_timeline_id', 'unknown')
+                endpoint_args = {
+                    "space_id": space_id,
+                    "timeline_id": timeline_id,
+                    "limit": self._pagination_limit
+                }
+                # Add cursor if we have one
+                if self._pagination_cursor:
+                    endpoint_args["offset"] = self._pagination_cursor
+                    
+                data = await self._fetch_drill_down_data(self._current_endpoint, endpoint_args)
+                await self._append_timeline_events_to_tree(data)
+            
+            self.status_message = "Loaded more items"
+            
+        except Exception as e:
+            self.status_message = f"Error loading more data: {str(e)}"
+        finally:
+            self._pagination_loading = False
+    
+    async def _append_facets_to_tree(self, data: Dict[str, Any]):
+        """Append new facets to the existing tree."""
+        if not self.tree_root or self.tree_root.id != "facets_root":
+            return
+        
+        # Get the facets array from the response
+        facets = data.get("facets", [])
+        
+        # Update pagination state
+        summary = data.get("summary", {})
+        self._pagination_has_more = summary.get("limited", False)
+        
+        # Set cursor to the last facet ID for next batch
+        if facets and self._pagination_has_more:
+            last_facet = facets[-1]
+            self._pagination_cursor = last_facet.get("facet_id", None)
+        
+        # Append new facets to existing tree
+        for i, facet in enumerate(facets):
+            facet_id = facet.get("facet_id", f"facet_{len(self.tree_root.children) + i}")
+            facet_type = facet.get("facet_type", "unknown")
+            
+            # Ensure unique ID by including current tree size
+            unique_facet_id = f"{facet_id}_batch_{len(self.tree_root.children)}_{i}"
+            
+            label = f"{facet_id} ({facet_type})"
+            facet_node = TreeNode(unique_facet_id, label, facet, parent=self.tree_root)
+            
+            # Make facet data expandable
+            if isinstance(facet, dict):
+                facet_node.children = []
+                for key, value in facet.items():
+                    child_path = f"{unique_facet_id}.{key}"
+                    child = self._build_node_from_value(value, key, facet_node, child_path, 1)
+                    facet_node.children.append(child)
+                facet_node.is_expanded = True
+            
+            self.tree_root.children.append(facet_node)
+    
+    async def _append_timeline_events_to_tree(self, data: Dict[str, Any]):
+        """Append new timeline events to the existing tree."""
+        if not self.tree_root or self.tree_root.id != "events_root":
+            return
+        
+        # Get the events array from the response
+        events = data.get("events", [])
+        
+        # Update pagination state
+        pagination = data.get("pagination", {})
+        self._pagination_has_more = pagination.get("has_more", False)
+        
+        # Set cursor to the last event timestamp for next batch
+        if events and self._pagination_has_more:
+            last_event = events[-1]
+            self._pagination_cursor = last_event.get("timestamp", None)
+        
+        # Append new events to existing tree
+        for i, event in enumerate(events):
+            event_id = event.get("id", f"event_{len(self.tree_root.children) + i}")
+            payload = event.get("payload", {})
+            event_type = payload.get("event_type", "unknown")
+            timestamp = event.get("timestamp", 0)
+            
+            # Ensure unique ID by including current tree size
+            unique_event_id = f"{event_id}_batch_{len(self.tree_root.children)}_{i}"
+            
+            # Create readable label
+            import datetime
+            try:
+                dt = datetime.datetime.fromtimestamp(timestamp)
+                time_str = dt.strftime("%H:%M:%S")
+            except (ValueError, OSError):
+                time_str = str(timestamp)[:10]
+            
+            label = f"{event_id} ({event_type}) at {time_str}"
+            event_node = TreeNode(unique_event_id, label, event, parent=self.tree_root)
+            
+            # Make event data expandable
+            if isinstance(event, dict):
+                event_node.children = []
+                for key, value in event.items():
+                    child_path = f"{unique_event_id}.{key}"
+                    child = self._build_node_from_value(value, key, event_node, child_path, 1)
+                    event_node.children.append(child)
+                event_node.is_expanded = True
+            
+            self.tree_root.children.append(event_node)
+    
+    async def _initialize_pagination_state(self, data: Dict[str, Any], endpoint_name: str):
+        """Initialize pagination state based on the response data."""
+        if endpoint_name == "veil_facets":
+            summary = data.get("summary", {})
+            facets = data.get("facets", [])
+            self._pagination_limit = 20  # Keep same limit as initial fetch
+            self._pagination_has_more = summary.get("limited", False)
+            # Set cursor to last facet ID if there are more items
+            if facets and self._pagination_has_more:
+                last_facet = facets[-1]
+                self._pagination_cursor = last_facet.get("facet_id", None)
+            else:
+                self._pagination_cursor = None
+                
+        elif endpoint_name == "timeline_details":
+            pagination = data.get("pagination", {})
+            events = data.get("events", [])
+            self._pagination_limit = 50  # Keep same limit as initial fetch
+            self._pagination_has_more = pagination.get("has_more", False)
+            # Set cursor to last event timestamp if there are more items
+            if events and self._pagination_has_more:
+                last_event = events[-1]
+                self._pagination_cursor = last_event.get("timestamp", None)
+            else:
+                self._pagination_cursor = None
+        else:
+            # Reset pagination for non-paginated endpoints
+            self._pagination_cursor = None
+            self._pagination_limit = 20
+            self._pagination_has_more = False
+        
+        self._pagination_loading = False
+    
+    def _reset_pagination_state(self):
+        """Reset pagination state when switching views."""
+        self._pagination_cursor = None
+        self._pagination_limit = 20
+        self._pagination_has_more = False
+        self._pagination_loading = False
+        self._last_scroll_direction = None
 
 
 async def main_ipc_tui(socket_path: str = None, timeout: float = 30.0):
