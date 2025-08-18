@@ -400,6 +400,51 @@ class IPCTUIInspector:
         
         self.terminal.reset_colors()
     
+    def _render_banner(self, start_row: int) -> int:
+        """Render ASCII banner if there's enough space. Returns the row after the banner."""
+        rows, cols = self.terminal.get_terminal_size()
+        
+        banner_lines = [
+            "  ██████╗ ██████╗ ███╗   ██╗███╗   ██╗███████╗ ██████╗████████╗ ██████╗ ███╗   ███╗███████╗",
+            " ██╔════╝██╔═══██╗████╗  ██║████╗  ██║██╔════╝██╔════╝╚══██╔══╝██╔═══██╗████╗ ████║██╔════╝",
+            " ██║     ██║   ██║██╔██╗ ██║██╔██╗ ██║█████╗  ██║        ██║   ██║   ██║██╔████╔██║█████╗  ",
+            " ██║     ██║   ██║██║╚██╗██║██║╚██╗██║██╔══╝  ██║        ██║   ██║   ██║██║╚██╔╝██║██╔══╝  ",
+            " ╚██████╗╚██████╔╝██║ ╚████║██║ ╚████║███████╗╚██████╗   ██║   ╚██████╔╝██║ ╚═╝ ██║███████╗",
+            "  ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝ ╚═════╝   ╚═╝    ╚═════╝ ╚═╝     ╚═╝╚══════╝",
+            "",
+            "                              ██╗███╗   ██╗███████╗██████╗ ███████╗ ██████╗████████╗ ██████╗ ██████╗ ",
+            "                              ██║████╗  ██║██╔════╝██╔══██╗██╔════╝██╔════╝╚══██╔══╝██╔═══██╗██╔══██╗",
+            "                              ██║██╔██╗ ██║███████╗██████╔╝█████╗  ██║        ██║   ██║   ██║██████╔╝",
+            "                              ██║██║╚██╗██║╚════██║██╔═══╝ ██╔══╝  ██║        ██║   ██║   ██║██╔══██╗",
+            "                              ██║██║ ╚████║███████║██║     ███████╗╚██████╗   ██║   ╚██████╔╝██║  ██║",
+            "                              ╚═╝╚═╝  ╚═══╝╚══════╝╚═╝     ╚══════╝ ╚═════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝"
+        ]
+        
+        # Check if we have enough space for the banner
+        # Need at least banner height + some space for content
+        banner_height = len(banner_lines)
+        min_space_needed = banner_height + 10  # Banner + space for menu items
+        available_space = rows - start_row - 3  # Reserve space for footer
+        
+        if available_space < min_space_needed:
+            return start_row  # Not enough space, don't render banner
+        
+        # Check if terminal is wide enough for the banner
+        banner_width = max(len(line) for line in banner_lines)
+        if cols < banner_width + 4:  # Need some padding
+            return start_row  # Not wide enough
+        
+        # Render the banner centered
+        for i, line in enumerate(banner_lines):
+            self.terminal.move_cursor(start_row + i, 1)
+            # Center the line
+            padding = (cols - len(line)) // 2
+            self.terminal.set_color('bright_cyan', bold=True)
+            print(' ' * padding + line)
+        
+        self.terminal.reset_colors()
+        return start_row + banner_height + 2  # Add some spacing after banner
+    
     async def _render_host_selection(self):
         """Render the host selection screen."""
         rows, cols = self.terminal.get_terminal_size()
@@ -466,8 +511,11 @@ class IPCTUIInspector:
         """Render the main menu."""
         rows, cols = self.terminal.get_terminal_size()
         
+        # Try to render banner, get the row where content should start
+        content_start_row = self._render_banner(4)
+        
         # Connection status
-        self.terminal.move_cursor(4, 2)
+        self.terminal.move_cursor(content_start_row, 2)
         if self.current_host:
             self.terminal.set_color('bright_green')
             print(f"Connected to PID {self.current_host.get('pid', '?')}")
@@ -476,13 +524,17 @@ class IPCTUIInspector:
             print("Not connected to any host")
         
         # Menu title
-        self.terminal.move_cursor(6, 2)
+        self.terminal.move_cursor(content_start_row + 2, 2)
         self.terminal.set_color('bright_green', bold=True)
         print("Select an option:")
         
         # Calculate available space for menu items
-        # Reserve space for header (6 rows), scroll indicators (1 row each), and footer (3 rows)
-        content_rows = rows - 12  # More conservative calculation
+        # Reserve space for header, content area, scroll indicators and footer
+        menu_title_row = content_start_row + 2
+        scroll_indicator_row = menu_title_row + 1
+        menu_start_row = scroll_indicator_row + 1
+        available_space = rows - menu_start_row - 3  # Reserve space for footer
+        content_rows = max(1, available_space)  # Ensure at least 1 row for menu
         
         # Adjust scroll offset to ensure current selection is visible
         if self.current_menu_index < self.scroll_offset:
@@ -496,17 +548,16 @@ class IPCTUIInspector:
         
         # Show up arrow if there are items above
         if self.scroll_offset > 0:
-            self.terminal.move_cursor(7, 2)
+            self.terminal.move_cursor(scroll_indicator_row, 2)
             self.terminal.set_color('bright_yellow', bold=True)
             print("↑ ↑ ↑  More items above  ↑ ↑ ↑")
             self.terminal.reset_colors()
         else:
             # Clear the line if no scroll indicator needed
-            self.terminal.move_cursor(7, 1)
+            self.terminal.move_cursor(scroll_indicator_row, 1)
             print(' ' * (cols - 1))
         
         # Clear the menu content area
-        menu_start_row = 8
         for i in range(content_rows):
             self.terminal.move_cursor(menu_start_row + i, 1)
             print(' ' * (cols - 1))  # Clear entire line
