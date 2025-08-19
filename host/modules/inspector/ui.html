@@ -932,7 +932,16 @@
                 const drillBtn = document.createElement('button');
                 drillBtn.textContent = '🔍';
                 drillBtn.className = 'drill-down-btn';
-                drillBtn.title = `Drill down into ${drillInfo.type}`;
+                
+                // Set user-friendly tooltip based on drill-down type
+                let tooltip = 'Drill down';
+                if (drillInfo.type === 'veil_facets') {
+                    tooltip = 'Show facets';
+                } else if (drillInfo.type === 'timeline_events') {
+                    tooltip = 'Show events';
+                }
+                drillBtn.title = tooltip;
+                
                 drillBtn.onclick = (e) => {
                     e.stopPropagation();
                     drillDown(drillInfo, currentPath);
