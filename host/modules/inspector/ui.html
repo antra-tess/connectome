@@ -309,23 +309,6 @@
     <div class="header">
         <h1>Connectome Inspector</h1>
         <div class="controls">
-            <select id="endpointSelect">
-                <option value="">Select an endpoint...</option>
-                <option value="/status">System Status</option>
-                <option value="/spaces">Spaces Overview</option>
-                <option value="/agents">Agents</option>
-                <option value="/adapters">Adapters</option>
-                <option value="/metrics">Metrics</option>
-                <option value="/timelines">Timelines Overview</option>
-                <option value="/veil">VEIL Overview</option>
-                <option value="/health">Health Check</option>
-                <optgroup label="Space-Specific Data">
-                    <option value="spaces_detailed">📊 Browse Space Details</option>
-                    <option value="timeline_events">⏱️ Browse Timeline Events</option>
-                    <option value="veil_facets">🎭 Browse VEIL Facets</option>
-                </optgroup>
-            </select>
-            <button id="loadBtn" onclick="loadAndVisualize()">Load & Visualize</button>
             <span id="status" class="loading" style="display: none;">Loading...</span>
         </div>
     </div>
@@ -334,22 +317,22 @@
         <div class="sidebar">
             <h3>Available Endpoints</h3>
             <ul class="endpoint-list">
-                <li><a href="#" onclick="selectEndpoint('/status')">System Status</a></li>
-                <li><a href="#" onclick="selectEndpoint('/spaces')">Spaces Overview</a></li>
-                <li><a href="#" onclick="selectEndpoint('/agents')">Agents</a></li>
-                <li><a href="#" onclick="selectEndpoint('/adapters')">Adapters</a></li>
-                <li><a href="#" onclick="selectEndpoint('/metrics')">Metrics</a></li>
-                <li><a href="#" onclick="selectEndpoint('/timelines')">Timelines Overview</a></li>
-                <li><a href="#" onclick="selectEndpoint('/veil')">VEIL Overview</a></li>
-                <li><a href="#" onclick="selectEndpoint('/health')">Health Check</a></li>
+                <li><a href="#" onclick="loadEndpoint('/status')">System Status</a></li>
+                <li><a href="#" onclick="loadEndpoint('/spaces')">Spaces Overview</a></li>
+                <li><a href="#" onclick="loadEndpoint('/agents')">Agents</a></li>
+                <li><a href="#" onclick="loadEndpoint('/adapters')">Adapters</a></li>
+                <li><a href="#" onclick="loadEndpoint('/metrics')">Metrics</a></li>
+                <li><a href="#" onclick="loadEndpoint('/timelines')">Timelines Overview</a></li>
+                <li><a href="#" onclick="loadEndpoint('/veil')">VEIL Overview</a></li>
+                <li><a href="#" onclick="loadEndpoint('/health')">Health Check</a></li>
             </ul>
             
             <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #0f3460;">
                 <h3>Space-Specific Data</h3>
                 <ul class="endpoint-list">
-                    <li><a href="#" onclick="selectEndpoint('spaces_detailed')">📊 Browse Space Details</a></li>
-                    <li><a href="#" onclick="selectEndpoint('timeline_events')">⏱️ Browse Timeline Events</a></li>
-                    <li><a href="#" onclick="selectEndpoint('veil_facets')">🎭 Browse VEIL Facets</a></li>
+                    <li><a href="#" onclick="loadEndpoint('spaces_detailed')">📊 Browse Space Details</a></li>
+                    <li><a href="#" onclick="loadEndpoint('timeline_events')">⏱️ Browse Timeline Events</a></li>
+                    <li><a href="#" onclick="loadEndpoint('veil_facets')">🎭 Browse VEIL Facets</a></li>
                 </ul>
             </div>
             
@@ -397,23 +380,12 @@
             currentBrowserType: null
         }; // For pagination
         
-        function selectEndpoint(endpoint) {
-            document.getElementById('endpointSelect').value = endpoint;
-            
+        async function loadEndpoint(endpoint) {
             // Update active link
             document.querySelectorAll('.endpoint-list a').forEach(a => a.classList.remove('active'));
             event.target.classList.add('active');
-        }
-        
-        async function loadAndVisualize() {
-            const endpoint = document.getElementById('endpointSelect').value;
-            if (!endpoint) {
-                alert('Please select an endpoint first');
-                return;
-            }
             
             const statusEl = document.getElementById('status');
-            const loadBtn = document.getElementById('loadBtn');
             const contentEl = document.getElementById('content');
             const toolbar = document.getElementById('toolbar');
             
@@ -424,7 +396,6 @@
             }
             
             statusEl.style.display = 'inline';
-            loadBtn.disabled = true;
             
             try {
                 statusEl.textContent = 'Loading data...';
@@ -476,7 +447,6 @@
                 toolbar.style.display = 'none';
             } finally {
                 statusEl.style.display = 'none';
-                loadBtn.disabled = false;
             }
         }
         
@@ -669,7 +639,7 @@
         
         async function refreshData() {
             if (currentEndpoint) {
-                await loadAndVisualize();
+                await loadEndpoint(currentEndpoint);
             }
         }
         
@@ -1218,12 +1188,7 @@
             }
         }
         
-        // Handle Enter key in select
-        document.getElementById('endpointSelect').addEventListener('keypress', function(e) {
-            if (e.key === 'Enter') {
-                loadAndVisualize();
-            }
-        });
+        // Navigation via sidebar links - no keyboard handlers needed since we removed dropdown
         
         // Navigation helpers
         function updateBreadcrumb(path) {
@@ -1444,11 +1409,10 @@
             }
         }
         
-        // Auto-select first endpoint on load for demo purposes
+        // Auto-load functionality (currently disabled)
         window.addEventListener('load', function() {
             // Optional: Auto-load status endpoint for demonstration
-            // selectEndpoint('/status');
-            // setTimeout(loadAndVisualize, 1000);
+            // loadEndpoint('/status');
         });
     </script>
 </body>
