@@ -1093,6 +1093,12 @@
                             padding-top: 0.5rem;
                             border-top: 1px solid #555;
                         `;
+                        
+                        // Stop click propagation to prevent collapsing when interacting with tree
+                        expandedDiv.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                        });
+                        
                         expandedDiv.appendChild(createTreeNode(facet.facet_id, facet, 0, true));
                         facetDiv.appendChild(expandedDiv);
                         facetDiv.style.background = '#1a2f4a';
@@ -1175,6 +1181,12 @@
                             padding-top: 0.5rem;
                             border-top: 1px solid #555;
                         `;
+                        
+                        // Stop click propagation to prevent collapsing when interacting with tree
+                        expandedDiv.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                        });
+                        
                         expandedDiv.appendChild(createTreeNode(event.id, event, 0, true));
                         eventDiv.appendChild(expandedDiv);
                         eventDiv.style.background = '#1a2f4a';
