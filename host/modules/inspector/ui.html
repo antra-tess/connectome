@@ -303,6 +303,29 @@
             opacity: 0.5;
             cursor: not-allowed;
         }
+        
+        /* Drill-down functionality styles */
+        .drill-down-btn {
+            background: #74b9ff !important;
+            color: #1a1a2e !important;
+            border: none !important;
+            padding: 2px 6px !important;
+            margin-left: 8px !important;
+            font-size: 0.7rem !important;
+            border-radius: 3px !important;
+            cursor: pointer !important;
+            opacity: 0.7;
+            transition: opacity 0.2s, background-color 0.2s;
+        }
+        
+        .drill-down-btn:hover {
+            opacity: 1;
+            background: #5a9df7 !important;
+        }
+        
+        .drillable-node:hover .drill-down-btn {
+            opacity: 1;
+        }
     </style>
 </head>
 <body>
@@ -753,7 +776,16 @@
             const hasMore = data.has_more || false;
             const nextCursor = data.next_cursor || null;
             const totalItems = data.total_items || '?';
-            const currentItems = data.events ? data.events.length : (data.facets ? Object.keys(data.facets).length : 0);
+            
+            // Count items based on data structure
+            let currentItems = 0;
+            if (data.events && Array.isArray(data.events)) {
+                currentItems = data.events.length;
+            } else if (data.facets && typeof data.facets === 'object') {
+                currentItems = Object.keys(data.facets).length;
+            } else if (data.timelines && typeof data.timelines === 'object') {
+                currentItems = Object.keys(data.timelines).length;
+            }
             
             const paginationHtml = `
                 <div class="pagination-controls">
@@ -833,9 +865,13 @@
             // Determine if this node is editable
             const isEditable = !hasChildren && isEditableField(currentPath, value);
             
+            // Determine if this node is drillable
+            const drillInfo = isDrillableNode(currentPath, value);
+            const isDrillable = drillInfo !== null;
+            
             // Create node header
             const headerDiv = document.createElement('div');
-            headerDiv.className = isEditable ? 'editable-node' : '';
+            headerDiv.className = isEditable ? 'editable-node' : (isDrillable ? 'drillable-node' : '');
             headerDiv.style.cssText = `
                 display: flex;
                 align-items: center;
@@ -899,6 +935,19 @@
                 headerDiv.appendChild(editBtn);
             }
             
+            // Add drill-down button for drillable fields
+            if (isDrillable) {
+                const drillBtn = document.createElement('button');
+                drillBtn.textContent = '🔍';
+                drillBtn.className = 'drill-down-btn';
+                drillBtn.title = `Drill down into ${drillInfo.type}`;
+                drillBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    drillDown(drillInfo, currentPath);
+                };
+                headerDiv.appendChild(drillBtn);
+            }
+            
             nodeDiv.appendChild(headerDiv);
             
             // Children container
@@ -920,7 +969,7 @@
                 nodeDiv.appendChild(childrenDiv);
                 
                 // Click handler for expand/collapse (only for containers, not editable items)
-                if (!isEditable) {
+                if (!isEditable && !isDrillable) {
                     headerDiv.addEventListener('click', () => {
                         const indicator = headerDiv.querySelector('span');
                         const isCurrentlyExpanded = childrenDiv.style.display === 'block';
@@ -933,6 +982,24 @@
                             indicator.textContent = '▼ ';
                         }
                     });
+                } else if (hasChildren && isDrillable) {
+                    // For drillable containers, only expand/collapse when clicking the indicator, not the whole header
+                    const indicator = headerDiv.querySelector('span');
+                    if (indicator) {
+                        indicator.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            const isCurrentlyExpanded = childrenDiv.style.display === 'block';
+                            
+                            if (isCurrentlyExpanded) {
+                                childrenDiv.style.display = 'none';
+                                indicator.textContent = '▶ ';
+                            } else {
+                                childrenDiv.style.display = 'block';
+                                indicator.textContent = '▼ ';
+                            }
+                        });
+                        indicator.style.cursor = 'pointer';
+                    }
                 }
             }
             
@@ -1227,6 +1294,165 @@
                 setTimeout(() => {
                     statusSpan.remove();
                 }, 3000);
+            }
+        }
+        
+        // Drill-down functionality for tree navigation
+        function isDrillableNode(path, value) {
+            const pathStr = path.join('.');
+            const key = path[path.length - 1];
+            
+            // Timeline drill-downs from spaces overview
+            if (pathStr.includes('spaces.') && pathStr.endsWith('timelines') && typeof value === 'object' && Object.keys(value).length > 0) {
+                const spaceId = getSpaceIdFromPath(path);
+                return { type: 'space_timelines', spaceId: spaceId };
+            }
+            
+            // Individual timeline from space timelines
+            if (pathStr.includes('spaces.') && pathStr.includes('timelines.') && typeof value === 'object') {
+                const spaceId = getSpaceIdFromPath(path);
+                const timelineId = key;
+                return { type: 'timeline_events', spaceId: spaceId, timelineId: timelineId };
+            }
+            
+            // Timeline events from timeline overview endpoint
+            if (pathStr === 'timelines' && typeof value === 'object' && Object.keys(value).length > 0) {
+                return { type: 'all_timeline_events', spaceId: 'overview' };
+            }
+            
+            // VEIL cache drill-down to facets
+            if (pathStr.includes('spaces.') && (pathStr.endsWith('veil_cache') || pathStr.endsWith('veil')) && typeof value === 'object' && Object.keys(value).length > 0) {
+                const spaceId = getSpaceIdFromPath(path);
+                return { type: 'veil_facets', spaceId: spaceId };
+            }
+            
+            // Individual VEIL facet details (when looking at facets overview)
+            if (pathStr.includes('facets.') && typeof value === 'object' && value.facet_id) {
+                const spaceId = getSpaceIdFromPath(path);
+                return { type: 'veil_facet_details', spaceId: spaceId, facetId: value.facet_id };
+            }
+            
+            // Elements collection drill-down
+            if (pathStr.includes('spaces.') && pathStr.endsWith('elements') && typeof value === 'object' && Object.keys(value).length > 0) {
+                const spaceId = getSpaceIdFromPath(path);
+                return { type: 'space_elements', spaceId: spaceId };
+            }
+            
+            // Agents collection drill-down
+            if (pathStr === 'agents' && typeof value === 'object' && Object.keys(value).length > 0) {
+                return { type: 'agents_detailed', spaceId: null };
+            }
+            
+            return null;
+        }
+        
+        async function drillDown(drillInfo, originalPath) {
+            // Push current state to navigation stack
+            pushNavigation();
+            
+            const statusEl = document.getElementById('status');
+            statusEl.style.display = 'inline';
+            statusEl.textContent = 'Loading drill-down data...';
+            
+            try {
+                let endpoint = '';
+                let title = '';
+                let breadcrumb = '';
+                
+                switch(drillInfo.type) {
+                    case 'timeline_events':
+                        endpoint = `/timelines/${drillInfo.spaceId}/${drillInfo.timelineId}`;
+                        title = `⏱️ Timeline Events: ${drillInfo.timelineId}`;
+                        breadcrumb = `Inspector → Timeline Events → ${drillInfo.spaceId} → ${drillInfo.timelineId}`;
+                        paginationState.currentBrowserType = 'timeline_events';
+                        break;
+                        
+                    case 'space_timelines':
+                        endpoint = `/timelines/${drillInfo.spaceId}`;
+                        title = `⏱️ Timeline Overview: ${drillInfo.spaceId}`;
+                        breadcrumb = `Inspector → Timelines → ${drillInfo.spaceId}`;
+                        paginationState.currentBrowserType = 'timeline_events';
+                        break;
+                        
+                    case 'all_timeline_events':
+                        endpoint = `/timelines`;
+                        title = `⏱️ All Timeline Events`;
+                        breadcrumb = `Inspector → Timeline Events → All Spaces`;
+                        paginationState.currentBrowserType = 'timeline_events';
+                        break;
+                        
+                    case 'veil_facets':
+                        endpoint = `/veil/${drillInfo.spaceId}/facets`;
+                        title = `🎭 VEIL Facets: ${drillInfo.spaceId}`;
+                        breadcrumb = `Inspector → VEIL Facets → ${drillInfo.spaceId}`;
+                        paginationState.currentBrowserType = 'veil_facets';
+                        break;
+                        
+                    case 'veil_facet_details':
+                        endpoint = `/veil/${drillInfo.spaceId}/facets/${drillInfo.facetId}`;
+                        title = `🎭 VEIL Facet Details: ${drillInfo.facetId}`;
+                        breadcrumb = `Inspector → VEIL Facets → ${drillInfo.spaceId} → ${drillInfo.facetId}`;
+                        paginationState.currentBrowserType = 'veil_facets';
+                        break;
+                        
+                    case 'space_elements':
+                        // For elements, we drill down to a filtered view of the spaces endpoint
+                        endpoint = `/spaces`;
+                        title = `🏗️ Space Elements: ${drillInfo.spaceId}`;
+                        breadcrumb = `Inspector → Elements → ${drillInfo.spaceId}`;
+                        paginationState.currentBrowserType = 'spaces_detailed';
+                        break;
+                        
+                    case 'agents_detailed':
+                        endpoint = `/agents`;
+                        title = `🤖 Agent Details`;
+                        breadcrumb = `Inspector → Agents → Detailed View`;
+                        paginationState.currentBrowserType = 'agents';
+                        break;
+                        
+                    default:
+                        throw new Error(`Unknown drill-down type: ${drillInfo.type}`);
+                }
+                
+                const response = await fetch(endpoint);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                
+                // Filter data if needed for specific drill-downs
+                if (drillInfo.type === 'space_elements' && data.spaces && drillInfo.spaceId) {
+                    // Filter to show only the specific space's elements
+                    const filteredData = {
+                        ...data,
+                        spaces: {
+                            [drillInfo.spaceId]: data.spaces[drillInfo.spaceId]
+                        }
+                    };
+                    currentData = filteredData;
+                } else {
+                    currentData = data;
+                }
+                
+                currentEndpoint = endpoint;
+                
+                // Update pagination state
+                paginationState.currentSpaceId = drillInfo.spaceId;
+                
+                // Update UI
+                updateBreadcrumb(breadcrumb);
+                document.getElementById('data-info').textContent = `${title} • ${formatBytes(JSON.stringify(currentData).length)}`;
+                
+                // Show the drilled-down data
+                showTreeView(currentData);
+                
+            } catch (error) {
+                console.error('Error during drill-down:', error);
+                alert(`Error loading drill-down data: ${error.message}`);
+                // Don't pop navigation on error, let user use back button
+            } finally {
+                statusEl.style.display = 'none';
             }
         }
         
