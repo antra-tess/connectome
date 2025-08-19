@@ -1283,6 +1283,45 @@
             }, 50); // Small delay to allow DOM to settle
         }
         
+        async function updateSpecificItem(context, freshItem) {
+            // Find the specific expanded item in the UI and update its content
+            const treeContainer = document.getElementById('tree-container');
+            if (!treeContainer) return;
+            
+            // Look for expanded content that matches this item ID
+            const expandedElements = treeContainer.querySelectorAll('.expanded-content');
+            for (const expandedEl of expandedElements) {
+                const parent = expandedEl.parentElement;
+                const idElement = parent.querySelector('[style*="color: #74b9ff"]');
+                
+                if (idElement && idElement.textContent) {
+                    // Extract the ID from the header (format: "TYPE • ID...")
+                    const match = idElement.textContent.match(/•\s*([^.]+)/);
+                    if (match) {
+                        const displayedId = match[1];
+                        const targetId = context.type === 'veil_facet' ? context.facetId : context.eventId;
+                        
+                        // Check if this matches our updated item (compare first 8 chars)
+                        if (targetId.startsWith(displayedId)) {
+                            // This is the item we need to update!
+                            // Clear the expanded content and rebuild it with fresh data
+                            expandedEl.innerHTML = '';
+                            
+                            const itemData = context.type === 'veil_facet' ? freshItem.facet : freshItem.event;
+                            const pathPrefix = context.type === 'veil_facet' ? ['facets', context.facetId] : ['events', context.eventId];
+                            
+                            expandedEl.appendChild(createTreeNode(targetId, itemData, 0, true, pathPrefix));
+                            
+                            console.log(`Updated ${context.type} ${targetId} with fresh data`);
+                            return; // Found and updated the item
+                        }
+                    }
+                }
+            }
+            
+            console.log(`Could not find expanded UI element for ${context.type} ${context.facetId || context.eventId}`);
+        }
+        
         function formatBytes(bytes) {
             if (bytes === 0) return '0 Bytes';
             const k = 1024;
@@ -1562,18 +1601,41 @@
                     statusSpan.textContent = 'Saved ✓';
                     statusSpan.className = 'edit-status edit-success';
                     
-                    // Seamlessly fetch updated data and update the UI
+                    // Seamlessly fetch updated individual item instead of full refresh
                     try {
-                        const freshResponse = await fetch(currentEndpoint);
-                        if (freshResponse.ok) {
-                            const freshData = await freshResponse.json();
-                            currentData = freshData;
-                            
-                            // Update the display with fresh data while preserving expanded state
-                            await updateDisplayWithFreshData();
+                        let itemEndpoint = null;
+                        let itemKey = null;
+                        
+                        if (context.type === 'veil_facet') {
+                            itemEndpoint = `/veil/${context.spaceId}/facets/${context.facetId}`;
+                            itemKey = context.facetId;
+                        } else if (context.type === 'timeline_event') {
+                            itemEndpoint = `/events/${context.eventId}`;
+                            itemKey = context.eventId;
+                        }
+                        
+                        if (itemEndpoint) {
+                            const freshResponse = await fetch(itemEndpoint);
+                            if (freshResponse.ok) {
+                                const freshItem = await freshResponse.json();
+                                
+                                // Update the specific item in currentData
+                                if (context.type === 'veil_facet' && currentData.facets) {
+                                    currentData.facets[itemKey] = freshItem.facet;
+                                } else if (context.type === 'timeline_event' && currentData.events) {
+                                    currentData.events[itemKey] = freshItem.event;
+                                }
+                                
+                                // Update just the specific expanded item in the UI
+                                await updateSpecificItem(context, freshItem);
+                            } else {
+                                throw new Error(`Individual item fetch failed: ${freshResponse.status}`);
+                            }
+                        } else {
+                            throw new Error('No individual endpoint available for this item type');
                         }
                     } catch (fetchError) {
-                        console.warn('Failed to fetch fresh data after edit:', fetchError);
+                        console.warn('Failed to fetch individual item after edit, falling back to full refresh:', fetchError);
                         // Fallback to full refresh
                         setTimeout(async () => {
                             await refreshData();

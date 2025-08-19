@@ -1784,3 +1784,100 @@ class InspectorDataCollector:
                 "success": False,
                 "timestamp": time.time()
             }
+
+    async def collect_event_details(self, event_id: str) -> Dict[str, Any]:
+        """
+        Collect detailed information about a specific event by its ID.
+        
+        Args:
+            event_id: The globally unique ID of the event to inspect
+            
+        Returns:
+            Dictionary containing detailed event information
+        """
+        try:
+            if not self.space_registry:
+                return {
+                    "error": "Space registry not available",
+                    "timestamp": time.time()
+                }
+
+            # Search for the event across all spaces and timelines
+            spaces_dict = self.space_registry.get_spaces()
+            
+            for space_id, space in spaces_dict.items():
+                try:
+                    # Check if space has timeline storage component
+                    timeline_storage = None
+                    for component in space.components.values():
+                        if hasattr(component, 'get_all_timelines'):
+                            timeline_storage = component
+                            break
+                    
+                    if not timeline_storage:
+                        continue
+                        
+                    # Search all timelines in this space for the event
+                    timelines = timeline_storage.get_all_timelines()
+                    for timeline_id, timeline in timelines.items():
+                        try:
+                            # Try to get the event from this timeline
+                            events = timeline.get_all_events()
+                            if event_id in events:
+                                event = events[event_id]
+                                
+                                # Found the event! Return detailed information
+                                return {
+                                    "event": self._serialize_event(event),
+                                    "context": {
+                                        "space_id": space_id,
+                                        "space_type": type(space).__name__,
+                                        "timeline_id": timeline_id,
+                                        "timeline_type": type(timeline).__name__
+                                    },
+                                    "relationships": {
+                                        "parent_events": event.parent_ids if hasattr(event, 'parent_ids') else [],
+                                        "children_count": len([e for e in events.values() 
+                                                            if hasattr(e, 'parent_ids') and event_id in e.parent_ids])
+                                    },
+                                    "timestamp": time.time()
+                                }
+                                
+                        except Exception as e:
+                            logger.debug(f"Error searching timeline {timeline_id} in space {space_id}: {e}")
+                            continue
+                            
+                except Exception as e:
+                    logger.debug(f"Error searching space {space_id} for event {event_id}: {e}")
+                    continue
+            
+            # Event not found in any timeline
+            return {
+                "error": "Event not found",
+                "event_id": event_id,
+                "searched_spaces": len(spaces_dict),
+                "timestamp": time.time()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error collecting event details for {event_id}: {e}", exc_info=True)
+            return {
+                "error": "Failed to collect event details",
+                "details": str(e),
+                "timestamp": time.time()
+            }
+
+    def _serialize_event(self, event) -> Dict[str, Any]:
+        """Serialize a timeline event for JSON output."""
+        try:
+            return {
+                "id": getattr(event, 'id', None),
+                "timestamp": getattr(event, 'timestamp', None),
+                "timeline_id": getattr(event, 'timeline_id', None),
+                "parent_ids": getattr(event, 'parent_ids', []),
+                "payload": getattr(event, 'payload', None),
+                "event_type": getattr(event, 'payload', {}).get('event_type', None) if hasattr(event, 'payload') else None
+            }
+        except Exception as e:
+            logger.warning(f"Error serializing event: {e}")
+            return {"error": "Failed to serialize event", "details": str(e)}

@@ -67,6 +67,7 @@ class InspectorServer:
         app.router.add_get('/veil/{space_id}', self.handle_veil_space)
         app.router.add_get('/veil/{space_id}/facets', self.handle_veil_facets)
         app.router.add_get('/veil/{space_id}/facets/{facet_id}', self.handle_veil_facet_details)
+        app.router.add_get('/events/{event_id}', self.handle_event_details)
         app.router.add_get('/health', self.handle_health)
         
         # Write endpoints
@@ -271,6 +272,14 @@ class InspectorServer:
         facet_id = request.match_info.get('facet_id')
         
         data = await self.handlers.handle_veil_facet_details(space_id, facet_id)
+        status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if "error" in data else 200)
+        return self._json_response(data, status=status_code)
+
+    async def handle_event_details(self, request: Request) -> Response:
+        """Handle detailed information about specific event endpoint."""
+        event_id = request.match_info.get('event_id')
+        
+        data = await self.handlers.handle_event_details(event_id)
         status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if "error" in data else 200)
         return self._json_response(data, status=status_code)
 

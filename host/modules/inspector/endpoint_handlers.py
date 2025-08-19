@@ -60,6 +60,7 @@ class InspectorEndpointHandlers:
                 "/veil/{space_id}": "VEIL cache state for specific space",
                 "/veil/{space_id}/facets": "All VEIL facets in space with filtering and pagination",
                 "/veil/{space_id}/facets/{facet_id}": "Detailed information about specific facet",
+                "/events/{event_id}": "Detailed information about specific event by globally unique ID",
                 "/health": "Simple health check",
                 "PUT/PATCH /events/{event_id}": "Update timeline event by globally unique event ID",
                 "PUT/PATCH /veil/{space_id}/facets/{facet_id}": "Update VEIL facet"
@@ -346,5 +347,26 @@ class InspectorEndpointHandlers:
                 "error": "Failed to handle VEIL facet update", 
                 "details": str(e),
                 "success": False,
+                "timestamp": time.time()
+            }
+
+    async def handle_event_details(self, event_id: str) -> Dict[str, Any]:
+        """Handle detailed information about specific event endpoint."""
+        self.request_count += 1
+        
+        try:
+            if not event_id:
+                return {
+                    "error": "event_id is required",
+                    "timestamp": time.time()
+                }
+            
+            event_details = await self.data_collector.collect_event_details(event_id)
+            return event_details
+        except Exception as e:
+            logger.error(f"Error collecting event details: {e}", exc_info=True)
+            return {
+                "error": "Failed to collect event details", 
+                "details": str(e),
                 "timestamp": time.time()
             }
