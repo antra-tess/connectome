@@ -322,4 +322,10 @@ When working on Inspector module:
 
 ### TODOs and Known issues:
 
-- in TUI, Agents page, agents/{agent} path is detected as drill-downable. However, it does not drill down to anything useful, in fact it errors out - "Unknown command: Agent details". Instead, somewhere there should be a way to access the *rendered* HUD state of the agent; this will require a new endpoint.
+- in TUI, Agents page, agents/{agent} path is detected as drill-downable. However, it does not drill down to anything useful, in fact it errors out - "Unknown command: Agent details". 
+- There should be an endpoint to show a HUD as rendered to an agent, probably accessible in UI through the Agents page.
+- Both TUI and WUI should support realtime event streaming in facets/events view, with new events being added to the list as the system continues to work
+- There should be a system freeze feature where all input/output processing except inspector is suspended
+- Eventually there should be an arbitrary code REPL feature, or a full-blown integrated python debugger (for web: `code-server`?)
+- Minor style issues: edit-button alignment, scroll cutoff in wui
+- Event/Facet insertion and deletion
