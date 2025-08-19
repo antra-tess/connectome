@@ -1099,7 +1099,7 @@
                             e.stopPropagation();
                         });
                         
-                        expandedDiv.appendChild(createTreeNode(facet.facet_id, facet, 0, true));
+                        expandedDiv.appendChild(createTreeNode(facet.facet_id, facet, 0, true, ['facets', facet.facet_id]));
                         facetDiv.appendChild(expandedDiv);
                         facetDiv.style.background = '#1a2f4a';
                     }
@@ -1187,7 +1187,7 @@
                             e.stopPropagation();
                         });
                         
-                        expandedDiv.appendChild(createTreeNode(event.id, event, 0, true));
+                        expandedDiv.appendChild(createTreeNode(event.id, event, 0, true, ['events', event.id]));
                         eventDiv.appendChild(expandedDiv);
                         eventDiv.style.background = '#1a2f4a';
                     }
@@ -1232,6 +1232,55 @@
                 minute: '2-digit', 
                 second: '2-digit' 
             });
+        }
+        
+        async function updateDisplayWithFreshData() {
+            // Get the current tree container
+            const treeContainer = document.getElementById('tree-container');
+            if (!treeContainer) return;
+            
+            // Store which items are currently expanded
+            const expandedItems = new Set();
+            const expandedElements = treeContainer.querySelectorAll('.expanded-content');
+            expandedElements.forEach(el => {
+                const parent = el.parentElement;
+                const idElement = parent.querySelector('[style*="color: #74b9ff"]');
+                if (idElement && idElement.textContent) {
+                    // Extract the ID from the header (format: "TYPE • ID...")
+                    const match = idElement.textContent.match(/•\s*([^.]+)/);
+                    if (match) {
+                        expandedItems.add(match[1]);
+                    }
+                }
+            });
+            
+            // Clear and rebuild the container with fresh data
+            treeContainer.innerHTML = '';
+            
+            // Rebuild the view based on data type
+            if (currentData.facets && typeof currentData.facets === 'object') {
+                renderFacetsStream(treeContainer, currentData.facets);
+            } else if (currentData.events && typeof currentData.events === 'object') {
+                renderEventsStream(treeContainer, currentData.events);
+            } else {
+                treeContainer.appendChild(createTreeNode('root', currentData, 0, true));
+                return; // No need to restore expanded state for regular tree
+            }
+            
+            // Restore expanded state for stream views
+            setTimeout(() => {
+                const newCards = treeContainer.querySelectorAll('[style*="background: #16213e"]');
+                newCards.forEach(card => {
+                    const idElement = card.querySelector('[style*="color: #74b9ff"]');
+                    if (idElement && idElement.textContent) {
+                        const match = idElement.textContent.match(/•\s*([^.]+)/);
+                        if (match && expandedItems.has(match[1])) {
+                            // Click to expand this item
+                            card.click();
+                        }
+                    }
+                });
+            }, 50); // Small delay to allow DOM to settle
         }
         
         function formatBytes(bytes) {
@@ -1290,11 +1339,22 @@
                 const eventId = eventMatch[1];
                 // Find the event data to get space_id and timeline_id
                 const eventData = getValueAtPath(currentData, path.slice(0, -1));
+                
+                // For stream views, get space ID from current data or endpoint
+                let spaceId = getSpaceIdFromPath(path);
+                if (!spaceId && currentData.space_id) {
+                    spaceId = currentData.space_id;
+                } else if (!spaceId && currentEndpoint) {
+                    // Extract from endpoint like /timelines/space_id/timeline_id
+                    const endpointMatch = currentEndpoint.match(/\/timelines\/([^\/]+)/);
+                    if (endpointMatch) spaceId = endpointMatch[1];
+                }
+                
                 return {
                     type: 'timeline_event',
                     eventId: eventId,
-                    spaceId: getSpaceIdFromPath(path),
-                    timelineId: eventData?.timeline_id
+                    spaceId: spaceId,
+                    timelineId: eventData?.timeline_id || currentData.timeline_id
                 };
             }
             
@@ -1302,7 +1362,17 @@
             const facetMatch = pathStr.match(/.*facets\.([^.]+)/);
             if (facetMatch) {
                 const facetId = facetMatch[1];
-                const spaceId = getSpaceIdFromPath(path);
+                
+                // For stream views, get space ID from current data or endpoint
+                let spaceId = getSpaceIdFromPath(path);
+                if (!spaceId && currentData.space_id) {
+                    spaceId = currentData.space_id;
+                } else if (!spaceId && currentEndpoint) {
+                    // Extract from endpoint like /veil/space_id/facets
+                    const endpointMatch = currentEndpoint.match(/\/veil\/([^\/]+)/);
+                    if (endpointMatch) spaceId = endpointMatch[1];
+                }
+                
                 return {
                     type: 'veil_facet',
                     facetId: facetId,
@@ -1492,9 +1562,26 @@
                     statusSpan.textContent = 'Saved ✓';
                     statusSpan.className = 'edit-status edit-success';
                     
-                    // Refresh the data after successful edit
-                    setTimeout(async () => {
-                        await refreshData();
+                    // Seamlessly fetch updated data and update the UI
+                    try {
+                        const freshResponse = await fetch(currentEndpoint);
+                        if (freshResponse.ok) {
+                            const freshData = await freshResponse.json();
+                            currentData = freshData;
+                            
+                            // Update the display with fresh data while preserving expanded state
+                            await updateDisplayWithFreshData();
+                        }
+                    } catch (fetchError) {
+                        console.warn('Failed to fetch fresh data after edit:', fetchError);
+                        // Fallback to full refresh
+                        setTimeout(async () => {
+                            await refreshData();
+                        }, 500);
+                    }
+                    
+                    // Remove status indicator
+                    setTimeout(() => {
                         statusSpan.remove();
                     }, 1000);
                     
