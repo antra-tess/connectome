@@ -360,8 +360,50 @@
             </div>
             
             <div id="content">
-                <div class="info">
-                    Select an endpoint from the sidebar to load and visualize Connectome debugging data
+                <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; padding: 2rem; text-align: center; background: #0f3460;">
+                    <div style="margin-bottom: 2rem;">
+                        <pre style="color: #00d4aa; font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace; font-size: 0.7rem; line-height: 1; margin: 0; text-align: center;">  ██████╗ ██████╗ ███╗   ██╗███╗   ██╗███████╗ ██████╗████████╗ ██████╗ ███╗   ███╗███████╗
+ ██╔════╝██╔═══██╗████╗  ██║████╗  ██║██╔════╝██╔════╝╚══██╔══╝██╔═══██╗████╗ ████║██╔════╝
+ ██║     ██║   ██║██╔██╗ ██║██╔██╗ ██║█████╗  ██║        ██║   ██║   ██║██╔████╔██║█████╗  
+ ██║     ██║   ██║██║╚██╗██║██║╚██╗██║██╔══╝  ██║        ██║   ██║   ██║██║╚██╔╝██║██╔══╝  
+ ╚██████╗╚██████╔╝██║ ╚████║██║ ╚████║███████╗╚██████╗   ██║   ╚██████╔╝██║ ╚═╝ ██║███████╗
+  ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝ ╚═════╝   ╚═╝    ╚═════╝ ╚═╝     ╚═╝╚══════╝
+
+                              ██╗███╗   ██╗███████╗██████╗ ███████╗ ██████╗████████╗ ██████╗ ██████╗ 
+                              ██║████╗  ██║██╔════╝██╔══██╗██╔════╝██╔════╝╚══██╔══╝██╔═══██╗██╔══██╗
+                              ██║██╔██╗ ██║███████╗██████╔╝█████╗  ██║        ██║   ██║   ██║██████╔╝
+                              ██║██║╚██╗██║╚════██║██╔═══╝ ██╔══╝  ██║        ██║   ██║   ██║██╔══██╗
+                              ██║██║ ╚████║███████║██║     ███████╗╚██████╗   ██║   ╚██████╔╝██║  ██║
+                              ╚═╝╚═╝  ╚═══╝╚══════╝╚═╝     ╚══════╝ ╚═════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝</pre>
+                    </div>
+                    
+                    <div style="color: #74b9ff; font-size: 1.2rem; font-weight: 600; margin-bottom: 1rem;">
+                        🔍 Connectome Inspector Web UI
+                    </div>
+                    
+                    <div style="color: #999; font-size: 0.9rem; line-height: 1.6; max-width: 600px;">
+                        <p>Welcome to the Connectome Inspector! This interface provides real-time debugging and exploration capabilities for your Connectome host system.</p>
+                        
+                        <p style="margin-top: 1.5rem;">
+                            <strong style="color: #00d4aa;">Getting Started:</strong><br>
+                            Select an endpoint from the sidebar to start exploring your system's state. The tree view provides an interactive way to navigate through spaces, agents, timelines, and VEIL data.
+                        </p>
+                        
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-top: 2rem; text-align: left;">
+                            <div style="background: #16213e; padding: 1rem; border-radius: 6px; border-left: 4px solid #74b9ff;">
+                                <strong style="color: #74b9ff;">System Overview</strong><br>
+                                <small>Status, spaces, agents, and metrics</small>
+                            </div>
+                            <div style="background: #16213e; padding: 1rem; border-radius: 6px; border-left: 4px solid #00d4aa;">
+                                <strong style="color: #00d4aa;">Interactive Browsing</strong><br>
+                                <small>Space-specific timeline events and VEIL data</small>
+                            </div>
+                            <div style="background: #16213e; padding: 1rem; border-radius: 6px; border-left: 4px solid #fd79a8;">
+                                <strong style="color: #fd79a8;">Tree Visualization</strong><br>
+                                <small>Expandable tree view with editing capabilities</small>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
