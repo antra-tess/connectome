@@ -319,3 +319,7 @@ When working on Inspector module:
 3. **Verify state persistence** - navigation, expansion, cursor position
 4. **Test with real data** - empty states, large datasets, rapid updates
 5. **Update documentation** - both this README and API docs
+
+### TODOs and Known issues:
+
+- in TUI, Agents page, agents/{agent} path is detected as drill-downable. However, it does not drill down to anything useful, in fact it errors out - "Unknown command: Agent details". Instead, somewhere there should be a way to access the *rendered* HUD state of the agent; this will require a new endpoint.

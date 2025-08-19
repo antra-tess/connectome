@@ -273,6 +273,36 @@
         .edit-error {
             color: #ff6b6b !important;
         }
+        
+        /* Pagination controls */
+        .pagination-controls {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 1rem;
+            margin: 1rem 0;
+            padding: 1rem;
+            background: #16213e;
+            border-radius: 6px;
+            border: 1px solid #0f3460;
+        }
+        
+        .pagination-controls button {
+            padding: 0.5rem 1rem;
+            font-size: 0.85rem;
+        }
+        
+        .pagination-info {
+            color: #999;
+            font-size: 0.85rem;
+            min-width: 120px;
+            text-align: center;
+        }
+        
+        .pagination-controls button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
     </style>
 </head>
 <body>
@@ -282,13 +312,18 @@
             <select id="endpointSelect">
                 <option value="">Select an endpoint...</option>
                 <option value="/status">System Status</option>
-                <option value="/spaces">Spaces</option>
+                <option value="/spaces">Spaces Overview</option>
                 <option value="/agents">Agents</option>
                 <option value="/adapters">Adapters</option>
                 <option value="/metrics">Metrics</option>
-                <option value="/timelines">Timelines</option>
+                <option value="/timelines">Timelines Overview</option>
                 <option value="/veil">VEIL Overview</option>
                 <option value="/health">Health Check</option>
+                <optgroup label="Space-Specific Data">
+                    <option value="spaces_detailed">📊 Browse Space Details</option>
+                    <option value="timeline_events">⏱️ Browse Timeline Events</option>
+                    <option value="veil_facets">🎭 Browse VEIL Facets</option>
+                </optgroup>
             </select>
             <button id="loadBtn" onclick="loadAndVisualize()">Load & Visualize</button>
             <span id="status" class="loading" style="display: none;">Loading...</span>
@@ -300,20 +335,29 @@
             <h3>Available Endpoints</h3>
             <ul class="endpoint-list">
                 <li><a href="#" onclick="selectEndpoint('/status')">System Status</a></li>
-                <li><a href="#" onclick="selectEndpoint('/spaces')">Spaces</a></li>
+                <li><a href="#" onclick="selectEndpoint('/spaces')">Spaces Overview</a></li>
                 <li><a href="#" onclick="selectEndpoint('/agents')">Agents</a></li>
                 <li><a href="#" onclick="selectEndpoint('/adapters')">Adapters</a></li>
                 <li><a href="#" onclick="selectEndpoint('/metrics')">Metrics</a></li>
-                <li><a href="#" onclick="selectEndpoint('/timelines')">Timelines</a></li>
+                <li><a href="#" onclick="selectEndpoint('/timelines')">Timelines Overview</a></li>
                 <li><a href="#" onclick="selectEndpoint('/veil')">VEIL Overview</a></li>
                 <li><a href="#" onclick="selectEndpoint('/health')">Health Check</a></li>
             </ul>
             
+            <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #0f3460;">
+                <h3>Space-Specific Data</h3>
+                <ul class="endpoint-list">
+                    <li><a href="#" onclick="selectEndpoint('spaces_detailed')">📊 Browse Space Details</a></li>
+                    <li><a href="#" onclick="selectEndpoint('timeline_events')">⏱️ Browse Timeline Events</a></li>
+                    <li><a href="#" onclick="selectEndpoint('veil_facets')">🎭 Browse VEIL Facets</a></li>
+                </ul>
+            </div>
+            
             <div style="margin-top: 2rem; border-top: 1px solid #0f3460; padding-top: 1rem;">
                 <h3>Visualization Info</h3>
                 <p style="font-size: 0.8rem; color: #999; line-height: 1.4;">
-                    This interface uses JSONCrack to visualize the Connectome debugging data.
-                    Select an endpoint and click "Load & Visualize" to see the data structure.
+                    This interface uses an interactive tree view by default to visualize Connectome debugging data.
+                    JSONCrack visualization is available via the toggle button. Select an endpoint to start exploring.
                 </p>
             </div>
         </div>
@@ -321,12 +365,14 @@
         <div class="main-content">
             <div class="toolbar" id="toolbar" style="display: none;">
                 <div class="toolbar-info">
+                    <div id="breadcrumb" style="margin-bottom: 0.25rem; font-size: 0.8rem; color: #74b9ff;"></div>
                     <span id="data-info"></span>
                 </div>
                 <div class="toolbar-actions">
+                    <button id="backBtn" onclick="goBack()" style="display: none;">← Back</button>
                     <button onclick="refreshData()">Refresh</button>
                     <button onclick="resetVisualization()">Reset View</button>
-                    <button id="viewToggle" onclick="toggleView()">Tree View</button>
+                    <button id="viewToggle" onclick="toggleView()">JSONCrack View</button>
                 </div>
             </div>
             
@@ -342,7 +388,14 @@
         let currentData = null;
         let currentEndpoint = null;
         let jsoncrackInstance = null;
-        let currentView = 'jsoncrack'; // 'jsoncrack' or 'tree'
+        let currentView = 'tree'; // 'tree' or 'jsoncrack' - tree is now default
+        let navigationStack = []; // For back navigation
+        let paginationState = {
+            hasMore: false,
+            nextCursor: null,
+            currentSpaceId: null,
+            currentBrowserType: null
+        }; // For pagination
         
         function selectEndpoint(endpoint) {
             document.getElementById('endpointSelect').value = endpoint;
@@ -363,6 +416,12 @@
             const loadBtn = document.getElementById('loadBtn');
             const contentEl = document.getElementById('content');
             const toolbar = document.getElementById('toolbar');
+            
+            // Handle special "browsing" endpoints that need space selection
+            if (['spaces_detailed', 'timeline_events', 'veil_facets'].includes(endpoint)) {
+                await showSpaceBrowser(endpoint);
+                return;
+            }
             
             statusEl.style.display = 'inline';
             loadBtn.disabled = true;
@@ -388,20 +447,21 @@
                 
                 // Show toolbar and update info
                 toolbar.style.display = 'flex';
+                updateBreadcrumb(`Inspector → ${endpoint}`);
                 updateDataInfo(data, endpoint);
                 
-                // Reset view mode to JSONCrack when loading new endpoint
-                currentView = 'jsoncrack';
+                // Reset view mode to Tree View as default when loading new endpoint
+                currentView = 'tree';
                 const toggleBtn = document.getElementById('viewToggle');
                 if (toggleBtn) {
-                    toggleBtn.textContent = 'Tree View';
+                    toggleBtn.textContent = 'JSONCrack View';
                 }
                 
-                // Clear content and create JSONCrack container
+                // Clear content and create tree container
                 contentEl.innerHTML = '<div id="jsoncrack-container"></div>';
                 
-                // Initialize JSONCrack visualization
-                await initializeJsonCrack(data);
+                // Initialize Tree visualization as default
+                showTreeView(data);
                 
             } catch (error) {
                 console.error('Error loading data:', error);
@@ -650,21 +710,103 @@
                 jsoncrackInstance.cleanup();
             }
             
+            // Check if this data has pagination metadata
+            const hasPagination = data.has_more !== undefined || data.next_cursor !== undefined;
+            
             container.innerHTML = `
                 <div style="padding: 1rem; background: #0f3460; border-radius: 4px; height: 100%; overflow: auto; display: flex; flex-direction: column;">
                     <div style="margin-bottom: 1rem; color: #00d4aa; display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.5rem; border-bottom: 1px solid #555;">
                         <strong>🌳 Interactive Tree View</strong>
                         <small style="color: #999;">Click to expand/collapse</small>
                     </div>
+                    ${hasPagination ? '<div id="pagination-top"></div>' : ''}
                     <div style="flex: 1; overflow: auto;">
                         <div id="tree-container"></div>
                     </div>
+                    ${hasPagination ? '<div id="pagination-bottom"></div>' : ''}
                 </div>
             `;
+            
+            // Add pagination controls if needed
+            if (hasPagination) {
+                addPaginationControls(data);
+            }
             
             // Build interactive tree
             const treeContainer = document.getElementById('tree-container');
             treeContainer.appendChild(createTreeNode('root', data, 0, true));
+        }
+        
+        function addPaginationControls(data) {
+            const hasMore = data.has_more || false;
+            const nextCursor = data.next_cursor || null;
+            const totalItems = data.total_items || '?';
+            const currentItems = data.events ? data.events.length : (data.facets ? Object.keys(data.facets).length : 0);
+            
+            const paginationHtml = `
+                <div class="pagination-controls">
+                    <button onclick="loadPreviousPage()" id="prevBtn" ${!paginationState.nextCursor ? 'disabled' : ''}>
+                        ← Previous
+                    </button>
+                    <div class="pagination-info">
+                        Showing ${currentItems} items
+                        ${totalItems !== '?' ? ` of ${totalItems}` : ''}
+                    </div>
+                    <button onclick="loadNextPage()" id="nextBtn" ${!hasMore ? 'disabled' : ''}>
+                        Next →
+                    </button>
+                </div>
+            `;
+            
+            document.getElementById('pagination-top').innerHTML = paginationHtml;
+            document.getElementById('pagination-bottom').innerHTML = paginationHtml;
+            
+            // Update pagination state
+            paginationState.hasMore = hasMore;
+            paginationState.nextCursor = nextCursor;
+        }
+        
+        async function loadNextPage() {
+            if (!paginationState.hasMore || !paginationState.nextCursor) return;
+            
+            const statusEl = document.getElementById('status');
+            statusEl.style.display = 'inline';
+            statusEl.textContent = 'Loading next page...';
+            
+            try {
+                let url = currentEndpoint;
+                
+                // Add pagination parameters
+                const separator = url.includes('?') ? '&' : '?';
+                if (paginationState.currentBrowserType === 'timeline_events') {
+                    url += `${separator}offset=${paginationState.nextCursor}&limit=20`;
+                } else if (paginationState.currentBrowserType === 'veil_facets') {
+                    url += `${separator}after_facet_id=${paginationState.nextCursor}&limit=20`;
+                }
+                
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                currentData = data;
+                
+                // Show the updated data
+                showTreeView(data);
+                
+            } catch (error) {
+                console.error('Error loading next page:', error);
+                alert(`Error loading next page: ${error.message}`);
+            } finally {
+                statusEl.style.display = 'none';
+            }
+        }
+        
+        async function loadPreviousPage() {
+            // For simplicity, just go back in navigation stack
+            // A full implementation would require tracking previous cursors
+            goBack();
         }
         
         function createTreeNode(key, value, depth, isExpanded = false, path = []) {
@@ -1082,6 +1224,225 @@
                 loadAndVisualize();
             }
         });
+        
+        // Navigation helpers
+        function updateBreadcrumb(path) {
+            const breadcrumbEl = document.getElementById('breadcrumb');
+            breadcrumbEl.textContent = path;
+        }
+        
+        function pushNavigation(state) {
+            navigationStack.push({
+                data: currentData,
+                endpoint: currentEndpoint,
+                view: currentView,
+                breadcrumb: document.getElementById('breadcrumb').textContent
+            });
+            document.getElementById('backBtn').style.display = 'inline-block';
+        }
+        
+        function goBack() {
+            if (navigationStack.length === 0) return;
+            
+            const previousState = navigationStack.pop();
+            currentData = previousState.data;
+            currentEndpoint = previousState.endpoint;
+            currentView = previousState.view;
+            
+            // Update UI to reflect previous state
+            updateBreadcrumb(previousState.breadcrumb);
+            document.getElementById('data-info').textContent = `${previousState.endpoint} • ${formatBytes(JSON.stringify(currentData).length)}`;
+            
+            // Update view toggle button
+            const toggleBtn = document.getElementById('viewToggle');
+            toggleBtn.textContent = currentView === 'tree' ? 'JSONCrack View' : 'Tree View';
+            
+            // Show the previous data
+            if (currentView === 'tree') {
+                showTreeView(currentData);
+            } else {
+                initializeJsonCrack(currentData);
+            }
+            
+            // Hide back button if no more history
+            if (navigationStack.length === 0) {
+                document.getElementById('backBtn').style.display = 'none';
+            }
+        }
+        
+        // Space browser functionality for interactive data exploration
+        async function showSpaceBrowser(browserType) {
+            const contentEl = document.getElementById('content');
+            const toolbar = document.getElementById('toolbar');
+            
+            try {
+                // First load the spaces overview to get available spaces
+                const spacesResponse = await fetch('/spaces');
+                if (!spacesResponse.ok) {
+                    throw new Error('Failed to load spaces data');
+                }
+                
+                const spacesData = await spacesResponse.json();
+                const spaces = spacesData.spaces || {};
+                
+                // Show toolbar for consistent UI
+                toolbar.style.display = 'flex';
+                updateBreadcrumb('Inspector → Space Browser');
+                document.getElementById('data-info').textContent = `${browserType} Browser • Select a space to explore`;
+                
+                // Create the browser interface
+                let browserTitle = '';
+                let browserDescription = '';
+                
+                switch(browserType) {
+                    case 'spaces_detailed':
+                        browserTitle = '📊 Space Details Browser';
+                        browserDescription = 'Explore detailed information about spaces, elements, and components';
+                        break;
+                    case 'timeline_events':
+                        browserTitle = '⏱️ Timeline Events Browser';
+                        browserDescription = 'Browse timeline events with pagination and filtering';
+                        break;
+                    case 'veil_facets':
+                        browserTitle = '🎭 VEIL Facets Browser';
+                        browserDescription = 'Explore VEIL facets with detailed metadata';
+                        break;
+                }
+                
+                contentEl.innerHTML = `
+                    <div style="padding: 2rem; background: #0f3460; height: 100%; overflow-y: auto;">
+                        <div style="text-align: center; margin-bottom: 2rem;">
+                            <h2 style="color: #00d4aa; margin-bottom: 0.5rem;">${browserTitle}</h2>
+                            <p style="color: #999; font-size: 0.9rem; margin-bottom: 2rem;">${browserDescription}</p>
+                        </div>
+                        
+                        <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1rem;">
+                            ${Object.keys(spaces).map(spaceId => {
+                                const space = spaces[spaceId];
+                                const elementCount = space.elements ? Object.keys(space.elements).length : 0;
+                                const spaceType = space.space_type || 'Unknown';
+                                
+                                return `
+                                    <div class="space-card" onclick="loadSpaceData('${spaceId}', '${browserType}')" 
+                                         style="background: #16213e; border: 1px solid #555; border-radius: 8px; padding: 1.5rem; cursor: pointer; transition: all 0.2s;">
+                                        <h3 style="color: #74b9ff; margin: 0 0 0.5rem 0; font-size: 1.1rem;">${spaceId}</h3>
+                                        <div style="color: #999; font-size: 0.85rem; margin-bottom: 1rem;">
+                                            <div>Type: <span style="color: #eee;">${spaceType}</span></div>
+                                            <div>Elements: <span style="color: #eee;">${elementCount}</span></div>
+                                        </div>
+                                        <div style="color: #00d4aa; font-size: 0.8rem; font-weight: 600;">Click to explore →</div>
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                        
+                        ${Object.keys(spaces).length === 0 ? 
+                            '<div style="text-align: center; color: #999; margin-top: 2rem; font-style: italic;">No spaces available</div>' : 
+                            ''}
+                    </div>
+                `;
+                
+                // Add hover effects with CSS
+                const style = document.createElement('style');
+                style.textContent = `
+                    .space-card:hover {
+                        border-color: #00d4aa !important;
+                        background: #1a2f4a !important;
+                        transform: translateY(-2px) !important;
+                        box-shadow: 0 4px 12px rgba(0, 212, 170, 0.15) !important;
+                    }
+                `;
+                document.head.appendChild(style);
+                
+            } catch (error) {
+                console.error('Error loading space browser:', error);
+                contentEl.innerHTML = `
+                    <div class="error">
+                        <strong>Error loading space browser:</strong><br>
+                        ${escapeHtml(error.message)}
+                    </div>
+                `;
+                toolbar.style.display = 'none';
+            }
+        }
+        
+        async function loadSpaceData(spaceId, browserType) {
+            const contentEl = document.getElementById('content');
+            const statusEl = document.getElementById('status');
+            
+            // Push current state to navigation stack
+            pushNavigation();
+            
+            statusEl.style.display = 'inline';
+            statusEl.textContent = 'Loading space data...';
+            
+            try {
+                let endpoint = '';
+                let title = '';
+                
+                switch(browserType) {
+                    case 'spaces_detailed':
+                        // Load detailed space information (this would be from the spaces endpoint but filtered)
+                        endpoint = `/spaces`;
+                        title = `📊 Space Details: ${spaceId}`;
+                        break;
+                    case 'timeline_events':
+                        // Load timeline events for this space with pagination
+                        endpoint = `/timelines/${spaceId}`;
+                        title = `⏱️ Timeline Events: ${spaceId}`;
+                        break;
+                    case 'veil_facets':
+                        // Load VEIL facets for this space
+                        endpoint = `/veil/${spaceId}/facets`;
+                        title = `🎭 VEIL Facets: ${spaceId}`;
+                        break;
+                }
+                
+                const response = await fetch(endpoint);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                
+                // If we're browsing spaces_detailed, filter to just the selected space
+                if (browserType === 'spaces_detailed' && data.spaces) {
+                    const filteredData = {
+                        ...data,
+                        spaces: {
+                            [spaceId]: data.spaces[spaceId]
+                        }
+                    };
+                    currentData = filteredData;
+                } else {
+                    currentData = data;
+                }
+                
+                currentEndpoint = endpoint;
+                
+                // Update pagination state
+                paginationState.currentSpaceId = spaceId;
+                paginationState.currentBrowserType = browserType;
+                
+                // Update breadcrumb for the specific space view
+                updateBreadcrumb(`Inspector → Space Browser → ${spaceId}`);
+                document.getElementById('data-info').textContent = `${title} • ${formatBytes(JSON.stringify(currentData).length)}`;
+                
+                // Show the tree view with the space data
+                showTreeView(currentData);
+                
+            } catch (error) {
+                console.error('Error loading space data:', error);
+                contentEl.innerHTML = `
+                    <div class="error">
+                        <strong>Error loading ${browserType} for space "${spaceId}":</strong><br>
+                        ${escapeHtml(error.message)}
+                    </div>
+                `;
+            } finally {
+                statusEl.style.display = 'none';
+            }
+        }
         
         // Auto-select first endpoint on load for demo purposes
         window.addEventListener('load', function() {
