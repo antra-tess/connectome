@@ -1312,6 +1312,12 @@
                 return { type: 'all_timeline_events', spaceId: 'overview' };
             }
             
+            // VEIL overview drill-down to space facets (from /veil endpoint)
+            if (currentEndpoint === '/veil' && pathStr.match(/^root\.spaces\.[^.]+$/) && typeof value === 'object' && Object.keys(value).length > 0) {
+                const spaceId = key; // The key is the space ID in this case
+                return { type: 'veil_facets', spaceId: spaceId };
+            }
+            
             // VEIL cache drill-down to facets
             if (pathStr.includes('spaces.') && (pathStr.endsWith('veil_cache') || pathStr.endsWith('veil')) && typeof value === 'object' && Object.keys(value).length > 0) {
                 const spaceId = getSpaceIdFromPath(path);
@@ -1319,7 +1325,7 @@
             }
             
             // Individual VEIL facet details (when looking at facets overview)
-            if (pathStr.includes('facets.') && typeof value === 'object' && value.facet_id) {
+            if (pathStr.includes('facets.') && typeof value === 'object' && value !== null && value.facet_id) {
                 const spaceId = getSpaceIdFromPath(path);
                 return { type: 'veil_facet_details', spaceId: spaceId, facetId: value.facet_id };
             }
