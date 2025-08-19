@@ -1294,51 +1294,17 @@
             const pathStr = path.join('.');
             const key = path[path.length - 1];
             
-            // Timeline drill-downs from spaces overview
-            if (pathStr.includes('spaces.') && pathStr.endsWith('timelines') && typeof value === 'object' && Object.keys(value).length > 0) {
-                const spaceId = getSpaceIdFromPath(path);
-                return { type: 'space_timelines', spaceId: spaceId };
-            }
-            
-            // Individual timeline from space timelines
-            if (pathStr.includes('spaces.') && pathStr.includes('timelines.') && typeof value === 'object') {
-                const spaceId = getSpaceIdFromPath(path);
-                const timelineId = key;
-                return { type: 'timeline_events', spaceId: spaceId, timelineId: timelineId };
-            }
-            
-            // Timeline events from timeline overview endpoint
-            if (pathStr === 'timelines' && typeof value === 'object' && Object.keys(value).length > 0) {
-                return { type: 'all_timeline_events', spaceId: 'overview' };
-            }
-            
-            // VEIL overview drill-down to space facets (from /veil endpoint)
+            // 1. VEIL overview drill-down to space facets (from /veil endpoint)
             if (currentEndpoint === '/veil' && pathStr.match(/^root\.spaces\.[^.]+$/) && typeof value === 'object' && Object.keys(value).length > 0) {
                 const spaceId = key; // The key is the space ID in this case
                 return { type: 'veil_facets', spaceId: spaceId };
             }
             
-            // VEIL cache drill-down to facets
-            if (pathStr.includes('spaces.') && (pathStr.endsWith('veil_cache') || pathStr.endsWith('veil')) && typeof value === 'object' && Object.keys(value).length > 0) {
+            // 2. Individual timeline drill-down to timeline events (from timelines overview)
+            if (pathStr.match(/^root\.spaces\.[^.]+\.timelines\.[^.]+$/) && typeof value === 'object' && value.timeline_id) {
+                const timelineId = value.timeline_id;
                 const spaceId = getSpaceIdFromPath(path);
-                return { type: 'veil_facets', spaceId: spaceId };
-            }
-            
-            // Individual VEIL facet details (when looking at facets overview)
-            if (pathStr.includes('facets.') && typeof value === 'object' && value !== null && value.facet_id) {
-                const spaceId = getSpaceIdFromPath(path);
-                return { type: 'veil_facet_details', spaceId: spaceId, facetId: value.facet_id };
-            }
-            
-            // Elements collection drill-down
-            if (pathStr.includes('spaces.') && pathStr.endsWith('elements') && typeof value === 'object' && Object.keys(value).length > 0) {
-                const spaceId = getSpaceIdFromPath(path);
-                return { type: 'space_elements', spaceId: spaceId };
-            }
-            
-            // Agents collection drill-down
-            if (pathStr === 'agents' && typeof value === 'object' && Object.keys(value).length > 0) {
-                return { type: 'agents_detailed', spaceId: null };
+                return { type: 'timeline_events', spaceId: spaceId, timelineId: timelineId };
             }
             
             return null;
