@@ -8,7 +8,10 @@ The Inspector module provides multiple interfaces for monitoring and inspecting 
 The most powerful inspection tool - a real-time terminal interface with tree navigation, editing capabilities, and cursor-based pagination.
 
 ```bash
-# Launch IPC-TUI interface
+# Launch IPC-TUI interface (recommended)
+./tui_inspector
+
+# Alternative launch method
 python -m host.modules.inspector.ipc_tui
 ```
 
