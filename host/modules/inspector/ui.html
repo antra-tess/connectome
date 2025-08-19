@@ -740,11 +740,26 @@
             // Check if this data has pagination metadata
             const hasPagination = data.has_more !== undefined || data.next_cursor !== undefined;
             
+            // Determine view type and header text
+            let viewIcon = '🌳';
+            let viewTitle = 'Interactive Tree View';
+            let viewHint = 'Click to expand/collapse';
+            
+            if (data.facets && typeof data.facets === 'object') {
+                viewIcon = '🎭';
+                viewTitle = 'VEIL Facets Stream';
+                viewHint = 'Click entries to expand details';
+            } else if (data.events && typeof data.events === 'object') {
+                viewIcon = '⏱️';
+                viewTitle = 'Timeline Events Stream';
+                viewHint = 'Click events to expand details';
+            }
+            
             container.innerHTML = `
                 <div style="padding: 1rem; background: #0f3460; border-radius: 4px; height: 100%; overflow: auto; display: flex; flex-direction: column;">
                     <div style="margin-bottom: 1rem; color: #00d4aa; display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.5rem; border-bottom: 1px solid #555;">
-                        <strong>🌳 Interactive Tree View</strong>
-                        <small style="color: #999;">Click to expand/collapse</small>
+                        <strong>${viewIcon} ${viewTitle}</strong>
+                        <small style="color: #999;">${viewHint}</small>
                     </div>
                     ${hasPagination ? '<div id="pagination-top"></div>' : ''}
                     <div style="flex: 1; overflow: auto;">
@@ -759,9 +774,20 @@
                 addPaginationControls(data);
             }
             
-            // Build interactive tree
+            // Build interactive tree or stream view
             const treeContainer = document.getElementById('tree-container');
-            treeContainer.appendChild(createTreeNode('root', data, 0, true));
+            
+            // Check if this is facets or events data and render as stream
+            if (data.facets && typeof data.facets === 'object') {
+                // VEIL facets stream view
+                renderFacetsStream(treeContainer, data.facets);
+            } else if (data.events && typeof data.events === 'object') {
+                // Timeline events stream view  
+                renderEventsStream(treeContainer, data.events);
+            } else {
+                // Regular tree view
+                treeContainer.appendChild(createTreeNode('root', data, 0, true));
+            }
         }
         
         function addPaginationControls(data) {
@@ -1016,6 +1042,184 @@
                 null: '#ff6b6b'
             };
             return colors[type] || '#eee';
+        }
+        
+        function renderFacetsStream(container, facets) {
+            // Convert facets object to array and sort by timestamp (newest first)
+            const facetArray = Object.values(facets).sort((a, b) => b.veil_timestamp - a.veil_timestamp);
+            
+            facetArray.forEach(facet => {
+                const facetDiv = document.createElement('div');
+                facetDiv.style.cssText = `
+                    margin-bottom: 0.5rem;
+                    padding: 0.75rem;
+                    background: #16213e;
+                    border-left: 4px solid ${getFacetTypeColor(facet.facet_type)};
+                    border-radius: 4px;
+                    cursor: pointer;
+                    transition: background-color 0.2s;
+                `;
+                
+                // Format timestamp
+                const timeStr = formatTimestamp(facet.veil_timestamp);
+                
+                // Create summary label
+                const summary = facet.content_summary || 'No summary available';
+                const truncatedSummary = summary.length > 100 ? summary.substring(0, 100) + '...' : summary;
+                
+                facetDiv.innerHTML = `
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">
+                        <div style="color: #74b9ff; font-weight: 600; font-size: 0.9rem;">
+                            ${facet.facet_type.toUpperCase()} • ${facet.facet_id.substring(0, 8)}...
+                        </div>
+                        <div style="color: #999; font-size: 0.8rem;">${timeStr}</div>
+                    </div>
+                    <div style="color: #eee; font-size: 0.85rem; line-height: 1.4;">
+                        ${truncatedSummary}
+                    </div>
+                `;
+                
+                // Add click handler to expand
+                facetDiv.addEventListener('click', () => {
+                    const expanded = facetDiv.querySelector('.expanded-content');
+                    if (expanded) {
+                        expanded.remove();
+                        facetDiv.style.background = '#16213e';
+                    } else {
+                        const expandedDiv = document.createElement('div');
+                        expandedDiv.className = 'expanded-content';
+                        expandedDiv.style.cssText = `
+                            margin-top: 0.5rem;
+                            padding-top: 0.5rem;
+                            border-top: 1px solid #555;
+                        `;
+                        expandedDiv.appendChild(createTreeNode(facet.facet_id, facet, 0, true));
+                        facetDiv.appendChild(expandedDiv);
+                        facetDiv.style.background = '#1a2f4a';
+                    }
+                });
+                
+                // Hover effect
+                facetDiv.addEventListener('mouseenter', () => {
+                    if (!facetDiv.querySelector('.expanded-content')) {
+                        facetDiv.style.background = '#1a2f4a';
+                    }
+                });
+                facetDiv.addEventListener('mouseleave', () => {
+                    if (!facetDiv.querySelector('.expanded-content')) {
+                        facetDiv.style.background = '#16213e';
+                    }
+                });
+                
+                container.appendChild(facetDiv);
+            });
+        }
+        
+        function renderEventsStream(container, events) {
+            // Convert events object to array and sort by timestamp (newest first)
+            const eventArray = Object.values(events).sort((a, b) => b.timestamp - a.timestamp);
+            
+            eventArray.forEach(event => {
+                const eventDiv = document.createElement('div');
+                eventDiv.style.cssText = `
+                    margin-bottom: 0.5rem;
+                    padding: 0.75rem;
+                    background: #16213e;
+                    border-left: 4px solid #a29bfe;
+                    border-radius: 4px;
+                    cursor: pointer;
+                    transition: background-color 0.2s;
+                `;
+                
+                // Format timestamp 
+                const timeStr = formatTimestamp(event.timestamp);
+                
+                // Get event type from payload
+                const eventType = event.payload?.event_type || 'unknown';
+                
+                // Create summary
+                let summary = `Event ${event.id.substring(0, 8)}...`;
+                if (event.payload?.payload) {
+                    if (typeof event.payload.payload === 'string') {
+                        summary = event.payload.payload.length > 80 ? 
+                            event.payload.payload.substring(0, 80) + '...' : event.payload.payload;
+                    } else if (event.payload.payload.message) {
+                        summary = event.payload.payload.message.length > 80 ? 
+                            event.payload.payload.message.substring(0, 80) + '...' : event.payload.payload.message;
+                    }
+                }
+                
+                eventDiv.innerHTML = `
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">
+                        <div style="color: #74b9ff; font-weight: 600; font-size: 0.9rem;">
+                            ${eventType.toUpperCase()} • ${event.id.substring(0, 8)}...
+                        </div>
+                        <div style="color: #999; font-size: 0.8rem;">${timeStr}</div>
+                    </div>
+                    <div style="color: #eee; font-size: 0.85rem; line-height: 1.4;">
+                        ${summary}
+                    </div>
+                `;
+                
+                // Add click handler to expand
+                eventDiv.addEventListener('click', () => {
+                    const expanded = eventDiv.querySelector('.expanded-content');
+                    if (expanded) {
+                        expanded.remove();
+                        eventDiv.style.background = '#16213e';
+                    } else {
+                        const expandedDiv = document.createElement('div');
+                        expandedDiv.className = 'expanded-content';
+                        expandedDiv.style.cssText = `
+                            margin-top: 0.5rem;
+                            padding-top: 0.5rem;
+                            border-top: 1px solid #555;
+                        `;
+                        expandedDiv.appendChild(createTreeNode(event.id, event, 0, true));
+                        eventDiv.appendChild(expandedDiv);
+                        eventDiv.style.background = '#1a2f4a';
+                    }
+                });
+                
+                // Hover effect
+                eventDiv.addEventListener('mouseenter', () => {
+                    if (!eventDiv.querySelector('.expanded-content')) {
+                        eventDiv.style.background = '#1a2f4a';
+                    }
+                });
+                eventDiv.addEventListener('mouseleave', () => {
+                    if (!eventDiv.querySelector('.expanded-content')) {
+                        eventDiv.style.background = '#16213e';
+                    }
+                });
+                
+                container.appendChild(eventDiv);
+            });
+        }
+        
+        function getFacetTypeColor(facetType) {
+            const colors = {
+                'event': '#a29bfe',
+                'status': '#00d4aa', 
+                'ambient': '#fd79a8'
+            };
+            return colors[facetType] || '#74b9ff';
+        }
+        
+        function formatTimestamp(timestamp) {
+            // For very small timestamps (like veil_timestamp), treat as relative
+            if (timestamp < 1000000) {
+                return `+${timestamp.toFixed(3)}s`;
+            }
+            
+            // For unix timestamps, format as readable time
+            const date = new Date(timestamp * 1000);
+            return date.toLocaleTimeString('en-US', { 
+                hour12: false, 
+                hour: '2-digit', 
+                minute: '2-digit', 
+                second: '2-digit' 
+            });
         }
         
         function formatBytes(bytes) {
