@@ -63,7 +63,10 @@ class InspectorEndpointHandlers:
                 "/events/{event_id}": "Detailed information about specific event by globally unique ID",
                 "/health": "Simple health check",
                 "PUT/PATCH /events/{event_id}": "Update timeline event by globally unique event ID",
-                "PUT/PATCH /veil/{space_id}/facets/{facet_id}": "Update VEIL facet"
+                "PUT/PATCH /veil/{space_id}/facets/{facet_id}": "Update VEIL facet",
+                "/repl/sessions": "List active REPL sessions",
+                "POST /repl/sessions": "Create new REPL session",
+                "POST /repl/execute": "Execute code in REPL session"
             }
         }
         return api_info
@@ -367,6 +370,104 @@ class InspectorEndpointHandlers:
             logger.error(f"Error collecting event details: {e}", exc_info=True)
             return {
                 "error": "Failed to collect event details", 
+                "details": str(e),
+                "timestamp": time.time()
+            }
+
+    async def handle_repl_sessions(self) -> Dict[str, Any]:
+        """Handle REPL sessions list endpoint."""
+        self.request_count += 1
+        
+        try:
+            sessions_data = self.data_collector.collect_repl_sessions()
+            return sessions_data
+        except Exception as e:
+            logger.error(f"Error collecting REPL sessions: {e}", exc_info=True)
+            return {
+                "error": "Failed to collect REPL sessions",
+                "details": str(e),
+                "timestamp": time.time()
+            }
+
+    async def handle_repl_create(self, context_type: str, context_id: str, target_path: str = None) -> Dict[str, Any]:
+        """Handle REPL session creation endpoint."""
+        self.request_count += 1
+        
+        try:
+            if not context_type or not context_id:
+                return {
+                    "error": "context_type and context_id are required",
+                    "timestamp": time.time()
+                }
+            
+            # Resolve target object if path provided
+            target_object = None
+            if target_path:
+                target_object = self.data_collector.get_object_by_path(target_path)
+                if target_object is None:
+                    return {
+                        "error": f"Failed to resolve target path: {target_path}",
+                        "timestamp": time.time()
+                    }
+            
+            # Create REPL context
+            session = self.data_collector.repl_manager.create_context(
+                context_type, context_id, target_object
+            )
+            
+            # Return session info (without full namespace for brevity)
+            return {
+                "success": True,
+                "session": {
+                    "id": session["id"],
+                    "type": session["type"],
+                    "context_id": session["context_id"],
+                    "created_at": session["created_at"],
+                    "last_accessed": session["last_accessed"],
+                    "history_length": len(session["history"]),
+                    "namespace_keys": list(session["namespace"].keys())
+                },
+                "timestamp": time.time()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error creating REPL session: {e}", exc_info=True)
+            return {
+                "error": "Failed to create REPL session",
+                "details": str(e),
+                "timestamp": time.time()
+            }
+
+    async def handle_repl_execute(self, session_id: str, code: str, timeout: float = 5.0) -> Dict[str, Any]:
+        """Handle REPL code execution endpoint."""
+        self.request_count += 1
+        
+        try:
+            if not session_id or not code:
+                return {
+                    "error": "session_id and code are required",
+                    "timestamp": time.time()
+                }
+            
+            # Execute code in the specified session
+            result = self.data_collector.repl_manager.execute_in_context(
+                session_id, code, timeout
+            )
+            
+            return {
+                "success": result["success"],
+                "output": result["output"],
+                "error": result["error"],
+                "execution_time_ms": result["execution_time_ms"],
+                "namespace_changes": result["namespace_changes"],
+                "session_id": session_id,
+                "timestamp": time.time()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error executing REPL code: {e}", exc_info=True)
+            return {
+                "error": "Failed to execute REPL code",
                 "details": str(e),
                 "timestamp": time.time()
             }
