@@ -20,6 +20,7 @@ from elements.elements.base import BaseElement
 from elements.elements.space import Space
 from elements.elements.inner_space import InnerSpace
 from elements.elements.components.base_component import Component
+from .repl_context import REPLContextManager
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ class InspectorDataCollector:
         """
         self.host_instance = host_instance
         self.space_registry = SpaceRegistry.get_instance()
+        self.repl_manager = REPLContextManager(host_instance)
         
     async def collect_system_status(self) -> Dict[str, Any]:
         """
@@ -1863,6 +1865,80 @@ class InspectorDataCollector:
             logger.error(f"Error collecting event details for {event_id}: {e}", exc_info=True)
             return {
                 "error": "Failed to collect event details",
+                "details": str(e),
+                "timestamp": time.time()
+            }
+
+    def get_object_by_path(self, path: str) -> Optional[Any]:
+        """
+        Resolve an object by its path identifier.
+        
+        Args:
+            path: Path in format "type:id" (e.g., "space:demo_space", "element:elem_id")
+            
+        Returns:
+            The resolved object or None if not found
+        """
+        try:
+            if ':' not in path:
+                logger.warning(f"Invalid path format: {path}. Expected 'type:id'")
+                return None
+                
+            path_type, path_id = path.split(':', 1)
+            
+            if path_type == 'space':
+                # Resolve space by ID
+                return self.space_registry.get_space(path_id)
+            
+            elif path_type == 'element':
+                # Search for element across all spaces
+                spaces_dict = self.space_registry.get_all_spaces()
+                for space in spaces_dict.values():
+                    if hasattr(space, 'elements') and path_id in space.elements:
+                        return space.elements[path_id]
+                return None
+                
+            elif path_type == 'component':
+                # Search for component across all elements in all spaces
+                spaces_dict = self.space_registry.get_all_spaces()
+                for space in spaces_dict.values():
+                    if hasattr(space, 'elements'):
+                        for element in space.elements.values():
+                            if hasattr(element, 'components'):
+                                for component in element.components:
+                                    if hasattr(component, 'component_id') and component.component_id == path_id:
+                                        return component
+                return None
+                
+            else:
+                logger.warning(f"Unknown path type: {path_type}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error resolving path '{path}': {e}", exc_info=True)
+            return None
+    
+    def collect_repl_sessions(self) -> Dict[str, Any]:
+        """
+        Collect information about active REPL sessions.
+        
+        Returns:
+            Dictionary containing REPL sessions info
+        """
+        try:
+            sessions_info = self.repl_manager.list_sessions()
+            
+            # Return simplified session info (without full namespaces)
+            return {
+                "sessions": sessions_info,
+                "total_sessions": len(sessions_info),
+                "timestamp": time.time()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error collecting REPL sessions: {e}", exc_info=True)
+            return {
+                "error": "Failed to collect REPL sessions",
                 "details": str(e),
                 "timestamp": time.time()
             }
