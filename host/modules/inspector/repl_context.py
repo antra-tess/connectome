@@ -13,6 +13,8 @@ import uuid
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 
+from .repl_executor import SafeREPLExecutor
+
 
 class REPLContextManager:
     """
@@ -37,6 +39,9 @@ class REPLContextManager:
         
         # Keep weak reference to host to avoid circular references
         self._host_ref = weakref.ref(host_instance) if host_instance else None
+        
+        # Initialize REPL executor for code execution
+        self.executor = SafeREPLExecutor()
     
     def create_context(self, context_type: str, context_id: str, target_object: Any = None) -> Dict[str, Any]:
         """
@@ -197,6 +202,60 @@ class REPLContextManager:
             del self.sessions[session_id]
             return True
         return False
+    
+    def execute_in_context(self, session_id: str, code: str, timeout: float = 5.0) -> Dict[str, Any]:
+        """
+        Execute Python code in a specific REPL session context.
+        
+        Args:
+            session_id: Session identifier
+            code: Python code to execute
+            timeout: Execution timeout in seconds
+            
+        Returns:
+            Execution result with additional namespace_changes field
+        """
+        # Check if session exists
+        session = self.sessions.get(session_id)
+        if not session:
+            return {
+                'output': '',
+                'error': f'Session "{session_id}" not found',
+                'success': False,
+                'execution_time_ms': 0,
+                'namespace_changes': []
+            }
+        
+        # Get namespace before execution
+        namespace = session['namespace']
+        keys_before = set(namespace.keys())
+        
+        # Execute code using the REPL executor
+        result = self.executor.execute(code, namespace, timeout)
+        
+        # Detect namespace changes
+        keys_after = set(namespace.keys())
+        new_variables = keys_after - keys_before
+        
+        # Add namespace changes to result
+        result['namespace_changes'] = sorted(list(new_variables))
+        
+        # Track execution in session history
+        history_entry = {
+            'timestamp': datetime.now().isoformat(),
+            'code': code,
+            'output': result['output'],
+            'error': result['error'],
+            'success': result['success'],
+            'execution_time_ms': result['execution_time_ms'],
+            'namespace_changes': result['namespace_changes']
+        }
+        session['history'].append(history_entry)
+        
+        # Update last accessed time
+        session['last_accessed'] = datetime.now().isoformat()
+        
+        return result
     
     def cleanup_dead_sessions(self) -> int:
         """
