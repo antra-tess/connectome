@@ -1,0 +1,218 @@
+"""
+REPL Context Manager for Connectome Inspector
+
+Manages REPL sessions with different scopes (global, space-level, component-level, etc).
+Tracks session state, history, and provides appropriate namespaces for each context.
+"""
+
+import json
+import time
+import pprint
+import weakref
+import uuid
+from datetime import datetime
+from typing import Dict, Any, Optional, List
+
+
+class REPLContextManager:
+    """
+    Manages REPL contexts and sessions for the Connectome Inspector.
+    
+    Provides scoped REPL environments for debugging different parts of the system:
+    - Global: Full system access with host instance
+    - Space: Scoped to a specific space and its elements
+    - Component: Scoped to a specific component instance
+    - Element: Scoped to a specific element and its components
+    """
+    
+    def __init__(self, host_instance):
+        """
+        Initialize the REPL context manager.
+        
+        Args:
+            host_instance: Reference to the main Host instance
+        """
+        self.host_instance = host_instance
+        self.sessions: Dict[str, Dict[str, Any]] = {}
+        
+        # Keep weak reference to host to avoid circular references
+        self._host_ref = weakref.ref(host_instance) if host_instance else None
+    
+    def create_context(self, context_type: str, context_id: str, target_object: Any = None) -> Dict[str, Any]:
+        """
+        Create a new REPL context/session.
+        
+        Args:
+            context_type: Type of context ('global', 'space', 'component', 'element')
+            context_id: Unique identifier for this context instance
+            target_object: Optional target object for scoped contexts
+            
+        Returns:
+            Session dictionary with id, type, namespace, history, and metadata
+        """
+        session_id = f"{context_type}:{context_id}"
+        
+        # Create base session structure
+        session = {
+            'id': session_id,
+            'type': context_type,
+            'context_id': context_id,
+            'namespace': {},
+            'history': [],
+            'created_at': datetime.now().isoformat(),
+            'last_accessed': datetime.now().isoformat(),
+            'target_ref': None
+        }
+        
+        # Store weak reference to target object if provided
+        if target_object is not None:
+            session['target_ref'] = weakref.ref(target_object)
+        
+        # Build namespace based on context type
+        session['namespace'] = self._build_namespace(context_type, context_id, target_object)
+        
+        # Store session
+        self.sessions[session_id] = session
+        
+        return session
+    
+    def _build_namespace(self, context_type: str, context_id: str, target_object: Any = None) -> Dict[str, Any]:
+        """
+        Build the appropriate namespace for a context type.
+        
+        Args:
+            context_type: Type of context
+            context_id: Context identifier
+            target_object: Target object for scoped contexts
+            
+        Returns:
+            Namespace dictionary with appropriate objects and utilities
+        """
+        # Base namespace with useful utilities
+        namespace = {
+            '__builtins__': __builtins__,
+            'json': json,
+            'time': time,
+            'pprint': pprint,
+            'datetime': datetime,
+            'weakref': weakref,
+        }
+        
+        if context_type == 'global':
+            # Global context: full system access
+            host = self._host_ref() if self._host_ref else None
+            if host:
+                namespace.update({
+                    'host': host,
+                    'space_registry': getattr(host, 'space_registry', None),
+                    'event_loop': getattr(host, 'event_loop', None),
+                    'activity_client': getattr(host, 'activity_client', None),
+                })
+                
+                # Add space registry if available
+                try:
+                    from elements.space_registry import SpaceRegistry
+                    namespace['SpaceRegistry'] = SpaceRegistry
+                    namespace['spaces'] = SpaceRegistry.get_instance()
+                except ImportError:
+                    pass
+        
+        elif context_type == 'space':
+            # Space context: scoped to a specific space
+            # TODO: Implement space-specific namespace
+            namespace['space_id'] = context_id
+            if target_object:
+                namespace['space'] = target_object
+        
+        elif context_type == 'component':
+            # Component context: scoped to a specific component
+            # TODO: Implement component-specific namespace
+            namespace['component_id'] = context_id
+            if target_object:
+                namespace['component'] = target_object
+        
+        elif context_type == 'element':
+            # Element context: scoped to a specific element
+            # TODO: Implement element-specific namespace
+            namespace['element_id'] = context_id
+            if target_object:
+                namespace['element'] = target_object
+        
+        return namespace
+    
+    def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get an existing REPL session.
+        
+        Args:
+            session_id: Session identifier
+            
+        Returns:
+            Session dictionary or None if not found
+        """
+        session = self.sessions.get(session_id)
+        if session:
+            # Update last accessed time
+            session['last_accessed'] = datetime.now().isoformat()
+        return session
+    
+    def list_sessions(self) -> List[Dict[str, Any]]:
+        """
+        List all active REPL sessions.
+        
+        Returns:
+            List of session metadata (without full namespaces for brevity)
+        """
+        sessions_info = []
+        for session_id, session in self.sessions.items():
+            # Check if target object is still alive (for weak references)
+            target_alive = True
+            if session.get('target_ref'):
+                target_alive = session['target_ref']() is not None
+            
+            session_info = {
+                'id': session['id'],
+                'type': session['type'],
+                'context_id': session['context_id'],
+                'created_at': session['created_at'],
+                'last_accessed': session['last_accessed'],
+                'history_length': len(session['history']),
+                'target_alive': target_alive
+            }
+            sessions_info.append(session_info)
+        
+        return sessions_info
+    
+    def destroy_session(self, session_id: str) -> bool:
+        """
+        Destroy a REPL session and clean up resources.
+        
+        Args:
+            session_id: Session identifier
+            
+        Returns:
+            True if session was destroyed, False if not found
+        """
+        if session_id in self.sessions:
+            del self.sessions[session_id]
+            return True
+        return False
+    
+    def cleanup_dead_sessions(self) -> int:
+        """
+        Clean up sessions where target objects have been garbage collected.
+        
+        Returns:
+            Number of sessions cleaned up
+        """
+        dead_sessions = []
+        
+        for session_id, session in self.sessions.items():
+            if session.get('target_ref'):
+                if session['target_ref']() is None:
+                    dead_sessions.append(session_id)
+        
+        for session_id in dead_sessions:
+            del self.sessions[session_id]
+        
+        return len(dead_sessions)
