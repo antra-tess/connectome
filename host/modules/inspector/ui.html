@@ -1,0 +1,2129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Connectome Inspector UI</title>
+    
+    <!-- No external scripts needed for iframe approach -->
+    
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .header {
+            background: #16213e;
+            padding: 1rem;
+            border-bottom: 1px solid #0f3460;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            flex-shrink: 0;
+        }
+        
+        .header h1 {
+            color: #00d4aa;
+            font-size: 1.5rem;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+        
+        select, button {
+            background: #0f3460;
+            color: #eee;
+            border: 1px solid #00d4aa;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            font-size: 0.9rem;
+        }
+        
+        button {
+            background: #00d4aa;
+            color: #1a1a2e;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        
+        button:hover {
+            background: #00b894;
+        }
+        
+        button:disabled {
+            background: #555;
+            color: #999;
+            cursor: not-allowed;
+        }
+        
+        .loading {
+            color: #00d4aa;
+            font-style: italic;
+        }
+        
+        .content {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+            height: 100%;
+        }
+        
+        .sidebar {
+            width: 300px;
+            background: #16213e;
+            border-right: 1px solid #0f3460;
+            padding: 1rem;
+            overflow-y: auto;
+            flex-shrink: 0;
+        }
+        
+        .sidebar h3 {
+            color: #00d4aa;
+            margin-bottom: 0.5rem;
+            font-size: 1rem;
+        }
+        
+        .endpoint-list {
+            list-style: none;
+        }
+        
+        .endpoint-list li {
+            margin-bottom: 0.5rem;
+        }
+        
+        .endpoint-list a {
+            color: #74b9ff;
+            text-decoration: none;
+            font-size: 0.9rem;
+            display: block;
+            padding: 0.25rem 0;
+        }
+        
+        .endpoint-list a:hover {
+            color: #00d4aa;
+        }
+        
+        .endpoint-list a.active {
+            color: #00d4aa;
+            font-weight: 600;
+        }
+        
+        .main-content {
+            flex: 1;
+            overflow: hidden;
+            position: relative;
+        }
+        
+        #content {
+            height: 100%;
+        }
+        
+        #jsoncrack-container {
+            width: 100%;
+            height: 100%;
+            background: #1a1a2e;
+            border: none;
+        }
+        
+        .error {
+            color: #ff6b6b;
+            background: #2d1b1b;
+            padding: 1rem;
+            margin: 1rem;
+            border-radius: 4px;
+            border-left: 4px solid #ff6b6b;
+        }
+        
+        .info {
+            color: #999;
+            text-align: center;
+            padding: 2rem;
+            font-size: 1.1rem;
+        }
+        
+        .stats {
+            font-size: 0.8rem;
+            color: #999;
+            margin-top: 0.5rem;
+        }
+        
+        .toolbar {
+            background: #16213e;
+            border-bottom: 1px solid #0f3460;
+            padding: 0.5rem 1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .toolbar-info {
+            color: #999;
+            font-size: 0.85rem;
+        }
+        
+        .toolbar-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+        
+        .toolbar button {
+            padding: 0.25rem 0.5rem;
+            font-size: 0.8rem;
+        }
+        
+        /* Edit functionality styles */
+        .edit-btn {
+            background: #00d4aa !important;
+            color: #1a1a2e !important;
+            border: none !important;
+            padding: 2px 6px !important;
+            margin-left: 8px !important;
+            font-size: 0.7rem !important;
+            border-radius: 3px !important;
+            cursor: pointer !important;
+            opacity: 0.7;
+            transition: opacity 0.2s;
+        }
+        
+        .edit-btn:hover {
+            opacity: 1;
+            background: #00b894 !important;
+        }
+        
+        .edit-input {
+            background: #16213e !important;
+            color: #eee !important;
+            border: 1px solid #00d4aa !important;
+            padding: 2px 4px !important;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace !important;
+            font-size: 0.85rem !important;
+            border-radius: 3px !important;
+            margin-left: 4px !important;
+            min-width: 100px !important;
+        }
+        
+        .edit-input:focus {
+            outline: none !important;
+            border-color: #00b894 !important;
+            box-shadow: 0 0 0 2px rgba(0, 212, 170, 0.3) !important;
+        }
+        
+        .edit-actions {
+            margin-left: 8px !important;
+            display: inline-flex !important;
+            gap: 4px !important;
+        }
+        
+        .edit-save, .edit-cancel {
+            background: #00d4aa !important;
+            color: #1a1a2e !important;
+            border: none !important;
+            padding: 2px 6px !important;
+            font-size: 0.7rem !important;
+            border-radius: 3px !important;
+            cursor: pointer !important;
+        }
+        
+        .edit-cancel {
+            background: #ff6b6b !important;
+            color: white !important;
+        }
+        
+        .edit-save:hover {
+            background: #00b894 !important;
+        }
+        
+        .edit-cancel:hover {
+            background: #e55656 !important;
+        }
+        
+        .editable-node {
+            position: relative;
+        }
+        
+        .editable-node:hover .edit-btn {
+            opacity: 1;
+        }
+        
+        .edit-status {
+            margin-left: 8px !important;
+            font-size: 0.7rem !important;
+            color: #999 !important;
+            font-style: italic;
+        }
+        
+        .edit-success {
+            color: #00d4aa !important;
+        }
+        
+        .edit-error {
+            color: #ff6b6b !important;
+        }
+        
+        /* Pagination controls */
+        .pagination-controls {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 1rem;
+            margin: 1rem 0;
+            padding: 1rem;
+            background: #16213e;
+            border-radius: 6px;
+            border: 1px solid #0f3460;
+        }
+        
+        .pagination-controls button {
+            padding: 0.5rem 1rem;
+            font-size: 0.85rem;
+        }
+        
+        .pagination-info {
+            color: #999;
+            font-size: 0.85rem;
+            min-width: 120px;
+            text-align: center;
+        }
+        
+        .pagination-controls button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        /* Drill-down functionality styles */
+        .drill-down-btn {
+            background: #74b9ff !important;
+            color: #1a1a2e !important;
+            border: none !important;
+            padding: 2px 6px !important;
+            margin-left: 8px !important;
+            font-size: 0.7rem !important;
+            border-radius: 3px !important;
+            cursor: pointer !important;
+            opacity: 0.7;
+            transition: opacity 0.2s, background-color 0.2s;
+        }
+        
+        .drill-down-btn:hover {
+            opacity: 1;
+            background: #5a9df7 !important;
+        }
+        
+        .drillable-node:hover .drill-down-btn {
+            opacity: 1;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Connectome Inspector</h1>
+        <div class="controls">
+            <span id="status" class="loading" style="display: none;">Loading...</span>
+        </div>
+    </div>
+    
+    <div class="content">
+        <div class="sidebar">
+            <h3>Available Endpoints</h3>
+            <ul class="endpoint-list">
+                <li><a href="#" onclick="loadEndpoint('/status')">System Status</a></li>
+                <li><a href="#" onclick="loadEndpoint('/spaces')">Spaces Overview</a></li>
+                <li><a href="#" onclick="loadEndpoint('/agents')">Agents</a></li>
+                <li><a href="#" onclick="loadEndpoint('/adapters')">Adapters</a></li>
+                <li><a href="#" onclick="loadEndpoint('/metrics')">Metrics</a></li>
+                <li><a href="#" onclick="loadEndpoint('/timelines')">Timelines Overview</a></li>
+                <li><a href="#" onclick="loadEndpoint('/veil')">VEIL Overview</a></li>
+                <li><a href="#" onclick="loadEndpoint('/health')">Health Check</a></li>
+            </ul>
+            
+            
+            <div style="margin-top: 2rem; border-top: 1px solid #0f3460; padding-top: 1rem;">
+                <h3>Visualization Info</h3>
+                <p style="font-size: 0.8rem; color: #999; line-height: 1.4;">
+                    This interface uses an interactive tree view by default to visualize Connectome debugging data.
+                    JSONCrack visualization is available via the toggle button. Select an endpoint to start exploring.
+                </p>
+            </div>
+        </div>
+        
+        <div class="main-content">
+            <div class="toolbar" id="toolbar" style="display: none;">
+                <div class="toolbar-info">
+                    <div id="breadcrumb" style="margin-bottom: 0.25rem; font-size: 0.8rem; color: #74b9ff;"></div>
+                    <span id="data-info"></span>
+                </div>
+                <div class="toolbar-actions">
+                    <button id="backBtn" onclick="goBack()" style="display: none;">← Back</button>
+                    <button onclick="refreshData()">Refresh</button>
+                    <button onclick="resetVisualization()">Reset View</button>
+                    <button id="viewToggle" onclick="toggleView()">JSONCrack View</button>
+                </div>
+            </div>
+            
+            <div id="content">
+                <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; padding: 2rem; text-align: center; background: #0f3460;">
+                    <div style="margin-bottom: 2rem;">
+                        <pre style="color: #00d4aa; font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace; font-size: 0.7rem; line-height: 1; margin: 0; text-align: center;">  ██████╗ ██████╗ ███╗   ██╗███╗   ██╗███████╗ ██████╗████████╗ ██████╗ ███╗   ███╗███████╗
+ ██╔════╝██╔═══██╗████╗  ██║████╗  ██║██╔════╝██╔════╝╚══██╔══╝██╔═══██╗████╗ ████║██╔════╝
+ ██║     ██║   ██║██╔██╗ ██║██╔██╗ ██║█████╗  ██║        ██║   ██║   ██║██╔████╔██║█████╗  
+ ██║     ██║   ██║██║╚██╗██║██║╚██╗██║██╔══╝  ██║        ██║   ██║   ██║██║╚██╔╝██║██╔══╝  
+ ╚██████╗╚██████╔╝██║ ╚████║██║ ╚████║███████╗╚██████╗   ██║   ╚██████╔╝██║ ╚═╝ ██║███████╗
+  ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝ ╚═════╝   ╚═╝    ╚═════╝ ╚═╝     ╚═╝╚══════╝
+
+                              ██╗███╗   ██╗███████╗██████╗ ███████╗ ██████╗████████╗ ██████╗ ██████╗ 
+                              ██║████╗  ██║██╔════╝██╔══██╗██╔════╝██╔════╝╚══██╔══╝██╔═══██╗██╔══██╗
+                              ██║██╔██╗ ██║███████╗██████╔╝█████╗  ██║        ██║   ██║   ██║██████╔╝
+                              ██║██║╚██╗██║╚════██║██╔═══╝ ██╔══╝  ██║        ██║   ██║   ██║██╔══██╗
+                              ██║██║ ╚████║███████║██║     ███████╗╚██████╗   ██║   ╚██████╔╝██║  ██║
+                              ╚═╝╚═╝  ╚═══╝╚══════╝╚═╝     ╚══════╝ ╚═════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝</pre>
+                    </div>
+                    
+                    <div style="color: #74b9ff; font-size: 1.2rem; font-weight: 600; margin-bottom: 1rem;">
+                        🔍 Connectome Inspector Web UI
+                    </div>
+                    
+                    <div style="color: #999; font-size: 0.9rem; line-height: 1.6; max-width: 600px;">
+                        <p>Welcome to the Connectome Inspector! This interface provides real-time debugging and exploration capabilities for your Connectome host system.</p>
+                        
+                        <p style="margin-top: 1.5rem;">
+                            <strong style="color: #00d4aa;">Getting Started:</strong><br>
+                            Select an endpoint from the sidebar to start exploring your system's state. The tree view provides an interactive way to navigate through spaces, agents, timelines, and VEIL data.
+                        </p>
+                        
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-top: 2rem; text-align: left;">
+                            <div style="background: #16213e; padding: 1rem; border-radius: 6px; border-left: 4px solid #74b9ff;">
+                                <strong style="color: #74b9ff;">System Overview</strong><br>
+                                <small>Status, spaces, agents, and metrics</small>
+                            </div>
+                            <div style="background: #16213e; padding: 1rem; border-radius: 6px; border-left: 4px solid #00d4aa;">
+                                <strong style="color: #00d4aa;">Interactive Browsing</strong><br>
+                                <small>Space-specific timeline events and VEIL data</small>
+                            </div>
+                            <div style="background: #16213e; padding: 1rem; border-radius: 6px; border-left: 4px solid #fd79a8;">
+                                <strong style="color: #fd79a8;">Tree Visualization</strong><br>
+                                <small>Expandable tree view with editing capabilities</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentData = null;
+        let currentEndpoint = null;
+        let jsoncrackInstance = null;
+        let currentView = 'tree'; // 'tree' or 'jsoncrack' - tree is now default
+        let navigationStack = []; // For back navigation
+        let paginationState = {
+            hasMore: false,
+            nextCursor: null,
+            currentSpaceId: null,
+            currentBrowserType: null
+        }; // For pagination
+        
+        async function loadEndpoint(endpoint) {
+            // Update active link
+            document.querySelectorAll('.endpoint-list a').forEach(a => a.classList.remove('active'));
+            event.target.classList.add('active');
+            
+            const statusEl = document.getElementById('status');
+            const contentEl = document.getElementById('content');
+            const toolbar = document.getElementById('toolbar');
+            
+            // Handle special "browsing" endpoints that need space selection
+            if (['spaces_detailed', 'timeline_events', 'veil_facets'].includes(endpoint)) {
+                await showSpaceBrowser(endpoint);
+                return;
+            }
+            
+            statusEl.style.display = 'inline';
+            
+            try {
+                statusEl.textContent = 'Loading data...';
+                
+                const response = await fetch(endpoint, {
+                    headers: {
+                        'Accept': 'application/json'
+                    }
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                currentData = data;
+                currentEndpoint = endpoint;
+                
+                statusEl.textContent = 'Initializing visualization...';
+                
+                // Show toolbar and update info
+                toolbar.style.display = 'flex';
+                updateBreadcrumb(`Inspector → ${endpoint}`);
+                updateDataInfo(data, endpoint);
+                
+                // Reset view mode to Tree View as default when loading new endpoint
+                currentView = 'tree';
+                const toggleBtn = document.getElementById('viewToggle');
+                if (toggleBtn) {
+                    toggleBtn.textContent = 'JSONCrack View';
+                }
+                
+                // Clear content and create tree container
+                contentEl.innerHTML = '<div id="jsoncrack-container"></div>';
+                
+                // Initialize Tree visualization as default
+                showTreeView(data);
+                
+            } catch (error) {
+                console.error('Error loading data:', error);
+                contentEl.innerHTML = `
+                    <div class="error">
+                        <strong>Error loading data from ${endpoint}:</strong><br>
+                        ${escapeHtml(error.message)}
+                    </div>
+                `;
+                currentData = null;
+                currentEndpoint = null;
+                toolbar.style.display = 'none';
+            } finally {
+                statusEl.style.display = 'none';
+            }
+        }
+        
+        async function initializeJsonCrack(data) {
+            try {
+                const container = document.getElementById('jsoncrack-container');
+                if (!container) {
+                    throw new Error('JSONCrack container not found');
+                }
+                
+                const jsonString = JSON.stringify(data, null, 2);
+                
+                // Clear container
+                container.innerHTML = '';
+                container.style.position = 'relative';
+                
+                console.log('Initializing JSONCrack with postMessage approach');
+                
+                // Create iframe for JSONCrack widget
+                const iframe = document.createElement('iframe');
+                iframe.style.width = '100%';
+                iframe.style.height = '100%';
+                iframe.style.border = 'none';
+                iframe.style.backgroundColor = '#1a1a2e';
+                iframe.src = 'https://jsoncrack.com/widget';
+                
+                container.appendChild(iframe);
+                
+                // Set up postMessage communication
+                let widgetReady = false;
+                let fallbackTriggered = false;
+                
+                // Handle iframe load errors (but not content errors like Sentry)
+                iframe.addEventListener('error', (event) => {
+                    console.error('JSONCrack iframe failed to load:', event);
+                    if (!fallbackTriggered) {
+                        fallbackTriggered = true;
+                        showFallbackVisualization(data);
+                    }
+                });
+                
+                // Listen for messages from the iframe
+                const messageHandler = (event) => {
+                    if (event.origin !== 'https://jsoncrack.com') {
+                        console.log('Ignoring message from non-JSONCrack origin:', event.origin);
+                        return;
+                    }
+                    
+                    // Log the complete message object to see all fields
+                    console.log('Received JSONCrack message - Full event object:', event);
+                    console.log('Event.data:', event.data);
+                    console.log('Event.type:', event.type);
+                    console.log('Event.source:', event.source);
+                    console.log('Event.ports:', event.ports);
+                    
+                    // Treat ANY message from JSONCrack as ready signal (but only once)
+                    if (!widgetReady) {
+                        console.log('JSONCrack widget ready (any message), attempting to send data');
+                        widgetReady = true;
+                        sendDataToWidget();
+                    } else {
+                        console.log('Additional message from JSONCrack (widget already ready)');
+                    }
+                };
+                
+                const sendDataToWidget = () => {
+                    if (!widgetReady) {
+                        console.log('Widget not ready yet, waiting...');
+                        return;
+                    }
+                    
+                    console.log('Attempting to send data to JSONCrack widget...');
+                    console.log('iframe.contentWindow exists:', !!iframe.contentWindow);
+                    
+                    try {
+                        // Try multiple message formats based on JSONCrack docs
+                        const messages = [
+                            // Format from docs - basic
+                            {
+                                json: jsonString,
+                                options: {
+                                    theme: 'dark',
+                                    direction: 'RIGHT'
+                                }
+                            },
+                            // Alternative format - maybe they expect different structure
+                            {
+                                type: 'data',
+                                payload: {
+                                    json: jsonString,
+                                    options: {
+                                        theme: 'dark',
+                                        direction: 'RIGHT'
+                                    }
+                                }
+                            },
+                            // Simple format - just the JSON
+                            {
+                                json: jsonString
+                            }
+                        ];
+                        
+                        // Try each message format with a small delay
+                        messages.forEach((message, index) => {
+                            setTimeout(() => {
+                                console.log(`Sending message format ${index + 1}:`, message);
+                                iframe.contentWindow.postMessage(message, 'https://jsoncrack.com');
+                            }, index * 500);
+                        });
+                        
+                    } catch (error) {
+                        console.error('Error sending data to widget:', error);
+                        // Only fallback for actual postMessage errors, not Sentry/tracking errors
+                        if (error.name === 'DataCloneError' || error.message.includes('postMessage')) {
+                            if (!fallbackTriggered) {
+                                fallbackTriggered = true;
+                                showFallbackVisualization(data);
+                            }
+                        }
+                    }
+                };
+                
+                window.addEventListener('message', messageHandler);
+                
+                // Clean up event listener when resetting
+                if (jsoncrackInstance) {
+                    jsoncrackInstance.cleanup = () => {
+                        window.removeEventListener('message', messageHandler);
+                    };
+                }
+                
+                jsoncrackInstance = {
+                    iframe: iframe,
+                    cleanup: () => {
+                        window.removeEventListener('message', messageHandler);
+                    },
+                    sendData: sendDataToWidget
+                };
+                
+                // Manual trigger no longer needed since auto-detection works!
+                
+                // Fallback timeout - if widget doesn't respond in 15 seconds, show fallback
+                setTimeout(() => {
+                    if (!widgetReady && !fallbackTriggered) {
+                        console.log('JSONCrack widget timeout, showing fallback');
+                        fallbackTriggered = true;
+                        showFallbackVisualization(data);
+                    }
+                }, 15000); // Increased timeout to allow for debugging
+                
+            } catch (error) {
+                console.error('JSONCrack initialization error:', error);
+                // Only fallback for critical initialization errors, not third-party script errors
+                if (error.message.includes('container not found') || 
+                    error.message.includes('iframe') ||
+                    error.name === 'TypeError' && error.message.includes('appendChild')) {
+                    showFallbackVisualization(data);
+                } else {
+                    // Log but don't fallback for non-critical errors (like Sentry loading)
+                    console.warn('Non-critical JSONCrack error ignored:', error);
+                }
+            }
+        }
+        
+        function showFallbackVisualization(data) {
+            const container = document.getElementById('jsoncrack-container') || document.getElementById('content');
+            const jsonString = JSON.stringify(data, null, 2);
+            
+            container.innerHTML = `
+                <div style="padding: 1rem; background: #0f3460; border-radius: 4px; height: 100%; overflow: auto; display: flex; flex-direction: column;">
+                    <div style="margin-bottom: 1rem; color: #00d4aa; display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.5rem; border-bottom: 1px solid #555;">
+                        <strong>📊 Formatted JSON View</strong>
+                        <small style="color: #999;">JSONCrack unavailable</small>
+                    </div>
+                    <div style="flex: 1; overflow: auto;">
+                        <pre style="color: #eee; font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace; font-size: 0.85rem; line-height: 1.4; white-space: pre-wrap; margin: 0;">${escapeHtml(jsonString)}</pre>
+                    </div>
+                </div>
+            `;
+        }
+        
+        function updateDataInfo(data, endpoint) {
+            const dataInfo = document.getElementById('data-info');
+            const jsonString = JSON.stringify(data);
+            const size = formatBytes(jsonString.length);
+            const keys = typeof data === 'object' && data !== null ? Object.keys(data).length : 0;
+            
+            dataInfo.textContent = `${endpoint} • ${size} • ${keys} top-level keys`;
+        }
+        
+        async function refreshData() {
+            if (currentEndpoint) {
+                await loadEndpoint(currentEndpoint);
+            }
+        }
+        
+        function resetVisualization() {
+            if (jsoncrackInstance && jsoncrackInstance.cleanup) {
+                jsoncrackInstance.cleanup();
+            }
+            if (currentData) {
+                if (currentView === 'jsoncrack') {
+                    initializeJsonCrack(currentData);
+                } else {
+                    showTreeView(currentData);
+                }
+            }
+        }
+        
+        function toggleView() {
+            if (!currentData) return;
+            
+            const toggleBtn = document.getElementById('viewToggle');
+            
+            if (currentView === 'jsoncrack') {
+                currentView = 'tree';
+                toggleBtn.textContent = 'JSONCrack View';
+                showTreeView(currentData);
+            } else {
+                currentView = 'jsoncrack';
+                toggleBtn.textContent = 'Tree View';
+                initializeJsonCrack(currentData);
+            }
+        }
+        
+        function showTreeView(data) {
+            const container = document.getElementById('jsoncrack-container') || document.getElementById('content');
+            
+            // Clean up any existing JSONCrack instance
+            if (jsoncrackInstance && jsoncrackInstance.cleanup) {
+                jsoncrackInstance.cleanup();
+            }
+            
+            // Check if this data has pagination metadata
+            const hasPagination = data.has_more !== undefined || data.next_cursor !== undefined;
+            
+            // Determine view type and header text
+            let viewIcon = '🌳';
+            let viewTitle = 'Interactive Tree View';
+            let viewHint = 'Click to expand/collapse';
+            
+            if (data.facets && typeof data.facets === 'object') {
+                viewIcon = '🎭';
+                viewTitle = 'VEIL Facets Stream';
+                viewHint = 'Click entries to expand details';
+            } else if (data.events && typeof data.events === 'object') {
+                viewIcon = '⏱️';
+                viewTitle = 'Timeline Events Stream';
+                viewHint = 'Click events to expand details';
+            }
+            
+            container.innerHTML = `
+                <div style="padding: 1rem; background: #0f3460; border-radius: 4px; height: 100%; overflow: auto; display: flex; flex-direction: column;">
+                    <div style="margin-bottom: 1rem; color: #00d4aa; display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.5rem; border-bottom: 1px solid #555;">
+                        <strong>${viewIcon} ${viewTitle}</strong>
+                        <small style="color: #999;">${viewHint}</small>
+                    </div>
+                    ${hasPagination ? '<div id="pagination-top"></div>' : ''}
+                    <div style="flex: 1; overflow: auto;">
+                        <div id="tree-container"></div>
+                    </div>
+                    ${hasPagination ? '<div id="pagination-bottom"></div>' : ''}
+                </div>
+            `;
+            
+            // Add pagination controls if needed
+            if (hasPagination) {
+                addPaginationControls(data);
+            }
+            
+            // Build interactive tree or stream view
+            const treeContainer = document.getElementById('tree-container');
+            
+            // Check if this is facets or events data and render as stream
+            if (data.facets && typeof data.facets === 'object') {
+                // VEIL facets stream view
+                renderFacetsStream(treeContainer, data.facets);
+            } else if (data.events && typeof data.events === 'object') {
+                // Timeline events stream view  
+                renderEventsStream(treeContainer, data.events);
+            } else {
+                // Regular tree view
+                treeContainer.appendChild(createTreeNode('root', data, 0, true));
+            }
+        }
+        
+        function addPaginationControls(data) {
+            const hasMore = data.has_more || false;
+            const nextCursor = data.next_cursor || null;
+            const totalItems = data.total_items || '?';
+            
+            // Count items based on data structure
+            let currentItems = 0;
+            if (data.events && Array.isArray(data.events)) {
+                currentItems = data.events.length;
+            } else if (data.facets && typeof data.facets === 'object') {
+                currentItems = Object.keys(data.facets).length;
+            } else if (data.timelines && typeof data.timelines === 'object') {
+                currentItems = Object.keys(data.timelines).length;
+            }
+            
+            const paginationHtml = `
+                <div class="pagination-controls">
+                    <button onclick="loadPreviousPage()" id="prevBtn" ${!paginationState.nextCursor ? 'disabled' : ''}>
+                        ← Previous
+                    </button>
+                    <div class="pagination-info">
+                        Showing ${currentItems} items
+                        ${totalItems !== '?' ? ` of ${totalItems}` : ''}
+                    </div>
+                    <button onclick="loadNextPage()" id="nextBtn" ${!hasMore ? 'disabled' : ''}>
+                        Next →
+                    </button>
+                </div>
+            `;
+            
+            document.getElementById('pagination-top').innerHTML = paginationHtml;
+            document.getElementById('pagination-bottom').innerHTML = paginationHtml;
+            
+            // Update pagination state
+            paginationState.hasMore = hasMore;
+            paginationState.nextCursor = nextCursor;
+        }
+        
+        async function loadNextPage() {
+            if (!paginationState.hasMore || !paginationState.nextCursor) return;
+            
+            const statusEl = document.getElementById('status');
+            statusEl.style.display = 'inline';
+            statusEl.textContent = 'Loading next page...';
+            
+            try {
+                let url = currentEndpoint;
+                
+                // Add pagination parameters
+                const separator = url.includes('?') ? '&' : '?';
+                if (paginationState.currentBrowserType === 'timeline_events') {
+                    url += `${separator}offset=${paginationState.nextCursor}&limit=20`;
+                } else if (paginationState.currentBrowserType === 'veil_facets') {
+                    url += `${separator}after_facet_id=${paginationState.nextCursor}&limit=20`;
+                }
+                
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                currentData = data;
+                
+                // Show the updated data
+                showTreeView(data);
+                
+            } catch (error) {
+                console.error('Error loading next page:', error);
+                alert(`Error loading next page: ${error.message}`);
+            } finally {
+                statusEl.style.display = 'none';
+            }
+        }
+        
+        async function loadPreviousPage() {
+            // For simplicity, just go back in navigation stack
+            // A full implementation would require tracking previous cursors
+            goBack();
+        }
+        
+        function createTreeNode(key, value, depth, isExpanded = false, path = []) {
+            const nodeDiv = document.createElement('div');
+            nodeDiv.style.marginLeft = (depth * 20) + 'px';
+            
+            const isObject = typeof value === 'object' && value !== null;
+            const isArray = Array.isArray(value);
+            const hasChildren = isObject && Object.keys(value).length > 0;
+            const currentPath = [...path, key];
+            
+            // Determine if this node is editable
+            const isEditable = !hasChildren && isEditableField(currentPath, value);
+            
+            // Determine if this node is drillable
+            const drillInfo = isDrillableNode(currentPath, value);
+            const isDrillable = drillInfo !== null;
+            
+            // Create node header
+            const headerDiv = document.createElement('div');
+            headerDiv.className = isEditable ? 'editable-node' : (isDrillable ? 'drillable-node' : '');
+            headerDiv.style.cssText = `
+                display: flex;
+                align-items: center;
+                padding: 2px 0;
+                cursor: ${hasChildren ? 'pointer' : 'default'};
+                color: #eee;
+                font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+                font-size: 0.85rem;
+                line-height: 1.4;
+            `;
+            
+            // Expand/collapse indicator
+            if (hasChildren) {
+                const indicator = document.createElement('span');
+                indicator.textContent = isExpanded ? '▼ ' : '▶ ';
+                indicator.style.color = '#00d4aa';
+                indicator.style.marginRight = '4px';
+                indicator.style.width = '12px';
+                headerDiv.appendChild(indicator);
+            } else {
+                const spacer = document.createElement('span');
+                spacer.style.marginRight = '16px';
+                headerDiv.appendChild(spacer);
+            }
+            
+            // Key name
+            const keySpan = document.createElement('span');
+            keySpan.textContent = key;
+            keySpan.style.color = '#74b9ff';
+            keySpan.style.fontWeight = '600';
+            headerDiv.appendChild(keySpan);
+            
+            // Type and value preview
+            const valueSpan = document.createElement('span');
+            valueSpan.setAttribute('data-path', JSON.stringify(currentPath));
+            
+            if (isArray) {
+                valueSpan.textContent = `: Array(${value.length})`;
+                valueSpan.style.color = '#a29bfe';
+            } else if (isObject) {
+                valueSpan.textContent = `: Object(${Object.keys(value).length})`;
+                valueSpan.style.color = '#fd79a8';
+            } else {
+                const preview = String(value);
+                const truncated = preview.length > 100 ? preview.substring(0, 100) + '...' : preview;
+                valueSpan.textContent = `: ${JSON.stringify(truncated)}`;
+                valueSpan.style.color = getValueColor(typeof value);
+            }
+            headerDiv.appendChild(valueSpan);
+            
+            // Add edit button for editable fields
+            if (isEditable) {
+                const editBtn = document.createElement('button');
+                editBtn.textContent = '✏️';
+                editBtn.className = 'edit-btn';
+                editBtn.title = 'Edit this field';
+                editBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    startEdit(headerDiv, currentPath, value);
+                };
+                headerDiv.appendChild(editBtn);
+            }
+            
+            // Add drill-down button for drillable fields
+            if (isDrillable) {
+                const drillBtn = document.createElement('button');
+                drillBtn.textContent = '🔍';
+                drillBtn.className = 'drill-down-btn';
+                
+                // Set user-friendly tooltip based on drill-down type
+                let tooltip = 'Drill down';
+                if (drillInfo.type === 'veil_facets') {
+                    tooltip = 'Show facets';
+                } else if (drillInfo.type === 'timeline_events') {
+                    tooltip = 'Show events';
+                }
+                drillBtn.title = tooltip;
+                
+                drillBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    drillDown(drillInfo, currentPath);
+                };
+                headerDiv.appendChild(drillBtn);
+            }
+            
+            nodeDiv.appendChild(headerDiv);
+            
+            // Children container
+            if (hasChildren) {
+                const childrenDiv = document.createElement('div');
+                childrenDiv.style.display = isExpanded ? 'block' : 'none';
+                
+                // Add children
+                if (isArray) {
+                    value.forEach((item, index) => {
+                        childrenDiv.appendChild(createTreeNode(`[${index}]`, item, depth + 1, false, currentPath));
+                    });
+                } else {
+                    Object.keys(value).forEach(childKey => {
+                        childrenDiv.appendChild(createTreeNode(childKey, value[childKey], depth + 1, false, currentPath));
+                    });
+                }
+                
+                nodeDiv.appendChild(childrenDiv);
+                
+                // Click handler for expand/collapse (only for containers, not editable items)
+                if (!isEditable && !isDrillable) {
+                    headerDiv.addEventListener('click', () => {
+                        const indicator = headerDiv.querySelector('span');
+                        const isCurrentlyExpanded = childrenDiv.style.display === 'block';
+                        
+                        if (isCurrentlyExpanded) {
+                            childrenDiv.style.display = 'none';
+                            indicator.textContent = '▶ ';
+                        } else {
+                            childrenDiv.style.display = 'block';
+                            indicator.textContent = '▼ ';
+                        }
+                    });
+                } else if (hasChildren && isDrillable) {
+                    // For drillable containers, only expand/collapse when clicking the indicator, not the whole header
+                    const indicator = headerDiv.querySelector('span');
+                    if (indicator) {
+                        indicator.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            const isCurrentlyExpanded = childrenDiv.style.display === 'block';
+                            
+                            if (isCurrentlyExpanded) {
+                                childrenDiv.style.display = 'none';
+                                indicator.textContent = '▶ ';
+                            } else {
+                                childrenDiv.style.display = 'block';
+                                indicator.textContent = '▼ ';
+                            }
+                        });
+                        indicator.style.cursor = 'pointer';
+                    }
+                }
+            }
+            
+            return nodeDiv;
+        }
+        
+        function getValueColor(type) {
+            const colors = {
+                string: '#00d4aa',
+                number: '#a29bfe',
+                boolean: '#6c5ce7',
+                undefined: '#999',
+                null: '#ff6b6b'
+            };
+            return colors[type] || '#eee';
+        }
+        
+        function renderFacetsStream(container, facets) {
+            // Convert facets object to array and sort by timestamp (newest first)
+            const facetArray = Object.values(facets).sort((a, b) => b.veil_timestamp - a.veil_timestamp);
+            
+            facetArray.forEach(facet => {
+                const facetDiv = document.createElement('div');
+                facetDiv.style.cssText = `
+                    margin-bottom: 0.5rem;
+                    padding: 0.75rem;
+                    background: #16213e;
+                    border-left: 4px solid ${getFacetTypeColor(facet.facet_type)};
+                    border-radius: 4px;
+                    cursor: pointer;
+                    transition: background-color 0.2s;
+                `;
+                
+                // Format timestamp
+                const timeStr = formatTimestamp(facet.veil_timestamp);
+                
+                // Create summary label
+                const summary = facet.content_summary || 'No summary available';
+                const truncatedSummary = summary.length > 100 ? summary.substring(0, 100) + '...' : summary;
+                
+                facetDiv.innerHTML = `
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">
+                        <div style="color: #74b9ff; font-weight: 600; font-size: 0.9rem;">
+                            ${facet.facet_type.toUpperCase()} • ${facet.facet_id.substring(0, 8)}...
+                        </div>
+                        <div style="color: #999; font-size: 0.8rem;">${timeStr}</div>
+                    </div>
+                    <div style="color: #eee; font-size: 0.85rem; line-height: 1.4;">
+                        ${truncatedSummary}
+                    </div>
+                `;
+                
+                // Add click handler to expand
+                facetDiv.addEventListener('click', () => {
+                    const expanded = facetDiv.querySelector('.expanded-content');
+                    if (expanded) {
+                        expanded.remove();
+                        facetDiv.style.background = '#16213e';
+                    } else {
+                        const expandedDiv = document.createElement('div');
+                        expandedDiv.className = 'expanded-content';
+                        expandedDiv.style.cssText = `
+                            margin-top: 0.5rem;
+                            padding-top: 0.5rem;
+                            border-top: 1px solid #555;
+                        `;
+                        
+                        // Stop click propagation to prevent collapsing when interacting with tree
+                        expandedDiv.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                        });
+                        
+                        expandedDiv.appendChild(createTreeNode(facet.facet_id, facet, 0, true, ['facets', facet.facet_id]));
+                        facetDiv.appendChild(expandedDiv);
+                        facetDiv.style.background = '#1a2f4a';
+                    }
+                });
+                
+                // Hover effect
+                facetDiv.addEventListener('mouseenter', () => {
+                    if (!facetDiv.querySelector('.expanded-content')) {
+                        facetDiv.style.background = '#1a2f4a';
+                    }
+                });
+                facetDiv.addEventListener('mouseleave', () => {
+                    if (!facetDiv.querySelector('.expanded-content')) {
+                        facetDiv.style.background = '#16213e';
+                    }
+                });
+                
+                container.appendChild(facetDiv);
+            });
+        }
+        
+        function renderEventsStream(container, events) {
+            // Convert events object to array and sort by timestamp (newest first)
+            const eventArray = Object.values(events).sort((a, b) => b.timestamp - a.timestamp);
+            
+            eventArray.forEach(event => {
+                const eventDiv = document.createElement('div');
+                eventDiv.style.cssText = `
+                    margin-bottom: 0.5rem;
+                    padding: 0.75rem;
+                    background: #16213e;
+                    border-left: 4px solid #a29bfe;
+                    border-radius: 4px;
+                    cursor: pointer;
+                    transition: background-color 0.2s;
+                `;
+                
+                // Format timestamp 
+                const timeStr = formatTimestamp(event.timestamp);
+                
+                // Get event type from payload
+                const eventType = event.payload?.event_type || 'unknown';
+                
+                // Create summary
+                let summary = `Event ${event.id.substring(0, 8)}...`;
+                if (event.payload?.payload) {
+                    if (typeof event.payload.payload === 'string') {
+                        summary = event.payload.payload.length > 80 ? 
+                            event.payload.payload.substring(0, 80) + '...' : event.payload.payload;
+                    } else if (event.payload.payload.message) {
+                        summary = event.payload.payload.message.length > 80 ? 
+                            event.payload.payload.message.substring(0, 80) + '...' : event.payload.payload.message;
+                    }
+                }
+                
+                eventDiv.innerHTML = `
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">
+                        <div style="color: #74b9ff; font-weight: 600; font-size: 0.9rem;">
+                            ${eventType.toUpperCase()} • ${event.id.substring(0, 8)}...
+                        </div>
+                        <div style="color: #999; font-size: 0.8rem;">${timeStr}</div>
+                    </div>
+                    <div style="color: #eee; font-size: 0.85rem; line-height: 1.4;">
+                        ${summary}
+                    </div>
+                `;
+                
+                // Add click handler to expand
+                eventDiv.addEventListener('click', () => {
+                    const expanded = eventDiv.querySelector('.expanded-content');
+                    if (expanded) {
+                        expanded.remove();
+                        eventDiv.style.background = '#16213e';
+                    } else {
+                        const expandedDiv = document.createElement('div');
+                        expandedDiv.className = 'expanded-content';
+                        expandedDiv.style.cssText = `
+                            margin-top: 0.5rem;
+                            padding-top: 0.5rem;
+                            border-top: 1px solid #555;
+                        `;
+                        
+                        // Stop click propagation to prevent collapsing when interacting with tree
+                        expandedDiv.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                        });
+                        
+                        expandedDiv.appendChild(createTreeNode(event.id, event, 0, true, ['events', event.id]));
+                        eventDiv.appendChild(expandedDiv);
+                        eventDiv.style.background = '#1a2f4a';
+                    }
+                });
+                
+                // Hover effect
+                eventDiv.addEventListener('mouseenter', () => {
+                    if (!eventDiv.querySelector('.expanded-content')) {
+                        eventDiv.style.background = '#1a2f4a';
+                    }
+                });
+                eventDiv.addEventListener('mouseleave', () => {
+                    if (!eventDiv.querySelector('.expanded-content')) {
+                        eventDiv.style.background = '#16213e';
+                    }
+                });
+                
+                container.appendChild(eventDiv);
+            });
+        }
+        
+        function getFacetTypeColor(facetType) {
+            const colors = {
+                'event': '#a29bfe',
+                'status': '#00d4aa', 
+                'ambient': '#fd79a8'
+            };
+            return colors[facetType] || '#74b9ff';
+        }
+        
+        function formatTimestamp(timestamp) {
+            // For very small timestamps (like veil_timestamp), treat as relative
+            if (timestamp < 1000000) {
+                return `+${timestamp.toFixed(3)}s`;
+            }
+            
+            // For unix timestamps, format as readable time
+            const date = new Date(timestamp * 1000);
+            return date.toLocaleTimeString('en-US', { 
+                hour12: false, 
+                hour: '2-digit', 
+                minute: '2-digit', 
+                second: '2-digit' 
+            });
+        }
+        
+        async function updateDisplayWithFreshData() {
+            // Get the current tree container
+            const treeContainer = document.getElementById('tree-container');
+            if (!treeContainer) return;
+            
+            // Store which items are currently expanded
+            const expandedItems = new Set();
+            const expandedElements = treeContainer.querySelectorAll('.expanded-content');
+            expandedElements.forEach(el => {
+                const parent = el.parentElement;
+                const idElement = parent.querySelector('[style*="color: #74b9ff"]');
+                if (idElement && idElement.textContent) {
+                    // Extract the ID from the header (format: "TYPE • ID...")
+                    const match = idElement.textContent.match(/•\s*([^.]+)/);
+                    if (match) {
+                        expandedItems.add(match[1]);
+                    }
+                }
+            });
+            
+            // Clear and rebuild the container with fresh data
+            treeContainer.innerHTML = '';
+            
+            // Rebuild the view based on data type
+            if (currentData.facets && typeof currentData.facets === 'object') {
+                renderFacetsStream(treeContainer, currentData.facets);
+            } else if (currentData.events && typeof currentData.events === 'object') {
+                renderEventsStream(treeContainer, currentData.events);
+            } else {
+                treeContainer.appendChild(createTreeNode('root', currentData, 0, true));
+                return; // No need to restore expanded state for regular tree
+            }
+            
+            // Restore expanded state for stream views
+            setTimeout(() => {
+                const newCards = treeContainer.querySelectorAll('[style*="background: #16213e"]');
+                newCards.forEach(card => {
+                    const idElement = card.querySelector('[style*="color: #74b9ff"]');
+                    if (idElement && idElement.textContent) {
+                        const match = idElement.textContent.match(/•\s*([^.]+)/);
+                        if (match && expandedItems.has(match[1])) {
+                            // Click to expand this item
+                            card.click();
+                        }
+                    }
+                });
+            }, 50); // Small delay to allow DOM to settle
+        }
+        
+        async function updateSpecificItem(context, freshItem) {
+            // Find the specific expanded item in the UI and update its content
+            const treeContainer = document.getElementById('tree-container');
+            if (!treeContainer) return;
+            
+            // Look for expanded content that matches this item ID
+            const expandedElements = treeContainer.querySelectorAll('.expanded-content');
+            for (const expandedEl of expandedElements) {
+                const parent = expandedEl.parentElement;
+                const idElement = parent.querySelector('[style*="color: #74b9ff"]');
+                
+                if (idElement && idElement.textContent) {
+                    // Extract the ID from the header (format: "TYPE • ID...")
+                    const match = idElement.textContent.match(/•\s*([^.]+)/);
+                    if (match) {
+                        const displayedId = match[1];
+                        const targetId = context.type === 'veil_facet' ? context.facetId : context.eventId;
+                        
+                        // Check if this matches our updated item (compare first 8 chars)
+                        if (targetId.startsWith(displayedId)) {
+                            // This is the item we need to update!
+                            // First, capture the current tree expansion state
+                            const treeState = captureTreeState(expandedEl);
+                            
+                            // Clear the expanded content and rebuild it with fresh data
+                            expandedEl.innerHTML = '';
+                            
+                            const itemData = context.type === 'veil_facet' ? freshItem.facet : freshItem.event;
+                            const pathPrefix = context.type === 'veil_facet' ? ['facets', context.facetId] : ['events', context.eventId];
+                            
+                            const newTreeNode = createTreeNode(targetId, itemData, 0, true, pathPrefix);
+                            expandedEl.appendChild(newTreeNode);
+                            
+                            // Restore the tree expansion state
+                            setTimeout(() => {
+                                restoreTreeState(expandedEl, treeState);
+                            }, 100); // Increased delay to ensure DOM is fully settled
+                            
+                            return; // Found and updated the item
+                        }
+                    }
+                }
+            }
+            
+        }
+        
+        function captureTreeState(containerElement) {
+            // Capture which tree nodes are currently expanded
+            const expandedPaths = new Set();
+            
+            
+            function walkTree(element, currentPath = []) {
+                
+                // Look for direct children div (the children container)
+                if (element.children.length >= 2) {
+                    const childrenDiv = element.children[1]; // Second child after headerDiv
+                    
+                    if (childrenDiv && childrenDiv.style.display === 'block') {
+                        // This node is expanded, record its path
+                        const pathStr = currentPath.join('.');
+                        expandedPaths.add(pathStr);
+                        
+                        // Walk through all direct child nodes
+                        Array.from(childrenDiv.children).forEach((childNode, index) => {
+                            // Extract the key from the header div
+                            const headerDiv = childNode.children[0];
+                            if (headerDiv) {
+                                // Extract key from the second span (first span is empty spacing, second has the key)
+                                const spans = headerDiv.querySelectorAll('span');
+                                
+                                if (spans.length >= 2) {
+                                    // The key is in the second span
+                                    const keySpan = spans[1];
+                                    const key = keySpan.textContent.trim();
+                                    
+                                    if (key) {
+                                        walkTree(childNode, [...currentPath, key]);
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+            
+            // Start from the actual tree node (first child of the container)
+            if (containerElement.children.length > 0) {
+                const rootTreeNode = containerElement.children[0];
+                walkTree(rootTreeNode);
+            }
+            
+            return expandedPaths;
+        }
+        
+        function restoreTreeState(containerElement, expandedPaths) {
+            // Restore the expanded state for tree nodes
+            if (!expandedPaths || expandedPaths.size === 0) return;
+            
+            function walkTree(element, currentPath = []) {
+                const currentPathStr = currentPath.join('.');
+                
+                // Check if this node should be expanded
+                if (expandedPaths.has(currentPathStr)) {
+                    // Find the expand indicator in the header div
+                    const headerDiv = element.children[0];
+                    if (headerDiv) {
+                        const indicator = headerDiv.querySelector('span');
+                        if (indicator && indicator.textContent.includes('▶')) {
+                            // Simulate click to expand
+                            indicator.click();
+                        }
+                    }
+                    
+                    // After expanding, walk through children
+                    setTimeout(() => {
+                        const childrenDiv = element.children[1];
+                        if (childrenDiv) {
+                            Array.from(childrenDiv.children).forEach((childNode) => {
+                                const childHeaderDiv = childNode.children[0];
+                                if (childHeaderDiv) {
+                                    // Extract key from the second span (same logic as capture)
+                                    const spans = childHeaderDiv.querySelectorAll('span');
+                                    if (spans.length >= 2) {
+                                        const keySpan = spans[1];
+                                        const key = keySpan.textContent.trim();
+                                        if (key) {
+                                            walkTree(childNode, [...currentPath, key]);
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    }, 50); // Small delay to let expansion animation complete
+                }
+            }
+            
+            // Start from the actual tree node (first child of the container)
+            if (containerElement.children.length > 0) {
+                const rootTreeNode = containerElement.children[0];
+                walkTree(rootTreeNode);
+            }
+        }
+        
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        // Edit functionality
+        function isEditableField(path, value) {
+            // Only allow editing of simple values (not objects or arrays)
+            if (typeof value === 'object' && value !== null) {
+                return false;
+            }
+            
+            // Determine what type of data we're dealing with based on path
+            const pathStr = path.join('.');
+            
+            // Timeline event fields (events are identifiable by having an 'id' field)
+            if (pathStr.includes('events') && (
+                pathStr.endsWith('timestamp') ||
+                pathStr.includes('payload.') ||
+                pathStr.endsWith('parent_ids') ||
+                pathStr.endsWith('timeline_id')
+            )) {
+                return true;
+            }
+            
+            // VEIL facet fields (facets are identifiable by having 'facet_id' field)
+            if (pathStr.includes('facets') && (
+                pathStr.endsWith('veil_timestamp') ||
+                pathStr.endsWith('owner_element_id') ||
+                pathStr.endsWith('links_to') ||
+                pathStr.includes('properties.')
+            )) {
+                return true;
+            }
+            
+            return false;
+        }
+        
+        function findEditableContext(path) {
+            const pathStr = path.join('.');
+            
+            // Look for timeline event context
+            const eventMatch = pathStr.match(/.*events\.([^.]+)/);
+            if (eventMatch) {
+                const eventId = eventMatch[1];
+                // Find the event data to get space_id and timeline_id
+                const eventData = getValueAtPath(currentData, path.slice(0, -1));
+                
+                // For stream views, get space ID from current data or endpoint
+                let spaceId = getSpaceIdFromPath(path);
+                if (!spaceId && currentData.space_id) {
+                    spaceId = currentData.space_id;
+                } else if (!spaceId && currentEndpoint) {
+                    // Extract from endpoint like /timelines/space_id/timeline_id
+                    const endpointMatch = currentEndpoint.match(/\/timelines\/([^\/]+)/);
+                    if (endpointMatch) spaceId = endpointMatch[1];
+                }
+                
+                return {
+                    type: 'timeline_event',
+                    eventId: eventId,
+                    spaceId: spaceId,
+                    timelineId: eventData?.timeline_id || currentData.timeline_id
+                };
+            }
+            
+            // Look for VEIL facet context
+            const facetMatch = pathStr.match(/.*facets\.([^.]+)/);
+            if (facetMatch) {
+                const facetId = facetMatch[1];
+                
+                // For stream views, get space ID from current data or endpoint
+                let spaceId = getSpaceIdFromPath(path);
+                if (!spaceId && currentData.space_id) {
+                    spaceId = currentData.space_id;
+                } else if (!spaceId && currentEndpoint) {
+                    // Extract from endpoint like /veil/space_id/facets
+                    const endpointMatch = currentEndpoint.match(/\/veil\/([^\/]+)/);
+                    if (endpointMatch) spaceId = endpointMatch[1];
+                }
+                
+                return {
+                    type: 'veil_facet',
+                    facetId: facetId,
+                    spaceId: spaceId
+                };
+            }
+            
+            return null;
+        }
+        
+        function getSpaceIdFromPath(path) {
+            // Look for space ID patterns in the path
+            const pathStr = path.join('.');
+            const spaceMatch = pathStr.match(/spaces\.([^.]+)/);
+            return spaceMatch ? spaceMatch[1] : null;
+        }
+        
+        function getValueAtPath(obj, path) {
+            return path.reduce((current, key) => {
+                if (current === null || current === undefined) return undefined;
+                return current[key];
+            }, obj);
+        }
+        
+        function startEdit(headerDiv, path, currentValue) {
+            // Don't start edit if already editing
+            if (headerDiv.querySelector('.edit-input')) {
+                return;
+            }
+            
+            const context = findEditableContext(path);
+            if (!context) {
+                console.warn('Could not determine edit context for path:', path);
+                return;
+            }
+            
+            const valueSpan = headerDiv.querySelector('span[data-path]');
+            if (!valueSpan) return;
+            
+            // Create input field
+            const input = document.createElement('input');
+            input.className = 'edit-input';
+            input.type = typeof currentValue === 'number' ? 'number' : 'text';
+            input.value = typeof currentValue === 'string' ? currentValue : JSON.stringify(currentValue);
+            
+            // Create action buttons
+            const actionsDiv = document.createElement('div');
+            actionsDiv.className = 'edit-actions';
+            
+            const saveBtn = document.createElement('button');
+            saveBtn.textContent = '✓';
+            saveBtn.className = 'edit-save';
+            saveBtn.title = 'Save (Enter)';
+            
+            const cancelBtn = document.createElement('button');
+            cancelBtn.textContent = '✗';
+            cancelBtn.className = 'edit-cancel';
+            cancelBtn.title = 'Cancel (Esc)';
+            
+            actionsDiv.appendChild(saveBtn);
+            actionsDiv.appendChild(cancelBtn);
+            
+            // Replace value span with input
+            const originalDisplay = valueSpan.style.display;
+            valueSpan.style.display = 'none';
+            valueSpan.parentNode.insertBefore(input, valueSpan.nextSibling);
+            valueSpan.parentNode.insertBefore(actionsDiv, input.nextSibling);
+            
+            // Focus input and select text
+            input.focus();
+            input.select();
+            
+            // Save function
+            const saveEdit = async () => {
+                const newValue = input.type === 'number' ? parseFloat(input.value) : 
+                                input.value.startsWith('{') || input.value.startsWith('[') ? 
+                                JSON.parse(input.value) : input.value;
+                
+                await commitEdit(context, path, newValue, headerDiv);
+                cleanupEdit();
+            };
+            
+            // Cancel function
+            const cancelEdit = () => {
+                cleanupEdit();
+            };
+            
+            // Cleanup function
+            const cleanupEdit = () => {
+                input.remove();
+                actionsDiv.remove();
+                valueSpan.style.display = originalDisplay;
+            };
+            
+            // Event handlers
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    saveEdit();
+                } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    cancelEdit();
+                }
+                e.stopPropagation();
+            });
+            
+            saveBtn.onclick = (e) => {
+                e.stopPropagation();
+                saveEdit();
+            };
+            
+            cancelBtn.onclick = (e) => {
+                e.stopPropagation();
+                cancelEdit();
+            };
+            
+            // Click outside to cancel
+            const clickOutsideHandler = (e) => {
+                if (!headerDiv.contains(e.target)) {
+                    cancelEdit();
+                    document.removeEventListener('click', clickOutsideHandler);
+                }
+            };
+            setTimeout(() => {
+                document.addEventListener('click', clickOutsideHandler);
+            }, 100);
+        }
+        
+        async function commitEdit(context, path, newValue, headerDiv) {
+            // Show status
+            const statusSpan = document.createElement('span');
+            statusSpan.className = 'edit-status';
+            statusSpan.textContent = 'Saving...';
+            headerDiv.appendChild(statusSpan);
+            
+            try {
+                let response;
+                const fieldName = path[path.length - 1];
+                
+                if (context.type === 'timeline_event') {
+                    // Update timeline event
+                    const updateData = {};
+                    
+                    // Handle nested payload fields
+                    if (path.includes('payload') && path.length > 2) {
+                        const payloadField = path[path.length - 1];
+                        updateData.payload = { [payloadField]: newValue };
+                    } else {
+                        updateData[fieldName] = newValue;
+                    }
+                    
+                    console.log('Updating timeline event:', context.eventId, updateData);
+                    
+                    const url = `/events/${context.eventId}`;
+                    response = await fetch(url, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(updateData)
+                    });
+                    
+                } else if (context.type === 'veil_facet') {
+                    // Update VEIL facet
+                    const updateData = {};
+                    
+                    // Handle nested properties fields
+                    if (path.includes('properties') && path.length > 2) {
+                        const propertyField = path[path.length - 1];
+                        updateData.properties = { [propertyField]: newValue };
+                    } else {
+                        updateData[fieldName] = newValue;
+                    }
+                    
+                    console.log('Updating VEIL facet:', context.spaceId, context.facetId, updateData);
+                    
+                    const url = `/veil/${context.spaceId}/facets/${context.facetId}`;
+                    response = await fetch(url, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(updateData)
+                    });
+                }
+                
+                if (response && response.ok) {
+                    const result = await response.json();
+                    console.log('Edit successful:', result);
+                    
+                    statusSpan.textContent = 'Saved ✓';
+                    statusSpan.className = 'edit-status edit-success';
+                    
+                    // Seamlessly fetch updated individual item instead of full refresh
+                    try {
+                        let itemEndpoint = null;
+                        let itemKey = null;
+                        
+                        if (context.type === 'veil_facet') {
+                            itemEndpoint = `/veil/${context.spaceId}/facets/${context.facetId}`;
+                            itemKey = context.facetId;
+                        } else if (context.type === 'timeline_event') {
+                            itemEndpoint = `/events/${context.eventId}`;
+                            itemKey = context.eventId;
+                        }
+                        
+                        if (itemEndpoint) {
+                            const freshResponse = await fetch(itemEndpoint);
+                            if (freshResponse.ok) {
+                                const freshItem = await freshResponse.json();
+                                
+                                // Update the specific item in currentData
+                                if (context.type === 'veil_facet' && currentData.facets) {
+                                    currentData.facets[itemKey] = freshItem.facet;
+                                } else if (context.type === 'timeline_event' && currentData.events) {
+                                    currentData.events[itemKey] = freshItem.event;
+                                }
+                                
+                                // Update just the specific expanded item in the UI
+                                await updateSpecificItem(context, freshItem);
+                            } else {
+                                throw new Error(`Individual item fetch failed: ${freshResponse.status}`);
+                            }
+                        } else {
+                            throw new Error('No individual endpoint available for this item type');
+                        }
+                    } catch (fetchError) {
+                        console.warn('Failed to fetch individual item after edit, falling back to full refresh:', fetchError);
+                        // Fallback to full refresh
+                        setTimeout(async () => {
+                            await refreshData();
+                        }, 500);
+                    }
+                    
+                    // Remove status indicator
+                    setTimeout(() => {
+                        statusSpan.remove();
+                    }, 1000);
+                    
+                } else {
+                    throw new Error(`HTTP ${response?.status}: ${response?.statusText || 'Unknown error'}`);
+                }
+                
+            } catch (error) {
+                console.error('Edit failed:', error);
+                statusSpan.textContent = `Error: ${error.message}`;
+                statusSpan.className = 'edit-status edit-error';
+                
+                // Remove error message after 3 seconds
+                setTimeout(() => {
+                    statusSpan.remove();
+                }, 3000);
+            }
+        }
+        
+        // Drill-down functionality for tree navigation
+        function isDrillableNode(path, value) {
+            const pathStr = path.join('.');
+            const key = path[path.length - 1];
+            
+            // 1. VEIL overview drill-down to space facets (from /veil endpoint)
+            if (currentEndpoint === '/veil' && pathStr.match(/^root\.spaces\.[^.]+$/) && typeof value === 'object' && Object.keys(value).length > 0) {
+                const spaceId = key; // The key is the space ID in this case
+                return { type: 'veil_facets', spaceId: spaceId };
+            }
+            
+            // 2. Individual timeline drill-down to timeline events (from timelines overview)
+            if (pathStr.match(/^root\.spaces\.[^.]+\.timelines\.[^.]+$/) && typeof value === 'object' && value.timeline_id) {
+                const timelineId = value.timeline_id;
+                const spaceId = getSpaceIdFromPath(path);
+                return { type: 'timeline_events', spaceId: spaceId, timelineId: timelineId };
+            }
+            
+            return null;
+        }
+        
+        async function drillDown(drillInfo, originalPath) {
+            // Push current state to navigation stack
+            pushNavigation();
+            
+            const statusEl = document.getElementById('status');
+            statusEl.style.display = 'inline';
+            statusEl.textContent = 'Loading drill-down data...';
+            
+            try {
+                let endpoint = '';
+                let title = '';
+                let breadcrumb = '';
+                
+                switch(drillInfo.type) {
+                    case 'timeline_events':
+                        endpoint = `/timelines/${drillInfo.spaceId}/${drillInfo.timelineId}`;
+                        title = `⏱️ Timeline Events: ${drillInfo.timelineId}`;
+                        breadcrumb = `Inspector → Timeline Events → ${drillInfo.spaceId} → ${drillInfo.timelineId}`;
+                        paginationState.currentBrowserType = 'timeline_events';
+                        break;
+                        
+                    case 'space_timelines':
+                        endpoint = `/timelines/${drillInfo.spaceId}`;
+                        title = `⏱️ Timeline Overview: ${drillInfo.spaceId}`;
+                        breadcrumb = `Inspector → Timelines → ${drillInfo.spaceId}`;
+                        paginationState.currentBrowserType = 'timeline_events';
+                        break;
+                        
+                    case 'all_timeline_events':
+                        endpoint = `/timelines`;
+                        title = `⏱️ All Timeline Events`;
+                        breadcrumb = `Inspector → Timeline Events → All Spaces`;
+                        paginationState.currentBrowserType = 'timeline_events';
+                        break;
+                        
+                    case 'veil_facets':
+                        endpoint = `/veil/${drillInfo.spaceId}/facets`;
+                        title = `🎭 VEIL Facets: ${drillInfo.spaceId}`;
+                        breadcrumb = `Inspector → VEIL Facets → ${drillInfo.spaceId}`;
+                        paginationState.currentBrowserType = 'veil_facets';
+                        break;
+                        
+                    case 'veil_facet_details':
+                        endpoint = `/veil/${drillInfo.spaceId}/facets/${drillInfo.facetId}`;
+                        title = `🎭 VEIL Facet Details: ${drillInfo.facetId}`;
+                        breadcrumb = `Inspector → VEIL Facets → ${drillInfo.spaceId} → ${drillInfo.facetId}`;
+                        paginationState.currentBrowserType = 'veil_facets';
+                        break;
+                        
+                    case 'space_elements':
+                        // For elements, we drill down to a filtered view of the spaces endpoint
+                        endpoint = `/spaces`;
+                        title = `🏗️ Space Elements: ${drillInfo.spaceId}`;
+                        breadcrumb = `Inspector → Elements → ${drillInfo.spaceId}`;
+                        paginationState.currentBrowserType = 'spaces_detailed';
+                        break;
+                        
+                    case 'agents_detailed':
+                        endpoint = `/agents`;
+                        title = `🤖 Agent Details`;
+                        breadcrumb = `Inspector → Agents → Detailed View`;
+                        paginationState.currentBrowserType = 'agents';
+                        break;
+                        
+                    default:
+                        throw new Error(`Unknown drill-down type: ${drillInfo.type}`);
+                }
+                
+                const response = await fetch(endpoint);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                
+                // Filter data if needed for specific drill-downs
+                if (drillInfo.type === 'space_elements' && data.spaces && drillInfo.spaceId) {
+                    // Filter to show only the specific space's elements
+                    const filteredData = {
+                        ...data,
+                        spaces: {
+                            [drillInfo.spaceId]: data.spaces[drillInfo.spaceId]
+                        }
+                    };
+                    currentData = filteredData;
+                } else {
+                    currentData = data;
+                }
+                
+                currentEndpoint = endpoint;
+                
+                // Update pagination state
+                paginationState.currentSpaceId = drillInfo.spaceId;
+                
+                // Update UI
+                updateBreadcrumb(breadcrumb);
+                document.getElementById('data-info').textContent = `${title} • ${formatBytes(JSON.stringify(currentData).length)}`;
+                
+                // Show the drilled-down data
+                showTreeView(currentData);
+                
+            } catch (error) {
+                console.error('Error during drill-down:', error);
+                alert(`Error loading drill-down data: ${error.message}`);
+                // Don't pop navigation on error, let user use back button
+            } finally {
+                statusEl.style.display = 'none';
+            }
+        }
+        
+        // Navigation via sidebar links - no keyboard handlers needed since we removed dropdown
+        
+        // Navigation helpers
+        function updateBreadcrumb(path) {
+            const breadcrumbEl = document.getElementById('breadcrumb');
+            breadcrumbEl.textContent = path;
+        }
+        
+        function pushNavigation(state) {
+            navigationStack.push({
+                data: currentData,
+                endpoint: currentEndpoint,
+                view: currentView,
+                breadcrumb: document.getElementById('breadcrumb').textContent
+            });
+            document.getElementById('backBtn').style.display = 'inline-block';
+        }
+        
+        function goBack() {
+            if (navigationStack.length === 0) return;
+            
+            const previousState = navigationStack.pop();
+            currentData = previousState.data;
+            currentEndpoint = previousState.endpoint;
+            currentView = previousState.view;
+            
+            // Update UI to reflect previous state
+            updateBreadcrumb(previousState.breadcrumb);
+            document.getElementById('data-info').textContent = `${previousState.endpoint} • ${formatBytes(JSON.stringify(currentData).length)}`;
+            
+            // Update view toggle button
+            const toggleBtn = document.getElementById('viewToggle');
+            toggleBtn.textContent = currentView === 'tree' ? 'JSONCrack View' : 'Tree View';
+            
+            // Show the previous data
+            if (currentView === 'tree') {
+                showTreeView(currentData);
+            } else {
+                initializeJsonCrack(currentData);
+            }
+            
+            // Hide back button if no more history
+            if (navigationStack.length === 0) {
+                document.getElementById('backBtn').style.display = 'none';
+            }
+        }
+        
+        // Space browser functionality for interactive data exploration
+        async function showSpaceBrowser(browserType) {
+            const contentEl = document.getElementById('content');
+            const toolbar = document.getElementById('toolbar');
+            
+            try {
+                // First load the spaces overview to get available spaces
+                const spacesResponse = await fetch('/spaces');
+                if (!spacesResponse.ok) {
+                    throw new Error('Failed to load spaces data');
+                }
+                
+                const spacesData = await spacesResponse.json();
+                const spaces = spacesData.spaces || {};
+                
+                // Show toolbar for consistent UI
+                toolbar.style.display = 'flex';
+                updateBreadcrumb('Inspector → Space Browser');
+                document.getElementById('data-info').textContent = `${browserType} Browser • Select a space to explore`;
+                
+                // Create the browser interface
+                let browserTitle = '';
+                let browserDescription = '';
+                
+                switch(browserType) {
+                    case 'spaces_detailed':
+                        browserTitle = '📊 Space Details Browser';
+                        browserDescription = 'Explore detailed information about spaces, elements, and components';
+                        break;
+                    case 'timeline_events':
+                        browserTitle = '⏱️ Timeline Events Browser';
+                        browserDescription = 'Browse timeline events with pagination and filtering';
+                        break;
+                    case 'veil_facets':
+                        browserTitle = '🎭 VEIL Facets Browser';
+                        browserDescription = 'Explore VEIL facets with detailed metadata';
+                        break;
+                }
+                
+                contentEl.innerHTML = `
+                    <div style="padding: 2rem; background: #0f3460; height: 100%; overflow-y: auto;">
+                        <div style="text-align: center; margin-bottom: 2rem;">
+                            <h2 style="color: #00d4aa; margin-bottom: 0.5rem;">${browserTitle}</h2>
+                            <p style="color: #999; font-size: 0.9rem; margin-bottom: 2rem;">${browserDescription}</p>
+                        </div>
+                        
+                        <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1rem;">
+                            ${Object.keys(spaces).map(spaceId => {
+                                const space = spaces[spaceId];
+                                const elementCount = space.elements ? Object.keys(space.elements).length : 0;
+                                const spaceType = space.space_type || 'Unknown';
+                                
+                                return `
+                                    <div class="space-card" onclick="loadSpaceData('${spaceId}', '${browserType}')" 
+                                         style="background: #16213e; border: 1px solid #555; border-radius: 8px; padding: 1.5rem; cursor: pointer; transition: all 0.2s;">
+                                        <h3 style="color: #74b9ff; margin: 0 0 0.5rem 0; font-size: 1.1rem;">${spaceId}</h3>
+                                        <div style="color: #999; font-size: 0.85rem; margin-bottom: 1rem;">
+                                            <div>Type: <span style="color: #eee;">${spaceType}</span></div>
+                                            <div>Elements: <span style="color: #eee;">${elementCount}</span></div>
+                                        </div>
+                                        <div style="color: #00d4aa; font-size: 0.8rem; font-weight: 600;">Click to explore →</div>
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                        
+                        ${Object.keys(spaces).length === 0 ? 
+                            '<div style="text-align: center; color: #999; margin-top: 2rem; font-style: italic;">No spaces available</div>' : 
+                            ''}
+                    </div>
+                `;
+                
+                // Add hover effects with CSS
+                const style = document.createElement('style');
+                style.textContent = `
+                    .space-card:hover {
+                        border-color: #00d4aa !important;
+                        background: #1a2f4a !important;
+                        transform: translateY(-2px) !important;
+                        box-shadow: 0 4px 12px rgba(0, 212, 170, 0.15) !important;
+                    }
+                `;
+                document.head.appendChild(style);
+                
+            } catch (error) {
+                console.error('Error loading space browser:', error);
+                contentEl.innerHTML = `
+                    <div class="error">
+                        <strong>Error loading space browser:</strong><br>
+                        ${escapeHtml(error.message)}
+                    </div>
+                `;
+                toolbar.style.display = 'none';
+            }
+        }
+        
+        async function loadSpaceData(spaceId, browserType) {
+            const contentEl = document.getElementById('content');
+            const statusEl = document.getElementById('status');
+            
+            // Push current state to navigation stack
+            pushNavigation();
+            
+            statusEl.style.display = 'inline';
+            statusEl.textContent = 'Loading space data...';
+            
+            try {
+                let endpoint = '';
+                let title = '';
+                
+                switch(browserType) {
+                    case 'spaces_detailed':
+                        // Load detailed space information (this would be from the spaces endpoint but filtered)
+                        endpoint = `/spaces`;
+                        title = `📊 Space Details: ${spaceId}`;
+                        break;
+                    case 'timeline_events':
+                        // Load timeline events for this space with pagination
+                        endpoint = `/timelines/${spaceId}`;
+                        title = `⏱️ Timeline Events: ${spaceId}`;
+                        break;
+                    case 'veil_facets':
+                        // Load VEIL facets for this space
+                        endpoint = `/veil/${spaceId}/facets`;
+                        title = `🎭 VEIL Facets: ${spaceId}`;
+                        break;
+                }
+                
+                const response = await fetch(endpoint);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                
+                // If we're browsing spaces_detailed, filter to just the selected space
+                if (browserType === 'spaces_detailed' && data.spaces) {
+                    const filteredData = {
+                        ...data,
+                        spaces: {
+                            [spaceId]: data.spaces[spaceId]
+                        }
+                    };
+                    currentData = filteredData;
+                } else {
+                    currentData = data;
+                }
+                
+                currentEndpoint = endpoint;
+                
+                // Update pagination state
+                paginationState.currentSpaceId = spaceId;
+                paginationState.currentBrowserType = browserType;
+                
+                // Update breadcrumb for the specific space view
+                updateBreadcrumb(`Inspector → Space Browser → ${spaceId}`);
+                document.getElementById('data-info').textContent = `${title} • ${formatBytes(JSON.stringify(currentData).length)}`;
+                
+                // Show the tree view with the space data
+                showTreeView(currentData);
+                
+            } catch (error) {
+                console.error('Error loading space data:', error);
+                contentEl.innerHTML = `
+                    <div class="error">
+                        <strong>Error loading ${browserType} for space "${spaceId}":</strong><br>
+                        ${escapeHtml(error.message)}
+                    </div>
+                `;
+            } finally {
+                statusEl.style.display = 'none';
+            }
+        }
+        
+        // Auto-load functionality (currently disabled)
+        window.addEventListener('load', function() {
+            // Optional: Auto-load status endpoint for demonstration
+            // loadEndpoint('/status');
+        });
+    </script>
+</body>
+</html>
