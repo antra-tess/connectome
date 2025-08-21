@@ -53,6 +53,9 @@ class BaseAgentLoopComponent(Component):
     """
     COMPONENT_TYPE = "AgentLoopComponent"
 
+    # Cooperative cancellation for preemption
+    _cancel_requested: bool = False
+
     # Events this component reacts to
     HANDLED_EVENT_TYPES = [
         "activation_call",  # Signals that the agent should consider running a cycle
@@ -75,6 +78,9 @@ class BaseAgentLoopComponent(Component):
 
         # NEW: Registry mapping short prefixes to full element IDs
         self._prefix_to_element_id_registry: Dict[str, str] = {}
+
+        # NEW: Cooperative cancellation confirmation event
+        self._cancel_event: asyncio.Event = asyncio.Event()
 
         # Convenience accessors, assuming parent_inner_space is correctly typed and populated
         self._llm_provider: Optional['LLMProvider'] = self.parent_inner_space._llm_provider
@@ -161,6 +167,16 @@ class BaseAgentLoopComponent(Component):
 
             if focus_element_id:
                 logger.info(f"[{self.agent_loop_name}] Activation with focused context on element: {focus_element_id}")
+
+                # Attempt to get a cached HUD snapshot for this focus (optional)
+                hud = self._get_hud()
+                if hud and hasattr(hud, 'get_snapshot'):
+                    snapshot = hud.get_snapshot(focus_element_id, max_age_ms=5000, generate_if_missing=False)
+                    if not snapshot and hasattr(hud, 'refresh_snapshot'):
+                        try:
+                            await hud.refresh_snapshot(focus_element_id)
+                        except Exception:
+                            pass
 
             # Run the actual agent cycle with focus context
             await self.trigger_cycle(focus_context=focus_context)
@@ -878,3 +894,45 @@ class BaseAgentLoopComponent(Component):
 
         except Exception as e:
             logger.error(f"Error persisting agent response to timeline: {e}", exc_info=True)
+
+    async def _emit_stream_lifecycle_event(self, event_type: str, payload: Dict[str, Any]) -> None:
+        """Emit agent response streaming lifecycle events to the parent space timeline."""
+        try:
+            timeline_context = {"timeline_id": self.parent_inner_space.get_primary_timeline()}
+            envelope = {
+                "event_type": event_type,
+                "target_element_id": self.parent_inner_space.id,
+                "is_replayable": True if event_type in ("agent_response_started", "agent_response_finalized") else False,
+                "payload": payload,
+            }
+            # If interruption, set confirmation event
+            if event_type == "agent_response_interrupted":
+                try:
+                    self._cancel_event.set()
+                except Exception:
+                    pass
+            self.parent_inner_space.receive_event(envelope, timeline_context)
+        except Exception as e:
+            logger.error(f"Error emitting stream lifecycle event '{event_type}': {e}", exc_info=True)
+
+    def get_cancel_event(self) -> asyncio.Event:
+        return self._cancel_event
+
+    def reset_cancel_event(self) -> None:
+        try:
+            self._cancel_event = asyncio.Event()
+        except Exception:
+            pass
+
+    def request_cancel(self) -> None:
+        """Signal cooperative cancellation to interrupt current cycle/stream."""
+        try:
+            self._cancel_requested = True
+        except Exception:
+            pass
+
+    def _reset_cancel(self) -> None:
+        self._cancel_requested = False
+
+    def _is_cancelled(self) -> bool:
+        return bool(getattr(self, '_cancel_requested', False))

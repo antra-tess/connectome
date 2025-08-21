@@ -13,6 +13,7 @@ import json
 import re
 from typing import Dict, Any, Optional, List, Union
 from dataclasses import dataclass
+import time
 
 from elements.component_registry import register_component
 from .base_agent_loop_component import BaseAgentLoopComponent
@@ -78,6 +79,16 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
         if not compression_engine:
             logger.warning(f"{self.agent_loop_name} ({self.id}): CompressionEngine not available. Proceeding without memory.")
 
+        # Streaming lifecycle: mark start
+        try:
+            await self._emit_stream_lifecycle_event("agent_response_started", {
+                "response_id": f"resp_{int(time.time()*1000)}",
+                "loop_component_id": self.id,
+                "timestamp": time.time()
+            })
+        except Exception:
+            pass
+
         try:
             # 1. Aggregate tools and build element name mapping
             aggregated_tools = await self.aggregate_tools()
@@ -94,10 +105,32 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
                 'render_style': 'chronological_flat',
                 'tool_rendering_mode': 'full'  # Use full mode for text parsing
             }
-            context_data = await hud.get_agent_context_via_compression_engine(
-                options=pipeline_options,
-                tools=enhanced_tools_from_veil
-            )
+            context_data = None
+            # Prefer HUD snapshot if focus provided
+            try:
+                focus_element_id = (focus_context or {}).get('focus_element_id') if isinstance(focus_context, dict) else None
+                if focus_element_id and hasattr(hud, 'get_snapshot'):
+                    snap = hud.get_snapshot(focus_element_id, max_age_ms=5000, generate_if_missing=False)
+                    if not snap and hasattr(hud, 'refresh_snapshot'):
+                        try:
+                            await hud.refresh_snapshot(focus_element_id)
+                            snap = hud.get_snapshot(focus_element_id, max_age_ms=5000, generate_if_missing=False)
+                        except Exception:
+                            pass
+                    # Unwrap snapshot wrapper to messages if present
+                    if isinstance(snap, dict) and 'messages' in snap:
+                        context_data = snap.get('messages')
+                    elif snap is not None:
+                        context_data = snap
+            except Exception:
+                pass
+
+            # Fallback to live rendering if no snapshot available
+            if context_data is None:
+                context_data = await hud.get_agent_context_via_compression_engine(
+                    options=pipeline_options,
+                    tools=enhanced_tools_from_veil
+                )
             logger.info(f"Using full tool rendering mode for ultra-concise XML text parsing")
 
             if not context_data:
@@ -130,7 +163,11 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
             # 3. Send rendered context to LLM (no separate tool definitions - they're in the context)
             # NOTE: We don't pass tools parameter to LLM since they're already rendered in the context
             # Metadata now travels with LLMMessage objects, no need for original_context_data
+            if self._is_cancelled():
+                raise Exception("Agent loop preempted before LLM call")
             llm_response_obj = llm_provider.complete(messages=messages, tools=[])
+            if self._is_cancelled():
+                raise Exception("Agent loop preempted after LLM call")
 
             if not llm_response_obj:
                 logger.warning(f"{self.agent_loop_name} ({self.id}): LLM returned no response. Aborting cycle.")
@@ -138,6 +175,18 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
 
             agent_response_text = llm_response_obj.content or ""
             logger.info(f"LLM response: {len(agent_response_text)} chars")
+
+            # Emit finalization lifecycle event
+            try:
+                await self._emit_stream_lifecycle_event("agent_response_finalized", {
+                    "response_id": f"resp_{int(time.time()*1000)}",
+                    "final_text": agent_response_text,
+                    "total_chars": len(agent_response_text),
+                    "loop_component_id": self.id,
+                    "timestamp": time.time()
+                })
+            except Exception:
+                pass
 
             # 4. Parse tool calls from text response
             parsed_tool_calls = self._parse_tool_calls_from_response(agent_response_text)
@@ -171,6 +220,20 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
             if non_tool_text.strip() and focus_context:
                 await self._send_conversational_response(non_tool_text, focus_context)
         except Exception as e:
+            # Emit interruption lifecycle if cancellation was requested
+            if self._is_cancelled():
+                try:
+                    await self._emit_stream_lifecycle_event("agent_response_interrupted", {
+                        "response_id": f"resp_{int(time.time()*1000)}",
+                        "final_text": "",
+                        "total_chars": 0,
+                        "interrupted_by_event_id": None,
+                        "loop_component_id": self.id,
+                        "timestamp": time.time()
+                    })
+                except Exception:
+                    pass
+                self._reset_cancel()
             logger.error(f"{self.agent_loop_name} ({self.id}): Error during text-parsing cycle: {e}", exc_info=True)
         finally:
             logger.info(f"{self.agent_loop_name} ({self.id}): Text-parsing cycle completed.")

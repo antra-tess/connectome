@@ -110,10 +110,27 @@ class MessageListComponent(Component):
 
             if veil_producer:
                 veil_producer.emit_delta()
+                # Post-refactor: Activation is handled by Decider; do not emit here
 
-                if activation_reason and not is_replay_mode:
-                    self._emit_activation_call(activation_reason, event_type, actual_content_payload)
-                    veil_producer.emit_delta()
+            # Emit component_processed ack for decider post-processing
+            try:
+                parent_space = self.owner.get_parent_object() if hasattr(self.owner, 'get_parent_object') else None
+                if parent_space and hasattr(parent_space, 'receive_event'):
+                    ack_event = {
+                        "event_type": "component_processed",
+                        "is_replayable": False,
+                        "payload": {
+                            "original_event_id": event_node.get('id'),
+                            "element_id": self.owner.id,
+                            "component_id": self.id,
+                            "handled": True,
+                            "timestamp": time.time()
+                        }
+                    }
+                    timeline_context_for_ack = {"timeline_id": parent_space.get_primary_timeline() if hasattr(parent_space, 'get_primary_timeline') else None}
+                    parent_space.receive_event(ack_event, timeline_context_for_ack)
+            except Exception as e:
+                logger.debug(f"[{self.owner.id}] Failed to emit component_processed ack: {e}")
 
             return True
 
@@ -157,6 +174,7 @@ class MessageListComponent(Component):
 
         return activation_reason
 
+    # Post-refactor: Activation emission removed; Decider handles activation
     def _emit_activation_call(self, reason: str, triggering_event_type: str, triggering_payload: Dict[str, Any]) -> None:
         """
         Enhanced to signal focus change to VeilProducer for historical focus tracking.
@@ -219,14 +237,8 @@ class MessageListComponent(Component):
             }
         }
 
-        # Use basic timeline context (let parent space handle specifics)
-        timeline_context = {"timeline_id": self.owner.get_parent_object().get_primary_timeline()}  # Default timeline
-
-        try:
-            parent_space.receive_event(activation_event, timeline_context)
-            logger.info(f"[{self.owner.id}] Emitted focused activation_call event to parent space. Reason: {reason}, Focus: {self.owner.id}")
-        except Exception as e:
-            logger.error(f"[{self.owner.id}] Error emitting activation_call event: {e}", exc_info=True)
+        # Post-refactor: Do not emit activation events here.
+        return
 
     def _handle_new_message(self, message_content: Dict[str, Any]) -> bool:
         """Adds a new message to the list. message_content is the actual message data (e.g., adapter_data)."""
@@ -989,9 +1001,7 @@ class MessageListComponent(Component):
 
             logger.error(f"[{self.owner.id}] Agent message failed to send (req_id: {internal_req_id}). Error: {error_msg}")
 
-            # NEW: Trigger agent activation for message send failure
-            # This allows the agent to respond to the failure, potentially retry, or take alternative action
-            self._emit_send_failure_activation_call(message_to_update, failure_content)
+            # Post-refactor: Decider handles activation decisions for send failures
 
             return True
         else:
@@ -1179,6 +1189,7 @@ class MessageListComponent(Component):
 
         return True
 
+    # Post-refactor: Activation emission removed; Decider handles send-failure activation
     def _emit_send_failure_activation_call(self, failed_message: MessageType, failure_content: Dict[str, Any]) -> None:
         """
         Emits an "activation_call" event when an agent's message fails to send.
@@ -1257,11 +1268,7 @@ class MessageListComponent(Component):
         # Use basic timeline context (let parent space handle specifics)
         timeline_context = {"timeline_id": parent_space.get_primary_timeline() if hasattr(parent_space, 'get_primary_timeline') else None}
 
-        try:
-            parent_space.receive_event(activation_event, timeline_context)
-            logger.warning(f"[{self.owner.id}] Emitted activation_call for message send failure. Reason: message_send_failed, Error: {failure_content.get('error_message', 'Unknown')}")
-        except Exception as e:
-            logger.error(f"[{self.owner.id}] Error emitting send failure activation: {e}", exc_info=True)
+        return
 
     # # --- NEW: Methods for immediate local state updates (called by tools before external confirmation) ---
     # def mark_message_pending_delete(self, external_message_id: str, requesting_agent_id: str) -> bool:
