@@ -447,6 +447,15 @@
             color: #74b9ff;
         }
         
+        .console-line.example {
+            color: #00b894;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            background: rgba(0, 184, 148, 0.1);
+            padding: 2px 6px;
+            border-radius: 3px;
+            margin: 1px 0;
+        }
+        
         .console-actions {
             display: flex;
             gap: 0.5rem;
@@ -581,6 +590,9 @@
                 <div class="console-output" id="console-output">
                     <div class="console-line info">Connectome Interactive Console</div>
                     <div class="console-line info">Initializing REPL session...</div>
+                    <div class="console-line info">Quick start example:</div>
+                    <div class="console-line example">import inspect</div>
+                    <div class="console-line example">print(inspect.getmembers(host))</div>
                 </div>
                 
                 <div class="console-input-container">
@@ -2375,6 +2387,10 @@
                     addConsoleMessage('info', `Session ID: ${consoleSession.sessionId}`);
                     addConsoleMessage('info', `Available variables: ${result.session.namespace_keys.length} items`);
                     addConsoleMessage('info', 'Type Python code and press Enter to execute. Use Shift+Enter for multi-line input.');
+                    addConsoleMessage('info', '');
+                    addConsoleMessage('info', 'Quick start example:');
+                    addConsoleMessage('example', 'import inspect');
+                    addConsoleMessage('example', 'print(inspect.getmembers(str))');
                     
                     // Update prompt
                     document.getElementById('console-prompt').textContent = '>>>';
