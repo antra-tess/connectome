@@ -55,6 +55,7 @@ class InspectorServer:
         # Add routes
         app.router.add_get('/', self.handle_root)
         app.router.add_get('/ui/', self.handle_ui)
+        app.router.add_get('/favicon.png', self.handle_favicon)
         app.router.add_get('/status', self.handle_status)
         app.router.add_get('/spaces', self.handle_spaces)
         app.router.add_get('/agents', self.handle_agents)
@@ -193,6 +194,32 @@ class InspectorServer:
                 text=f"<html><body><h1>Error loading UI</h1><p>{str(e)}</p></body></html>",
                 content_type='text/html',
                 status=500
+            )
+    
+    async def handle_favicon(self, request: Request) -> Response:
+        """Handle favicon.png endpoint."""
+        import os
+        try:
+            # Get the path to the favicon file in the same directory as this module
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            favicon_path = os.path.join(current_dir, 'favicon.png')
+            
+            with open(favicon_path, 'rb') as f:
+                favicon_content = f.read()
+            
+            return web.Response(
+                body=favicon_content,
+                content_type='image/png',
+                headers={
+                    'Access-Control-Allow-Origin': '*',
+                    'Cache-Control': 'public, max-age=86400'  # Cache for 1 day
+                }
+            )
+        except Exception as e:
+            logger.error(f"Error serving favicon: {e}", exc_info=True)
+            return web.Response(
+                text="Favicon not found",
+                status=404
             )
     
     async def handle_status(self, request: Request) -> Response:
