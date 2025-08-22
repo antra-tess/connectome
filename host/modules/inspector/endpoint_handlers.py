@@ -66,7 +66,9 @@ class InspectorEndpointHandlers:
                 "PUT/PATCH /veil/{space_id}/facets/{facet_id}": "Update VEIL facet",
                 "/repl/sessions": "List active REPL sessions",
                 "POST /repl/sessions": "Create new REPL session",
-                "POST /repl/execute": "Execute code in REPL session"
+                "POST /repl/execute": "Execute code in REPL session",
+                "POST /repl/complete": "Get code completions for REPL session",
+                "POST /repl/inspect": "Inspect object in REPL session"
             }
         }
         return api_info
@@ -495,6 +497,8 @@ class InspectorEndpointHandlers:
                 "output": result["output"],
                 "error": result["error"],
                 "execution_time_ms": result["execution_time_ms"],
+                "execution_count": result.get("execution_count", 0),
+                "rich_output": result.get("rich_output", []),
                 "namespace_changes": result["namespace_changes"],
                 "session_id": session_id,
                 "timestamp": time.time()
@@ -504,6 +508,72 @@ class InspectorEndpointHandlers:
             logger.error(f"Error executing REPL code: {e}", exc_info=True)
             return {
                 "error": "Failed to execute REPL code",
+                "details": str(e),
+                "timestamp": time.time()
+            }
+    
+    async def handle_repl_complete(self, session_id: str, code: str, cursor_pos: int) -> Dict[str, Any]:
+        """Handle REPL code completion endpoint."""
+        self.request_count += 1
+        
+        try:
+            if not session_id or code is None:
+                return {
+                    "error": "session_id and code are required",
+                    "timestamp": time.time()
+                }
+            
+            # Get completions for the specified session
+            result = self.data_collector.repl_manager.get_completions(
+                session_id, code, cursor_pos
+            )
+            
+            return {
+                "success": "error" not in result,
+                "completions": result.get("completions", []),
+                "cursor_start": result.get("cursor_start", cursor_pos),
+                "cursor_end": result.get("cursor_end", cursor_pos),
+                "metadata": result.get("metadata", {}),
+                "error": result.get("error", ""),
+                "session_id": session_id,
+                "timestamp": time.time()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting REPL completions: {e}", exc_info=True)
+            return {
+                "error": "Failed to get REPL completions",
+                "details": str(e),
+                "timestamp": time.time()
+            }
+    
+    async def handle_repl_inspect(self, session_id: str, obj_name: str) -> Dict[str, Any]:
+        """Handle REPL object inspection endpoint."""
+        self.request_count += 1
+        
+        try:
+            if not session_id or not obj_name:
+                return {
+                    "error": "session_id and obj_name are required",
+                    "timestamp": time.time()
+                }
+            
+            # Inspect object in the specified session
+            result = self.data_collector.repl_manager.inspect_object(
+                session_id, obj_name
+            )
+            
+            return {
+                "success": "error" not in result,
+                "inspection": result,
+                "session_id": session_id,
+                "timestamp": time.time()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error inspecting REPL object: {e}", exc_info=True)
+            return {
+                "error": "Failed to inspect REPL object",
                 "details": str(e),
                 "timestamp": time.time()
             }

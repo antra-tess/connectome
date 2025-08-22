@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 
-from .repl_executor import SafeREPLExecutor
+from .repl_executor import IPythonREPLExecutor
 
 
 class REPLContextManager:
@@ -40,8 +40,8 @@ class REPLContextManager:
         # Keep weak reference to host to avoid circular references
         self._host_ref = weakref.ref(host_instance) if host_instance else None
         
-        # Initialize REPL executor for code execution
-        self.executor = SafeREPLExecutor()
+        # Initialize IPython REPL executor for code execution
+        self.executor = IPythonREPLExecutor()
     
     def create_context(self, context_type: str, context_id: str, target_object: Any = None) -> Dict[str, Any]:
         """
@@ -63,6 +63,7 @@ class REPLContextManager:
             'type': context_type,
             'context_id': context_id,
             'namespace': {},
+            'ipython_shell': None,  # New: IPython shell instance
             'history': [],
             'created_at': datetime.now().isoformat(),
             'last_accessed': datetime.now().isoformat(),
@@ -75,6 +76,9 @@ class REPLContextManager:
         
         # Build namespace based on context type
         session['namespace'] = self._build_namespace(context_type, context_id, target_object)
+        
+        # Create IPython shell instance for this session
+        session['ipython_shell'] = self.executor.create_shell(session['namespace'])
         
         # Store session
         self.sessions[session_id] = session
@@ -259,19 +263,28 @@ class REPLContextManager:
                 'error': f'Session "{session_id}" not found',
                 'success': False,
                 'execution_time_ms': 0,
+                'execution_count': 0,
+                'rich_output': [],
                 'namespace_changes': []
             }
         
-        # Get namespace before execution
+        # Get IPython shell and namespace before execution
+        shell = session['ipython_shell']
         namespace = session['namespace']
         keys_before = set(namespace.keys())
         
-        # Execute code using the REPL executor
-        result = self.executor.execute(code, namespace, timeout)
+        # Execute code using IPython executor with session shell
+        result = self.executor.execute(code, namespace, timeout, shell_instance=shell)
         
-        # Detect namespace changes
-        keys_after = set(namespace.keys())
-        new_variables = keys_after - keys_before
+        # Detect namespace changes (IPython shell user_ns)
+        if shell:
+            keys_after = set(shell.user_ns.keys())
+            new_variables = keys_after - keys_before
+            # Update session namespace with new variables
+            session['namespace'].update({k: shell.user_ns[k] for k in new_variables})
+        else:
+            keys_after = set(namespace.keys())
+            new_variables = keys_after - keys_before
         
         # Add namespace changes to result
         result['namespace_changes'] = sorted(list(new_variables))
@@ -284,6 +297,8 @@ class REPLContextManager:
             'error': result['error'],
             'success': result['success'],
             'execution_time_ms': result['execution_time_ms'],
+            'execution_count': result.get('execution_count', 0),
+            'rich_output': result.get('rich_output', []),
             'namespace_changes': result['namespace_changes']
         }
         session['history'].append(history_entry)
@@ -292,6 +307,73 @@ class REPLContextManager:
         session['last_accessed'] = datetime.now().isoformat()
         
         return result
+    
+    def get_completions(self, session_id: str, code: str, cursor_pos: int) -> Dict[str, Any]:
+        """
+        Get tab completions for code at cursor position in a specific session.
+        
+        Args:
+            session_id: Session identifier
+            code: Code string to get completions for
+            cursor_pos: Cursor position in the code
+            
+        Returns:
+            Dict with completions list and metadata
+        """
+        session = self.sessions.get(session_id)
+        if not session:
+            return {
+                'completions': [],
+                'error': f'Session "{session_id}" not found'
+            }
+            
+        try:
+            shell = session['ipython_shell']
+            completions = self.executor.get_completions(code, cursor_pos, shell)
+            
+            return {
+                'completions': completions,
+                'cursor_start': cursor_pos,
+                'cursor_end': cursor_pos,
+                'metadata': {
+                    'session_id': session_id,
+                    'code_length': len(code)
+                }
+            }
+            
+        except Exception as e:
+            return {
+                'completions': [],
+                'error': f'Error getting completions: {str(e)}'
+            }
+    
+    def inspect_object(self, session_id: str, obj_name: str) -> Dict[str, Any]:
+        """
+        Get detailed information about an object in a specific session.
+        
+        Args:
+            session_id: Session identifier
+            obj_name: Name of object to inspect
+            
+        Returns:
+            Dict with object information
+        """
+        session = self.sessions.get(session_id)
+        if not session:
+            return {'error': f'Session "{session_id}" not found'}
+            
+        try:
+            shell = session['ipython_shell']
+            inspection_result = self.executor.inspect_object(obj_name, shell)
+            
+            # Add session context
+            inspection_result['session_id'] = session_id
+            inspection_result['session_type'] = session['type']
+            
+            return inspection_result
+            
+        except Exception as e:
+            return {'error': f'Error inspecting object: {str(e)}'}
     
     def cleanup_dead_sessions(self) -> int:
         """

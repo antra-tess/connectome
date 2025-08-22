@@ -456,6 +456,60 @@
             margin: 1px 0;
         }
         
+        .console-line.rich-output {
+            margin: 4px 0;
+            padding: 4px;
+            border: 1px solid #0f3460;
+            border-radius: 4px;
+            background: rgba(15, 52, 96, 0.2);
+        }
+        
+        .console-line.rich-output pre {
+            margin: 0;
+            font-size: 0.9em;
+            overflow-x: auto;
+        }
+        
+        .console-line.rich-output img {
+            display: block;
+            margin: 4px 0;
+            border-radius: 4px;
+        }
+        
+        /* Tab completion dropdown styles */
+        .completion-dropdown {
+            background: #16213e;
+            border: 1px solid #00d4aa;
+            border-radius: 4px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            z-index: 1000;
+            max-height: 200px;
+            overflow-y: auto;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 0.9rem;
+        }
+        
+        .completion-item {
+            padding: 6px 12px;
+            cursor: pointer;
+            border-bottom: 1px solid #0f3460;
+            color: #eee;
+        }
+        
+        .completion-item:last-child {
+            border-bottom: none;
+        }
+        
+        .completion-item:hover,
+        .completion-item.selected {
+            background: #00d4aa;
+            color: #1a1a2e;
+        }
+        
+        .completion-item.selected {
+            font-weight: 600;
+        }
+        
         .console-actions {
             display: flex;
             gap: 0.5rem;
@@ -2386,8 +2440,14 @@
                     addConsoleMessage('success', '✓ REPL session established');
                     addConsoleMessage('info', `Session ID: ${consoleSession.sessionId}`);
                     addConsoleMessage('info', `Available variables: ${result.session.namespace_keys.length} items`);
+                    addConsoleMessage('info', 'IPython-powered REPL with magic commands and rich output support.');
                     addConsoleMessage('info', 'Type Python code and press Enter to execute. Use Shift+Enter for multi-line input.');
-                    addConsoleMessage('info', 'Use ↑/↓ arrow keys to browse command history.');
+                    addConsoleMessage('info', 'Use ↑/↓ for history, Tab for completions, Ctrl+I or double-click for inspection.');
+                    addConsoleMessage('info', '');
+                    addConsoleMessage('info', 'Connectome magic commands:');
+                    addConsoleMessage('example', '%cstatus  - Show system status');
+                    addConsoleMessage('example', '%cspaces  - List spaces');
+                    addConsoleMessage('example', '%cagents  - List agents');
                     addConsoleMessage('info', '');
                     addConsoleMessage('info', 'Quick start example:');
                     addConsoleMessage('example', 'import inspect');
@@ -2454,7 +2514,14 @@
                     throw new Error(`${result.error}`);
                 }
                 
-                // Show output
+                // Show rich output first (HTML, images, etc.)
+                if (result.rich_output && result.rich_output.length > 0) {
+                    result.rich_output.forEach(richOutput => {
+                        displayRichOutput(richOutput);
+                    });
+                }
+                
+                // Show regular output
                 if (result.output && result.output.trim()) {
                     addConsoleMessage('output', result.output.trim());
                 }
@@ -2462,6 +2529,12 @@
                 // Show errors (execution errors, not HTTP errors)
                 if (result.error && result.error.trim() && result.success === false) {
                     addConsoleMessage('error', result.error.trim());
+                }
+                
+                // Show execution count and timing info
+                if (result.execution_count) {
+                    const timing = result.execution_time_ms ? ` (${result.execution_time_ms}ms)` : '';
+                    addConsoleMessage('info', `# Execution [${result.execution_count}]${timing}`);
                 }
                 
                 // Show new variables
@@ -2477,6 +2550,281 @@
                 
             } catch (error) {
                 addConsoleMessage('error', `Execution error: ${error.message}`);
+            }
+        }
+        
+        // Display rich output (HTML, images, JSON, etc.)
+        function displayRichOutput(richOutput) {
+            const output = document.getElementById('console-output');
+            const richLine = document.createElement('div');
+            richLine.className = 'console-line rich-output';
+            
+            if (richOutput.data) {
+                if (richOutput.data.html) {
+                    // HTML output
+                    richLine.innerHTML = richOutput.data.html;
+                } else if (richOutput.data.image_png) {
+                    // PNG image
+                    const img = document.createElement('img');
+                    img.src = 'data:image/png;base64,' + richOutput.data.image_png;
+                    img.style.maxWidth = '100%';
+                    richLine.appendChild(img);
+                } else if (richOutput.data.json) {
+                    // JSON data
+                    const pre = document.createElement('pre');
+                    pre.textContent = JSON.stringify(richOutput.data.json, null, 2);
+                    pre.style.background = '#2a2a2a';
+                    pre.style.padding = '0.5rem';
+                    pre.style.borderRadius = '4px';
+                    richLine.appendChild(pre);
+                } else if (richOutput.data.text) {
+                    // Plain text with formatting
+                    const pre = document.createElement('pre');
+                    pre.textContent = richOutput.data.text;
+                    richLine.appendChild(pre);
+                } else {
+                    // Fallback: display raw data
+                    richLine.textContent = JSON.stringify(richOutput.data);
+                }
+            }
+            
+            output.appendChild(richLine);
+            output.scrollTop = output.scrollHeight;
+        }
+        
+        // Get tab completions
+        async function getCompletions(code, cursorPos) {
+            if (!consoleSession.isConnected || !consoleSession.sessionId) {
+                return [];
+            }
+            
+            try {
+                const response = await fetch('/repl/complete', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        session_id: consoleSession.sessionId,
+                        code: code,
+                        cursor_pos: cursorPos
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success && result.completions) {
+                    return result.completions;
+                }
+                
+                return [];
+                
+            } catch (error) {
+                console.error('Error getting completions:', error);
+                return [];
+            }
+        }
+        
+        // Inspect object
+        async function inspectObject(objName) {
+            if (!consoleSession.isConnected || !consoleSession.sessionId) {
+                addConsoleMessage('error', 'Not connected to REPL session');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/repl/inspect', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        session_id: consoleSession.sessionId,
+                        obj_name: objName
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success && result.inspection) {
+                    const info = result.inspection;
+                    addConsoleMessage('info', `Object: ${info.name} (${info.type})`);
+                    if (info.docstring) {
+                        addConsoleMessage('info', `Docstring: ${info.docstring.substring(0, 200)}...`);
+                    }
+                    if (info.file) {
+                        addConsoleMessage('info', `File: ${info.file}`);
+                    }
+                } else {
+                    addConsoleMessage('error', result.inspection?.error || 'Inspection failed');
+                }
+                
+            } catch (error) {
+                addConsoleMessage('error', `Inspection error: ${error.message}`);
+            }
+        }
+        
+        // Tab completion handling
+        let completionDropdown = null;
+        let currentCompletions = [];
+        let completionStartPos = 0;
+        
+        async function handleTabCompletion(input) {
+            const cursorPos = input.selectionStart;
+            const code = input.value;
+            
+            try {
+                const completions = await getCompletions(code, cursorPos);
+                
+                if (completions.length === 0) {
+                    hideCompletionDropdown();
+                    return;
+                }
+                
+                if (completions.length === 1) {
+                    // Single completion - insert directly
+                    insertCompletion(input, completions[0], cursorPos);
+                    hideCompletionDropdown();
+                } else {
+                    // Multiple completions - show dropdown
+                    showCompletionDropdown(input, completions, cursorPos);
+                }
+            } catch (error) {
+                console.error('Tab completion error:', error);
+                hideCompletionDropdown();
+            }
+        }
+        
+        function insertCompletion(input, completion, cursorPos) {
+            // Find the start of the current word being completed
+            const code = input.value;
+            let wordStart = cursorPos;
+            
+            // Move backwards to find word boundary
+            while (wordStart > 0 && /\w/.test(code[wordStart - 1])) {
+                wordStart--;
+            }
+            
+            // Replace the partial word with the completion
+            const before = code.substring(0, wordStart);
+            const after = code.substring(cursorPos);
+            const newValue = before + completion + after;
+            
+            input.value = newValue;
+            input.setSelectionRange(wordStart + completion.length, wordStart + completion.length);
+            autoResizeTextarea();
+        }
+        
+        function showCompletionDropdown(input, completions, cursorPos) {
+            hideCompletionDropdown(); // Remove any existing dropdown
+            
+            currentCompletions = completions;
+            completionStartPos = cursorPos;
+            
+            // Create dropdown
+            completionDropdown = document.createElement('div');
+            completionDropdown.className = 'completion-dropdown';
+            
+            completions.forEach((completion, index) => {
+                const item = document.createElement('div');
+                item.className = 'completion-item';
+                if (index === 0) item.classList.add('selected');
+                item.textContent = completion;
+                
+                item.addEventListener('click', () => {
+                    insertCompletion(input, completion, completionStartPos);
+                    hideCompletionDropdown();
+                    input.focus();
+                });
+                
+                completionDropdown.appendChild(item);
+            });
+            
+            // Position dropdown near the input
+            const inputRect = input.getBoundingClientRect();
+            completionDropdown.style.position = 'absolute';
+            completionDropdown.style.left = inputRect.left + 'px';
+            completionDropdown.style.top = (inputRect.bottom + 2) + 'px';
+            completionDropdown.style.minWidth = '200px';
+            completionDropdown.style.maxWidth = '400px';
+            
+            document.body.appendChild(completionDropdown);
+            
+            // Add keyboard navigation for dropdown
+            setupDropdownNavigation(input);
+        }
+        
+        function hideCompletionDropdown() {
+            if (completionDropdown) {
+                completionDropdown.remove();
+                completionDropdown = null;
+                currentCompletions = [];
+            }
+        }
+        
+        function setupDropdownNavigation(input) {
+            // Add temporary keydown listener for dropdown navigation
+            function handleDropdownKeys(e) {
+                if (!completionDropdown) {
+                    input.removeEventListener('keydown', handleDropdownKeys);
+                    return;
+                }
+                
+                const items = completionDropdown.querySelectorAll('.completion-item');
+                const selected = completionDropdown.querySelector('.completion-item.selected');
+                let selectedIndex = Array.from(items).indexOf(selected);
+                
+                if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    selectedIndex = Math.min(selectedIndex + 1, items.length - 1);
+                    updateSelection(items, selectedIndex);
+                } else if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    selectedIndex = Math.max(selectedIndex - 1, 0);
+                    updateSelection(items, selectedIndex);
+                } else if (e.key === 'Enter' || e.key === 'Tab') {
+                    e.preventDefault();
+                    const selectedCompletion = currentCompletions[selectedIndex];
+                    insertCompletion(input, selectedCompletion, completionStartPos);
+                    hideCompletionDropdown();
+                } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    hideCompletionDropdown();
+                }
+            }
+            
+            input.addEventListener('keydown', handleDropdownKeys);
+        }
+        
+        function updateSelection(items, selectedIndex) {
+            items.forEach((item, index) => {
+                item.classList.toggle('selected', index === selectedIndex);
+            });
+        }
+        
+        // Object inspection handling
+        async function handleObjectInspection(input) {
+            const cursorPos = input.selectionStart;
+            const code = input.value;
+            
+            // Find the word at cursor position
+            let wordStart = cursorPos;
+            let wordEnd = cursorPos;
+            
+            // Expand to word boundaries
+            while (wordStart > 0 && /\w/.test(code[wordStart - 1])) {
+                wordStart--;
+            }
+            while (wordEnd < code.length && /\w/.test(code[wordEnd])) {
+                wordEnd++;
+            }
+            
+            const word = code.substring(wordStart, wordEnd);
+            
+            if (word) {
+                await inspectObject(word);
+            } else {
+                addConsoleMessage('info', 'No object at cursor to inspect');
             }
         }
         
@@ -2621,10 +2969,49 @@
                         autoResizeTextarea();
                     }
                 }
+                
+                // Tab completion
+                else if (e.key === 'Tab') {
+                    e.preventDefault();
+                    handleTabCompletion(input);
+                }
+                
+                // Object inspection with Ctrl+I
+                else if (e.key === 'i' && e.ctrlKey) {
+                    e.preventDefault();
+                    handleObjectInspection(input);
+                }
+                
+                // Clear completion dropdown on escape
+                else if (e.key === 'Escape') {
+                    hideCompletionDropdown();
+                }
             });
             
             // Auto-resize textarea
             input.addEventListener('input', autoResizeTextarea);
+            
+            // Hide completion dropdown when clicking outside
+            document.addEventListener('click', (e) => {
+                if (completionDropdown && !completionDropdown.contains(e.target) && e.target !== input) {
+                    hideCompletionDropdown();
+                }
+            });
+            
+            // Hide completion dropdown when input loses focus (but not when clicking on dropdown)
+            input.addEventListener('blur', (e) => {
+                // Delay hiding to allow dropdown clicks to register
+                setTimeout(() => {
+                    if (!document.activeElement || !completionDropdown?.contains(document.activeElement)) {
+                        hideCompletionDropdown();
+                    }
+                }, 100);
+            });
+            
+            // Double-click for object inspection
+            input.addEventListener('dblclick', (e) => {
+                handleObjectInspection(input);
+            });
         }
         
         // Auto-resize textarea to fit content

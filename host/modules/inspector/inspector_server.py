@@ -80,6 +80,8 @@ class InspectorServer:
         # REPL endpoints
         app.router.add_post('/repl/create', self.handle_repl_create)
         app.router.add_post('/repl/execute', self.handle_repl_execute)
+        app.router.add_post('/repl/complete', self.handle_repl_complete)
+        app.router.add_post('/repl/inspect', self.handle_repl_inspect)
         app.router.add_get('/repl/sessions', self.handle_repl_sessions)
         app.router.add_get('/repl/session/{session_id}/history', self.handle_repl_session_history)
         
@@ -118,6 +120,8 @@ class InspectorServer:
             logger.info(f"  PUT/PATCH http://localhost:{self.port}/veil/{{space_id}}/facets/{{facet_id}} - Update VEIL facet")
             logger.info(f"  POST http://localhost:{self.port}/repl/create - Create new REPL session")
             logger.info(f"  POST http://localhost:{self.port}/repl/execute - Execute code in REPL session")
+            logger.info(f"  POST http://localhost:{self.port}/repl/complete - Get code completions for REPL session")
+            logger.info(f"  POST http://localhost:{self.port}/repl/inspect - Inspect object in REPL session")
             logger.info(f"  GET http://localhost:{self.port}/repl/sessions - List active REPL sessions")
             logger.info(f"  GET http://localhost:{self.port}/repl/session/{{session_id}}/history - Get REPL session history")
             
@@ -438,5 +442,44 @@ class InspectorServer:
             offset = 0
         
         data = await self.handlers.handle_repl_session_history(session_id, limit, offset)
+        status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if "error" in data else 200)
+        return self._json_response(data, status=status_code)
+    
+    async def handle_repl_complete(self, request: Request) -> Response:
+        """Handle REPL code completion endpoint."""
+        try:
+            request_data = await request.json()
+            
+            session_id = request_data.get('session_id', '')
+            code = request_data.get('code', '')
+            cursor_pos = request_data.get('cursor_pos', len(code))  # Default to end of code
+            
+        except (ValueError, TypeError) as e:
+            return self._json_response({
+                "error": "Invalid JSON in request body",
+                "details": str(e),
+                "timestamp": time.time()
+            }, status=400)
+        
+        data = await self.handlers.handle_repl_complete(session_id, code, cursor_pos)
+        status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if "error" in data else 200)
+        return self._json_response(data, status=status_code)
+    
+    async def handle_repl_inspect(self, request: Request) -> Response:
+        """Handle REPL object inspection endpoint."""
+        try:
+            request_data = await request.json()
+            
+            session_id = request_data.get('session_id', '')
+            obj_name = request_data.get('obj_name', '')
+            
+        except (ValueError, TypeError) as e:
+            return self._json_response({
+                "error": "Invalid JSON in request body",
+                "details": str(e),
+                "timestamp": time.time()
+            }, status=400)
+        
+        data = await self.handlers.handle_repl_inspect(session_id, obj_name)
         status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if "error" in data else 200)
         return self._json_response(data, status=status_code)
