@@ -76,6 +76,12 @@ class InspectorServer:
         app.router.add_put('/veil/{space_id}/facets/{facet_id}', self.handle_update_veil_facet)
         app.router.add_patch('/veil/{space_id}/facets/{facet_id}', self.handle_update_veil_facet)
         
+        # REPL endpoints
+        app.router.add_post('/repl/create', self.handle_repl_create)
+        app.router.add_post('/repl/execute', self.handle_repl_execute)
+        app.router.add_get('/repl/sessions', self.handle_repl_sessions)
+        app.router.add_get('/repl/session/{session_id}/history', self.handle_repl_session_history)
+        
         # Add middleware for request counting
         app.middlewares.append(self.request_counter_middleware)
         
@@ -109,6 +115,10 @@ class InspectorServer:
             logger.info(f"  GET http://localhost:{self.port}/veil/{{space_id}}/facets/{{facet_id}} - Specific facet details")
             logger.info(f"  PUT/PATCH http://localhost:{self.port}/events/{{event_id}} - Update timeline event")
             logger.info(f"  PUT/PATCH http://localhost:{self.port}/veil/{{space_id}}/facets/{{facet_id}} - Update VEIL facet")
+            logger.info(f"  POST http://localhost:{self.port}/repl/create - Create new REPL session")
+            logger.info(f"  POST http://localhost:{self.port}/repl/execute - Execute code in REPL session")
+            logger.info(f"  GET http://localhost:{self.port}/repl/sessions - List active REPL sessions")
+            logger.info(f"  GET http://localhost:{self.port}/repl/session/{{session_id}}/history - Get REPL session history")
             
         except Exception as e:
             logger.error(f"Failed to start inspector server: {e}", exc_info=True)
@@ -147,7 +157,7 @@ class InspectorServer:
             status=status,
             headers={
                 'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Methods': 'GET, PUT, PATCH, OPTIONS',
+                'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, OPTIONS',
                 'Access-Control-Allow-Headers': 'Content-Type'
             }
         )
@@ -334,4 +344,72 @@ class InspectorServer:
         
         data = await self.handlers.handle_update_veil_facet(space_id, facet_id, update_data)
         status_code = 400 if not data.get("success", False) and "required" in data.get("error", "") else (500 if not data.get("success", False) else 200)
+        return self._json_response(data, status=status_code)
+
+    async def handle_repl_create(self, request: Request) -> Response:
+        """Handle REPL session creation endpoint."""
+        # Parse JSON body
+        try:
+            body = await request.json()
+        except Exception as e:
+            return self._json_response({
+                "error": "Invalid JSON in request body",
+                "details": str(e),
+                "success": False
+            }, status=400)
+        
+        # Extract required parameters
+        context_type = body.get('context_type')
+        context_id = body.get('context_id')
+        target_path = body.get('target_path')
+        
+        data = await self.handlers.handle_repl_create(context_type, context_id, target_path)
+        status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if "error" in data else 200)
+        return self._json_response(data, status=status_code)
+
+    async def handle_repl_execute(self, request: Request) -> Response:
+        """Handle REPL code execution endpoint."""
+        # Parse JSON body
+        try:
+            body = await request.json()
+        except Exception as e:
+            return self._json_response({
+                "error": "Invalid JSON in request body",
+                "details": str(e),
+                "success": False
+            }, status=400)
+        
+        # Extract required parameters
+        session_id = body.get('session_id')
+        code = body.get('code')
+        timeout = body.get('timeout', 5.0)
+        
+        data = await self.handlers.handle_repl_execute(session_id, code, timeout)
+        status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if "error" in data else 200)
+        return self._json_response(data, status=status_code)
+
+    async def handle_repl_sessions(self, request: Request) -> Response:
+        """Handle REPL sessions list endpoint."""
+        _ = request  # Request parameter required by aiohttp interface
+        data = await self.handlers.handle_repl_sessions()
+        status_code = 500 if "error" in data else 200
+        return self._json_response(data, status=status_code)
+
+    async def handle_repl_session_history(self, request: Request) -> Response:
+        """Handle REPL session history endpoint."""
+        session_id = request.match_info.get('session_id')
+        
+        # Get optional query parameters
+        try:
+            limit = int(request.query.get('limit', 50))
+        except (ValueError, TypeError):
+            limit = 50
+        
+        try:
+            offset = int(request.query.get('offset', 0))
+        except (ValueError, TypeError):
+            offset = 0
+        
+        data = await self.handlers.handle_repl_session_history(session_id, limit, offset)
+        status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if "error" in data else 200)
         return self._json_response(data, status=status_code)

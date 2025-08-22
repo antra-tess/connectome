@@ -438,6 +438,42 @@ class InspectorEndpointHandlers:
                 "timestamp": time.time()
             }
 
+    async def handle_repl_session_history(self, session_id: str, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
+        """Handle REPL session history endpoint."""
+        self.request_count += 1
+        
+        try:
+            if not session_id:
+                return {
+                    "error": "session_id is required",
+                    "timestamp": time.time()
+                }
+            
+            # Get session history
+            history_data = self.data_collector.repl_manager.get_session_history(
+                session_id, limit, offset
+            )
+            
+            if history_data is None:
+                return {
+                    "error": f"Session not found: {session_id}",
+                    "timestamp": time.time()
+                }
+            
+            return {
+                "success": True,
+                **history_data,
+                "timestamp": time.time()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting REPL session history: {e}", exc_info=True)
+            return {
+                "error": "Failed to get REPL session history",
+                "details": str(e),
+                "timestamp": time.time()
+            }
+
     async def handle_repl_execute(self, session_id: str, code: str, timeout: float = 5.0) -> Dict[str, Any]:
         """Handle REPL code execution endpoint."""
         self.request_count += 1

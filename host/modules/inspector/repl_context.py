@@ -188,6 +188,42 @@ class REPLContextManager:
         
         return sessions_info
     
+    def get_session_history(self, session_id: str, limit: int = 50, offset: int = 0) -> Optional[Dict[str, Any]]:
+        """
+        Get the execution history for a specific REPL session.
+        
+        Args:
+            session_id: Session identifier
+            limit: Maximum number of history entries to return (default 50)
+            offset: Number of entries to skip from the start (default 0)
+            
+        Returns:
+            Dictionary with session info and paginated history, or None if session not found
+        """
+        session = self.sessions.get(session_id)
+        if not session:
+            return None
+        
+        # Get paginated history (newest first)
+        history = session['history']
+        total_count = len(history)
+        
+        # Reverse slice to get newest first, then apply pagination
+        paginated_history = history[::-1][offset:offset + limit]
+        
+        return {
+            'session_id': session_id,
+            'context_type': session['type'],
+            'context_id': session['context_id'],
+            'created_at': session['created_at'],
+            'last_accessed': session['last_accessed'],
+            'history': paginated_history,
+            'total_history_count': total_count,
+            'returned_count': len(paginated_history),
+            'offset': offset,
+            'has_more': offset + len(paginated_history) < total_count
+        }
+    
     def destroy_session(self, session_id: str) -> bool:
         """
         Destroy a REPL session and clean up resources.
