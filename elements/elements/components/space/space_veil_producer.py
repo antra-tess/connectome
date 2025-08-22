@@ -60,23 +60,14 @@ class SpaceVeilProducer(VeilProducer):
         Args:
             operations: List of VEILFacetOperation instances to process
         """
-        logger.critical(f"🔨📦 [{self.owner.id if self.owner else 'Unknown'}] SpaceVeilProducer.receive_facet_operations() called with {len(operations) if operations else 0} operations")
-        
         if not isinstance(operations, list) or not operations:
-            logger.critical(f"🔨📦 [{self.owner.id if self.owner else 'Unknown'}] SpaceVeilProducer received no valid facet operations")
             return
 
         # Apply operations to facet cache
-        logger.critical(f"🔨📦 Applying {len(operations)} operations to facet cache...")
         success_count = self._facet_cache.apply_operations(operations)
-        logger.critical(f"🔨📦 Applied {success_count}/{len(operations)} operations successfully")
         
         # Accumulate for frame-end dispatch to uplinks
         self._accumulated_facet_operations.extend(operations)
-        
-        # Check final cache size
-        cache_size = len(self._facet_cache.facets) if hasattr(self._facet_cache, 'facets') else 0
-        logger.critical(f"🔨📦 Final facet cache size: {cache_size}")
         
         logger.debug(f"[{self.owner.id if self.owner else 'Unknown'}] Processed {success_count}/{len(operations)} facet operations in SpaceVeilProducer")
 

@@ -320,24 +320,19 @@ class Space(BaseElement):
         Args:
             delta_operations: List of VEILFacetOperation instances
         """
-        logger.critical(f"🔨🏠 [{self.id}] Space.receive_delta() received {len(delta_operations) if delta_operations else 0} operations")
-        
         if not self._veil_producer:
             logger.critical(f"🔨🏠 [{self.id}] No SpaceVeilProducer available - VEIL operations lost!")
             return
             
         # Route to SpaceVeilProducer for processing
         try:
-            logger.critical(f"🔨🏠 Routing {len(delta_operations)} operations to SpaceVeilProducer...")
             import asyncio
             
             # SpaceVeilProducer.receive_facet_operations is async, so we need to handle it properly
             loop = asyncio.get_running_loop()
             loop.create_task(self._veil_producer.receive_facet_operations(delta_operations))
             
-            logger.critical(f"🔨🏠 Successfully routed operations to SpaceVeilProducer")
         except Exception as e:
-            logger.critical(f"🔨🏠 ERROR routing to SpaceVeilProducer: {e}")
             logger.error(f"Error routing VEIL operations to SpaceVeilProducer: {e}", exc_info=True)
 
     # --- NEW: Method to find an element by ID ---
@@ -418,11 +413,6 @@ class Space(BaseElement):
         replay_phase = timeline_context.get('replay_phase', 'unknown')
 
         logger.debug(f"[{self.id}] Receiving event: Type='{event_type}', Target='{target_element_id}', Timeline='{timeline_context.get('timeline_id')}', Replay={is_replay_mode}, Phase={replay_phase}")
-        
-        # Special logging for activation_call events
-        if event_type == "activation_call":
-            logger.critical(f"🎯 SPACE RECEIVED ACTIVATION_CALL: {event_payload}")
-            logger.critical(f"🎯 Timeline context: {timeline_context}")
 
         # 1. Add event to the timeline via TimelineComponent (unless in replay mode)
         new_event_id = None
@@ -516,7 +506,6 @@ class Space(BaseElement):
         # NEW: Handle system events directly (bypass heartbeat classification)
         # These events represent internal system decisions/acknowledgments, not external content
         if event_type in ["activation_call", "component_processed"]:
-            logger.critical(f"🎯 SYSTEM EVENT ({event_type}): Direct processing (bypassing heartbeat classification)")
             self.process_event_for_components(full_event_node, timeline_context)
             return
 
@@ -528,7 +517,6 @@ class Space(BaseElement):
                     heartbeat = comp
                     break
             if heartbeat:
-                logger.critical(f"Event payload found: {event_payload}")
                 interrupt_class = (event_payload or {}).get('decider', {}).get('interrupt_class') if isinstance(event_payload, dict) else None
                 
                 loop = asyncio.get_running_loop()
@@ -575,17 +563,6 @@ class Space(BaseElement):
     # New method: process event by broadcasting to own components and all mounted elements
     def process_event_for_components(self, event_payload: Dict[str, Any], timeline_context: Dict[str, Any]) -> None:
         try:
-            event_type = event_payload.get("event_type")
-            
-            # Special logging for activation_call events
-            if event_type == "activation_call":
-                logger.critical(f"🎯 PROCESSING ACTIVATION_CALL in components: {event_payload}")
-            
-            # Extract the real event ID from the event payload or timeline context
-            real_event_id = event_payload.get('event_id')
-            
-            logger.critical(f"🎯 Using event ID for components: {real_event_id}")
-            
             # 2. Dispatch event to own components
             handled_by_component = False
             for comp_name, component in self.get_components().items():
@@ -605,6 +582,67 @@ class Space(BaseElement):
                 logger.error(f"[{self.id}] Error broadcasting event to mounted elements: {e}", exc_info=True)
         except Exception as e:
             logger.error(f"[{self.id}] process_event_for_components error: {e}", exc_info=True)
+
+    async def execute_action_on_element(self,
+                                        element_id: str,
+                                        action_name: str,
+                                        parameters: Dict[str, Any],
+                                        calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Allows this Space to execute an action (tool) on one of its mounted child elements.
+        Finds the element (either self or a mounted child) and delegates to its ToolProviderComponent.
+        """
+        target_element: Optional[BaseElement] = None
+
+        # Check if this is an action on this space itself
+        if element_id == self.id:
+            target_element = self
+        else:
+            # Otherwise, look for the element in mounted elements (using ContainerComponent)
+            target_element = self.get_mounted_element(element_id)
+        if not target_element:
+            # If not found by mount_id, maybe element_id is a direct ID of a mounted element?
+            # This is less common for actions but could happen.
+            for elem in self.get_mounted_elements().values():
+                if elem.id == element_id:
+                     target_element = elem
+                     logger.debug(f"[{self.id}] Found target element by element_id '{element_id}' instead of mount_id.")
+                break
+
+            if not target_element:
+                return {"success": False, "error": f"[{self.id}] Target element '{element_id}' not found in this space."}
+
+        # Execute the action on the found element
+        tool_provider = target_element.get_component_by_type("ToolProviderComponent")
+        if not tool_provider:
+            err_msg = f"Cannot execute action '{action_name}' on element '{element_id}': Target element does not have a ToolProviderComponent."
+            logger.error(f"[{self.id}] {err_msg}")
+            return {"success": False, "error": err_msg}
+
+        # Execute the tool via the ToolProviderComponent
+        action_result = await tool_provider.execute_tool(action_name, calling_context=calling_context, **parameters)
+
+        # TODO: Consider recording the action_result or a summary as an event on the Space's timeline?
+        # For example, if an agent successfully sends a message, that could be a timeline event.
+
+        # Record action execution event
+        action_event_payload = {
+            'event_type': 'action_executed',
+            'target_element_id': target_element.id, # Record which element was acted upon
+            'payload': {
+                'action_name': action_name,
+                'parameters': parameters,
+                'result': action_result # Include the result
+            }
+        }
+        # Use default timeline context (primary timeline)
+        timeline_context = {}
+        primary_timeline = self.get_primary_timeline()
+        if primary_timeline:
+            timeline_context['timeline_id'] = primary_timeline
+        self.add_event_to_timeline(action_event_payload, timeline_context)
+
+        return action_result if isinstance(action_result, dict) else {"success": True, "result": action_result}
 
     # --- NEW: Method to find an element by ID ---
     def get_element_by_id(self, element_id: str) -> Optional[BaseElement]:

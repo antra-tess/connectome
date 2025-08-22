@@ -120,16 +120,10 @@ class BaseAgentLoopComponent(Component):
             focus_context = inner_payload.get('focus_context', {})
             source_element_id = focus_context.get('focus_element_id', 'unknown')
 
-            logger.critical(f"🎯 [{self.agent_loop_name}] RECEIVED ACTIVATION_CALL: reason='{activation_reason}', focus_element='{source_element_id}'")
-            logger.critical(f"🎯 Inner payload: {inner_payload}")
-            logger.critical(f"🎯 Timeline context: {timeline_context}")
-
             # Check if we should actually trigger a cycle based on our own logic
             should_activate = self._should_activate_for_reason(activation_reason, event_payload)
 
             if should_activate:
-                logger.critical(f"🚀 [{self.agent_loop_name}] ACTIVATING AGENT CYCLE due to: {activation_reason}")
-
                 # Run the cycle asynchronously
                 asyncio.create_task(self._run_activation_cycle(activation_reason, event_payload))
             else:

@@ -9,7 +9,7 @@ from elements.component_registry import register_component
 from elements.utils.element_id_generator import ElementIdGenerator
 from .logging_utils import log_decision, log_rules_loaded, DecisionType, log_rules_reload_attempt, log_validation_error
 from .rule_validator import validate_activation_rules
-from .focus_selector import FocusSelector
+
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +55,9 @@ class ActivationDeciderComponent(Component):
 		self._last_activation_context: Dict[str, Any] = {}
 		self._rules_file_path: Optional[str] = None
 		self._file_watcher: Optional[RulesFileWatcher] = None
+		# Focus resolution configuration (extensible architecture)
+		self._focus_resolution_config: Dict[str, Any] = {}
+		self._focus_resolution_strategy: str = "direct"
 
 	def initialize(self, **kwargs) -> None:
 		super().initialize(**kwargs)
@@ -69,10 +72,10 @@ class ActivationDeciderComponent(Component):
 			self._file_watcher = RulesFileWatcher(self, self._rules_file_path)
 			self._file_watcher.start()
 			
-		# Initialize focus selector
-		focus_config = self._rules.get('focus_selection', {})
-		strategy = focus_config.get('strategy', 'conversation')
-		self._focus_selector = FocusSelector(strategy, focus_config)
+		# Initialize focus resolution configuration (extensible for future strategies)
+		self._focus_resolution_config = self._rules.get('focus_resolution', {})
+		self._focus_resolution_strategy = self._focus_resolution_config.get('strategy', 'direct')
+		
 
 	def _load_rules(self) -> None:
 		try:
@@ -120,10 +123,10 @@ class ActivationDeciderComponent(Component):
 			is_valid, errors = validate_activation_rules(rules)
 			if is_valid:
 				self._rules = rules
-				# Reinitialize focus selector with new rules
-				focus_config = self._rules.get('focus_selection', {})
-				strategy = focus_config.get('strategy', 'conversation')
-				self._focus_selector = FocusSelector(strategy, focus_config)
+				# Reinitialize focus resolution configuration
+				self._focus_resolution_config = self._rules.get('focus_resolution', {})
+				self._focus_resolution_strategy = self._focus_resolution_config.get('strategy', 'direct')
+				
 				
 				log_rules_reload_attempt("ActivationDeciderComponent", 
 										self.owner.id if self.owner else 'unknown', True)
@@ -198,8 +201,6 @@ class ActivationDeciderComponent(Component):
 			reason=reason,
 			metadata=metadata
 		)
-		logger.critical(f"Activation decision: {decision}")
-		logger.critical(f"Payload: {payload}")
 		return decision
 
 	def remember_decision(self, event_id: str, decision: Dict[str, Any]) -> None:
@@ -215,7 +216,6 @@ class ActivationDeciderComponent(Component):
 			event_type = event_payload.get('event_type')
 			
 			if event_type == "component_processed":
-				logger.critical(f"🔔 RECEIVED COMPONENT_PROCESSED ACK: {event_payload}")
 				self.on_component_processed(event_payload)
 				return True
 				
@@ -227,54 +227,33 @@ class ActivationDeciderComponent(Component):
 	def on_component_processed(self, ack_payload: Dict[str, Any]) -> None:
 		try:
 			original_event_id = ack_payload.get('payload', {}).get('original_event_id')
-			logger.critical(f"🔔 Processing ack for event: {original_event_id}")
-			logger.critical(f"🔔 Pending decisions: {list(self._pending_decisions.keys())}")
 			
 			if not original_event_id:
-				logger.critical(f"🔔 No original_event_id in ack payload")
 				return
 			decision = self._pending_decisions.get(original_event_id)
 			if not decision:
-				logger.critical(f"🔔 No pending decision found for event: {original_event_id}")
 				return
 				
-			logger.critical(f"🔔 Found decision for {original_event_id}: {decision}")
-			
 			if decision.get('activation_decision'):
-				logger.critical(f"🔔 Activation decision is True, emitting activation_call")
-				logger.critical(f"🔔 About to call _emit_activation_after_processing...")
 				self._emit_activation_after_processing(decision, ack_payload)
-				logger.critical(f"🔔 Finished calling _emit_activation_after_processing")
-			else:
-				logger.critical(f"🔔 Activation decision is False, not emitting activation_call")
 		except Exception as e:
 			logger.error(f"ActivationDecider on_component_processed error: {e}", exc_info=True)
 
 	def _emit_activation_after_processing(self, decision: Dict[str, Any], ack_payload: Dict[str, Any]) -> None:
 		try:
-			logger.critical(f"🔧 STARTING _emit_activation_after_processing")
-			logger.critical(f"🔧 Decision: {decision}")
-			logger.critical(f"🔧 Ack payload: {ack_payload}")
-			
 			parent_space = self.owner
-			logger.critical(f"🔧 Parent space: {parent_space}")
-			logger.critical(f"🔧 Has receive_event: {hasattr(parent_space, 'receive_event') if parent_space else False}")
 			
 			if not parent_space or not hasattr(parent_space, 'receive_event'):
-				logger.critical(f"🔧 ABORTING: No parent space or receive_event method")
 				return
 			focus_element_id = None
 			try:
 				original_event_id = ack_payload.get('payload', {}).get('original_event_id')
-				logger.critical(f"🔧 Original event ID: {original_event_id}")
 				
 				ctx = self._event_context_by_id.get(original_event_id, {})
-				logger.critical(f"🔧 Event context: {ctx}")
 				
-				# Use advanced focus selection strategy
-				event_contexts = [ctx] if ctx else []
-				focus_element_id = self._select_focus_element(event_contexts)
-				logger.critical(f"🔧 Selected focus element: {focus_element_id}")
+				# NEW: Processing-based focus resolution with extensible architecture
+				processing_element_id = ack_payload.get("payload", {}).get('element_id')
+				focus_element_id = self._resolve_focus_target(processing_element_id, ctx, ack_payload)
 				
 				# NEW: Remember last activation context for later conditional rules
 				conversation_id = ctx.get('conversation_id') if ctx else None
@@ -283,7 +262,7 @@ class ActivationDeciderComponent(Component):
 					"conversation_id": conversation_id,
 					"adapter_id": ctx.get('adapter_id') if ctx else None
 				}
-				logger.critical(f"🔧 Last activation context: {self._last_activation_context}")
+				
 			except Exception as e:
 				logger.critical(f"🔧 EXCEPTION in focus selection: {e}")
 				pass
@@ -300,15 +279,9 @@ class ActivationDeciderComponent(Component):
 			}
 			timeline_context = {"timeline_id": parent_space.get_primary_timeline() if hasattr(parent_space, 'get_primary_timeline') else None}
 			
-			logger.critical(f"🚀 EMITTING ACTIVATION_CALL (after processing): {envelope}")
-			logger.critical(f"🚀 Timeline context: {timeline_context}")
-			logger.critical(f"🚀 About to call parent_space.receive_event...")
 			
 			parent_space.receive_event(envelope, timeline_context)
-			
-			logger.critical(f"🚀 Successfully called parent_space.receive_event!")
 		except Exception as e:
-			logger.critical(f"🚨 ActivationDecider activation emit ERROR: {e}")
 			logger.error(f"ActivationDecider activation emit error: {e}", exc_info=True)
 
 	async def evaluate_and_maybe_activate(self, context: Dict[str, Any]) -> None:
@@ -322,9 +295,10 @@ class ActivationDeciderComponent(Component):
 					return
 				ctx = self._event_context_by_id.get(last_event_id, {})
 				
-				# Use advanced focus selection strategy
-				event_contexts = [ctx] if ctx else []
-				focus_element_id = self._select_focus_element(event_contexts)
+				# FALLBACK: This path should rarely be used - prefer component ack path
+				# For direct activation without ack context, use element from context if available  
+				processing_element_id = None  # No direct processing element in this path
+				focus_element_id = self._resolve_focus_target(processing_element_id, ctx, {})
 				
 				# NEW: Remember last activation context
 				conversation_id = ctx.get('conversation_id') if ctx else None
@@ -345,8 +319,6 @@ class ActivationDeciderComponent(Component):
 					}
 				}
 				timeline_context = {"timeline_id": parent_space.get_primary_timeline() if hasattr(parent_space, 'get_primary_timeline') else None}
-				logger.critical(f"🚀 EMITTING ACTIVATION_CALL (evaluate): {envelope}")
-				logger.critical(f"🚀 Timeline context: {timeline_context}")
 				parent_space.receive_event(envelope, timeline_context)
 		except Exception as e:
 			logger.debug(f"ActivationDecider evaluate_and_maybe_activate error: {e}")
@@ -365,16 +337,55 @@ class ActivationDeciderComponent(Component):
 	def get_focus_candidates(self) -> List[str]:
 		return list(self._recent_focus_candidates)
 
-	def _select_focus_element(self, event_contexts: List[Dict[str, Any]]) -> Optional[str]:
-		"""Use configured strategy to select focus."""
-		current_context = {
-			'triggering_conversation_id': event_contexts[-1].get('conversation_id') if event_contexts else None
-		}
-		parent_space = self.owner.get_parent_object() if hasattr(self.owner, 'get_parent_object') else self.owner
-		owner_space_id = getattr(parent_space, 'id', None) if parent_space else None
+	def _resolve_focus_target(self, processing_element_id: Optional[str], 
+	                        event_context: Dict[str, Any], 
+	                        ack_payload: Dict[str, Any]) -> Optional[str]:
+		"""
+		Resolve focus target element from processing element and context.
 		
-		return self._focus_selector.generate_focus_element_id(
-			event_contexts, current_context, owner_space_id)
+		EXTENSIBLE ARCHITECTURE: Currently uses direct mapping (Processing = Focus),
+		but can be extended with strategies for X→Y focus relationships.
+		
+		Args:
+			processing_element_id: Element that processed the original event
+			event_context: Context about the original event
+			ack_payload: Full acknowledgment payload for additional context
+			
+		Returns:
+			Element ID to focus on, or None if cannot resolve
+		"""
+		try:
+			# Use configured focus resolution strategy
+			focus_strategy = self._focus_resolution_strategy
+			
+			if focus_strategy == "direct":
+				if processing_element_id:
+					return processing_element_id
+			
+			# FUTURE EXTENSION POINTS - YAML Configuration Examples:
+			#
+			# focus_resolution:
+			#   strategy: "cross_conversation"
+			#   config:
+			#     redirect_rules:
+			#       - from_pattern: "admin_console_*"
+			#         to_element: "main_conversation"
+			#       - event_type: "system_notification"  
+			#         to_element: "system_chat"
+			#
+			# elif focus_strategy == "cross_conversation":
+			#     return self._resolve_cross_conversation_focus(processing_element_id, event_context)
+			# elif focus_strategy == "hierarchical":
+			#     return self._resolve_hierarchical_focus(processing_element_id, event_context)  
+			# elif focus_strategy == "workflow":
+			#     return self._resolve_workflow_focus(processing_element_id, event_context)
+			
+				
+			return processing_element_id
+			
+		except Exception as e:
+			logger.error(f"Error resolving focus target: {e}", exc_info=True)
+			return processing_element_id  # Safe fallback
 
 	# NEW: Expose last activation context for sibling components (e.g., InterruptDecider)
 	def get_last_activation_context(self) -> Dict[str, Any]:

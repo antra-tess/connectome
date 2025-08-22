@@ -328,14 +328,9 @@ class VeilProducer(Component):
         Emits the calculated delta to the owning element's timeline.
         """
         delta_operations = self.calculate_delta()
-        logger.critical(f"🔨➡️ [{self.owner.id if self.owner else 'Unknown'}/{self.COMPONENT_TYPE}] emit_delta() calculated {len(delta_operations) if delta_operations else 0} operations")
         
         if delta_operations:
-            logger.critical(f"🔨➡️ Calling owner.receive_delta() with {len(delta_operations)} operations")
             self.owner.receive_delta(delta_operations)
-            logger.critical(f"🔨➡️ Successfully called owner.receive_delta()")
-        else:
-            logger.critical(f"🔨➡️ No delta operations to emit")
 
     def calculate_delta(self) -> Optional[List]:
         """

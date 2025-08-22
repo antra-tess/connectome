@@ -31,6 +31,13 @@ ACTIVATION_RULES_SCHEMA = {
     "properties": {
         "activate_event_types": {"type": "array", "items": {"type": "string"}},
         "preempt_event_types": {"type": "array", "items": {"type": "string"}},
+        "focus_resolution": {
+            "type": "object",
+            "properties": {
+                "strategy": {"type": "string", "enum": ["direct", "cross_conversation", "hierarchical", "workflow"]},
+                "config": {"type": "object"}
+            }
+        },
         "focus_selection": {
             "type": "object",
             "properties": {

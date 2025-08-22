@@ -59,9 +59,13 @@ def log_rules_loaded(component_type: str, element_id: str, rules: Dict[str, Any]
     elif component_type == "ActivationDeciderComponent":
         activate_types = list(rules.get('activate_event_types', []))
         preempt_types = list(rules.get('preempt_event_types', []))
+        focus_resolution = rules.get('focus_resolution', {})
         
         logger.info(f"  Activate event types: {activate_types}")
         logger.info(f"  Preempt event types: {preempt_types}")
+        logger.info(f"  Focus resolution strategy: {focus_resolution.get('strategy', 'direct')}")
+        if focus_resolution.get('config'):
+            logger.info(f"  Focus resolution config: {focus_resolution['config']}")
 
 
 def log_rules_reload_attempt(component_type: str, element_id: str, success: bool, 

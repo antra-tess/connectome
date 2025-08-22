@@ -245,14 +245,11 @@ class MessageListVeilProducer(VeilProducer):
         Returns:
             List of VEILFacetOperation instances for the message list
         """
-        logger.critical(f"🔨 [{self.owner.id}] MessageListVeilProducer.calculate_delta() called")
         
         # NEW: Check if we're in structural replay phase and should defer content processing
         should_defer = self._should_defer_content_processing()
-        logger.critical(f"🔨 Should defer content processing: {should_defer}")
         
         if should_defer:
-            logger.critical(f"🔨 [{self.owner.id}/{self.COMPONENT_TYPE}] DEFERRING content processing during structural phase")
             return None
 
         facet_operations = []
@@ -484,12 +481,6 @@ class MessageListVeilProducer(VeilProducer):
 
         self._state['_last_list_root_properties'] = current_container_state
         self._state['_last_generated_veil_message_ids'] = current_message_ids
-
-        if facet_operations:
-            logger.critical(f"🔨 [{owner_id}/{self.COMPONENT_TYPE}] Calculated {len(facet_operations)} facet operations")
-            logger.critical(f"🔨 Operation types: {[op.operation_type for op in facet_operations]}")
-        else:
-            logger.critical(f"🔨 [{owner_id}/{self.COMPONENT_TYPE}] NO facet operations calculated - no VEIL changes")
 
         return facet_operations if facet_operations else None
 

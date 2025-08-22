@@ -172,7 +172,8 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
             if not llm_response_obj:
                 logger.warning(f"{self.agent_loop_name} ({self.id}): LLM returned no response. Aborting cycle.")
                 return
-
+            logger.critical("RESPONSE RECEIVED")
+            logger.critical(f"LLM response: {llm_response_obj}")
             agent_response_text = llm_response_obj.content or ""
             logger.info(f"LLM response: {len(agent_response_text)} chars")
 
@@ -364,6 +365,8 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
             # Find <tool_calls> blocks
             tool_calls_pattern = r'<tool_calls>(.*?)</tool_calls>'
             tool_calls_matches = re.findall(tool_calls_pattern, response_text, re.DOTALL)
+            logger.critical(f"Tool calls matches: {tool_calls_matches}")
+            logger.critical(f"Response text: {response_text}")
 
             for tool_calls_block in tool_calls_matches:
                 # Find all XML elements with their attributes AND content
