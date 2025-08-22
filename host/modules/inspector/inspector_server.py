@@ -385,7 +385,7 @@ class InspectorServer:
         timeout = body.get('timeout', 5.0)
         
         data = await self.handlers.handle_repl_execute(session_id, code, timeout)
-        status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if "error" in data else 200)
+        status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if not data.get("success", False) and "error" in data else 200)
         return self._json_response(data, status=status_code)
 
     async def handle_repl_sessions(self, request: Request) -> Response:

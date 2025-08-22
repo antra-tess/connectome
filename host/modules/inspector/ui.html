@@ -326,6 +326,146 @@
         .drillable-node:hover .drill-down-btn {
             opacity: 1;
         }
+        
+        /* Console Styles */
+        .console-container {
+            display: none;
+            height: 100%;
+            background: #1a1a2e;
+            flex-direction: column;
+        }
+        
+        .console-container.active {
+            display: flex;
+        }
+        
+        .console-header {
+            background: #16213e;
+            border-bottom: 1px solid #0f3460;
+            padding: 0.75rem 1rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-shrink: 0;
+        }
+        
+        .console-title {
+            color: #00d4aa;
+            font-size: 1rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .console-status {
+            font-size: 0.85rem;
+            color: #999;
+        }
+        
+        .console-status.connected {
+            color: #00d4aa;
+        }
+        
+        .console-status.error {
+            color: #ff6b6b;
+        }
+        
+        .console-output {
+            flex: 1;
+            background: #0f0f23;
+            color: #e0e0e0;
+            font-family: 'Courier New', 'Consolas', 'Monaco', monospace;
+            font-size: 14px;
+            padding: 1rem;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            line-height: 1.4;
+        }
+        
+        .console-input-container {
+            background: #16213e;
+            border-top: 1px solid #0f3460;
+            padding: 0.75rem 1rem;
+            display: flex;
+            align-items: flex-start;
+            gap: 0.5rem;
+            flex-shrink: 0;
+        }
+        
+        .console-prompt {
+            color: #00d4aa;
+            font-family: 'Courier New', 'Consolas', 'Monaco', monospace;
+            font-size: 14px;
+            font-weight: bold;
+            white-space: nowrap;
+            padding-top: 2px;
+        }
+        
+        .console-input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: #e0e0e0;
+            font-family: 'Courier New', 'Consolas', 'Monaco', monospace;
+            font-size: 14px;
+            outline: none;
+            resize: none;
+            min-height: 20px;
+            max-height: 200px;
+            padding: 0;
+            margin: 0;
+            line-height: 1.4;
+        }
+        
+        .console-input:focus {
+            outline: none;
+        }
+        
+        .console-line {
+            margin-bottom: 0.25rem;
+        }
+        
+        .console-line.input {
+            color: #e0e0e0;
+        }
+        
+        .console-line.output {
+            color: #b0b0b0;
+        }
+        
+        .console-line.error {
+            color: #ff6b6b;
+        }
+        
+        .console-line.success {
+            color: #00d4aa;
+        }
+        
+        .console-line.info {
+            color: #74b9ff;
+        }
+        
+        .console-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+        
+        .console-action-btn {
+            background: #0f3460;
+            color: #74b9ff;
+            border: 1px solid #74b9ff;
+            padding: 0.25rem 0.5rem;
+            border-radius: 3px;
+            font-size: 0.75rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .console-action-btn:hover {
+            background: #74b9ff;
+            color: #1a1a2e;
+        }
     </style>
 </head>
 <body>
@@ -340,7 +480,8 @@
         <div class="sidebar">
             <h3>Available Endpoints</h3>
             <ul class="endpoint-list">
-                <li><a href="#" onclick="loadEndpoint('/status')">System Status</a></li>
+                <li><a href="#" onclick="openConsole()">🔧 Interactive Console</a></li>
+                <li style="border-top: 1px solid #0f3460; margin-top: 0.5rem; padding-top: 0.5rem;"><a href="#" onclick="loadEndpoint('/status')">System Status</a></li>
                 <li><a href="#" onclick="loadEndpoint('/spaces')">Spaces Overview</a></li>
                 <li><a href="#" onclick="loadEndpoint('/agents')">Agents</a></li>
                 <li><a href="#" onclick="loadEndpoint('/adapters')">Adapters</a></li>
@@ -419,6 +560,31 @@
                             </div>
                         </div>
                     </div>
+                </div>
+            </div>
+            
+            <!-- Interactive Console -->
+            <div class="console-container" id="console">
+                <div class="console-header">
+                    <div class="console-title">
+                        <span>🔧</span>
+                        <span>Interactive Python Console</span>
+                    </div>
+                    <div class="console-actions">
+                        <span class="console-status" id="console-status">Disconnected</span>
+                        <button class="console-action-btn" onclick="clearConsole()">Clear</button>
+                        <button class="console-action-btn" onclick="closeConsole()">Close</button>
+                    </div>
+                </div>
+                
+                <div class="console-output" id="console-output">
+                    <div class="console-line info">Connectome Interactive Console</div>
+                    <div class="console-line info">Initializing REPL session...</div>
+                </div>
+                
+                <div class="console-input-container">
+                    <div class="console-prompt" id="console-prompt">...</div>
+                    <textarea class="console-input" id="console-input" placeholder="Enter Python code..." rows="1"></textarea>
                 </div>
             </div>
         </div>
@@ -2119,8 +2285,316 @@
             }
         }
         
+        // ========================================
+        // INTERACTIVE CONSOLE FUNCTIONALITY
+        // ========================================
+        
+        let consoleSession = {
+            sessionId: null,
+            isConnected: false,
+            codeBuffer: [],
+            commandHistory: [],
+            historyIndex: -1
+        };
+        
+        // Open the console
+        function openConsole() {
+            // Update active menu item
+            document.querySelectorAll('.endpoint-list a').forEach(a => a.classList.remove('active'));
+            event.target.classList.add('active');
+            
+            // Hide other content and show console
+            document.getElementById('content').style.display = 'none';
+            document.getElementById('toolbar').style.display = 'none';
+            document.getElementById('console').classList.add('active');
+            
+            // Initialize REPL session if not already connected
+            if (!consoleSession.isConnected) {
+                initializeConsoleSession();
+            }
+            
+            // Focus on input
+            setTimeout(() => {
+                document.getElementById('console-input').focus();
+            }, 100);
+        }
+        
+        // Close the console
+        function closeConsole() {
+            document.getElementById('console').classList.remove('active');
+            document.getElementById('content').style.display = 'block';
+            document.querySelectorAll('.endpoint-list a').forEach(a => a.classList.remove('active'));
+        }
+        
+        // Clear console output
+        function clearConsole() {
+            const output = document.getElementById('console-output');
+            output.innerHTML = '<div class="console-line info">Console cleared</div>';
+        }
+        
+        // Initialize REPL session
+        async function initializeConsoleSession() {
+            const statusEl = document.getElementById('console-status');
+            statusEl.textContent = 'Connecting...';
+            statusEl.className = 'console-status';
+            
+            try {
+                // Create REPL session with unique context ID
+                const contextId = `web_console_${Date.now()}`;
+                const response = await fetch('/repl/create', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        context_type: 'global',
+                        context_id: contextId
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const result = await response.json();
+                console.log('REPL creation result:', result); // Debug logging
+                
+                if (result.success) {
+                    // Store the full session ID returned by the server
+                    consoleSession.sessionId = result.session.id;
+                    consoleSession.isConnected = true;
+                    
+                    statusEl.textContent = `Connected (${consoleSession.sessionId})`;
+                    statusEl.className = 'console-status connected';
+                    
+                    // Clear initialization messages and show welcome
+                    const output = document.getElementById('console-output');
+                    output.innerHTML = '';
+                    addConsoleMessage('success', '✓ REPL session established');
+                    addConsoleMessage('info', `Session ID: ${consoleSession.sessionId}`);
+                    addConsoleMessage('info', `Available variables: ${result.session.namespace_keys.length} items`);
+                    addConsoleMessage('info', 'Type Python code and press Enter to execute. Use Shift+Enter for multi-line input.');
+                    
+                    // Update prompt
+                    document.getElementById('console-prompt').textContent = '>>>';
+                    
+                } else {
+                    throw new Error(result.error || 'Failed to create session');
+                }
+                
+            } catch (error) {
+                statusEl.textContent = `Error: ${error.message}`;
+                statusEl.className = 'console-status error';
+                
+                addConsoleMessage('error', `Failed to initialize console: ${error.message}`);
+                addConsoleMessage('info', 'Please ensure Connectome host is running with inspector enabled.');
+            }
+        }
+        
+        // Add message to console output
+        function addConsoleMessage(type, message, showPrompt = false) {
+            const output = document.getElementById('console-output');
+            const line = document.createElement('div');
+            line.className = `console-line ${type}`;
+            
+            if (showPrompt && type === 'input') {
+                const prompt = consoleSession.codeBuffer.length > 0 ? '... ' : '>>> ';
+                line.textContent = prompt + message;
+            } else {
+                line.textContent = message;
+            }
+            
+            output.appendChild(line);
+            output.scrollTop = output.scrollHeight;
+        }
+        
+        // Execute code in REPL
+        async function executeConsoleCode(code) {
+            if (!consoleSession.isConnected || !consoleSession.sessionId) {
+                addConsoleMessage('error', 'Not connected to REPL session');
+                return;
+            }
+            
+            try {
+                console.log('Executing code with session ID:', consoleSession.sessionId); // Debug logging
+                
+                const response = await fetch('/repl/execute', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        session_id: consoleSession.sessionId,
+                        code: code
+                    })
+                });
+                
+                const result = await response.json();
+                console.log('REPL execution result:', result); // Debug logging
+                
+                if (!response.ok && result.error) {
+                    throw new Error(`${result.error}`);
+                }
+                
+                // Show output
+                if (result.output && result.output.trim()) {
+                    addConsoleMessage('output', result.output.trim());
+                }
+                
+                // Show errors (execution errors, not HTTP errors)
+                if (result.error && result.error.trim() && result.success === false) {
+                    addConsoleMessage('error', result.error.trim());
+                }
+                
+                // Show new variables
+                if (result.namespace_changes && result.namespace_changes.length > 0) {
+                    const vars = result.namespace_changes.join(', ');
+                    addConsoleMessage('info', `# New variables: ${vars}`);
+                }
+                
+                // Handle case where there's an error message in the response
+                if (!result.success && result.error) {
+                    addConsoleMessage('error', result.error);
+                }
+                
+            } catch (error) {
+                addConsoleMessage('error', `Execution error: ${error.message}`);
+            }
+        }
+        
+        // Check if code is complete (simplified version)
+        function isCodeComplete(code) {
+            if (!code.trim()) return true;
+            
+            // Simple heuristic: check for incomplete statements
+            const lines = code.split('\n');
+            const lastLine = lines[lines.length - 1];
+            
+            // Check for incomplete structures
+            if (lastLine.trim().endsWith(':') || 
+                lastLine.trim().endsWith('\\') ||
+                code.trim().match(/^(if|for|while|def|class|try|with|elif|else|except|finally)\s/) && !code.includes('\n')) {
+                return false;
+            }
+            
+            // Try to compile (this is a simplified check)
+            try {
+                // Count open/close brackets, parens, braces
+                let parens = 0, brackets = 0, braces = 0;
+                let inString = false, stringChar = null;
+                
+                for (let i = 0; i < code.length; i++) {
+                    const char = code[i];
+                    
+                    if ((char === '"' || char === "'") && !inString) {
+                        inString = true;
+                        stringChar = char;
+                    } else if (char === stringChar && inString && code[i-1] !== '\\') {
+                        inString = false;
+                        stringChar = null;
+                    } else if (!inString) {
+                        if (char === '(') parens++;
+                        else if (char === ')') parens--;
+                        else if (char === '[') brackets++;
+                        else if (char === ']') brackets--;
+                        else if (char === '{') braces++;
+                        else if (char === '}') braces--;
+                    }
+                }
+                
+                return parens === 0 && brackets === 0 && braces === 0 && !inString;
+            } catch {
+                return true; // Assume complete if we can't parse
+            }
+        }
+        
+        // Handle console input
+        function setupConsoleInput() {
+            const input = document.getElementById('console-input');
+            const prompt = document.getElementById('console-prompt');
+            
+            input.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') {
+                    if (e.shiftKey) {
+                        // Shift+Enter: new line (let default behavior happen)
+                        return;
+                    } else {
+                        // Regular Enter: process input
+                        e.preventDefault();
+                        
+                        const code = input.value;
+                        if (!code.trim() && consoleSession.codeBuffer.length === 0) {
+                            return; // Empty input, do nothing
+                        }
+                        
+                        // Add to code buffer
+                        consoleSession.codeBuffer.push(code);
+                        
+                        // Show input in output
+                        const promptText = consoleSession.codeBuffer.length === 1 ? '>>> ' : '... ';
+                        addConsoleMessage('input', code, true);
+                        
+                        // Check if code is complete
+                        const fullCode = consoleSession.codeBuffer.join('\n');
+                        
+                        if (code.trim() === '' || isCodeComplete(fullCode)) {
+                            // Execute the code
+                            if (fullCode.trim()) {
+                                executeConsoleCode(fullCode);
+                                consoleSession.commandHistory.push(fullCode);
+                                consoleSession.historyIndex = consoleSession.commandHistory.length;
+                            }
+                            
+                            // Reset buffer and prompt
+                            consoleSession.codeBuffer = [];
+                            prompt.textContent = '>>>';
+                        } else {
+                            // Continue multi-line input
+                            prompt.textContent = '...';
+                        }
+                        
+                        // Clear input
+                        input.value = '';
+                        autoResizeTextarea();
+                    }
+                }
+                
+                // Command history navigation
+                else if (e.key === 'ArrowUp' && e.ctrlKey) {
+                    e.preventDefault();
+                    if (consoleSession.historyIndex > 0) {
+                        consoleSession.historyIndex--;
+                        input.value = consoleSession.commandHistory[consoleSession.historyIndex];
+                        autoResizeTextarea();
+                    }
+                }
+                else if (e.key === 'ArrowDown' && e.ctrlKey) {
+                    e.preventDefault();
+                    if (consoleSession.historyIndex < consoleSession.commandHistory.length - 1) {
+                        consoleSession.historyIndex++;
+                        input.value = consoleSession.commandHistory[consoleSession.historyIndex];
+                    } else {
+                        consoleSession.historyIndex = consoleSession.commandHistory.length;
+                        input.value = '';
+                    }
+                    autoResizeTextarea();
+                }
+            });
+            
+            // Auto-resize textarea
+            input.addEventListener('input', autoResizeTextarea);
+        }
+        
+        // Auto-resize textarea to fit content
+        function autoResizeTextarea() {
+            const input = document.getElementById('console-input');
+            input.style.height = 'auto';
+            input.style.height = Math.min(input.scrollHeight, 200) + 'px';
+        }
+        
         // Auto-load functionality (currently disabled)
         window.addEventListener('load', function() {
+            setupConsoleInput();
             // Optional: Auto-load status endpoint for demonstration
             // loadEndpoint('/status');
         });
