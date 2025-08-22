@@ -109,9 +109,6 @@ class HeartbeatComponent(Component):
 	async def _process_single_event(self, event_payload: Dict[str, Any], timeline_context: Dict[str, Any]) -> None:
 		try:
 			space = self.owner  # Heartbeat is attached to InnerSpace; owner is InnerSpace (Space subclass)
-			if not space or not hasattr(space, 'process_event_for_components'):
-				logger.error("Heartbeat cannot find Space.process_event_for_components")
-				return
 			space.process_event_for_components(event_payload, timeline_context)
 		except Exception as e:
 			logger.error(f"Heartbeat process_single_event error: {e}", exc_info=True)

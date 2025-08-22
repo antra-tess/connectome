@@ -489,8 +489,15 @@ class BaseElement:
         return self._mount_id
 
     def receive_delta(self, delta: List[Dict[str, Any]]) -> None:
+        logger.critical(f"🔨⬆️ [{self.id}] BaseElement.receive_delta() called with {len(delta) if delta else 0} operations")
+        
         parent = self.get_parent_object()
+        logger.critical(f"🔨⬆️ Parent object: {parent} (type: {type(parent).__name__ if parent else 'None'})")
+        
         if parent and hasattr(parent, 'receive_delta'):
+            logger.critical(f"🔨⬆️ Forwarding {len(delta)} operations to parent")
             parent.receive_delta(delta)
+            logger.critical(f"🔨⬆️ Successfully forwarded to parent")
         else:
+            logger.critical(f"🔨⬆️ [{self.id}] No parent or receive_delta method on parent for element {self.id}")
             logger.warning(f"[{self.id}] No owner or receive_delta method on owner for element {self.id}")

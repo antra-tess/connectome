@@ -138,8 +138,8 @@ class InterruptDeciderComponent(Component):
 			interrupt = True
 		elif rule_normal:
 			interrupt = False
-		else:
-			interrupt = bool(is_dm or self._is_mention(mentions))
+		# else:
+		# 	interrupt = bool(is_dm or self._is_mention(mentions))
 
 		# Evaluate optional condition rules (first match wins)
 		for cond in conditions:

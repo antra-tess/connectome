@@ -299,6 +299,18 @@ class FacetAwareHUDComponent(Component):
                 return "Error: VEILFacetCache not available"
 
             facet_cache = veil_producer.get_facet_cache()  # NEW: Get VEILFacetCache
+            
+            # DEBUG: Check facet cache contents
+            cache_size = len(facet_cache.facets) if facet_cache and hasattr(facet_cache, 'facets') else 0
+            logger.critical(f"🔍 [{self.owner.id}] HUD accessing VEILFacetCache - size: {cache_size}")
+            
+            if cache_size == 0:
+                logger.critical(f"🔍 [{self.owner.id}] EMPTY VEILFacetCache - no facets available for context generation!")
+            else:
+                facet_types = []
+                if hasattr(facet_cache, 'facets'):
+                    facet_types = [f.facet_type.value for f in facet_cache.facets.values()]
+                logger.critical(f"🔍 [{self.owner.id}] VEILFacetCache contains facet types: {set(facet_types)}")
             self._extract_current_focus_info(options) # NEW: Extract current focus at HUD level
 
             # Get VEILFacetCompressionEngine

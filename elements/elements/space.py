@@ -312,6 +312,34 @@ class Space(BaseElement):
         """Get the element factory component."""
         return self._element_factory
 
+    # --- NEW: VEIL Operations ---
+    def receive_delta(self, delta_operations: List[Dict[str, Any]]) -> None:
+        """
+        Receive VEIL facet operations from child elements and route to SpaceVeilProducer.
+        
+        Args:
+            delta_operations: List of VEILFacetOperation instances
+        """
+        logger.critical(f"🔨🏠 [{self.id}] Space.receive_delta() received {len(delta_operations) if delta_operations else 0} operations")
+        
+        if not self._veil_producer:
+            logger.critical(f"🔨🏠 [{self.id}] No SpaceVeilProducer available - VEIL operations lost!")
+            return
+            
+        # Route to SpaceVeilProducer for processing
+        try:
+            logger.critical(f"🔨🏠 Routing {len(delta_operations)} operations to SpaceVeilProducer...")
+            import asyncio
+            
+            # SpaceVeilProducer.receive_facet_operations is async, so we need to handle it properly
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._veil_producer.receive_facet_operations(delta_operations))
+            
+            logger.critical(f"🔨🏠 Successfully routed operations to SpaceVeilProducer")
+        except Exception as e:
+            logger.critical(f"🔨🏠 ERROR routing to SpaceVeilProducer: {e}")
+            logger.error(f"Error routing VEIL operations to SpaceVeilProducer: {e}", exc_info=True)
+
     # --- NEW: Method to find an element by ID ---
     def get_element_by_id(self, element_id: str) -> Optional[BaseElement]:
         """
@@ -390,6 +418,11 @@ class Space(BaseElement):
         replay_phase = timeline_context.get('replay_phase', 'unknown')
 
         logger.debug(f"[{self.id}] Receiving event: Type='{event_type}', Target='{target_element_id}', Timeline='{timeline_context.get('timeline_id')}', Replay={is_replay_mode}, Phase={replay_phase}")
+        
+        # Special logging for activation_call events
+        if event_type == "activation_call":
+            logger.critical(f"🎯 SPACE RECEIVED ACTIVATION_CALL: {event_payload}")
+            logger.critical(f"🎯 Timeline context: {timeline_context}")
 
         # 1. Add event to the timeline via TimelineComponent (unless in replay mode)
         new_event_id = None
@@ -480,6 +513,13 @@ class Space(BaseElement):
              'payload': event_payload.copy()
         }
 
+        # NEW: Handle system events directly (bypass heartbeat classification)
+        # These events represent internal system decisions/acknowledgments, not external content
+        if event_type in ["activation_call", "component_processed"]:
+            logger.critical(f"🎯 SYSTEM EVENT ({event_type}): Direct processing (bypassing heartbeat classification)")
+            self.process_event_for_components(full_event_node, timeline_context)
+            return
+
         # Route event to Heartbeat queues instead of immediate broadcast
         try:
             heartbeat = None
@@ -488,18 +528,20 @@ class Space(BaseElement):
                     heartbeat = comp
                     break
             if heartbeat:
+                logger.critical(f"Event payload found: {event_payload}")
                 interrupt_class = (event_payload or {}).get('decider', {}).get('interrupt_class') if isinstance(event_payload, dict) else None
+                
                 loop = asyncio.get_running_loop()
-                if interrupt_class == 'interrupt' and hasattr(heartbeat, 'handle_interrupt_now'):
-                    loop.create_task(heartbeat.handle_interrupt_now(event_payload, timeline_context))
-                elif hasattr(heartbeat, 'enqueue_normal'):
-                    loop.create_task(heartbeat.enqueue_normal(event_payload, timeline_context))
+                if interrupt_class == 'interrupt':
+                    loop.create_task(heartbeat.handle_interrupt_now(full_event_node, timeline_context))
+                else:
+                    loop.create_task(heartbeat.enqueue_normal(full_event_node, timeline_context))
             else:
                 # Fallback to immediate processing if heartbeat missing
-                self.process_event_for_components(event_payload, timeline_context)
+                self.process_event_for_components(full_event_node, timeline_context)
         except Exception as e:
             logger.debug(f"[{self.id}] Heartbeat routing error, falling back to immediate processing: {e}")
-            self.process_event_for_components(event_payload, timeline_context)
+            self.process_event_for_components(full_event_node, timeline_context)
 
         # --- NEW: Handle action_request_for_remote ---
         if event_type == "action_request_for_remote":
@@ -534,23 +576,28 @@ class Space(BaseElement):
     def process_event_for_components(self, event_payload: Dict[str, Any], timeline_context: Dict[str, Any]) -> None:
         try:
             event_type = event_payload.get("event_type")
+            
+            # Special logging for activation_call events
+            if event_type == "activation_call":
+                logger.critical(f"🎯 PROCESSING ACTIVATION_CALL in components: {event_payload}")
+            
+            # Extract the real event ID from the event payload or timeline context
+            real_event_id = event_payload.get('event_id')
+            
+            logger.critical(f"🎯 Using event ID for components: {real_event_id}")
+            
             # 2. Dispatch event to own components
             handled_by_component = False
             for comp_name, component in self.get_components().items():
                 if hasattr(component, 'handle_event') and callable(component.handle_event):
                     try:
-                        full_event_node = {
-                            'id': f"proc_{event_type}_{int(time.time()*1000)}",
-                            'timeline_id': timeline_context.get('timeline_id', self.get_primary_timeline()),
-                            'payload': event_payload.copy()
-                        }
-                        if component.handle_event(full_event_node, timeline_context):
+                        if component.handle_event(event_payload, timeline_context):
                             handled_by_component = True
                     except Exception as comp_err:
                         logger.error(f"[{self.id}] Error in component '{comp_name}' handling event: {comp_err}", exc_info=True)
             # 3. Broadcast to all mounted child elements
             try:
-                mounted_elements = self._container.get_mounted_elements() if self._container else {}
+                mounted_elements = self._container.get_mounted_elements() if self._container else {}  
                 for elem in mounted_elements.values():
                     if hasattr(elem, 'receive_event') and callable(elem.receive_event):
                         elem.receive_event(event_payload, timeline_context)

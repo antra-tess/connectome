@@ -40,6 +40,9 @@ class RulesFileWatcher:
 @register_component
 class ActivationDeciderComponent(Component):
 	COMPONENT_TYPE = "ActivationDeciderComponent"
+	
+	# Handle component acknowledgments to trigger activation
+	HANDLED_EVENT_TYPES = ["component_processed"]
 
 	def __init__(self, **kwargs):
 		super().__init__(**kwargs)
@@ -205,32 +208,73 @@ class ActivationDeciderComponent(Component):
 	def remember_event_context(self, event_id: str, context: Dict[str, Any]) -> None:
 		self._event_context_by_id[event_id] = context or {}
 
+	def _on_event(self, event: Dict[str, Any], timeline_context: Dict[str, Any]) -> bool:
+		"""Handle events sent to this component."""
+		try:
+			event_payload = event.get('payload', {})
+			event_type = event_payload.get('event_type')
+			
+			if event_type == "component_processed":
+				logger.critical(f"🔔 RECEIVED COMPONENT_PROCESSED ACK: {event_payload}")
+				self.on_component_processed(event_payload)
+				return True
+				
+			return False
+		except Exception as e:
+			logger.error(f"ActivationDecider _on_event error: {e}", exc_info=True)
+			return False
+
 	def on_component_processed(self, ack_payload: Dict[str, Any]) -> None:
 		try:
-			original_event_id = ack_payload.get('original_event_id')
+			original_event_id = ack_payload.get('payload', {}).get('original_event_id')
+			logger.critical(f"🔔 Processing ack for event: {original_event_id}")
+			logger.critical(f"🔔 Pending decisions: {list(self._pending_decisions.keys())}")
+			
 			if not original_event_id:
+				logger.critical(f"🔔 No original_event_id in ack payload")
 				return
 			decision = self._pending_decisions.get(original_event_id)
 			if not decision:
+				logger.critical(f"🔔 No pending decision found for event: {original_event_id}")
 				return
+				
+			logger.critical(f"🔔 Found decision for {original_event_id}: {decision}")
+			
 			if decision.get('activation_decision'):
+				logger.critical(f"🔔 Activation decision is True, emitting activation_call")
+				logger.critical(f"🔔 About to call _emit_activation_after_processing...")
 				self._emit_activation_after_processing(decision, ack_payload)
+				logger.critical(f"🔔 Finished calling _emit_activation_after_processing")
+			else:
+				logger.critical(f"🔔 Activation decision is False, not emitting activation_call")
 		except Exception as e:
-			logger.debug(f"ActivationDecider on_component_processed error: {e}")
+			logger.error(f"ActivationDecider on_component_processed error: {e}", exc_info=True)
 
 	def _emit_activation_after_processing(self, decision: Dict[str, Any], ack_payload: Dict[str, Any]) -> None:
 		try:
-			parent_space = self.owner.get_parent_object() if hasattr(self.owner, 'get_parent_object') else self.owner
+			logger.critical(f"🔧 STARTING _emit_activation_after_processing")
+			logger.critical(f"🔧 Decision: {decision}")
+			logger.critical(f"🔧 Ack payload: {ack_payload}")
+			
+			parent_space = self.owner
+			logger.critical(f"🔧 Parent space: {parent_space}")
+			logger.critical(f"🔧 Has receive_event: {hasattr(parent_space, 'receive_event') if parent_space else False}")
+			
 			if not parent_space or not hasattr(parent_space, 'receive_event'):
+				logger.critical(f"🔧 ABORTING: No parent space or receive_event method")
 				return
 			focus_element_id = None
 			try:
-				original_event_id = ack_payload.get('original_event_id')
+				original_event_id = ack_payload.get('payload', {}).get('original_event_id')
+				logger.critical(f"🔧 Original event ID: {original_event_id}")
+				
 				ctx = self._event_context_by_id.get(original_event_id, {})
+				logger.critical(f"🔧 Event context: {ctx}")
 				
 				# Use advanced focus selection strategy
 				event_contexts = [ctx] if ctx else []
 				focus_element_id = self._select_focus_element(event_contexts)
+				logger.critical(f"🔧 Selected focus element: {focus_element_id}")
 				
 				# NEW: Remember last activation context for later conditional rules
 				conversation_id = ctx.get('conversation_id') if ctx else None
@@ -239,7 +283,9 @@ class ActivationDeciderComponent(Component):
 					"conversation_id": conversation_id,
 					"adapter_id": ctx.get('adapter_id') if ctx else None
 				}
-			except Exception:
+				logger.critical(f"🔧 Last activation context: {self._last_activation_context}")
+			except Exception as e:
+				logger.critical(f"🔧 EXCEPTION in focus selection: {e}")
 				pass
 			envelope = {
 				"event_type": "activation_call",
@@ -253,9 +299,17 @@ class ActivationDeciderComponent(Component):
 				}
 			}
 			timeline_context = {"timeline_id": parent_space.get_primary_timeline() if hasattr(parent_space, 'get_primary_timeline') else None}
+			
+			logger.critical(f"🚀 EMITTING ACTIVATION_CALL (after processing): {envelope}")
+			logger.critical(f"🚀 Timeline context: {timeline_context}")
+			logger.critical(f"🚀 About to call parent_space.receive_event...")
+			
 			parent_space.receive_event(envelope, timeline_context)
+			
+			logger.critical(f"🚀 Successfully called parent_space.receive_event!")
 		except Exception as e:
-			logger.debug(f"ActivationDecider activation emit error: {e}")
+			logger.critical(f"🚨 ActivationDecider activation emit ERROR: {e}")
+			logger.error(f"ActivationDecider activation emit error: {e}", exc_info=True)
 
 	async def evaluate_and_maybe_activate(self, context: Dict[str, Any]) -> None:
 		try:
@@ -291,6 +345,8 @@ class ActivationDeciderComponent(Component):
 					}
 				}
 				timeline_context = {"timeline_id": parent_space.get_primary_timeline() if hasattr(parent_space, 'get_primary_timeline') else None}
+				logger.critical(f"🚀 EMITTING ACTIVATION_CALL (evaluate): {envelope}")
+				logger.critical(f"🚀 Timeline context: {timeline_context}")
 				parent_space.receive_event(envelope, timeline_context)
 		except Exception as e:
 			logger.debug(f"ActivationDecider evaluate_and_maybe_activate error: {e}")
@@ -299,17 +355,9 @@ class ActivationDeciderComponent(Component):
 		try:
 			agent_name = getattr(self.owner, 'agent_name', None)
 			alias = getattr(self.owner, 'alias', None)
+			adapter_ids = getattr(self.owner, '_agent_adapter_ids', [])
 			# NEW: Load additional handles from env (comma-separated)
-			extra_handles_env = os.environ.get('CONNECTOME_AGENT_HANDLES') or os.environ.get('AGENT_HANDLES') or os.environ.get('BOT_HANDLES')
-			extra_handles = []
-			if extra_handles_env:
-				try:
-					extra_handles = [h.strip() for h in extra_handles_env.split(',') if h.strip()]
-				except Exception:
-					extra_handles = []
-			if not mentions:
-				return False
-			handles = [h for h in [agent_name, alias] if h] + extra_handles
+			handles = [h for h in [agent_name, alias] if h] + list(adapter_ids)
 			return any(m in handles for m in mentions)
 		except Exception:
 			return False

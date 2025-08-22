@@ -68,9 +68,9 @@ class MessageListComponent(Component):
 
         # Check if this is a replay event to avoid activation during startup
         is_replay_mode = timeline_context.get('replay_mode', False)
-
+        
         if event_type in self.HANDLED_EVENT_TYPES:
-            logger.debug(f"[{self.owner.id}] MessageListComponent handling event: {event_type} (replay: {is_replay_mode})")
+            logger.critical(f"[{self.owner.id}] MessageListComponent handling event: {event_type} (replay: {is_replay_mode})")
 
             # FIXED: For events from ExternalEventRouter via Space, the actual content is nested in event_payload['payload']
             # The structure is: event_node['payload']['payload'] contains the actual message content
@@ -114,13 +114,16 @@ class MessageListComponent(Component):
 
             # Emit component_processed ack for decider post-processing
             try:
+                original_event_id = event_node.get('id')
+                logger.critical(f"📢 EMITTING COMPONENT_PROCESSED ACK for event: {original_event_id}")
+                
                 parent_space = self.owner.get_parent_object() if hasattr(self.owner, 'get_parent_object') else None
                 if parent_space and hasattr(parent_space, 'receive_event'):
                     ack_event = {
                         "event_type": "component_processed",
                         "is_replayable": False,
                         "payload": {
-                            "original_event_id": event_node.get('id'),
+                            "original_event_id": original_event_id,
                             "element_id": self.owner.id,
                             "component_id": self.id,
                             "handled": True,
@@ -128,9 +131,12 @@ class MessageListComponent(Component):
                         }
                     }
                     timeline_context_for_ack = {"timeline_id": parent_space.get_primary_timeline() if hasattr(parent_space, 'get_primary_timeline') else None}
+                    logger.critical(f"📢 ACK EVENT: {ack_event}")
                     parent_space.receive_event(ack_event, timeline_context_for_ack)
+                else:
+                    logger.critical(f"📢 Cannot emit ack: parent_space not available")
             except Exception as e:
-                logger.debug(f"[{self.owner.id}] Failed to emit component_processed ack: {e}")
+                logger.error(f"[{self.owner.id}] Failed to emit component_processed ack: {e}", exc_info=True)
 
             return True
 

@@ -114,21 +114,26 @@ class BaseAgentLoopComponent(Component):
             return False
 
         if event_type == "activation_call":
-            activation_reason = event_payload.get('activation_reason', 'unknown')
-            source_element_id = event_payload.get('source_element_id', 'unknown')
+            # Extract from nested payload structure
+            inner_payload = event_payload.get('payload', {})
+            activation_reason = inner_payload.get('activation_reason', 'unknown')
+            focus_context = inner_payload.get('focus_context', {})
+            source_element_id = focus_context.get('focus_element_id', 'unknown')
 
-            logger.info(f"[{self.agent_loop_name}] Received activation_call: reason='{activation_reason}', source='{source_element_id}'")
+            logger.critical(f"🎯 [{self.agent_loop_name}] RECEIVED ACTIVATION_CALL: reason='{activation_reason}', focus_element='{source_element_id}'")
+            logger.critical(f"🎯 Inner payload: {inner_payload}")
+            logger.critical(f"🎯 Timeline context: {timeline_context}")
 
             # Check if we should actually trigger a cycle based on our own logic
             should_activate = self._should_activate_for_reason(activation_reason, event_payload)
 
             if should_activate:
-                logger.info(f"[{self.agent_loop_name}] Activating agent cycle due to: {activation_reason}")
+                logger.critical(f"🚀 [{self.agent_loop_name}] ACTIVATING AGENT CYCLE due to: {activation_reason}")
 
                 # Run the cycle asynchronously
                 asyncio.create_task(self._run_activation_cycle(activation_reason, event_payload))
             else:
-                logger.debug(f"[{self.agent_loop_name}] Skipping activation for reason: {activation_reason}")
+                logger.critical(f"❌ [{self.agent_loop_name}] SKIPPING activation for reason: {activation_reason}")
 
             return True
 
@@ -161,8 +166,9 @@ class BaseAgentLoopComponent(Component):
         try:
             logger.debug(f"[{self.agent_loop_name}] Starting activation cycle for reason: {activation_reason}")
 
-            # NEW: Extract focus context for targeted rendering
-            focus_context = event_payload.get('focus_context', {})
+            # NEW: Extract focus context for targeted rendering (from nested payload)
+            inner_payload = event_payload.get('payload', {})
+            focus_context = inner_payload.get('focus_context', {})
             focus_element_id = focus_context.get('focus_element_id')
 
             if focus_element_id:
