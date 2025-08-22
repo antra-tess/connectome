@@ -6,6 +6,7 @@ Uses the same InspectorEndpointHandlers as the web server for consistency.
 """
 
 import asyncio
+import base64
 import json
 import logging
 import time
@@ -81,6 +82,11 @@ class CLICommandHandler:
             # Write commands
             'update-timeline-event': self._handle_update_timeline_event,
             'update-veil-facet': self._handle_update_veil_facet,
+            # REPL commands
+            'repl-create': self._handle_repl_create,
+            'repl-exec': self._handle_repl_exec,
+            'repl-sessions': self._handle_repl_sessions,
+            'repl-history': self._handle_repl_history,
         }
     
     def start(self):
@@ -351,6 +357,218 @@ class CLICommandHandler:
         facet_id = args.get('facet_id')
         update_data = args.get('update_data')
         return await self.handlers.handle_update_veil_facet(space_id, facet_id, update_data)
+    
+    async def _handle_repl_create(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle repl-create command."""
+        context_type = args.get('context_type')
+        context_id = args.get('context_id')
+        target_path = args.get('target_path')
+        
+        result = await self.handlers.handle_repl_create(context_type, context_id, target_path)
+        
+        # Format output for terminal display
+        if result.get('success'):
+            session_info = result.get('session', {})
+            formatted_result = {
+                **result,
+                'formatted_output': self._format_repl_session_created(session_info)
+            }
+            return formatted_result
+        else:
+            return result
+    
+    async def _handle_repl_exec(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle repl-exec command."""
+        session_id = args.get('session_id')
+        code = args.get('code')
+        timeout = args.get('timeout', 5.0)
+        
+        # Handle base64 encoded code for multi-line support
+        if args.get('code_base64'):
+            try:
+                code = base64.b64decode(args['code_base64']).decode('utf-8')
+            except Exception as e:
+                return {
+                    'error': f'Failed to decode base64 code: {e}',
+                    'timestamp': time.time()
+                }
+        
+        result = await self.handlers.handle_repl_execute(session_id, code, timeout)
+        
+        # Format output for terminal display - always format, even on failure
+        formatted_result = {
+            **result,
+            'formatted_output': self._format_repl_execution_result(result)
+        }
+        return formatted_result
+    
+    async def _handle_repl_sessions(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle repl-sessions command."""
+        result = await self.handlers.handle_repl_sessions()
+        
+        # Format output for terminal display
+        if not result.get('error'):
+            formatted_result = {
+                **result,
+                'formatted_output': self._format_repl_sessions_list(result)
+            }
+            return formatted_result
+        else:
+            return result
+    
+    async def _handle_repl_history(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle repl-history command."""
+        session_id = args.get('session_id')
+        limit = args.get('limit', 50)
+        offset = args.get('offset', 0)
+        
+        result = await self.handlers.handle_repl_session_history(session_id, limit, offset)
+        
+        # Format output for terminal display
+        if result.get('success'):
+            formatted_result = {
+                **result,
+                'formatted_output': self._format_repl_session_history(result)
+            }
+            return formatted_result
+        else:
+            return result
+    
+    def _format_repl_session_created(self, session_info: Dict[str, Any]) -> str:
+        """Format REPL session creation output for terminal."""
+        lines = [
+            f"✓ REPL session created successfully",
+            f"  Session ID: {session_info.get('id')}",
+            f"  Context Type: {session_info.get('type')}",
+            f"  Context ID: {session_info.get('context_id')}",
+            f"  Created: {session_info.get('created_at')}",
+            f"  Namespace Keys: {len(session_info.get('namespace_keys', []))} available",
+            "",
+            "Available variables:"
+        ]
+        
+        # Show first few namespace keys
+        namespace_keys = session_info.get('namespace_keys', [])
+        for key in namespace_keys[:10]:  # Show first 10 keys
+            lines.append(f"  - {key}")
+        
+        if len(namespace_keys) > 10:
+            lines.append(f"  ... and {len(namespace_keys) - 10} more")
+        
+        return "\n".join(lines)
+    
+    def _format_repl_execution_result(self, result: Dict[str, Any]) -> str:
+        """Format REPL execution result for terminal."""
+        lines = []
+        
+        # Show execution status
+        if result.get('success'):
+            lines.append("✓ Code executed successfully")
+        else:
+            lines.append("✗ Code execution failed")
+        
+        # Show execution time
+        exec_time = result.get('execution_time_ms', 0)
+        lines.append(f"  Execution time: {exec_time:.2f}ms")
+        
+        # Show output if present
+        output = result.get('output', '').strip()
+        if output:
+            lines.append("")
+            lines.append("Output:")
+            for line in output.split('\n'):
+                lines.append(f"  {line}")
+        
+        # Show error if present
+        error = result.get('error', '').strip()
+        if error:
+            lines.append("")
+            lines.append("Error:")
+            for line in error.split('\n'):
+                lines.append(f"  {line}")
+        
+        # Show namespace changes
+        namespace_changes = result.get('namespace_changes', [])
+        if namespace_changes:
+            lines.append("")
+            lines.append("New variables created:")
+            for var in namespace_changes:
+                lines.append(f"  - {var}")
+        
+        return "\n".join(lines)
+    
+    def _format_repl_sessions_list(self, result: Dict[str, Any]) -> str:
+        """Format REPL sessions list for terminal."""
+        sessions = result.get('sessions', [])
+        total = result.get('total_sessions', 0)
+        
+        if total == 0:
+            return "No active REPL sessions found."
+        
+        lines = [f"Found {total} active REPL session(s):", ""]
+        
+        for session in sessions:
+            lines.extend([
+                f"Session: {session.get('id')}",
+                f"  Type: {session.get('type')}",
+                f"  Context: {session.get('context_id')}",
+                f"  Created: {session.get('created_at')}",
+                f"  Last accessed: {session.get('last_accessed')}",
+                f"  History entries: {session.get('history_length', 0)}",
+                f"  Target alive: {session.get('target_alive', True)}",
+                ""
+            ])
+        
+        return "\n".join(lines)
+    
+    def _format_repl_session_history(self, result: Dict[str, Any]) -> str:
+        """Format REPL session history for terminal."""
+        session_id = result.get('session_id')
+        history = result.get('history', [])
+        total_count = result.get('total_history_count', 0)
+        returned_count = result.get('returned_count', 0)
+        offset = result.get('offset', 0)
+        has_more = result.get('has_more', False)
+        
+        lines = [
+            f"History for session: {session_id}",
+            f"Showing {returned_count} of {total_count} entries (offset: {offset})",
+            ""
+        ]
+        
+        if not history:
+            lines.append("No history entries found.")
+            return "\n".join(lines)
+        
+        for i, entry in enumerate(history):
+            entry_num = total_count - offset - i  # Calculate actual entry number
+            lines.extend([
+                f"Entry #{entry_num} - {entry.get('timestamp')}",
+                f"  Code: {entry.get('code')}",
+            ])
+            
+            # Show output if present
+            output = entry.get('output', '').strip()
+            if output:
+                lines.append("  Output:")
+                for line in output.split('\n'):
+                    lines.append(f"    {line}")
+            
+            # Show error if present
+            error = entry.get('error', '').strip()
+            if error:
+                lines.append("  Error:")
+                for line in error.split('\n'):
+                    lines.append(f"    {line}")
+            
+            lines.append(f"  Success: {entry.get('success')}")
+            lines.append(f"  Execution time: {entry.get('execution_time_ms', 0):.2f}ms")
+            lines.append("")
+        
+        if has_more:
+            lines.append(f"... {total_count - offset - returned_count} more entries available")
+        
+        return "\n".join(lines)
 
 
 def register_cli_commands(host_instance) -> CLICommandHandler:
