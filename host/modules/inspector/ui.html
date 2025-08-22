@@ -2387,10 +2387,11 @@
                     addConsoleMessage('info', `Session ID: ${consoleSession.sessionId}`);
                     addConsoleMessage('info', `Available variables: ${result.session.namespace_keys.length} items`);
                     addConsoleMessage('info', 'Type Python code and press Enter to execute. Use Shift+Enter for multi-line input.');
+                    addConsoleMessage('info', 'Use ↑/↓ arrow keys to browse command history.');
                     addConsoleMessage('info', '');
                     addConsoleMessage('info', 'Quick start example:');
                     addConsoleMessage('example', 'import inspect');
-                    addConsoleMessage('example', 'print(inspect.getmembers(str))');
+                    addConsoleMessage('example', 'print(inspect.getmembers(host))');
                     
                     // Update prompt
                     document.getElementById('console-prompt').textContent = '>>>';
@@ -2577,24 +2578,48 @@
                 }
                 
                 // Command history navigation
-                else if (e.key === 'ArrowUp' && e.ctrlKey) {
-                    e.preventDefault();
-                    if (consoleSession.historyIndex > 0) {
-                        consoleSession.historyIndex--;
-                        input.value = consoleSession.commandHistory[consoleSession.historyIndex];
-                        autoResizeTextarea();
+                else if (e.key === 'ArrowUp') {
+                    // Navigate history up if cursor is at the beginning of first line
+                    // or if Ctrl is held (always navigate)
+                    const cursorPos = input.selectionStart;
+                    const textBeforeCursor = input.value.substring(0, cursorPos);
+                    const isAtFirstLine = !textBeforeCursor.includes('\n');
+                    
+                    if (e.ctrlKey || (isAtFirstLine && cursorPos === 0)) {
+                        e.preventDefault();
+                        if (consoleSession.historyIndex > 0) {
+                            consoleSession.historyIndex--;
+                            input.value = consoleSession.commandHistory[consoleSession.historyIndex];
+                            // Place cursor at end
+                            setTimeout(() => {
+                                input.setSelectionRange(input.value.length, input.value.length);
+                            }, 0);
+                            autoResizeTextarea();
+                        }
                     }
                 }
-                else if (e.key === 'ArrowDown' && e.ctrlKey) {
-                    e.preventDefault();
-                    if (consoleSession.historyIndex < consoleSession.commandHistory.length - 1) {
-                        consoleSession.historyIndex++;
-                        input.value = consoleSession.commandHistory[consoleSession.historyIndex];
-                    } else {
-                        consoleSession.historyIndex = consoleSession.commandHistory.length;
-                        input.value = '';
+                else if (e.key === 'ArrowDown') {
+                    // Navigate history down if cursor is at the end of last line
+                    // or if Ctrl is held (always navigate)
+                    const cursorPos = input.selectionStart;
+                    const textAfterCursor = input.value.substring(cursorPos);
+                    const isAtLastLine = !textAfterCursor.includes('\n');
+                    
+                    if (e.ctrlKey || (isAtLastLine && cursorPos === input.value.length)) {
+                        e.preventDefault();
+                        if (consoleSession.historyIndex < consoleSession.commandHistory.length - 1) {
+                            consoleSession.historyIndex++;
+                            input.value = consoleSession.commandHistory[consoleSession.historyIndex];
+                            // Place cursor at end
+                            setTimeout(() => {
+                                input.setSelectionRange(input.value.length, input.value.length);
+                            }, 0);
+                        } else {
+                            consoleSession.historyIndex = consoleSession.commandHistory.length;
+                            input.value = '';
+                        }
+                        autoResizeTextarea();
                     }
-                    autoResizeTextarea();
                 }
             });
             
