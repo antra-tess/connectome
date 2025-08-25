@@ -378,13 +378,17 @@ class IPythonREPLExecutor:
                     # Fall back to the original matches (might be empty)
                     pass
             
-            # Remove duplicates while preserving order
+            # Remove duplicates and fix completion formatting
             seen = set()
             unique_completions = []
             for comp in matches:
                 if comp and comp not in seen:
-                    seen.add(comp)
-                    unique_completions.append(comp)
+                    # Remove leading dot from completions to avoid double-dot issues
+                    # e.g., "host." + ".space_registry" should be "host." + "space_registry"
+                    cleaned_comp = comp.lstrip('.')
+                    if cleaned_comp:  # Only add non-empty completions
+                        seen.add(comp)
+                        unique_completions.append(cleaned_comp)
             
             return unique_completions
             
