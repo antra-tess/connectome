@@ -299,41 +299,16 @@ class IPythonREPLExecutor:
         if actual_result is None:
             return
             
-        object_refs = []
-        
-        def object_handler(obj):
-            """Custom JSON encoder that converts objects to references."""
-            # Check if this is an object we should create an inspection button for
-            obj_repr = repr(obj)
-            if '<' in obj_repr and 'at 0x' in obj_repr:
-                # Extract class name and memory address
-                match = re.match(r'<([^>]+)\s+at\s+(0x[a-f0-9]+)>', obj_repr)
-                if match:
-                    class_info, memory_addr = match.groups()
-                    
-                    # Create a reference object
-                    obj_ref = {
-                        'class_name': class_info,
-                        'memory_address': memory_addr,
-                        'variable_name': self._extract_variable_name_from_code(original_code),
-                        'full_representation': obj_repr,
-                        'inspectable': True
-                    }
-                    object_refs.append(obj_ref)
-                    
-                    # Return a reference that the tree can display
-                    return {
-                        '__object_ref__': len(object_refs) - 1,
-                        '__repr__': obj_repr,
-                        '__class__': class_info
-                    }
-            
-            # For other non-serializable objects, convert to string
-            return str(obj)
-        
         try:
-            # Try to serialize the result to JSON
-            json_data = json.loads(json.dumps(actual_result, default=object_handler, ensure_ascii=False))
+            # Track objects and their paths
+            object_refs = []
+            base_var_name = self._extract_variable_name_from_code(original_code)
+            
+            # First pass: serialize and track paths
+            json_data, found_objects = self._serialize_with_path_tracking(actual_result, base_var_name)
+            
+            # Add found objects to object_refs
+            object_refs.extend(found_objects)
             
             # Set the metadata based on the actual data structure
             if isinstance(actual_result, dict):
@@ -351,9 +326,61 @@ class IPythonREPLExecutor:
             result['output_metadata']['object_representations'].extend(object_refs)
             
         except (TypeError, ValueError) as e:
-            # If JSON serialization fails completely, fall back to string analysis
-            print(f"Debug: JSON serialization failed: {e}")
+            # If serialization fails, fall back to string analysis
+            print(f"Debug: Serialization failed: {e}")
             self._analyze_output_string(result, original_code)
+    
+    def _serialize_with_path_tracking(self, obj, base_path):
+        """Serialize an object to JSON while tracking paths to non-serializable objects."""
+        found_objects = []
+        
+        def serialize_recursive(item, path):
+            """Recursively serialize items, tracking their paths."""
+            if item is None or isinstance(item, (bool, int, float, str)):
+                return item
+            elif isinstance(item, dict):
+                result = {}
+                for key, value in item.items():
+                    new_path = f"{path}[{repr(key)}]"
+                    result[key] = serialize_recursive(value, new_path)
+                return result
+            elif isinstance(item, (list, tuple)):
+                result = []
+                for i, value in enumerate(item):
+                    new_path = f"{path}[{i}]"
+                    result.append(serialize_recursive(value, new_path))
+                return result
+            else:
+                # Non-serializable object - check if it's inspectable
+                obj_repr = repr(item)
+                if '<' in obj_repr and 'at 0x' in obj_repr:
+                    match = re.match(r'<([^>]+)\s+at\s+(0x[a-f0-9]+)>', obj_repr)
+                    if match:
+                        class_info, memory_addr = match.groups()
+                        
+                        # Store object reference with its path
+                        obj_ref = {
+                            'class_name': class_info,
+                            'memory_address': memory_addr,
+                            'variable_name': path,  # Use the full path instead of base name
+                            'full_representation': obj_repr,
+                            'inspectable': True
+                        }
+                        found_objects.append(obj_ref)
+                        
+                        # Return a reference marker for the tree
+                        return {
+                            '__object_ref__': len(found_objects) - 1,
+                            '__repr__': obj_repr,
+                            '__class__': class_info,
+                            '__path__': path
+                        }
+                
+                # For other non-serializable objects, convert to string
+                return str(item)
+        
+        json_data = serialize_recursive(obj, base_path)
+        return json_data, found_objects
     
     def _analyze_output_string(self, result: Dict[str, Any], original_code: str) -> None:
         """Fallback analysis using string parsing when actual result isn't available."""
@@ -486,12 +513,19 @@ class IPythonREPLExecutor:
         """Extract variable name from the original code for inspection purposes."""
         code = code.strip()
         
-        # Handle simple variable references like "host", "host.space_registry", "obj.attr"
-        if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*$', code):
-            return code
+        # If multiline, extract the last non-empty line (likely the expression being evaluated)
+        lines = code.split('\n')
+        last_line = ''
+        for line in reversed(lines):
+            if line.strip():
+                last_line = line.strip()
+                break
+        
+        # Use last line if found, otherwise use full code
+        code_to_analyze = last_line if last_line else code
         
         # Handle function calls like "type(host)", "len(my_list)", etc.
-        func_match = re.match(r'^(\w+)\(([^)]+)\)$', code)
+        func_match = re.match(r'^(\w+)\(([^)]+)\)$', code_to_analyze)
         if func_match:
             func_name, args = func_match.groups()
             # For simple inspection functions, return the argument
@@ -499,14 +533,16 @@ class IPythonREPLExecutor:
                 return args.strip()
         
         # Handle inspect.getmembers(variable) calls
-        inspect_match = re.match(r'^inspect\.getmembers\(([^)]+)\)$', code)
+        inspect_match = re.match(r'^inspect\.getmembers\(([^)]+)\)$', code_to_analyze)
         if inspect_match:
             return inspect_match.group(1).strip()
         
-        # Handle array/dict access like "my_dict['key']", "my_list[0]"
-        access_match = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*)\[.+\]$', code)
-        if access_match:
-            return access_match.group(1)
+        # Handle any valid Python identifier/attribute/array access combination
+        # This includes: variable, var.attr, var[key], var.attr[key], var[key].attr, etc.
+        # The pattern matches a variable name followed by any combination of .attr or [key] accesses
+        mixed_access_pattern = r'^[a-zA-Z_][a-zA-Z0-9_]*((\.[a-zA-Z_][a-zA-Z0-9_]*)|(\[[^\]]+\]))*$'
+        if re.match(mixed_access_pattern, code_to_analyze):
+            return code_to_analyze
         
         # For anything else, fall back to the last result reference
         return '_'
