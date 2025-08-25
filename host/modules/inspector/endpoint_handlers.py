@@ -500,6 +500,7 @@ class InspectorEndpointHandlers:
                 "execution_count": result.get("execution_count", 0),
                 "rich_output": result.get("rich_output", []),
                 "namespace_changes": result["namespace_changes"],
+                "output_metadata": result.get("output_metadata", {}),
                 "session_id": session_id,
                 "timestamp": time.time()
             }

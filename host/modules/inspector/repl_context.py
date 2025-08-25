@@ -10,6 +10,7 @@ import time
 import pprint
 import weakref
 import uuid
+import inspect
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 
@@ -105,6 +106,7 @@ class REPLContextManager:
             'pprint': pprint,
             'datetime': datetime,
             'weakref': weakref,
+            'inspect': inspect,
         }
         
         if context_type == 'global':
@@ -382,6 +384,104 @@ class REPLContextManager:
                 'completions': [],
                 'error': f'Error getting completions: {str(e)}'
             }
+    
+    def execute_inspection(self, session_id: str, variable_name: str) -> Dict[str, Any]:
+        """
+        Execute an inspection command (inspect.getmembers) on a variable.
+        
+        Args:
+            session_id: Session identifier
+            variable_name: Name of variable to inspect (e.g., 'host', 'host.space_registry', '_')
+            
+        Returns:
+            Dict with inspection results
+        """
+        session = self.sessions.get(session_id)
+        if not session:
+            return {
+                'success': False,
+                'error': f'Session "{session_id}" not found'
+            }
+        
+        # Generate inspection code
+        inspection_code = f"inspect.getmembers({variable_name})"
+        
+        try:
+            # Execute the inspection
+            result = self.execute_in_context(session_id, inspection_code)
+            
+            # Mark this as an inspection result for special handling
+            if result['success']:
+                result['is_inspection'] = True
+                result['inspected_variable'] = variable_name
+                result['inspection_type'] = 'getmembers'
+                
+                # Try to parse the inspection results into a more structured format
+                if result.get('output_metadata', {}).get('has_list'):
+                    result['structured_inspection'] = self._parse_inspection_output(result['output'])
+            
+            return result
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'error': f'Error executing inspection: {str(e)}',
+                'inspected_variable': variable_name
+            }
+    
+    def _parse_inspection_output(self, output: str) -> Optional[Dict[str, Any]]:
+        """
+        Parse inspect.getmembers() output into structured data.
+        
+        Args:
+            output: Raw output from inspect.getmembers()
+            
+        Returns:
+            Structured inspection data or None if parsing fails
+        """
+        try:
+            # Extract the list part from "Out[N]: [('name', value), ...]"
+            import re
+            
+            # Find the output value (after "Out[N]: ")
+            lines = output.split('\n')
+            for line in lines:
+                if line.strip().startswith('Out[') and ': ' in line:
+                    list_str = line.split(': ', 1)[1]
+                    break
+            else:
+                return None
+            
+            # Simple parsing for member lists
+            # This is a basic implementation - could be enhanced
+            members = []
+            
+            # Look for patterns like ('name', <value>)
+            member_pattern = r"\('([^']+)',\s*([^)]+)\)"
+            matches = re.findall(member_pattern, list_str)
+            
+            for name, value_repr in matches:
+                member_info = {
+                    'name': name,
+                    'value_repr': value_repr.strip(),
+                    'is_method': 'method' in value_repr.lower(),
+                    'is_function': 'function' in value_repr.lower(),
+                    'is_property': not ('method' in value_repr.lower() or 'function' in value_repr.lower()),
+                    'is_private': name.startswith('_'),
+                    'is_dunder': name.startswith('__') and name.endswith('__')
+                }
+                members.append(member_info)
+            
+            return {
+                'members': members,
+                'total_count': len(members),
+                'methods': [m for m in members if m['is_method']],
+                'properties': [m for m in members if m['is_property']],
+                'functions': [m for m in members if m['is_function']]
+            }
+            
+        except Exception:
+            return None
     
     def inspect_object(self, session_id: str, obj_name: str) -> Dict[str, Any]:
         """

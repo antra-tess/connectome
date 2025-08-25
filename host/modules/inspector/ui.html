@@ -476,6 +476,56 @@
             border-radius: 4px;
         }
         
+        /* Tree output styles */
+        .tree-output {
+            background: rgba(42, 42, 42, 0.8);
+            border: 1px solid #444;
+            border-radius: 4px;
+            padding: 8px;
+            margin: 4px 0;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 0.9em;
+            overflow-x: auto;
+        }
+        
+        .tree-output pre {
+            margin: 0;
+            white-space: pre-wrap;
+        }
+        
+        .tree-view {
+            cursor: pointer;
+            user-select: none;
+        }
+        
+        /* Inspection button styles */
+        .inspection-buttons {
+            display: inline-block;
+            margin-left: 8px;
+            vertical-align: top;
+        }
+        
+        .inspect-btn {
+            background: #0f3460;
+            border: 1px solid #00d4aa;
+            color: #00d4aa;
+            padding: 2px 6px;
+            margin: 0 2px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s ease;
+        }
+        
+        .inspect-btn:hover {
+            background: #00d4aa;
+            color: #0f3460;
+        }
+        
+        .inspect-btn:active {
+            transform: scale(0.95);
+        }
+        
         /* Tab completion dropdown styles */
         .completion-dropdown {
             background: #16213e;
@@ -2442,7 +2492,7 @@
                     addConsoleMessage('info', `Available variables: ${result.session.namespace_keys.length} items`);
                     addConsoleMessage('info', 'IPython-powered REPL with rich output support.');
                     addConsoleMessage('info', 'Type Python code and press Enter to execute. Use Shift+Enter for multi-line input.');
-                    addConsoleMessage('info', 'Use ↑/↓ for history, Tab for completions, Ctrl+I or double-click for inspection.');
+                    addConsoleMessage('info', 'Use ↑/↓ for history, Tab for completions. Rich outputs show tree views and inspection buttons.');
                     addConsoleMessage('info', '');
                     addConsoleMessage('info', 'Quick start example:');
                     addConsoleMessage('example', 'import inspect');
@@ -2516,9 +2566,9 @@
                     });
                 }
                 
-                // Show regular output
+                // Show regular output with enhanced rendering for structured data and inspectable objects  
                 if (result.output && result.output.trim()) {
-                    addConsoleMessage('output', result.output.trim());
+                    displayEnhancedOutput(result.output.trim(), result.output_metadata);
                 }
                 
                 // Show errors (execution errors, not HTTP errors)
@@ -2585,6 +2635,162 @@
             
             output.appendChild(richLine);
             output.scrollTop = output.scrollHeight;
+        }
+        
+        // Display enhanced output with tree rendering and inspection buttons
+        function displayEnhancedOutput(output, metadata) {
+            const outputDiv = document.getElementById('console-output');
+            const outputLine = document.createElement('div');
+            outputLine.className = 'console-line output';
+            
+            // Check if we should render as tree (structured data)
+            const hasStructuredData = metadata && (metadata.has_json || metadata.has_list || metadata.has_dict);
+            const hasInspectableObjects = metadata && metadata.object_representations && metadata.object_representations.length > 0;
+            
+            if (hasStructuredData) {
+                // Try to render as tree view
+                try {
+                    const treeContainer = document.createElement('div');
+                    treeContainer.className = 'tree-output';
+                    
+                    // Parse the output to extract the actual data
+                    const dataMatch = output.match(/Out\[\d+\]:\s*(.*)/s);
+                    const dataStr = dataMatch ? dataMatch[1].trim() : output;
+                    
+                    // Try to evaluate the data safely for tree rendering
+                    let parsedData;
+                    try {
+                        // Use a safe evaluation approach
+                        parsedData = JSON.parse(dataStr.replace(/'/g, '"'));
+                    } catch {
+                        // If JSON parsing fails, try to extract from Python representation
+                        if (dataStr.startsWith('[') || dataStr.startsWith('{')) {
+                            // This is a Python structure, render as collapsible tree
+                            treeContainer.innerHTML = `<pre class="tree-view">${escapeHtml(dataStr)}</pre>`;
+                            makeTreeCollapsible(treeContainer);
+                        } else {
+                            // Fallback to regular output
+                            treeContainer.innerHTML = `<pre>${escapeHtml(output)}</pre>`;
+                        }
+                    }
+                    
+                    if (parsedData !== undefined) {
+                        // Render as proper tree
+                        const treeHtml = renderDataAsTree(parsedData);
+                        treeContainer.innerHTML = treeHtml;
+                    }
+                    
+                    outputLine.appendChild(treeContainer);
+                } catch (error) {
+                    // Fallback to regular text output
+                    outputLine.innerHTML = `<pre>${escapeHtml(output)}</pre>`;
+                }
+            } else {
+                // Regular text output
+                outputLine.innerHTML = `<pre>${escapeHtml(output)}</pre>`;
+            }
+            
+            // Add inspection buttons for object representations
+            if (hasInspectableObjects) {
+                addInspectionButtons(outputLine, metadata.object_representations, output);
+            }
+            
+            outputDiv.appendChild(outputLine);
+            outputDiv.scrollTop = outputDiv.scrollHeight;
+        }
+        
+        // Render data as expandable tree
+        function renderDataAsTree(data, level = 0) {
+            const indent = '  '.repeat(level);
+            
+            if (Array.isArray(data)) {
+                if (data.length === 0) return '[]';
+                
+                let html = '[\n';
+                data.forEach((item, index) => {
+                    const comma = index < data.length - 1 ? ',' : '';
+                    html += `${indent}  ${renderDataAsTree(item, level + 1)}${comma}\n`;
+                });
+                html += `${indent}]`;
+                return html;
+            } else if (typeof data === 'object' && data !== null) {
+                const keys = Object.keys(data);
+                if (keys.length === 0) return '{}';
+                
+                let html = '{\n';
+                keys.forEach((key, index) => {
+                    const comma = index < keys.length - 1 ? ',' : '';
+                    html += `${indent}  "${key}": ${renderDataAsTree(data[key], level + 1)}${comma}\n`;
+                });
+                html += `${indent}}`;
+                return html;
+            } else if (typeof data === 'string') {
+                return `"${escapeHtml(data)}"`;
+            } else {
+                return String(data);
+            }
+        }
+        
+        // Make tree output collapsible
+        function makeTreeCollapsible(container) {
+            // This is a simplified version - could be enhanced with proper folding
+            const pre = container.querySelector('pre');
+            if (pre) {
+                pre.style.cursor = 'pointer';
+                pre.title = 'Click to toggle collapse (simplified tree view)';
+            }
+        }
+        
+        // Add inspection buttons for object representations
+        function addInspectionButtons(outputLine, objectRepresentations, originalOutput) {
+            objectRepresentations.forEach(objRep => {
+                if (objRep.inspectable) {
+                    // Find the object representation in the output and add a button
+                    const inspectBtn = document.createElement('button');
+                    inspectBtn.className = 'inspect-btn';
+                    inspectBtn.innerHTML = '🔍';
+                    inspectBtn.title = `Inspect ${objRep.variable_name}`;
+                    inspectBtn.style.cssText = `
+                        background: #0f3460;
+                        border: 1px solid #00d4aa;
+                        color: #00d4aa;
+                        padding: 2px 6px;
+                        margin-left: 8px;
+                        border-radius: 3px;
+                        cursor: pointer;
+                        font-size: 12px;
+                    `;
+                    
+                    inspectBtn.addEventListener('click', () => {
+                        executeInspection(objRep.variable_name);
+                    });
+                    
+                    // Add the button to the output line
+                    const buttonContainer = document.createElement('span');
+                    buttonContainer.className = 'inspection-buttons';
+                    buttonContainer.appendChild(inspectBtn);
+                    outputLine.appendChild(buttonContainer);
+                }
+            });
+        }
+        
+        // Execute inspection on an object by running inspect.getmembers() as console input
+        function executeInspection(variableName) {
+            // Simply execute the inspection command as if the user typed it
+            const inspectionCode = `inspect.getmembers(${variableName})`;
+            
+            // Show what we're executing
+            addConsoleMessage('input', inspectionCode);
+            
+            // Execute it through the normal console execution flow
+            executeCode(inspectionCode);
+        }
+        
+        // Utility function to escape HTML
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
         }
         
         // Get tab completions

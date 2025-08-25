@@ -20,6 +20,8 @@ import contextlib
 import json
 import html
 import inspect
+import re
+import ast
 from typing import Dict, Any, Optional, List, Tuple
 
 try:
@@ -50,6 +52,8 @@ class IPythonREPLExecutor:
             '__builtins__': __builtins__,
             'time': time,
             'traceback': traceback,
+            'inspect': inspect,
+            'json': json,
         }
         
         # Initialize IPython shell if available
@@ -131,7 +135,13 @@ class IPythonREPLExecutor:
             'execution_time_ms': 0,
             'execution_count': 0,
             'rich_output': [],
-            'completions': []
+            'completions': [],
+            'output_metadata': {
+                'has_json': False,
+                'has_list': False,
+                'has_dict': False,
+                'object_representations': []  # List of object references for inspection
+            }
         }
         
         try:
@@ -156,6 +166,9 @@ class IPythonREPLExecutor:
             # Capture rich output (HTML, images, etc.)
             if hasattr(captured, 'outputs'):
                 result['rich_output'] = self._format_rich_outputs(captured.outputs)
+                
+            # Analyze output for inspection features
+            self._analyze_output_for_inspection(result, shell, code)
                 
         except Exception as e:
             result['error'] = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
@@ -241,6 +254,176 @@ class IPythonREPLExecutor:
                 formatted_outputs.append(output_data)
         
         return formatted_outputs
+    
+    def _analyze_output_for_inspection(self, result: Dict[str, Any], shell_instance: Any, original_code: str) -> None:
+        """Analyze execution output for inspection features."""
+        if not result['success'] or not result['output']:
+            return
+            
+        output_text = result['output'].strip()
+        
+        # Skip if output is just empty or assignment (no Out[N]:)
+        if not output_text or 'Out[' not in output_text:
+            return
+        
+        # Extract the actual output value (after "Out[N]: ")
+        # Handle multiline output where the value starts on the next line
+        lines = output_text.split('\n')
+        output_value = None
+        output_start_idx = None
+        
+        for i, line in enumerate(lines):
+            if line.strip().startswith('Out[') and ': ' in line:
+                if ': ' in line:
+                    # Value might be on same line or next line
+                    value_part = line.split(': ', 1)[1].strip()
+                    if value_part:
+                        # Value on same line
+                        output_value = value_part
+                    else:
+                        # Value starts on next line - join remaining lines
+                        output_value = '\n'.join(lines[i+1:]).strip()
+                    output_start_idx = i
+                    break
+        
+        if not output_value:
+            return
+            
+        # Try to parse the output as a Python literal using AST
+        parsed_data = None
+        try:
+            # AST can safely parse Python literals (dicts, lists, tuples, strings, numbers, etc.)
+            parsed_data = ast.literal_eval(output_value)
+        except (ValueError, SyntaxError):
+            # Not a Python literal, might be object representation or complex expression
+            pass
+        
+        # Analyze based on what we parsed or the raw string
+        if parsed_data is not None:
+            # Successfully parsed as Python literal
+            self._analyze_parsed_data(result, parsed_data, output_value)
+        else:
+            # Couldn't parse - check for object representations or other patterns
+            self._analyze_unparsed_output(result, output_value, shell_instance, original_code)
+    
+    def _analyze_parsed_data(self, result: Dict[str, Any], parsed_data: Any, raw_output: str) -> None:
+        """Analyze successfully parsed Python literal data."""
+        # Detect data types
+        if isinstance(parsed_data, dict):
+            result['output_metadata']['has_dict'] = True
+            result['output_metadata']['has_json'] = True
+        elif isinstance(parsed_data, list):
+            result['output_metadata']['has_list'] = True
+            result['output_metadata']['has_json'] = True
+        elif isinstance(parsed_data, tuple):
+            result['output_metadata']['has_list'] = True  # Treat tuples like lists for UI
+            result['output_metadata']['has_json'] = True
+        
+        # Recursively find object representations in the data structure
+        self._find_objects_in_data(result, parsed_data, "")
+    
+    def _find_objects_in_data(self, result: Dict[str, Any], data: Any, path_prefix: str) -> None:
+        """Recursively find object representations in parsed data."""
+        if isinstance(data, (list, tuple)):
+            for i, item in enumerate(data):
+                item_path = f"{path_prefix}[{i}]" if path_prefix else f"[{i}]"
+                self._find_objects_in_data(result, item, item_path)
+        elif isinstance(data, dict):
+            for key, value in data.items():
+                key_path = f"{path_prefix}[{repr(key)}]" if path_prefix else f"[{repr(key)}]"
+                self._find_objects_in_data(result, value, key_path)
+        elif isinstance(data, str):
+            # Check if this string looks like an object representation
+            object_pattern = r'<([^>]+)\s+at\s+(0x[a-f0-9]+)>'
+            matches = re.findall(object_pattern, data)
+            
+            for class_info, memory_addr in matches:
+                result['output_metadata']['object_representations'].append({
+                    'class_name': class_info,
+                    'memory_address': memory_addr,
+                    'variable_name': f"_{path_prefix}" if path_prefix else "_",
+                    'full_representation': data,
+                    'path_in_result': path_prefix,
+                    'inspectable': True
+                })
+    
+    def _analyze_unparsed_output(self, result: Dict[str, Any], output_value: str, shell_instance: Any, original_code: str) -> None:
+        """Analyze output that couldn't be parsed as Python literal."""
+        # Check for object representations in raw string
+        object_pattern = r'<([^>]+)\s+at\s+(0x[a-f0-9]+)>'
+        matches = re.findall(object_pattern, output_value)
+        
+        if matches:
+            # Find the variable name that corresponds to this object using the original code
+            variable_name = self._extract_variable_name_from_code(original_code)
+            
+            for class_info, memory_addr in matches:
+                result['output_metadata']['object_representations'].append({
+                    'class_name': class_info,
+                    'memory_address': memory_addr,
+                    'variable_name': variable_name,
+                    'full_representation': f'<{class_info} at {memory_addr}>',
+                    'inspectable': True
+                })
+        
+        # Check for other patterns that might indicate structured data
+        if output_value.startswith(('{', '[')) and output_value.endswith(('}', ']')):
+            # Looks like structured data but couldn't parse - might be too complex
+            if output_value.startswith('{'):
+                result['output_metadata']['has_dict'] = True
+            elif output_value.startswith('['):
+                result['output_metadata']['has_list'] = True
+    
+    def _find_variable_name_for_object(self, shell_instance: Any, execution_count: int) -> str:
+        """Find the variable name that was just executed to produce this object."""
+        if not shell_instance or not hasattr(shell_instance, '_ih'):
+            return '_'  # Fallback to last result
+        
+        try:
+            # Get the input history for this execution
+            if execution_count > 0 and execution_count <= len(shell_instance._ih):
+                last_input = shell_instance._ih[execution_count].strip()
+                
+                # Simple heuristics to extract variable name
+                if '=' not in last_input and '(' not in last_input:
+                    # Simple variable reference like "host" or "host.space_registry"
+                    return last_input
+                elif last_input.startswith(('type(', 'len(', 'str(', 'repr(')):
+                    # Function call, extract the argument
+                    match = re.match(r'\w+\(([^)]+)\)', last_input)
+                    if match:
+                        return match.group(1)
+                
+                # Fallback: use the last result reference
+                return f'_{execution_count}' if execution_count > 1 else '_'
+        except (AttributeError, IndexError):
+            pass
+        
+        return '_'
+    
+    def _extract_variable_name_from_code(self, code: str) -> str:
+        """Extract variable name from the original code for inspection purposes."""
+        code = code.strip()
+        
+        # Handle simple variable references like "host", "host.space_registry", "obj.attr"
+        if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*$', code):
+            return code
+        
+        # Handle function calls like "type(host)", "len(my_list)", etc.
+        func_match = re.match(r'^(\w+)\(([^)]+)\)$', code)
+        if func_match:
+            func_name, args = func_match.groups()
+            # For simple inspection functions, return the argument
+            if func_name in ['type', 'len', 'str', 'repr', 'dir', 'vars']:
+                return args.strip()
+        
+        # Handle array/dict access like "my_dict['key']", "my_list[0]"
+        access_match = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*)\[.+\]$', code)
+        if access_match:
+            return access_match.group(1)
+        
+        # For anything else, fall back to the last result reference
+        return '_'
     
     def get_completions(self, code: str, cursor_pos: int, shell_instance: Any = None) -> List[str]:
         """Get tab completions for the given code at cursor position."""
