@@ -6,9 +6,9 @@ This is an external debugging tool that runs in the Inspector's process space,
 similar to pdb or Chrome DevTools - completely isolated from agent code.
 
 Features:
-- IPython shell with rich output, syntax highlighting, and magic commands
-- Tab completion and object introspection
-- Connectome-specific magic commands for system inspection
+- IPython shell with rich output, syntax highlighting, and tab completion
+- Object introspection and attribute exploration
+- Session-based namespace management
 - Backward compatibility with existing REPL API
 """
 
@@ -19,22 +19,17 @@ import traceback
 import contextlib
 import json
 import html
+import inspect
 from typing import Dict, Any, Optional, List, Tuple
 
 try:
-    from IPython.core.interactiveshell import InteractiveShell
-    from IPython.core.magic import Magics, line_magic, cell_magic, register_line_magic
-    from IPython.core.magic_arguments import parse_argstring, argument, magic_arguments
     from IPython.utils.capture import capture_output
-    from IPython.core.displayhook import DisplayHook
-    from IPython.core.formatters import PlainTextFormatter
-    from IPython.core.completerlib import module_completion, magic_run_completer
     from IPython.terminal.interactiveshell import TerminalInteractiveShell
     IPYTHON_AVAILABLE = True
 except ImportError:
     IPYTHON_AVAILABLE = False
     # Fallback to basic implementation if IPython not available
-    InteractiveShell = None
+    TerminalInteractiveShell = None
 
 
 class IPythonREPLExecutor:
@@ -42,9 +37,9 @@ class IPythonREPLExecutor:
     IPython-based REPL executor for the Connectome Inspector.
     
     Provides rich interactive Python environment with:
-    - Magic commands for Connectome system inspection
     - Tab completion and object introspection
     - Rich output display (HTML, images, etc.)
+    - Session-based namespace management
     - Command history and enhanced error reporting
     - Backward compatibility with existing REPL API
     """
@@ -60,7 +55,6 @@ class IPythonREPLExecutor:
         # Initialize IPython shell if available
         if IPYTHON_AVAILABLE:
             self.shell = None  # Will be created per-session
-            self._setup_connectome_magics()
         else:
             self.shell = None
             
@@ -95,8 +89,7 @@ class IPythonREPLExecutor:
             shell.Completer.namespace = shell.user_ns
             shell.Completer.global_namespace = shell.user_global_ns
             
-        # Register Connectome magics
-        self._register_connectome_magics(shell)
+        # Shell is ready for use
         
         return shell
     
@@ -220,101 +213,6 @@ class IPythonREPLExecutor:
             
         return result
     
-    def _setup_connectome_magics(self):
-        """Setup Connectome-specific magic commands."""
-        if not IPYTHON_AVAILABLE:
-            return
-            
-        # These will be registered per shell instance
-        self.connectome_magics = {
-            'cstatus': self._magic_connectome_status,
-            'cspaces': self._magic_connectome_spaces,
-            'cagents': self._magic_connectome_agents,
-            'ctimeline': self._magic_connectome_timeline,
-            'cveil': self._magic_connectome_veil,
-        }
-    
-    def _register_connectome_magics(self, shell):
-        """Register Connectome magics with an IPython shell instance."""
-        if not IPYTHON_AVAILABLE:
-            return
-            
-        for magic_name, magic_func in self.connectome_magics.items():
-            shell.register_magic_function(magic_func, 'line', magic_name)
-    
-    def _magic_connectome_status(self, line):
-        """Magic command to show Connectome system status."""
-        try:
-            # Get host instance from the shell that called this magic
-            import inspect
-            frame = inspect.currentframe()
-            while frame:
-                if 'self' in frame.f_locals and hasattr(frame.f_locals['self'], 'user_ns'):
-                    shell = frame.f_locals['self']
-                    break
-                frame = frame.f_back
-            else:
-                return "Error: Could not find IPython shell instance"
-                
-            host = shell.user_ns.get('host')
-            if not host:
-                return "Error: host instance not available in namespace"
-            
-            status = {
-                'spaces': len(getattr(host, 'space_registry', {}).spaces if hasattr(host.space_registry, 'spaces') else {}),
-                'uptime': time.time() - getattr(host, 'start_time', time.time()),
-                'event_loop_running': hasattr(host, 'event_loop') and host.event_loop is not None
-            }
-            
-            return f"Connectome Status:\n  Spaces: {status['spaces']}\n  Uptime: {status['uptime']:.1f}s\n  Event Loop: {'✓' if status['event_loop_running'] else '✗'}"
-            
-        except Exception as e:
-            return f"Error getting status: {e}"
-    
-    def _magic_connectome_spaces(self, line):
-        """Magic command to list Connectome spaces."""
-        try:
-            spaces = self.shell.user_ns.get('spaces')
-            if not spaces:
-                return "Error: spaces not available in namespace"
-                
-            space_list = []
-            if hasattr(spaces, 'spaces'):
-                for space_id, space in spaces.spaces.items():
-                    space_type = type(space).__name__
-                    space_list.append(f"  {space_id} ({space_type})")
-            
-            return f"Connectome Spaces:\n" + "\n".join(space_list) if space_list else "No spaces found"
-            
-        except Exception as e:
-            return f"Error listing spaces: {e}"
-    
-    def _magic_connectome_agents(self, line):
-        """Magic command to list Connectome agents."""
-        try:
-            host = self.shell.user_ns.get('host')
-            if not host:
-                return "Error: host instance not available in namespace"
-            
-            # Try to get agent information from the host
-            agents = []
-            if hasattr(host, 'space_registry') and host.space_registry:
-                for space_id, space in host.space_registry.spaces.items():
-                    if 'inner_space' in space_id.lower() or hasattr(space, 'agent_id'):
-                        agents.append(f"  {space_id}")
-            
-            return f"Connectome Agents:\n" + "\n".join(agents) if agents else "No agents found"
-            
-        except Exception as e:
-            return f"Error listing agents: {e}"
-    
-    def _magic_connectome_timeline(self, line):
-        """Magic command to show timeline information."""
-        return "Timeline magic not implemented yet. Use: host.space_registry.spaces[space_id].timeline_component"
-    
-    def _magic_connectome_veil(self, line):
-        """Magic command to show VEIL information."""
-        return "VEIL magic not implemented yet. Use: host.space_registry.spaces[space_id].veil_producer"
     
     def _format_rich_outputs(self, outputs) -> List[Dict[str, Any]]:
         """Format rich outputs from IPython display system."""
