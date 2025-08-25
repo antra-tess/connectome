@@ -335,8 +335,18 @@ class IPythonREPLExecutor:
             
         try:
             # Use IPython's completion system
-            completions = shell_instance.complete(code, cursor_pos)
-            return [c.text for c in completions[1]] if completions and len(completions) > 1 else []
+            # Extract the text to complete (from start of line to cursor)
+            text_to_complete = code[:cursor_pos]
+            
+            # Call IPython's complete method with proper parameters
+            completed_text, completions = shell_instance.complete(text_to_complete, code, cursor_pos)
+            
+            # Extract completion text from completion objects
+            if completions and hasattr(completions[0], 'text'):
+                return [c.text for c in completions]
+            else:
+                # Handle case where completions are just strings
+                return completions if isinstance(completions, list) else []
             
         except Exception as e:
             # Fallback to basic completion

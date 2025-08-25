@@ -462,7 +462,7 @@ class InspectorServer:
             }, status=400)
         
         data = await self.handlers.handle_repl_complete(session_id, code, cursor_pos)
-        status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if "error" in data else 200)
+        status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if "error" in data and data.get("error") else 200)
         return self._json_response(data, status=status_code)
     
     async def handle_repl_inspect(self, request: Request) -> Response:
