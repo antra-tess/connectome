@@ -20,7 +20,6 @@ import contextlib
 import json
 import html
 import inspect
-import re
 import ast
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -294,93 +293,55 @@ class IPythonREPLExecutor:
             self._analyze_output_string(result, original_code)
     
     def _analyze_actual_result(self, result: Dict[str, Any], actual_result: Any, original_code: str) -> None:
-        """Analyze the actual result value using JSON serialization with custom object handler."""
+        """Analyze the actual result value using simple JSON serialization."""
         # Don't analyze None results (from print statements, etc.)
         if actual_result is None:
             return
             
         try:
-            # Track objects and their paths
-            object_refs = []
-            base_var_name = self._extract_variable_name_from_code(original_code)
-            
-            # First pass: serialize and track paths
-            json_data, found_objects = self._serialize_with_path_tracking(actual_result, base_var_name)
-            
-            # Add found objects to object_refs
-            object_refs.extend(found_objects)
+            # Simple serialization without object inspection tracking
+            json_data = self._serialize_for_tree_display(actual_result)
             
             # Set the metadata based on the actual data structure
             if isinstance(actual_result, dict):
                 result['output_metadata']['has_dict'] = True
                 result['output_metadata']['has_json'] = True
-                # Add the JSON data for tree rendering
                 result['output_metadata']['json_data'] = json_data
             elif isinstance(actual_result, (list, tuple)):
                 result['output_metadata']['has_list'] = True
                 result['output_metadata']['has_json'] = True
-                # Add the JSON data for tree rendering
                 result['output_metadata']['json_data'] = json_data
             
-            # Add any object references found
-            result['output_metadata']['object_representations'].extend(object_refs)
+            # Store original code for client-side inspection logic
+            result['output_metadata']['original_code'] = original_code
             
         except (TypeError, ValueError) as e:
             # If serialization fails, fall back to string analysis
             print(f"Debug: Serialization failed: {e}")
             self._analyze_output_string(result, original_code)
     
-    def _serialize_with_path_tracking(self, obj, base_path):
-        """Serialize an object to JSON while tracking paths to non-serializable objects."""
-        found_objects = []
+    def _serialize_for_tree_display(self, obj):
+        """Serialize an object to JSON for tree display, converting non-serializable objects to strings."""
         
-        def serialize_recursive(item, path):
-            """Recursively serialize items, tracking their paths."""
+        def serialize_recursive(item):
+            """Recursively serialize items for display."""
             if item is None or isinstance(item, (bool, int, float, str)):
                 return item
             elif isinstance(item, dict):
                 result = {}
                 for key, value in item.items():
-                    new_path = f"{path}[{repr(key)}]"
-                    result[key] = serialize_recursive(value, new_path)
+                    result[key] = serialize_recursive(value)
                 return result
             elif isinstance(item, (list, tuple)):
                 result = []
-                for i, value in enumerate(item):
-                    new_path = f"{path}[{i}]"
-                    result.append(serialize_recursive(value, new_path))
+                for value in item:
+                    result.append(serialize_recursive(value))
                 return result
             else:
-                # Non-serializable object - check if it's inspectable
-                obj_repr = repr(item)
-                if '<' in obj_repr and 'at 0x' in obj_repr:
-                    match = re.match(r'<([^>]+)\s+at\s+(0x[a-f0-9]+)>', obj_repr)
-                    if match:
-                        class_info, memory_addr = match.groups()
-                        
-                        # Store object reference with its path
-                        obj_ref = {
-                            'class_name': class_info,
-                            'memory_address': memory_addr,
-                            'variable_name': path,  # Use the full path instead of base name
-                            'full_representation': obj_repr,
-                            'inspectable': True
-                        }
-                        found_objects.append(obj_ref)
-                        
-                        # Return a reference marker for the tree
-                        return {
-                            '__object_ref__': len(found_objects) - 1,
-                            '__repr__': obj_repr,
-                            '__class__': class_info,
-                            '__path__': path
-                        }
-                
-                # For other non-serializable objects, convert to string
+                # Non-serializable object - convert to string representation
                 return str(item)
         
-        json_data = serialize_recursive(obj, base_path)
-        return json_data, found_objects
+        return serialize_recursive(obj)
     
     def _analyze_output_string(self, result: Dict[str, Any], original_code: str) -> None:
         """Fallback analysis using string parsing when actual result isn't available."""
@@ -409,71 +370,29 @@ class IPythonREPLExecutor:
         # Try to parse the output as a Python literal using AST
         try:
             parsed_data = ast.literal_eval(output_value)
-            self._analyze_parsed_data(result, parsed_data, output_value)
+            self._analyze_parsed_data(result, parsed_data)
         except (ValueError, SyntaxError):
-            # Check for object representations or other patterns
-            self._analyze_unparsed_output(result, output_value, None, original_code)
+            # Check for basic patterns
+            self._analyze_unparsed_output(result, output_value)
     
-    def _analyze_parsed_data(self, result: Dict[str, Any], parsed_data: Any, raw_output: str) -> None:
+    def _analyze_parsed_data(self, result: Dict[str, Any], parsed_data: Any) -> None:
         """Analyze successfully parsed Python literal data."""
         # Detect data types
         if isinstance(parsed_data, dict):
             result['output_metadata']['has_dict'] = True
             result['output_metadata']['has_json'] = True
+            result['output_metadata']['json_data'] = parsed_data
         elif isinstance(parsed_data, list):
             result['output_metadata']['has_list'] = True
             result['output_metadata']['has_json'] = True
+            result['output_metadata']['json_data'] = parsed_data
         elif isinstance(parsed_data, tuple):
             result['output_metadata']['has_list'] = True  # Treat tuples like lists for UI
             result['output_metadata']['has_json'] = True
-        
-        # Recursively find object representations in the data structure
-        self._find_objects_in_data(result, parsed_data, "")
+            result['output_metadata']['json_data'] = list(parsed_data)  # Convert tuple to list for JSON
     
-    def _find_objects_in_data(self, result: Dict[str, Any], data: Any, path_prefix: str) -> None:
-        """Recursively find object representations in parsed data."""
-        if isinstance(data, (list, tuple)):
-            for i, item in enumerate(data):
-                item_path = f"{path_prefix}[{i}]" if path_prefix else f"[{i}]"
-                self._find_objects_in_data(result, item, item_path)
-        elif isinstance(data, dict):
-            for key, value in data.items():
-                key_path = f"{path_prefix}[{repr(key)}]" if path_prefix else f"[{repr(key)}]"
-                self._find_objects_in_data(result, value, key_path)
-        elif isinstance(data, str):
-            # Check if this string looks like an object representation
-            object_pattern = r'<([^>]+)\s+at\s+(0x[a-f0-9]+)>'
-            matches = re.findall(object_pattern, data)
-            
-            for class_info, memory_addr in matches:
-                result['output_metadata']['object_representations'].append({
-                    'class_name': class_info,
-                    'memory_address': memory_addr,
-                    'variable_name': f"_{path_prefix}" if path_prefix else "_",
-                    'full_representation': data,
-                    'path_in_result': path_prefix,
-                    'inspectable': True
-                })
-    
-    def _analyze_unparsed_output(self, result: Dict[str, Any], output_value: str, shell_instance: Any, original_code: str) -> None:
+    def _analyze_unparsed_output(self, result: Dict[str, Any], output_value: str) -> None:
         """Analyze output that couldn't be parsed as Python literal."""
-        # Check for object representations in raw string
-        object_pattern = r'<([^>]+)\s+at\s+(0x[a-f0-9]+)>'
-        matches = re.findall(object_pattern, output_value)
-        
-        if matches:
-            # Find the variable name that corresponds to this object using the original code
-            variable_name = self._extract_variable_name_from_code(original_code)
-            
-            for class_info, memory_addr in matches:
-                result['output_metadata']['object_representations'].append({
-                    'class_name': class_info,
-                    'memory_address': memory_addr,
-                    'variable_name': variable_name,
-                    'full_representation': f'<{class_info} at {memory_addr}>',
-                    'inspectable': True
-                })
-        
         # Check for other patterns that might indicate structured data
         if output_value.startswith(('{', '[')) and output_value.endswith(('}', ']')):
             # Looks like structured data but couldn't parse - might be too complex
@@ -482,70 +401,6 @@ class IPythonREPLExecutor:
             elif output_value.startswith('['):
                 result['output_metadata']['has_list'] = True
     
-    def _find_variable_name_for_object(self, shell_instance: Any, execution_count: int) -> str:
-        """Find the variable name that was just executed to produce this object."""
-        if not shell_instance or not hasattr(shell_instance, '_ih'):
-            return '_'  # Fallback to last result
-        
-        try:
-            # Get the input history for this execution
-            if execution_count > 0 and execution_count <= len(shell_instance._ih):
-                last_input = shell_instance._ih[execution_count].strip()
-                
-                # Simple heuristics to extract variable name
-                if '=' not in last_input and '(' not in last_input:
-                    # Simple variable reference like "host" or "host.space_registry"
-                    return last_input
-                elif last_input.startswith(('type(', 'len(', 'str(', 'repr(')):
-                    # Function call, extract the argument
-                    match = re.match(r'\w+\(([^)]+)\)', last_input)
-                    if match:
-                        return match.group(1)
-                
-                # Fallback: use the last result reference
-                return f'_{execution_count}' if execution_count > 1 else '_'
-        except (AttributeError, IndexError):
-            pass
-        
-        return '_'
-    
-    def _extract_variable_name_from_code(self, code: str) -> str:
-        """Extract variable name from the original code for inspection purposes."""
-        code = code.strip()
-        
-        # If multiline, extract the last non-empty line (likely the expression being evaluated)
-        lines = code.split('\n')
-        last_line = ''
-        for line in reversed(lines):
-            if line.strip():
-                last_line = line.strip()
-                break
-        
-        # Use last line if found, otherwise use full code
-        code_to_analyze = last_line if last_line else code
-        
-        # Handle function calls like "type(host)", "len(my_list)", etc.
-        func_match = re.match(r'^(\w+)\(([^)]+)\)$', code_to_analyze)
-        if func_match:
-            func_name, args = func_match.groups()
-            # For simple inspection functions, return the argument
-            if func_name in ['type', 'len', 'str', 'repr', 'dir', 'vars']:
-                return args.strip()
-        
-        # Handle inspect.getmembers(variable) calls
-        inspect_match = re.match(r'^inspect\.getmembers\(([^)]+)\)$', code_to_analyze)
-        if inspect_match:
-            return inspect_match.group(1).strip()
-        
-        # Handle any valid Python identifier/attribute/array access combination
-        # This includes: variable, var.attr, var[key], var.attr[key], var[key].attr, etc.
-        # The pattern matches a variable name followed by any combination of .attr or [key] accesses
-        mixed_access_pattern = r'^[a-zA-Z_][a-zA-Z0-9_]*((\.[a-zA-Z_][a-zA-Z0-9_]*)|(\[[^\]]+\]))*$'
-        if re.match(mixed_access_pattern, code_to_analyze):
-            return code_to_analyze
-        
-        # For anything else, fall back to the last result reference
-        return '_'
     
     def get_completions(self, code: str, cursor_pos: int, shell_instance: Any = None) -> List[str]:
         """Get tab completions for the given code at cursor position."""

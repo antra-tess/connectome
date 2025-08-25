@@ -2637,7 +2637,7 @@
             output.scrollTop = output.scrollHeight;
         }
         
-        // Display enhanced output with tree rendering and inspection buttons
+        // Display enhanced output with tree rendering and special inspect.getmembers handling
         function displayEnhancedOutput(output, metadata) {
             const outputDiv = document.getElementById('console-output');
             const outputLine = document.createElement('div');
@@ -2645,7 +2645,10 @@
             
             // Check if we should render as tree (structured data)
             const hasStructuredData = metadata && (metadata.has_json || metadata.has_list || metadata.has_dict);
-            const hasInspectableObjects = metadata && metadata.object_representations && metadata.object_representations.length > 0;
+            
+            // Check if this is inspect.getmembers output
+            const isInspectGetMembers = metadata && metadata.original_code && 
+                                      metadata.original_code.includes('inspect.getmembers');
             
             if (hasStructuredData) {
                 // Try to render as proper interactive tree view
@@ -2664,12 +2667,14 @@
                     
                     // Check if we have properly serialized JSON data from the server
                     if (metadata.json_data) {
-                        // Use the server-provided JSON data for perfect tree rendering
-                        const treeNode = createTreeNode('result', metadata.json_data, 0, true);
-                        treeContainer.appendChild(treeNode);
-                        
-                        // Add inspection buttons for any object references in the tree
-                        addInspectionButtonsToTree(treeContainer, metadata.object_representations);
+                        if (isInspectGetMembers) {
+                            // Special handling for inspect.getmembers output
+                            renderInspectGetMembersTree(treeContainer, metadata.json_data, metadata.original_code);
+                        } else {
+                            // Regular tree rendering (no inspection buttons)
+                            const treeNode = createTreeNode('result', metadata.json_data, 0, true);
+                            treeContainer.appendChild(treeNode);
+                        }
                     } else {
                         // Fallback: Parse the output string to extract data
                         const dataMatch = output.match(/Out\[\d+\]:\s*(.*)/s);
@@ -2679,7 +2684,11 @@
                         let parsedData = parsePythonDataForTree(dataStr);
                         
                         if (parsedData !== null) {
-                            treeContainer.appendChild(createTreeNode('result', parsedData, 0, true));
+                            if (isInspectGetMembers) {
+                                renderInspectGetMembersTree(treeContainer, parsedData, metadata.original_code);
+                            } else {
+                                treeContainer.appendChild(createTreeNode('result', parsedData, 0, true));
+                            }
                         } else {
                             // Last resort: simple formatted display
                             treeContainer.innerHTML = `<pre class="tree-view">${escapeHtml(dataStr)}</pre>`;
@@ -2694,11 +2703,6 @@
             } else {
                 // Regular text output
                 outputLine.innerHTML = `<pre>${escapeHtml(output)}</pre>`;
-            }
-            
-            // Add inspection buttons for object representations
-            if (hasInspectableObjects) {
-                addInspectionButtons(outputLine, metadata.object_representations, output);
             }
             
             outputDiv.appendChild(outputLine);
@@ -2738,20 +2742,56 @@
             }
         }
         
-        // Add inspection buttons for object references within tree structures
-        function addInspectionButtonsToTree(treeContainer, objectRepresentations) {
-            // Find all nodes in the tree that contain object references
-            const allNodes = treeContainer.querySelectorAll('div');
-            allNodes.forEach(node => {
-                const textContent = node.textContent;
-                if (textContent && textContent.includes('__object_ref__')) {
-                    // This node contains an object reference, add an inspection button
-                    objectRepresentations.forEach(objRep => {
-                        if (textContent.includes(objRep.full_representation)) {
+        
+        // Render inspect.getmembers output with inspection buttons for member values
+        function renderInspectGetMembersTree(container, membersData, originalCode) {
+            // Extract the object name from inspect.getmembers(object_name) call
+            const objectMatch = originalCode.match(/inspect\.getmembers\(([^)]+)\)/);
+            const objectName = objectMatch ? objectMatch[1].trim() : 'obj';
+            
+            // Create a custom tree for inspect.getmembers output
+            const membersTree = document.createElement('div');
+            membersTree.className = 'members-tree';
+            
+            // Add a header
+            const header = document.createElement('div');
+            header.className = 'tree-node';
+            header.innerHTML = `<span class="tree-key" style="color: #00d4aa; font-weight: bold;">Members of ${escapeHtml(objectName)}:</span>`;
+            membersTree.appendChild(header);
+            
+            // Process each member (should be list of [name, value] tuples)
+            if (Array.isArray(membersData)) {
+                membersData.forEach((member, index) => {
+                    if (Array.isArray(member) && member.length >= 2) {
+                        const [memberName, memberValue] = member;
+                        
+                        const memberNode = document.createElement('div');
+                        memberNode.className = 'tree-node';
+                        memberNode.style.marginLeft = '16px';
+                        
+                        const memberKey = document.createElement('span');
+                        memberKey.className = 'tree-key';
+                        memberKey.style.color = '#569cd6';
+                        memberKey.textContent = memberName;
+                        
+                        const colon = document.createElement('span');
+                        colon.textContent = ': ';
+                        colon.style.color = '#d4d4d4';
+                        
+                        const memberValueSpan = document.createElement('span');
+                        memberValueSpan.className = 'tree-value';
+                        memberValueSpan.textContent = typeof memberValue === 'string' ? memberValue : JSON.stringify(memberValue);
+                        
+                        memberNode.appendChild(memberKey);
+                        memberNode.appendChild(colon);
+                        memberNode.appendChild(memberValueSpan);
+                        
+                        // Add inspection button if the value looks like an object
+                        if (typeof memberValue === 'string' && memberValue.includes('<') && memberValue.includes('at 0x')) {
                             const inspectBtn = document.createElement('button');
                             inspectBtn.className = 'inspect-btn';
                             inspectBtn.innerHTML = '🔍';
-                            inspectBtn.title = `Inspect ${objRep.variable_name}`;
+                            inspectBtn.title = `Inspect ${objectName}.${memberName}`;
                             inspectBtn.style.cssText = `
                                 background: #0f3460;
                                 border: 1px solid #00d4aa;
@@ -2761,52 +2801,23 @@
                                 border-radius: 3px;
                                 cursor: pointer;
                                 font-size: 12px;
-                                vertical-align: middle;
                             `;
                             
-                            inspectBtn.addEventListener('click', (e) => {
-                                e.stopPropagation();  // Prevent tree collapse/expand
-                                executeInspection(objRep.variable_name);
+                            // Create the proper inspection path
+                            const inspectionPath = `${objectName}.${memberName}`;
+                            inspectBtn.addEventListener('click', () => {
+                                executeInspection(inspectionPath);
                             });
                             
-                            node.appendChild(inspectBtn);
+                            memberNode.appendChild(inspectBtn);
                         }
-                    });
-                }
-            });
-        }
-        
-        // Add inspection buttons for object representations
-        function addInspectionButtons(outputLine, objectRepresentations, originalOutput) {
-            objectRepresentations.forEach(objRep => {
-                if (objRep.inspectable) {
-                    // Find the object representation in the output and add a button
-                    const inspectBtn = document.createElement('button');
-                    inspectBtn.className = 'inspect-btn';
-                    inspectBtn.innerHTML = '🔍';
-                    inspectBtn.title = `Inspect ${objRep.variable_name}`;
-                    inspectBtn.style.cssText = `
-                        background: #0f3460;
-                        border: 1px solid #00d4aa;
-                        color: #00d4aa;
-                        padding: 2px 6px;
-                        margin-left: 8px;
-                        border-radius: 3px;
-                        cursor: pointer;
-                        font-size: 12px;
-                    `;
-                    
-                    inspectBtn.addEventListener('click', () => {
-                        executeInspection(objRep.variable_name);
-                    });
-                    
-                    // Add the button to the output line
-                    const buttonContainer = document.createElement('span');
-                    buttonContainer.className = 'inspection-buttons';
-                    buttonContainer.appendChild(inspectBtn);
-                    outputLine.appendChild(buttonContainer);
-                }
-            });
+                        
+                        membersTree.appendChild(memberNode);
+                    }
+                });
+            }
+            
+            container.appendChild(membersTree);
         }
         
         // Execute inspection on an object by running inspect.getmembers() as console input
