@@ -257,7 +257,15 @@ class IPythonREPLExecutor:
     
     def _analyze_output_for_inspection(self, result: Dict[str, Any], shell_instance: Any, original_code: str) -> None:
         """Analyze execution output for inspection features using actual result values."""
-        if not result['success'] or not result['output']:
+        # Always reset metadata to prevent caching issues from previous executions
+        result['output_metadata']['has_json'] = False
+        result['output_metadata']['has_list'] = False
+        result['output_metadata']['has_dict'] = False
+        result['output_metadata']['object_representations'] = []
+        if 'json_data' in result['output_metadata']:
+            del result['output_metadata']['json_data']
+            
+        if not result['success']:
             return
             
         # Try to get the actual result value from IPython's output history
@@ -265,13 +273,15 @@ class IPythonREPLExecutor:
         if shell_instance and hasattr(shell_instance, 'user_ns'):
             try:
                 # Get the last result from IPython using Out dictionary
+                # Note: After execution, execution_count is incremented, but result is in Out[execution_count-1]
                 execution_count = result.get('execution_count', 1)
                 if hasattr(shell_instance, 'user_ns') and 'Out' in shell_instance.user_ns:
                     out_dict = shell_instance.user_ns['Out']
-                    if execution_count in out_dict:
-                        actual_result = out_dict[execution_count]
-                    elif '_' in shell_instance.user_ns:
-                        actual_result = shell_instance.user_ns['_']
+                    # The result is stored at execution_count - 1
+                    result_key = execution_count - 1
+                    if result_key > 0 and result_key in out_dict:
+                        actual_result = out_dict[result_key]
+                    # Don't fall back to _ if there's no Out entry - that would be from a previous execution
             except Exception as e:
                 print(f"Debug: Error getting result: {e}")
                 pass
@@ -279,12 +289,16 @@ class IPythonREPLExecutor:
         if actual_result is not None:
             # Use JSON serialization with custom object handler
             self._analyze_actual_result(result, actual_result, original_code)
-        else:
+        elif result['output']:
             # Fallback to string parsing for cases where we can't get the actual result
             self._analyze_output_string(result, original_code)
     
     def _analyze_actual_result(self, result: Dict[str, Any], actual_result: Any, original_code: str) -> None:
         """Analyze the actual result value using JSON serialization with custom object handler."""
+        # Don't analyze None results (from print statements, etc.)
+        if actual_result is None:
+            return
+            
         object_refs = []
         
         def object_handler(obj):
@@ -325,12 +339,13 @@ class IPythonREPLExecutor:
             if isinstance(actual_result, dict):
                 result['output_metadata']['has_dict'] = True
                 result['output_metadata']['has_json'] = True
+                # Add the JSON data for tree rendering
+                result['output_metadata']['json_data'] = json_data
             elif isinstance(actual_result, (list, tuple)):
                 result['output_metadata']['has_list'] = True
                 result['output_metadata']['has_json'] = True
-            
-            # Add the JSON data for tree rendering
-            result['output_metadata']['json_data'] = json_data
+                # Add the JSON data for tree rendering
+                result['output_metadata']['json_data'] = json_data
             
             # Add any object references found
             result['output_metadata']['object_representations'].extend(object_refs)
