@@ -346,51 +346,17 @@ class IPythonREPLExecutor:
             return []
             
         try:
-            # Split code into lines and find current line
-            lines = code[:cursor_pos].split('\n')
-            current_line = lines[-1] if lines else ''
-            line_cursor = len(current_line)
+            # Extract current line from cursor position
+            current_line = code[:cursor_pos].split('\n')[-1]
             
-            # Use IPython's higher-level complete method which is stable API
-            # Signature: complete(text, line, cursor_pos)
-            completed_text, matches = shell_instance.complete(current_line, current_line, line_cursor)
+            # Get completions using IPython's stable API
+            _, matches = shell_instance.complete(current_line, current_line, len(current_line))
             
-            # If no matches from complete(), try the provisional completions API with context manager
-            if not matches:
-                try:
-                    import warnings
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore")  # Suppress provisional API warning
-                        completer = shell_instance.Completer
-                        completion_results = completer.completions(current_line, line_cursor)
-                        
-                        # Extract completion text from completion objects
-                        completions = []
-                        for completion in completion_results:
-                            if hasattr(completion, 'text'):
-                                completions.append(completion.text)
-                            elif hasattr(completion, '__str__'):
-                                completions.append(str(completion))
-                        
-                        matches = completions
-                        
-                except Exception as e:
-                    # Fall back to the original matches (might be empty)
-                    pass
-            
-            # Remove duplicates and fix completion formatting
-            seen = set()
-            unique_completions = []
-            for comp in matches:
-                if comp and comp not in seen:
-                    # Remove leading dot from completions to avoid double-dot issues
-                    # e.g., "host." + ".space_registry" should be "host." + "space_registry"
-                    cleaned_comp = comp.lstrip('.')
-                    if cleaned_comp:  # Only add non-empty completions
-                        seen.add(comp)
-                        unique_completions.append(cleaned_comp)
-            
-            return unique_completions
+            # Clean up completions: remove leading dots and deduplicate
+            return list(dict.fromkeys(  # Preserves order while deduplicating
+                comp.lstrip('.') for comp in matches 
+                if comp and comp.lstrip('.')  # Filter out empty/dot-only completions
+            ))
             
         except Exception as e:
             # Log the error for debugging
