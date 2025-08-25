@@ -72,12 +72,24 @@ class IPythonREPLExecutor:
         if not IPYTHON_AVAILABLE:
             return None
             
-        # Create IPython shell with custom configuration
-        shell = InteractiveShell.instance()
+        # Create isolated IPython shell (not singleton) with custom configuration
+        shell = TerminalInteractiveShell()
         
-        # Update namespace
+        # Configure shell for better completion
+        shell.readline_use = False  # Disable readline for programmatic use
+        shell.autoindent = True
+        shell.colors = 'NoColor'  # Avoid terminal color codes
+        
+        # Disable Jedi to avoid index errors in programmatic usage
+        shell.Completer.use_jedi = False  # Use basic completer for reliability
+        shell.Completer.greedy = True   # More aggressive completion
+        
+        # Update namespace AND sync completer namespaces
         if namespace:
             shell.user_ns.update(namespace)
+            # CRITICAL: Sync completer namespaces with user namespace
+            shell.Completer.namespace = shell.user_ns
+            shell.Completer.global_namespace = shell.user_global_ns
             
         # Register Connectome magics
         self._register_connectome_magics(shell)
@@ -334,22 +346,53 @@ class IPythonREPLExecutor:
             return []
             
         try:
-            # Use IPython's completion system
-            # Extract the text to complete (from start of line to cursor)
-            text_to_complete = code[:cursor_pos]
+            # Split code into lines and find current line
+            lines = code[:cursor_pos].split('\n')
+            current_line = lines[-1] if lines else ''
+            line_cursor = len(current_line)
             
-            # Call IPython's complete method with proper parameters
-            completed_text, completions = shell_instance.complete(text_to_complete, code, cursor_pos)
+            # Use IPython's higher-level complete method which is stable API
+            # Signature: complete(text, line, cursor_pos)
+            completed_text, matches = shell_instance.complete(current_line, current_line, line_cursor)
             
-            # Extract completion text from completion objects
-            if completions and hasattr(completions[0], 'text'):
-                return [c.text for c in completions]
-            else:
-                # Handle case where completions are just strings
-                return completions if isinstance(completions, list) else []
+            # If no matches from complete(), try the provisional completions API with context manager
+            if not matches:
+                try:
+                    import warnings
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")  # Suppress provisional API warning
+                        completer = shell_instance.Completer
+                        completion_results = completer.completions(current_line, line_cursor)
+                        
+                        # Extract completion text from completion objects
+                        completions = []
+                        for completion in completion_results:
+                            if hasattr(completion, 'text'):
+                                completions.append(completion.text)
+                            elif hasattr(completion, '__str__'):
+                                completions.append(str(completion))
+                        
+                        matches = completions
+                        
+                except Exception as e:
+                    # Fall back to the original matches (might be empty)
+                    pass
+            
+            # Remove duplicates while preserving order
+            seen = set()
+            unique_completions = []
+            for comp in matches:
+                if comp and comp not in seen:
+                    seen.add(comp)
+                    unique_completions.append(comp)
+            
+            return unique_completions
             
         except Exception as e:
-            # Fallback to basic completion
+            # Log the error for debugging
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.debug(f"Completion error for code '{code[:cursor_pos]}': {e}")
             return []
     
     def inspect_object(self, obj_name: str, shell_instance: Any = None) -> Dict[str, Any]:

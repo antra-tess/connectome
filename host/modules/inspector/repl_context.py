@@ -273,15 +273,32 @@ class REPLContextManager:
         namespace = session['namespace']
         keys_before = set(namespace.keys())
         
+        # Ensure shell user_ns is synchronized with session namespace before execution
+        if shell:
+            shell.user_ns.clear()
+            shell.user_ns.update(namespace)
+            # CRITICAL: Also sync completer namespaces for completion to work
+            shell.Completer.namespace = shell.user_ns
+            shell.Completer.global_namespace = shell.user_global_ns
+        
         # Execute code using IPython executor with session shell
         result = self.executor.execute(code, namespace, timeout, shell_instance=shell)
         
-        # Detect namespace changes (IPython shell user_ns)
+        # Detect namespace changes and sync both directions
         if shell:
+            # Get all variables from shell after execution
             keys_after = set(shell.user_ns.keys())
             new_variables = keys_after - keys_before
-            # Update session namespace with new variables
-            session['namespace'].update({k: shell.user_ns[k] for k in new_variables})
+            
+            # Update session namespace with ALL shell variables (not just new ones)
+            # This ensures complete synchronization
+            session['namespace'].clear()
+            session['namespace'].update(shell.user_ns)
+            
+            # CRITICAL: Re-sync completer namespaces after execution
+            # This ensures completion sees all variables after code execution
+            shell.Completer.namespace = shell.user_ns
+            shell.Completer.global_namespace = shell.user_global_ns
         else:
             keys_after = set(namespace.keys())
             new_variables = keys_after - keys_before
@@ -329,6 +346,16 @@ class REPLContextManager:
             
         try:
             shell = session['ipython_shell']
+            
+            # Critical: Sync namespace before completion
+            # This ensures the completion system sees all variables from execution
+            if shell:
+                shell.user_ns.clear()
+                shell.user_ns.update(session['namespace'])
+                # CRITICAL: Also sync completer namespaces for completion to work
+                shell.Completer.namespace = shell.user_ns
+                shell.Completer.global_namespace = shell.user_global_ns
+            
             completions = self.executor.get_completions(code, cursor_pos, shell)
             
             return {
@@ -337,7 +364,8 @@ class REPLContextManager:
                 'cursor_end': cursor_pos,
                 'metadata': {
                     'session_id': session_id,
-                    'code_length': len(code)
+                    'code_length': len(code),
+                    'namespace_variables': list(session['namespace'].keys())
                 }
             }
             
