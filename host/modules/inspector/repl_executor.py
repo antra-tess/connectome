@@ -167,7 +167,7 @@ class IPythonREPLExecutor:
             if hasattr(captured, 'outputs'):
                 result['rich_output'] = self._format_rich_outputs(captured.outputs)
                 
-            # Analyze output for inspection features
+            # Analyze output for inspection features and get result value
             self._analyze_output_for_inspection(result, shell, code)
                 
         except Exception as e:
@@ -256,10 +256,92 @@ class IPythonREPLExecutor:
         return formatted_outputs
     
     def _analyze_output_for_inspection(self, result: Dict[str, Any], shell_instance: Any, original_code: str) -> None:
-        """Analyze execution output for inspection features."""
+        """Analyze execution output for inspection features using actual result values."""
         if not result['success'] or not result['output']:
             return
             
+        # Try to get the actual result value from IPython's output history
+        actual_result = None
+        if shell_instance and hasattr(shell_instance, 'user_ns'):
+            try:
+                # Get the last result from IPython using Out dictionary
+                execution_count = result.get('execution_count', 1)
+                if hasattr(shell_instance, 'user_ns') and 'Out' in shell_instance.user_ns:
+                    out_dict = shell_instance.user_ns['Out']
+                    if execution_count in out_dict:
+                        actual_result = out_dict[execution_count]
+                    elif '_' in shell_instance.user_ns:
+                        actual_result = shell_instance.user_ns['_']
+            except Exception as e:
+                print(f"Debug: Error getting result: {e}")
+                pass
+        
+        if actual_result is not None:
+            # Use JSON serialization with custom object handler
+            self._analyze_actual_result(result, actual_result, original_code)
+        else:
+            # Fallback to string parsing for cases where we can't get the actual result
+            self._analyze_output_string(result, original_code)
+    
+    def _analyze_actual_result(self, result: Dict[str, Any], actual_result: Any, original_code: str) -> None:
+        """Analyze the actual result value using JSON serialization with custom object handler."""
+        object_refs = []
+        
+        def object_handler(obj):
+            """Custom JSON encoder that converts objects to references."""
+            # Check if this is an object we should create an inspection button for
+            obj_repr = repr(obj)
+            if '<' in obj_repr and 'at 0x' in obj_repr:
+                # Extract class name and memory address
+                match = re.match(r'<([^>]+)\s+at\s+(0x[a-f0-9]+)>', obj_repr)
+                if match:
+                    class_info, memory_addr = match.groups()
+                    
+                    # Create a reference object
+                    obj_ref = {
+                        'class_name': class_info,
+                        'memory_address': memory_addr,
+                        'variable_name': self._extract_variable_name_from_code(original_code),
+                        'full_representation': obj_repr,
+                        'inspectable': True
+                    }
+                    object_refs.append(obj_ref)
+                    
+                    # Return a reference that the tree can display
+                    return {
+                        '__object_ref__': len(object_refs) - 1,
+                        '__repr__': obj_repr,
+                        '__class__': class_info
+                    }
+            
+            # For other non-serializable objects, convert to string
+            return str(obj)
+        
+        try:
+            # Try to serialize the result to JSON
+            json_data = json.loads(json.dumps(actual_result, default=object_handler, ensure_ascii=False))
+            
+            # Set the metadata based on the actual data structure
+            if isinstance(actual_result, dict):
+                result['output_metadata']['has_dict'] = True
+                result['output_metadata']['has_json'] = True
+            elif isinstance(actual_result, (list, tuple)):
+                result['output_metadata']['has_list'] = True
+                result['output_metadata']['has_json'] = True
+            
+            # Add the JSON data for tree rendering
+            result['output_metadata']['json_data'] = json_data
+            
+            # Add any object references found
+            result['output_metadata']['object_representations'].extend(object_refs)
+            
+        except (TypeError, ValueError) as e:
+            # If JSON serialization fails completely, fall back to string analysis
+            print(f"Debug: JSON serialization failed: {e}")
+            self._analyze_output_string(result, original_code)
+    
+    def _analyze_output_string(self, result: Dict[str, Any], original_code: str) -> None:
+        """Fallback analysis using string parsing when actual result isn't available."""
         output_text = result['output'].strip()
         
         # Skip if output is just empty or assignment (no Out[N]:)
@@ -267,44 +349,28 @@ class IPythonREPLExecutor:
             return
         
         # Extract the actual output value (after "Out[N]: ")
-        # Handle multiline output where the value starts on the next line
         lines = output_text.split('\n')
         output_value = None
-        output_start_idx = None
         
         for i, line in enumerate(lines):
             if line.strip().startswith('Out[') and ': ' in line:
-                if ': ' in line:
-                    # Value might be on same line or next line
-                    value_part = line.split(': ', 1)[1].strip()
-                    if value_part:
-                        # Value on same line
-                        output_value = value_part
-                    else:
-                        # Value starts on next line - join remaining lines
-                        output_value = '\n'.join(lines[i+1:]).strip()
-                    output_start_idx = i
-                    break
+                value_part = line.split(': ', 1)[1].strip()
+                if value_part:
+                    output_value = value_part
+                else:
+                    output_value = '\n'.join(lines[i+1:]).strip()
+                break
         
         if not output_value:
             return
             
         # Try to parse the output as a Python literal using AST
-        parsed_data = None
         try:
-            # AST can safely parse Python literals (dicts, lists, tuples, strings, numbers, etc.)
             parsed_data = ast.literal_eval(output_value)
-        except (ValueError, SyntaxError):
-            # Not a Python literal, might be object representation or complex expression
-            pass
-        
-        # Analyze based on what we parsed or the raw string
-        if parsed_data is not None:
-            # Successfully parsed as Python literal
             self._analyze_parsed_data(result, parsed_data, output_value)
-        else:
-            # Couldn't parse - check for object representations or other patterns
-            self._analyze_unparsed_output(result, output_value, shell_instance, original_code)
+        except (ValueError, SyntaxError):
+            # Check for object representations or other patterns
+            self._analyze_unparsed_output(result, output_value, None, original_code)
     
     def _analyze_parsed_data(self, result: Dict[str, Any], parsed_data: Any, raw_output: str) -> None:
         """Analyze successfully parsed Python literal data."""
@@ -416,6 +482,11 @@ class IPythonREPLExecutor:
             # For simple inspection functions, return the argument
             if func_name in ['type', 'len', 'str', 'repr', 'dir', 'vars']:
                 return args.strip()
+        
+        # Handle inspect.getmembers(variable) calls
+        inspect_match = re.match(r'^inspect\.getmembers\(([^)]+)\)$', code)
+        if inspect_match:
+            return inspect_match.group(1).strip()
         
         # Handle array/dict access like "my_dict['key']", "my_list[0]"
         access_match = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*)\[.+\]$', code)

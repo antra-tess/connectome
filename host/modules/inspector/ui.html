@@ -2648,36 +2648,42 @@
             const hasInspectableObjects = metadata && metadata.object_representations && metadata.object_representations.length > 0;
             
             if (hasStructuredData) {
-                // Try to render as tree view
+                // Try to render as proper interactive tree view
                 try {
                     const treeContainer = document.createElement('div');
                     treeContainer.className = 'tree-output';
+                    treeContainer.style.cssText = `
+                        background: rgba(42, 42, 42, 0.8);
+                        border: 1px solid #444;
+                        border-radius: 4px;
+                        padding: 8px;
+                        margin: 4px 0;
+                        font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+                        font-size: 0.9em;
+                    `;
                     
-                    // Parse the output to extract the actual data
-                    const dataMatch = output.match(/Out\[\d+\]:\s*(.*)/s);
-                    const dataStr = dataMatch ? dataMatch[1].trim() : output;
-                    
-                    // Try to evaluate the data safely for tree rendering
-                    let parsedData;
-                    try {
-                        // Use a safe evaluation approach
-                        parsedData = JSON.parse(dataStr.replace(/'/g, '"'));
-                    } catch {
-                        // If JSON parsing fails, try to extract from Python representation
-                        if (dataStr.startsWith('[') || dataStr.startsWith('{')) {
-                            // This is a Python structure, render as collapsible tree
-                            treeContainer.innerHTML = `<pre class="tree-view">${escapeHtml(dataStr)}</pre>`;
-                            makeTreeCollapsible(treeContainer);
+                    // Check if we have properly serialized JSON data from the server
+                    if (metadata.json_data) {
+                        // Use the server-provided JSON data for perfect tree rendering
+                        const treeNode = createTreeNode('result', metadata.json_data, 0, true);
+                        treeContainer.appendChild(treeNode);
+                        
+                        // Add inspection buttons for any object references in the tree
+                        addInspectionButtonsToTree(treeContainer, metadata.object_representations);
+                    } else {
+                        // Fallback: Parse the output string to extract data
+                        const dataMatch = output.match(/Out\[\d+\]:\s*(.*)/s);
+                        const dataStr = dataMatch ? dataMatch[1].trim() : output;
+                        
+                        // Try to convert Python representation to JavaScript object
+                        let parsedData = parsePythonDataForTree(dataStr);
+                        
+                        if (parsedData !== null) {
+                            treeContainer.appendChild(createTreeNode('result', parsedData, 0, true));
                         } else {
-                            // Fallback to regular output
-                            treeContainer.innerHTML = `<pre>${escapeHtml(output)}</pre>`;
+                            // Last resort: simple formatted display
+                            treeContainer.innerHTML = `<pre class="tree-view">${escapeHtml(dataStr)}</pre>`;
                         }
-                    }
-                    
-                    if (parsedData !== undefined) {
-                        // Render as proper tree
-                        const treeHtml = renderDataAsTree(parsedData);
-                        treeContainer.innerHTML = treeHtml;
                     }
                     
                     outputLine.appendChild(treeContainer);
@@ -2699,46 +2705,75 @@
             outputDiv.scrollTop = outputDiv.scrollHeight;
         }
         
-        // Render data as expandable tree
-        function renderDataAsTree(data, level = 0) {
-            const indent = '  '.repeat(level);
-            
-            if (Array.isArray(data)) {
-                if (data.length === 0) return '[]';
-                
-                let html = '[\n';
-                data.forEach((item, index) => {
-                    const comma = index < data.length - 1 ? ',' : '';
-                    html += `${indent}  ${renderDataAsTree(item, level + 1)}${comma}\n`;
-                });
-                html += `${indent}]`;
-                return html;
-            } else if (typeof data === 'object' && data !== null) {
-                const keys = Object.keys(data);
-                if (keys.length === 0) return '{}';
-                
-                let html = '{\n';
-                keys.forEach((key, index) => {
-                    const comma = index < keys.length - 1 ? ',' : '';
-                    html += `${indent}  "${key}": ${renderDataAsTree(data[key], level + 1)}${comma}\n`;
-                });
-                html += `${indent}}`;
-                return html;
-            } else if (typeof data === 'string') {
-                return `"${escapeHtml(data)}"`;
-            } else {
-                return String(data);
+        // Parse Python data representations into JavaScript objects for tree rendering
+        function parsePythonDataForTree(dataStr) {
+            try {
+                // First, try direct JSON parsing (works for simple cases)
+                return JSON.parse(dataStr.replace(/'/g, '"').replace(/True/g, 'true').replace(/False/g, 'false').replace(/None/g, 'null'));
+            } catch {
+                // For more complex Python structures, try a more sophisticated approach
+                try {
+                    // Handle Python tuples, lists, and dicts with basic conversion
+                    let jsStr = dataStr
+                        .replace(/'/g, '"')  // Single to double quotes
+                        .replace(/True/g, 'true')  // Python True -> JavaScript true
+                        .replace(/False/g, 'false')  // Python False -> JavaScript false
+                        .replace(/None/g, 'null')  // Python None -> JavaScript null
+                        .replace(/\(/g, '[')  // Convert tuples to arrays
+                        .replace(/\)/g, ']');
+                    
+                    return JSON.parse(jsStr);
+                } catch {
+                    // If still can't parse, check if it looks like a simple list/dict structure
+                    if (dataStr.match(/^\s*[\[\{]/)) {
+                        // It looks like structured data but we can't parse it properly
+                        // Return a simple representation that can be shown as expandable
+                        return {
+                            "__python_repr__": dataStr,
+                            "__type__": "complex_structure"
+                        };
+                    }
+                    return null;  // Can't parse as tree data
+                }
             }
         }
         
-        // Make tree output collapsible
-        function makeTreeCollapsible(container) {
-            // This is a simplified version - could be enhanced with proper folding
-            const pre = container.querySelector('pre');
-            if (pre) {
-                pre.style.cursor = 'pointer';
-                pre.title = 'Click to toggle collapse (simplified tree view)';
-            }
+        // Add inspection buttons for object references within tree structures
+        function addInspectionButtonsToTree(treeContainer, objectRepresentations) {
+            // Find all nodes in the tree that contain object references
+            const allNodes = treeContainer.querySelectorAll('div');
+            allNodes.forEach(node => {
+                const textContent = node.textContent;
+                if (textContent && textContent.includes('__object_ref__')) {
+                    // This node contains an object reference, add an inspection button
+                    objectRepresentations.forEach(objRep => {
+                        if (textContent.includes(objRep.full_representation)) {
+                            const inspectBtn = document.createElement('button');
+                            inspectBtn.className = 'inspect-btn';
+                            inspectBtn.innerHTML = '🔍';
+                            inspectBtn.title = `Inspect ${objRep.variable_name}`;
+                            inspectBtn.style.cssText = `
+                                background: #0f3460;
+                                border: 1px solid #00d4aa;
+                                color: #00d4aa;
+                                padding: 2px 6px;
+                                margin-left: 8px;
+                                border-radius: 3px;
+                                cursor: pointer;
+                                font-size: 12px;
+                                vertical-align: middle;
+                            `;
+                            
+                            inspectBtn.addEventListener('click', (e) => {
+                                e.stopPropagation();  // Prevent tree collapse/expand
+                                executeInspection(objRep.variable_name);
+                            });
+                            
+                            node.appendChild(inspectBtn);
+                        }
+                    });
+                }
+            });
         }
         
         // Add inspection buttons for object representations
