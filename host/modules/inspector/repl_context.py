@@ -275,8 +275,12 @@ class REPLContextManager:
         
         # Ensure shell user_ns is synchronized with session namespace before execution
         if shell:
+            # Preserve IPython internal variables when syncing namespace
+            ipython_internals = {k: v for k, v in shell.user_ns.items() 
+                               if k.startswith('_') or k in ('In', 'Out', 'get_ipython', 'exit', 'quit')}
             shell.user_ns.clear()
             shell.user_ns.update(namespace)
+            shell.user_ns.update(ipython_internals)  # Restore IPython internals
             # CRITICAL: Also sync completer namespaces for completion to work
             shell.Completer.namespace = shell.user_ns
             shell.Completer.global_namespace = shell.user_global_ns
@@ -350,8 +354,12 @@ class REPLContextManager:
             # Critical: Sync namespace before completion
             # This ensures the completion system sees all variables from execution
             if shell:
+                # Preserve IPython internal variables when syncing namespace
+                ipython_internals = {k: v for k, v in shell.user_ns.items() 
+                                   if k.startswith('_') or k in ('In', 'Out', 'get_ipython', 'exit', 'quit')}
                 shell.user_ns.clear()
                 shell.user_ns.update(session['namespace'])
+                shell.user_ns.update(ipython_internals)  # Restore IPython internals
                 # CRITICAL: Also sync completer namespaces for completion to work
                 shell.Completer.namespace = shell.user_ns
                 shell.Completer.global_namespace = shell.user_global_ns

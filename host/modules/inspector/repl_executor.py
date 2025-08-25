@@ -84,6 +84,10 @@ class IPythonREPLExecutor:
         shell.Completer.use_jedi = False  # Use basic completer for reliability
         shell.Completer.greedy = True   # More aggressive completion
         
+        # Initialize IPython internals properly
+        shell.init_history()
+        shell.init_display_formatter()
+        
         # Update namespace AND sync completer namespaces
         if namespace:
             shell.user_ns.update(namespace)
