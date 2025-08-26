@@ -36,6 +36,7 @@ class NavigationMode(Enum):
     TREE_VIEW = "tree_view"
     DETAIL_VIEW = "detail_view"
     HOST_SELECTION = "host_selection"
+    REPL_MODE = "repl_mode"
 
 
 @dataclass
@@ -224,6 +225,7 @@ class IPCTUIInspector:
             ("Metrics", "metrics", "📈 System performance metrics"),
             ("Timelines", "timelines", "⏰ Timeline DAG overview"),
             ("VEIL Overview", "veil", "👁️ VEIL system overview"),
+            ("Python REPL", "repl", "🐍 Interactive Python debugging console"),
             ("Health Check", "health", "✅ Simple health check"),
             ("Switch Host", "switch_host", "🔄 Connect to a different host"),
             ("Quit", "quit", "❌ Exit the inspector")
@@ -239,6 +241,18 @@ class IPCTUIInspector:
         self._pagination_loading = False  # Prevent recursive loading
         self._last_scroll_direction = None  # Track last scroll direction for pagination
         self._rendering = False  # Prevent tree modifications during rendering
+        
+        # REPL state
+        self.repl_sessions = {}  # session_id -> session_info
+        self.current_repl_session = None  # Active session
+        self.repl_input_buffer = []  # Current input lines
+        self.repl_output_history = []  # [{"type": "input/output/error", "content": str, "execution_count": int}]
+        self.repl_scroll_offset = 0  # For scrolling through output
+        self.repl_completion_suggestions = []  # Tab completion suggestions
+        self.repl_completion_index = -1  # Current completion selection
+        self.repl_input_cursor_pos = 0  # Cursor position in current input line
+        self.repl_context_type = "global"  # Current REPL context type
+        self.repl_context_id = "global"  # Current REPL context id
         
     async def start(self):
         """Start the IPC TUI inspector."""
@@ -358,6 +372,8 @@ class IPCTUIInspector:
                 await self._render_tree_view()
             elif self.mode == NavigationMode.DETAIL_VIEW:
                 await self._render_detail_view()
+            elif self.mode == NavigationMode.REPL_MODE:
+                await self._render_repl_view()
             
             # Render footer
             await self._render_footer()
@@ -386,6 +402,9 @@ class IPCTUIInspector:
             breadcrumb = f" > {self.current_tree_node.label} > Details"
         elif self.mode == NavigationMode.HOST_SELECTION:
             breadcrumb = " > Select Host"
+        elif self.mode == NavigationMode.REPL_MODE:
+            context_desc = f"{self.repl_context_type}:{self.repl_context_id}" if self.repl_context_type != "global" else "global"
+            breadcrumb = f" > Python REPL [{context_desc}]"
         
         full_title = title + breadcrumb
         if len(full_title) > cols - 2:
@@ -910,9 +929,11 @@ class IPCTUIInspector:
         elif self.mode == NavigationMode.MAIN_MENU:
             controls = "↑↓: Navigate • Enter: Select • Q: Quit"
         elif self.mode == NavigationMode.TREE_VIEW:
-            controls = "↑↓: Navigate • →: Expand • ←: Collapse • Enter: Details • E: Edit • B: Back • R: Refresh • Q: Quit"
+            controls = "↑↓: Navigate • →: Expand • ←: Collapse • Enter: Details • E: Edit • P: REPL • B: Back • R: Refresh • Q: Quit"
         elif self.mode == NavigationMode.DETAIL_VIEW:
-            controls = "↑↓: Navigate • →: Expand • ←: Collapse • E: Edit • B: Back • Q: Quit"
+            controls = "↑↓: Navigate • →: Expand • ←: Collapse • E: Edit • P: REPL • B: Back • Q: Quit"
+        elif self.mode == NavigationMode.REPL_MODE:
+            controls = "Enter: Execute/Drill • Tab: Complete • ↑↓: Scroll/History • PgUp/Dn: Scroll • Ctrl+C: Clear • B: Back • Q: Quit"
         else:
             controls = "Q: Quit"
         
@@ -940,6 +961,8 @@ class IPCTUIInspector:
             await self._handle_tree_view_input(key)
         elif self.mode == NavigationMode.DETAIL_VIEW:
             await self._handle_detail_view_input(key)
+        elif self.mode == NavigationMode.REPL_MODE:
+            await self._handle_repl_input(key)
     
     async def _handle_host_selection_input(self, key: str):
         """Handle input in host selection mode."""
@@ -983,6 +1006,8 @@ class IPCTUIInspector:
             await self._view_node_details()
         elif key in ['e', 'E']:
             await self._edit_current_node()
+        elif key in ['p', 'P']:
+            await self._enter_context_repl()
         elif key in ['b', 'B']:
             self.mode = NavigationMode.MAIN_MENU
             self.status_message = ""
@@ -1010,6 +1035,8 @@ class IPCTUIInspector:
             await self._navigate_detail_tree_home()
         elif key in ['e', 'E']:
             await self._edit_detail_node()
+        elif key in ['p', 'P']:
+            await self._enter_context_repl()
         elif key in ['b', 'B']:
             self.mode = NavigationMode.TREE_VIEW
             # Reset scroll offset when going back
@@ -1043,6 +1070,9 @@ class IPCTUIInspector:
             await self._discover_hosts()
             self.mode = NavigationMode.HOST_SELECTION
             self.current_host_index = 0
+            return
+        elif cmd == "repl":
+            await self._enter_repl_mode()
             return
         
         # Load data for the selected endpoint
@@ -2527,6 +2557,614 @@ class IPCTUIInspector:
         self.tree_root.children = new_nodes + self.tree_root.children
         
         self.status_message = f"Added {len(events)} new events"
+
+    # === REPL FUNCTIONALITY ===
+    
+    async def _enter_repl_mode(self):
+        """Enter REPL mode with global context."""
+        self.repl_context_type = "global" 
+        self.repl_context_id = "global"
+        await self._ensure_repl_session()
+        self.mode = NavigationMode.REPL_MODE
+        self.status_message = "Entered Python REPL (global context)"
+    
+    async def _enter_context_repl(self):
+        """Enter REPL mode with context based on current tree node."""
+        if not self.current_tree_node:
+            await self._enter_repl_mode()  # Fallback to global
+            return
+            
+        # Determine context based on current node
+        node_id = self.current_tree_node.id
+        
+        # Extract context from node path - spaces have ids like "space_main_space"
+        if "space_" in node_id and self._current_endpoint in ["spaces", "veil"]:
+            space_id = node_id.replace("space_", "").replace("_", "")
+            self.repl_context_type = "space"
+            self.repl_context_id = space_id
+            self.status_message = f"Entered Python REPL (space: {space_id})"
+        else:
+            # Default to global for now
+            self.repl_context_type = "global"
+            self.repl_context_id = "global"  
+            self.status_message = "Entered Python REPL (global context)"
+        
+        await self._ensure_repl_session()
+        self.mode = NavigationMode.REPL_MODE
+    
+    async def _ensure_repl_session(self):
+        """Ensure a REPL session exists for the current context."""
+        session_key = f"{self.repl_context_type}:{self.repl_context_id}"
+        
+        if session_key not in self.repl_sessions:
+            try:
+                # Create new REPL session via IPC
+                response = await self.executor.execute_command("repl-create", {
+                    "context_type": self.repl_context_type,
+                    "context_id": self.repl_context_id
+                })
+                
+                if response.get("error"):
+                    self.status_message = f"Failed to create REPL session: {response['error']}"
+                    return
+                
+                session_info = response.get("result", {})
+                session_id = session_info.get("session_id")
+                
+                if not session_id:
+                    self.status_message = "Invalid REPL session response"
+                    return
+                
+                self.repl_sessions[session_key] = {
+                    "session_id": session_id,
+                    "context_type": self.repl_context_type,
+                    "context_id": self.repl_context_id,
+                    "created_at": session_info.get("created_at"),
+                    "output_history": []
+                }
+                
+                # Add welcome message
+                self.repl_output_history = [{
+                    "type": "info",
+                    "content": f"🐍 Python REPL session started ({session_key})",
+                    "execution_count": 0
+                }]
+                
+            except Exception as e:
+                self.status_message = f"Error creating REPL session: {str(e)}"
+                return
+        
+        # Set current session
+        self.current_repl_session = self.repl_sessions[session_key]
+        
+        # Restore output history for this session
+        self.repl_output_history = self.current_repl_session.get("output_history", [])
+    
+    async def _render_repl_view(self):
+        """Render the REPL interface."""
+        rows, cols = self.terminal.get_terminal_size()
+        
+        # Calculate areas: header (2 rows) + output area + input area (3 rows) + footer (2 rows)
+        output_start_row = 4
+        input_start_row = rows - 5  # Leave space for 3 input rows + 2 footer rows
+        output_height = input_start_row - output_start_row
+        
+        # Render output history area
+        await self._render_repl_output(output_start_row, output_height, cols)
+        
+        # Render input area
+        await self._render_repl_input(input_start_row, cols)
+        
+        # Show status
+        status_row = input_start_row + 3
+        self.terminal.move_cursor(status_row, 2)
+        if self.current_repl_session:
+            session_info = f"Session: {self.current_repl_session['session_id'][:8]}..."
+            self.terminal.set_color('bright_black')
+            print(session_info)
+            self.terminal.reset_colors()
+    
+    async def _render_repl_output(self, start_row: int, height: int, cols: int):
+        """Render REPL output history with scrolling."""
+        if not self.repl_output_history:
+            self.terminal.move_cursor(start_row + height//2, cols//2 - 10)
+            self.terminal.set_color('bright_black')
+            print("No output yet. Start typing!")
+            self.terminal.reset_colors()
+            return
+        
+        # Calculate visible entries with scroll offset
+        visible_entries = self.repl_output_history[self.repl_scroll_offset:self.repl_scroll_offset + height]
+        
+        row = start_row
+        for entry in visible_entries:
+            if row >= start_row + height:
+                break
+                
+            self.terminal.move_cursor(row, 2)
+            
+            entry_type = entry.get("type", "output")
+            content = entry.get("content", "")
+            exec_count = entry.get("execution_count", 0)
+            
+            if entry_type == "input":
+                self.terminal.set_color('bright_blue')
+                prefix = f"[{exec_count}] >>> "
+            elif entry_type == "error":
+                self.terminal.set_color('bright_red')
+                prefix = f"[{exec_count}] !!! "
+            elif entry_type == "info":
+                self.terminal.set_color('bright_green')
+                prefix = "     "
+            else:
+                self.terminal.set_color('bright_white')
+                prefix = f"[{exec_count}] <<< "
+            
+            # Truncate content to fit terminal width
+            max_content_width = cols - len(prefix) - 4
+            if len(content) > max_content_width:
+                content = content[:max_content_width-3] + "..."
+            
+            print(prefix + content)
+            self.terminal.reset_colors()
+            row += 1
+        
+        # Show scroll indicators
+        if self.repl_scroll_offset > 0:
+            self.terminal.move_cursor(start_row, cols - 20)
+            self.terminal.set_color('bright_yellow')
+            print("↑ More above ↑")
+        
+        if self.repl_scroll_offset + height < len(self.repl_output_history):
+            self.terminal.move_cursor(start_row + height - 1, cols - 20)
+            self.terminal.set_color('bright_yellow')
+            print("↓ More below ↓")
+        
+        self.terminal.reset_colors()
+    
+    async def _render_repl_input(self, start_row: int, cols: int):
+        """Render REPL input area."""
+        # Current input buffer (supporting multi-line)
+        input_lines = self.repl_input_buffer if self.repl_input_buffer else [""]
+        
+        # Show up to 3 lines of input
+        for i in range(3):
+            self.terminal.move_cursor(start_row + i, 2)
+            
+            if i < len(input_lines):
+                if i == 0:
+                    self.terminal.set_color('bright_green', bold=True)
+                    prompt = ">>> "
+                else:
+                    self.terminal.set_color('bright_green')
+                    prompt = "... "
+                
+                print(prompt, end="")
+                self.terminal.reset_colors()
+                
+                # Show current line with cursor
+                line = input_lines[i]
+                max_line_width = cols - 8  # Leave space for prompt and margins
+                display_line = line[:max_line_width]
+                
+                if i == len(input_lines) - 1:  # Current line
+                    # Show cursor position
+                    cursor_pos = min(self.repl_input_cursor_pos, len(display_line))
+                    before_cursor = display_line[:cursor_pos]
+                    at_cursor = display_line[cursor_pos:cursor_pos+1] or " "
+                    after_cursor = display_line[cursor_pos+1:]
+                    
+                    print(before_cursor, end="")
+                    self.terminal.set_color('black', 'bright_white')  # Highlight cursor
+                    print(at_cursor, end="")
+                    self.terminal.reset_colors()
+                    print(after_cursor, end="")
+                else:
+                    print(display_line, end="")
+            else:
+                # Empty line
+                if i == 0:
+                    self.terminal.set_color('bright_green', bold=True)
+                    print(">>> ", end="")
+                    self.terminal.reset_colors()
+                    # Show cursor on empty line
+                    self.terminal.set_color('black', 'bright_white')
+                    print(" ", end="")
+                    self.terminal.reset_colors()
+    
+    async def _handle_repl_input(self, key: str):
+        """Handle input in REPL mode."""
+        if key in ['b', 'B']:
+            # Go back to previous mode
+            self.mode = NavigationMode.MAIN_MENU
+            self.status_message = ""
+            return
+        elif key == 'CTRL_C':
+            # Clear current input
+            self.repl_input_buffer = []
+            self.repl_input_cursor_pos = 0
+            self.status_message = "Input cleared"
+            return
+        elif key == '\r' or key == '\n':  # Enter - execute code or drill down
+            if self.repl_input_buffer and any(line.strip() for line in self.repl_input_buffer):
+                # If there's input to execute
+                await self._execute_repl_code()
+            else:
+                # If no input, try drill-down on recent output
+                await self._handle_repl_output_drill_down()
+            return
+        elif key == '\t':  # Tab - completion
+            await self._handle_repl_completion()
+            return
+        elif key == 'ESC[A':  # Up arrow - history or scroll
+            if self.repl_input_buffer and self.repl_input_buffer[0].strip():
+                # If typing, navigate history
+                await self._navigate_repl_history(-1)
+            else:
+                # If not typing, scroll output up
+                await self._scroll_repl_output(-1)
+            return
+        elif key == 'ESC[B':  # Down arrow - history or scroll
+            if self.repl_input_buffer and self.repl_input_buffer[0].strip():
+                # If typing, navigate history
+                await self._navigate_repl_history(1)
+            else:
+                # If not typing, scroll output down
+                await self._scroll_repl_output(1)
+            return
+        elif key == 'ESC[5~':  # Page Up - scroll output
+            await self._scroll_repl_output(-5)
+            return
+        elif key == 'ESC[6~':  # Page Down - scroll output
+            await self._scroll_repl_output(5)
+            return
+        elif key == 'ESC[D':  # Left arrow - move cursor left
+            if self.repl_input_cursor_pos > 0:
+                self.repl_input_cursor_pos -= 1
+            return
+        elif key == 'ESC[C':  # Right arrow - move cursor right
+            current_line = self.repl_input_buffer[-1] if self.repl_input_buffer else ""
+            if self.repl_input_cursor_pos < len(current_line):
+                self.repl_input_cursor_pos += 1
+            return
+        elif key == 'ESC[3~':  # Delete key
+            await self._handle_repl_delete()
+            return
+        elif key == '\x08' or key == '\x7f':  # Backspace
+            await self._handle_repl_backspace()
+            return
+        
+        # Regular character input
+        if len(key) == 1 and ord(key) >= 32:  # Printable character
+            await self._handle_repl_char_input(key)
+    
+    async def _execute_repl_code(self):
+        """Execute the current REPL input."""
+        if not self.current_repl_session:
+            self.status_message = "No active REPL session"
+            return
+        
+        # Join all input lines
+        code = "\n".join(self.repl_input_buffer) if self.repl_input_buffer else ""
+        
+        if not code.strip():
+            return  # Nothing to execute
+        
+        # Add input to history
+        exec_count = len([e for e in self.repl_output_history if e.get("type") == "input"]) + 1
+        self.repl_output_history.append({
+            "type": "input",
+            "content": code.replace("\n", " "),  # Show as single line in history
+            "execution_count": exec_count
+        })
+        
+        try:
+            # Execute code via IPC
+            response = await self.executor.execute_command("repl-exec", {
+                "session_id": self.current_repl_session["session_id"],
+                "code": code
+            })
+            
+            if response.get("error"):
+                self.repl_output_history.append({
+                    "type": "error",
+                    "content": response["error"],
+                    "execution_count": exec_count
+                })
+            else:
+                result = response.get("result", {})
+                output = result.get("output", "")
+                error = result.get("error", "")
+                
+                if output:
+                    # Check for drill-down indicators
+                    content, has_drill_down = self._process_repl_output(output, result)
+                    
+                    self.repl_output_history.append({
+                        "type": "output",
+                        "content": content,
+                        "execution_count": exec_count,
+                        "drill_down": has_drill_down,
+                        "raw_result": result if has_drill_down else None
+                    })
+                
+                if error:
+                    self.repl_output_history.append({
+                        "type": "error", 
+                        "content": error,
+                        "execution_count": exec_count
+                    })
+            
+        except Exception as e:
+            self.repl_output_history.append({
+                "type": "error",
+                "content": f"Execution error: {str(e)}",
+                "execution_count": exec_count
+            })
+        
+        # Update session history
+        self.current_repl_session["output_history"] = self.repl_output_history
+        
+        # Clear input buffer and scroll to bottom
+        self.repl_input_buffer = []
+        self.repl_input_cursor_pos = 0
+        self.repl_scroll_offset = max(0, len(self.repl_output_history) - 10)  # Show recent output
+        
+        self.status_message = "Code executed"
+    
+    def _process_repl_output(self, output: str, result: dict) -> tuple[str, bool]:
+        """Process REPL output and determine if drill-down is available."""
+        # Check for large structured data that should have drill-down
+        output_metadata = result.get("output_metadata", {})
+        
+        if output_metadata.get("has_json") and output_metadata.get("json_data"):
+            data = output_metadata["json_data"]
+            if isinstance(data, dict) and len(data) > 5:
+                return f"dict({len(data)} keys) [Enter to 🔍]", True
+            elif isinstance(data, list) and len(data) > 10:
+                return f"list({len(data)} items) [Enter to 🔍]", True
+        
+        # Check for inspect.getmembers patterns
+        if "getmembers" in output or (isinstance(output, str) and output.count("(") > 10):
+            return "[members of object: Enter to 🔍]", True
+        
+        # Return original output if no drill-down needed
+        return output.strip()[:100] + ("..." if len(output) > 100 else ""), False
+    
+    async def _handle_repl_completion(self):
+        """Handle tab completion in REPL."""
+        if not self.current_repl_session or not self.repl_input_buffer:
+            return
+        
+        current_line = self.repl_input_buffer[-1] if self.repl_input_buffer else ""
+        cursor_pos = self.repl_input_cursor_pos
+        
+        try:
+            response = await self.executor.execute_command("repl-complete", {
+                "session_id": self.current_repl_session["session_id"],
+                "code": current_line,
+                "cursor_pos": cursor_pos
+            })
+            
+            if response.get("error"):
+                self.status_message = f"Completion error: {response['error']}"
+                return
+            
+            result = response.get("result", {})
+            completions = result.get("completions", [])
+            
+            if not completions:
+                self.status_message = "No completions available"
+                return
+            
+            if len(completions) == 1:
+                # Single completion - insert it
+                completion = completions[0]
+                # Simple insertion at cursor position
+                before = current_line[:cursor_pos]
+                after = current_line[cursor_pos:]
+                
+                # Find the prefix to replace (basic word boundary detection)
+                word_start = cursor_pos
+                while word_start > 0 and current_line[word_start-1].isalnum() or current_line[word_start-1] == '_':
+                    word_start -= 1
+                
+                new_line = current_line[:word_start] + completion + after
+                self.repl_input_buffer[-1] = new_line
+                self.repl_input_cursor_pos = word_start + len(completion)
+                self.status_message = f"Completed: {completion}"
+                
+            else:
+                # Multiple completions - show in status (simplified for now)
+                self.status_message = f"Completions: {', '.join(completions[:3])}" + ("..." if len(completions) > 3 else "")
+        
+        except Exception as e:
+            self.status_message = f"Completion failed: {str(e)}"
+    
+    async def _navigate_repl_history(self, direction: int):
+        """Navigate through REPL command history."""
+        # Find previous input commands
+        input_commands = [e for e in self.repl_output_history if e.get("type") == "input"]
+        
+        if not input_commands:
+            return
+        
+        # Simple history navigation (can be enhanced later)
+        if direction < 0 and input_commands:  # Up arrow - get last command
+            last_cmd = input_commands[-1]["content"]
+            self.repl_input_buffer = [last_cmd]
+            self.repl_input_cursor_pos = len(last_cmd)
+            self.status_message = "Previous command loaded"
+    
+    async def _handle_repl_char_input(self, char: str):
+        """Handle character input in REPL."""
+        # Ensure we have at least one line in buffer
+        if not self.repl_input_buffer:
+            self.repl_input_buffer = [""]
+        
+        # Insert character at cursor position
+        current_line = self.repl_input_buffer[-1]
+        cursor_pos = self.repl_input_cursor_pos
+        
+        new_line = current_line[:cursor_pos] + char + current_line[cursor_pos:]
+        self.repl_input_buffer[-1] = new_line
+        self.repl_input_cursor_pos += 1
+    
+    async def _handle_repl_backspace(self):
+        """Handle backspace in REPL input."""
+        if not self.repl_input_buffer or self.repl_input_cursor_pos == 0:
+            return
+        
+        current_line = self.repl_input_buffer[-1]
+        cursor_pos = self.repl_input_cursor_pos
+        
+        # Remove character before cursor
+        new_line = current_line[:cursor_pos-1] + current_line[cursor_pos:]
+        self.repl_input_buffer[-1] = new_line
+        self.repl_input_cursor_pos -= 1
+    
+    async def _handle_repl_delete(self):
+        """Handle delete key in REPL input."""
+        if not self.repl_input_buffer:
+            return
+        
+        current_line = self.repl_input_buffer[-1]
+        cursor_pos = self.repl_input_cursor_pos
+        
+        if cursor_pos < len(current_line):
+            # Remove character at cursor
+            new_line = current_line[:cursor_pos] + current_line[cursor_pos+1:]
+            self.repl_input_buffer[-1] = new_line
+    
+    async def _scroll_repl_output(self, direction: int):
+        """Scroll REPL output up or down."""
+        if not self.repl_output_history:
+            return
+        
+        self.repl_scroll_offset += direction
+        
+        # Calculate terminal height for output area
+        rows, cols = self.terminal.get_terminal_size()
+        output_height = rows - 9  # Header(2) + input(3) + footer(2) + status(2)
+        
+        # Clamp scroll offset to valid range
+        max_scroll = max(0, len(self.repl_output_history) - output_height)
+        self.repl_scroll_offset = max(0, min(self.repl_scroll_offset, max_scroll))
+        
+        if direction < 0:
+            self.status_message = "Scrolled up"
+        else:
+            self.status_message = "Scrolled down"
+    
+    async def _handle_repl_output_drill_down(self):
+        """Handle drill-down into REPL output with drill_down flag."""
+        # Find the most recent output entry that supports drill-down
+        drill_down_entries = [e for e in reversed(self.repl_output_history) 
+                             if e.get("drill_down") and e.get("raw_result")]
+        
+        if not drill_down_entries:
+            self.status_message = "No drill-down data available"
+            return
+        
+        # Use the most recent drill-down entry
+        entry = drill_down_entries[0]
+        raw_result = entry.get("raw_result", {})
+        output_metadata = raw_result.get("output_metadata", {})
+        
+        if not output_metadata.get("has_json"):
+            self.status_message = "No structured data to explore"
+            return
+        
+        json_data = output_metadata.get("json_data")
+        if not json_data:
+            self.status_message = "No data to display"
+            return
+        
+        try:
+            # Build tree from the JSON data
+            exec_count = entry.get("execution_count", 0)
+            tree_name = f"REPL Output [{exec_count}]"
+            
+            # Create tree root
+            self.tree_root = TreeNode(
+                id=f"repl_output_{exec_count}",
+                label=tree_name,
+                data=json_data
+            )
+            
+            # Build tree structure from JSON data
+            await self._build_json_tree(self.tree_root, json_data)
+            
+            # Switch to detail view
+            self.current_tree_node = self.tree_root
+            self.mode = NavigationMode.DETAIL_VIEW
+            self.scroll_offset = 0
+            self._reset_pagination_state()
+            
+            self.status_message = f"Exploring {tree_name}"
+            
+        except Exception as e:
+            self.status_message = f"Error building drill-down view: {str(e)}"
+    
+    async def _build_json_tree(self, parent: TreeNode, data: Any, max_depth: int = 10, current_depth: int = 0):
+        """Build tree structure from JSON data."""
+        if current_depth >= max_depth:
+            return
+        
+        if isinstance(data, dict):
+            for key, value in data.items():
+                child_id = f"{parent.id}_{key}"
+                
+                # Create display label based on value type
+                if isinstance(value, dict):
+                    label = f"{key}: dict({len(value)} keys)"
+                elif isinstance(value, list):
+                    label = f"{key}: list({len(value)} items)"
+                elif isinstance(value, str) and len(value) > 50:
+                    label = f"{key}: \"{value[:47]}...\""
+                else:
+                    label = f"{key}: {repr(value)}"
+                
+                child_node = TreeNode(
+                    id=child_id,
+                    label=label,
+                    data=value,
+                    parent=parent
+                )
+                parent.children.append(child_node)
+                
+                # Recursively build subtree for complex types
+                if isinstance(value, (dict, list)):
+                    await self._build_json_tree(child_node, value, max_depth, current_depth + 1)
+        
+        elif isinstance(data, list):
+            for i, item in enumerate(data):
+                if i >= 100:  # Limit very large lists
+                    break
+                    
+                child_id = f"{parent.id}_{i}"
+                
+                # Create display label based on item type  
+                if isinstance(item, dict):
+                    label = f"[{i}]: dict({len(item)} keys)"
+                elif isinstance(item, list):
+                    label = f"[{i}]: list({len(item)} items)"
+                elif isinstance(item, str) and len(item) > 50:
+                    label = f"[{i}]: \"{item[:47]}...\""
+                else:
+                    label = f"[{i}]: {repr(item)}"
+                
+                child_node = TreeNode(
+                    id=child_id,
+                    label=label,
+                    data=item,
+                    parent=parent
+                )
+                parent.children.append(child_node)
+                
+                # Recursively build subtree for complex types
+                if isinstance(item, (dict, list)):
+                    await self._build_json_tree(child_node, item, max_depth, current_depth + 1)
 
 
 async def main_ipc_tui(socket_path: str = None, timeout: float = 30.0):
