@@ -206,13 +206,11 @@ class IPCTUIInspector:
         self.terminal = TerminalController()
         
         # UI State
-        self.mode = NavigationMode.HOST_SELECTION if not socket_path else NavigationMode.MAIN_MENU
         self.current_menu_index = 0
         self.current_tree_index = 0
         self.current_tree_node = None
         self.tree_root = None
         self.scroll_offset = 0
-        self.status_message = ""
         self.search_query = ""
         
         # Detail view state
@@ -263,6 +261,13 @@ class IPCTUIInspector:
         # REPL state
         self.repl_sessions = {}  # session_id -> session_info
         self.current_repl_session = None  # Active session
+        
+        # Render state tracking
+        self._needs_render = True  # Always render initially
+        self._last_status_message = ""
+        self._last_mode = None
+        self._status_message = ""  # Private backing field
+        self._mode = NavigationMode.HOST_SELECTION if not socket_path else NavigationMode.MAIN_MENU
         self.repl_input_buffer = []  # Current input lines
         self.repl_output_history = []  # [{"type": "input/output/error", "content": str, "execution_count": int}]
         self.repl_scroll_offset = 0  # For scrolling through output
@@ -355,19 +360,27 @@ class IPCTUIInspector:
         """Main UI event loop."""
         while self.running:
             try:
-                # Render current screen
-                await self._render_screen()
+                # Only render if something has changed
+                if self._needs_render or self._has_ui_changed():
+                    await self._render_screen()
+                    self._needs_render = False
+                    self._update_last_state()
                 
-                # Get user input
-                key = self.terminal.get_key()
+                # Get user input with timeout to allow background tasks to run
+                key = await self._get_key_with_timeout(0.1)  # 100ms timeout
                 
-                # Handle input based on current mode
-                await self._handle_input(key)
+                # Handle input if we got a key
+                if key:
+                    await self._handle_input(key)
+                    self._needs_render = True  # Input might change UI
                 
                 # Check for pagination after input handling (safe from recursion)
                 if self._last_scroll_direction == "down":
                     await self._check_pagination_on_scroll(self._last_scroll_direction)
                 self._last_scroll_direction = None  # Reset after check
+                
+                # Yield control to allow background tasks (like realtime polling) to run
+                await asyncio.sleep(0)
                 
             except KeyboardInterrupt:
                 break
@@ -1089,6 +1102,59 @@ class IPCTUIInspector:
             print(controls)
         
         self.terminal.reset_colors()
+    
+    def _has_ui_changed(self) -> bool:
+        """Check if UI state has changed since last render."""
+        return (
+            self.status_message != self._last_status_message or
+            self.mode != self._last_mode
+        )
+    
+    def _update_last_state(self):
+        """Update tracked state after rendering."""
+        self._last_status_message = self.status_message
+        self._last_mode = self.mode
+    
+    def _mark_for_render(self):
+        """Mark the UI as needing a refresh."""
+        self._needs_render = True
+    
+    @property
+    def status_message(self) -> str:
+        """Get the current status message."""
+        return self._status_message
+    
+    @status_message.setter
+    def status_message(self, value: str):
+        """Set the status message and mark for render if changed."""
+        if value != self._status_message:
+            self._status_message = value
+            self._mark_for_render()
+    
+    @property
+    def mode(self) -> NavigationMode:
+        """Get the current navigation mode."""
+        return self._mode
+    
+    @mode.setter
+    def mode(self, value: NavigationMode):
+        """Set the navigation mode and mark for render if changed."""
+        if value != self._mode:
+            self._mode = value
+            self._mark_for_render()
+    
+    async def _get_key_with_timeout(self, timeout: float) -> Optional[str]:
+        """Get a key with timeout to allow background tasks to run."""
+        import select
+        
+        # Check if input is available without blocking
+        if select.select([sys.stdin], [], [], 0)[0]:
+            # Input is available, read it
+            return self.terminal.get_key()
+        
+        # No input available, yield control for a short time
+        await asyncio.sleep(timeout)
+        return None
     
     async def _handle_input(self, key: str):
         """Handle keyboard input based on current mode."""
@@ -2589,11 +2655,11 @@ class IPCTUIInspector:
             self.status_message = "Realtime streaming disabled"
         else:
             # Enable realtime
-            self._start_realtime_polling()
-            self.status_message = "Realtime streaming enabled"
+            await self._start_realtime_polling()
     
-    def _start_realtime_polling(self):
+    async def _start_realtime_polling(self):
         """Start background polling for new data."""
+        logger.debug(f"Realtime: Starting realtime polling for view_type={self._current_view_type}")
         self._realtime_enabled = True
         
         # Initialize newest data tracking from current data
@@ -2601,9 +2667,43 @@ class IPCTUIInspector:
         
         # Start background polling task
         if self._realtime_task:
+            logger.debug(f"Realtime: Cancelling existing task: {self._realtime_task}")
             self._realtime_task.cancel()
         
-        self._realtime_task = asyncio.create_task(self._realtime_poll_loop())
+        try:
+            self._realtime_task = asyncio.create_task(self._realtime_poll_loop())
+            logger.debug(f"Realtime: Background polling task created: {self._realtime_task}")
+            
+            # Add a callback to see what happens to the task
+            def task_done_callback(task):
+                if task.cancelled():
+                    logger.debug(f"Realtime: Task was cancelled")
+                elif task.exception():
+                    logger.error(f"Realtime: Task failed with exception: {task.exception()}")
+                else:
+                    logger.debug(f"Realtime: Task completed normally")
+            
+            self._realtime_task.add_done_callback(task_done_callback)
+            
+            # Yield control to allow the task to start
+            await asyncio.sleep(0)
+            
+            # Check task status immediately  
+            if self._realtime_task.done():
+                if self._realtime_task.cancelled():
+                    self.status_message = "Realtime task was cancelled immediately"
+                elif self._realtime_task.exception():
+                    exc = self._realtime_task.exception()
+                    self.status_message = f"Realtime task failed: {exc}"
+                    logger.error(f"Realtime task failed immediately: {exc}", exc_info=True)
+                else:
+                    self.status_message = "Realtime task completed immediately"
+            else:
+                self.status_message = f"Realtime polling active (every {self._realtime_poll_interval}s) - waiting for first poll..."
+            
+        except Exception as e:
+            logger.error(f"Realtime: Failed to create background task: {e}", exc_info=True)
+            self.status_message = f"Failed to start realtime polling: {e}"
     
     def _stop_realtime_polling(self):
         """Stop background polling for new data."""
@@ -2615,17 +2715,22 @@ class IPCTUIInspector:
     
     async def _realtime_poll_loop(self):
         """Background task that polls for new data at regular intervals."""
+        logger.debug(f"Realtime: Poll loop starting, enabled={self._realtime_enabled}, interval={self._realtime_poll_interval}")
         try:
+            poll_count = 0
             while self._realtime_enabled:
                 await asyncio.sleep(self._realtime_poll_interval)
                 
                 if not self._realtime_enabled:
                     break
                     
+                poll_count += 1
+                logger.debug(f"Realtime: Starting poll #{poll_count}")
                 await self._poll_for_new_data()
                 
         except asyncio.CancelledError:
             # Task was cancelled, clean up
+            logger.debug("Realtime: Poll loop cancelled")
             pass
         except Exception as e:
             logger.error(f"Realtime polling error: {e}", exc_info=True)
@@ -2635,6 +2740,7 @@ class IPCTUIInspector:
     def _initialize_realtime_cursors(self):
         """Initialize cursor tracking from currently loaded data."""
         if not self.current_tree_node or not self._current_view_type:
+            logger.debug(f"Realtime: Cannot initialize cursors - tree_node={self.current_tree_node is not None}, view_type={self._current_view_type}")
             return
         
         if self._current_view_type == 'timeline_events' and hasattr(self.current_tree_node, 'children'):
@@ -2650,6 +2756,7 @@ class IPCTUIInspector:
                         newest_event_id = child.data.get('id')
             
             self._realtime_newest_event_id = newest_event_id
+            logger.debug(f"Realtime: Initialized timeline cursor - newest_event_id={newest_event_id}, newest_timestamp={newest_timestamp}, children_count={len(self.current_tree_node.children) if hasattr(self.current_tree_node, 'children') else 0}")
             
         elif self._current_view_type == 'veil_facets' and hasattr(self.current_tree_node, 'children'):
             # Find newest facet by veil_timestamp
@@ -2670,6 +2777,9 @@ class IPCTUIInspector:
         if not self._current_view_type:
             return
         
+        # Set status message to show polling is active
+        self.status_message = f"Polling for new {self._current_view_type.replace('_', ' ')}..."
+        
         try:
             if self._current_view_type == 'timeline_events':
                 await self._poll_for_new_events()
@@ -2677,10 +2787,12 @@ class IPCTUIInspector:
                 await self._poll_for_new_facets()
         except Exception as e:
             logger.error(f"Error polling for new data: {e}", exc_info=True)
+            self.status_message = f"Polling error: {str(e)}"
     
     async def _poll_for_new_events(self):
         """Poll for new timeline events using reverse limit logic."""
         if not hasattr(self, '_current_endpoint_args'):
+            logger.debug("Realtime: No current endpoint args, skipping poll")
             return
             
         # Build polling request with reverse limit to get newer events
@@ -2698,20 +2810,25 @@ class IPCTUIInspector:
             # Use positive limit to get events newer than our newest timestamp
             endpoint_args['offset'] = newest_timestamp
             endpoint_args['limit'] = 20
+            logger.debug(f"Realtime: Polling for events newer than {newest_timestamp} with args: {endpoint_args}")
         else:
             # No reference point, get latest events
             endpoint_args['limit'] = -20
+            logger.debug(f"Realtime: No newest event ID, polling with args: {endpoint_args}")
         
-        # Make the request
-        response = await self.executor.execute_command('timeline-details', endpoint_args)
-        
-        if response.get('status') != 'success':
+        # Make the request using the same method as refresh (which works)
+        try:
+            data = await self._fetch_drill_down_data('timeline_details', endpoint_args)
+            logger.debug(f"Realtime: Got response data with keys: {list(data.keys()) if isinstance(data, dict) else type(data)}")
+        except Exception as e:
+            logger.debug(f"Realtime: Error fetching data: {e}")
             return
             
-        data = response.get('data', {})
         new_events = data.get('events', [])
         
+        logger.debug(f"Realtime: Got {len(new_events)} new events from API")
         if not new_events:
+            self.status_message = "No new timeline events found"
             return
             
         # Filter out events we already have and events that aren't actually newer
@@ -2735,11 +2852,14 @@ class IPCTUIInspector:
                 event_timestamp > newest_existing_timestamp):
                 actually_new_events.append(event)
         
+        logger.debug(f"Realtime: After filtering, {len(actually_new_events)} actually new events")
         if not actually_new_events:
+            self.status_message = "No actually new timeline events after filtering"
             return
             
         # Sort by timestamp (newest first) and prepend to tree
         actually_new_events.sort(key=lambda e: e.get('timestamp', 0), reverse=True)
+        logger.debug(f"Realtime: Prepending {len(actually_new_events)} new events to tree")
         await self._prepend_new_events(actually_new_events)
     
     async def _poll_for_new_facets(self):
@@ -2758,16 +2878,17 @@ class IPCTUIInspector:
             # No reference point, get latest facets
             endpoint_args['limit'] = 20
         
-        # Make the request  
-        response = await self.executor.execute_command('veil-facets', endpoint_args)
-        
-        if response.get('status') != 'success':
+        # Make the request using the same method as refresh (which works)
+        try:
+            data = await self._fetch_drill_down_data('veil_facets', endpoint_args)
+        except Exception as e:
+            logger.debug(f"Realtime facets: Error fetching data: {e}")
             return
             
-        data = response.get('data', {})
         facets_dict = data.get('facets', {})
         
         if not facets_dict:
+            self.status_message = "No new VEIL facets found"
             return
         
         new_facets = list(facets_dict.values())
@@ -2794,6 +2915,7 @@ class IPCTUIInspector:
                 actually_new_facets.append(facet)
         
         if not actually_new_facets:
+            self.status_message = "No actually new VEIL facets after filtering"
             return
             
         # Sort by veil_timestamp (newest first) and prepend to tree
@@ -2803,6 +2925,7 @@ class IPCTUIInspector:
     async def _prepend_new_events(self, new_events: List[Dict[str, Any]]):
         """Prepend new events to the current tree view."""
         if not new_events or not self.current_tree_node:
+            logger.debug(f"Realtime: _prepend_new_events called with {len(new_events) if new_events else 0} events, tree_node={self.current_tree_node is not None}")
             return
             
         # Create new TreeNode objects for the events
@@ -2840,16 +2963,20 @@ class IPCTUIInspector:
             new_nodes.append(event_node)
         
         # Prepend new nodes to the beginning of children list
+        logger.debug(f"Realtime: Adding {len(new_nodes)} new nodes to tree with {len(self.current_tree_node.children)} existing children")
         self.current_tree_node.children = new_nodes + self.current_tree_node.children
         
         # Update realtime cursor to newest event
         if new_events:
             self._realtime_newest_event_id = new_events[0].get('id')
+            logger.debug(f"Realtime: Updated newest event ID to {self._realtime_newest_event_id}")
         
-        # Trigger UI refresh
-        await self._render_current_view()
+        # Mark for UI refresh (will render on next loop iteration)
+        logger.debug("Realtime: Marking for UI refresh")
+        self._mark_for_render()
         
         self.status_message = f"Added {len(new_events)} new events"
+        logger.debug(f"Realtime: Status message set: {self.status_message}")
     
     async def _prepend_new_facets(self, new_facets: List[Dict[str, Any]]):
         """Prepend new facets to the current tree view."""
@@ -2887,8 +3014,8 @@ class IPCTUIInspector:
         if new_facets:
             self._realtime_newest_facet_id = new_facets[0].get('facet_id')
         
-        # Trigger UI refresh
-        await self._render_current_view()
+        # Mark for UI refresh (will render on next loop iteration)
+        self._mark_for_render()
         
         self.status_message = f"Added {len(new_facets)} new facets"
     
