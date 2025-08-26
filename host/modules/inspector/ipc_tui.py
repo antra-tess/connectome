@@ -1313,8 +1313,8 @@ class IPCTUIInspector:
                     child = self._build_node_from_value(value, key, facet_node, child_path, 1)
                     facet_node.children.append(child)
                     
-                # Auto-expand the facet to show its properties  
-                facet_node.is_expanded = True
+                # Start collapsed by default to avoid overwhelming display
+                facet_node.is_expanded = False
             
             root.children.append(facet_node)
         
@@ -1357,8 +1357,8 @@ class IPCTUIInspector:
                     child = self._build_node_from_value(value, key, event_node, child_path, 1)
                     event_node.children.append(child)
                     
-                # Auto-expand the event to show its properties  
-                event_node.is_expanded = True
+                # Start collapsed by default to avoid overwhelming display
+                event_node.is_expanded = False
             
             root.children.append(event_node)
         
@@ -2362,7 +2362,7 @@ class IPCTUIInspector:
                     child_path = f"{unique_facet_id}.{key}"
                     child = self._build_node_from_value(value, key, facet_node, child_path, 1)
                     facet_node.children.append(child)
-                facet_node.is_expanded = True
+                facet_node.is_expanded = False
             
             self.tree_root.children.append(facet_node)
     
@@ -2428,7 +2428,7 @@ class IPCTUIInspector:
                     child_path = f"{unique_event_id}.{key}"
                     child = self._build_node_from_value(value, key, event_node, child_path, 1)
                     event_node.children.append(child)
-                event_node.is_expanded = True
+                event_node.is_expanded = False
             
             self.tree_root.children.append(event_node)
     
