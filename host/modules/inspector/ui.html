@@ -2746,8 +2746,8 @@
         // Render inspect.getmembers output with inspection buttons for member values
         function renderInspectGetMembersTree(container, membersData, originalCode) {
             // Extract the object name from inspect.getmembers(object_name) call
-            const objectMatch = originalCode.match(/inspect\.getmembers\(([^)]+)\)/);
-            const objectName = objectMatch ? objectMatch[1].trim() : 'obj';
+            // Handle nested parentheses properly
+            const objectName = extractObjectNameFromInspectCall(originalCode);
             
             // Create a custom tree for inspect.getmembers output
             const membersTree = document.createElement('div');
@@ -2804,7 +2804,10 @@
                             `;
                             
                             // Create the proper inspection path
-                            const inspectionPath = `${objectName}.${memberName}`;
+                            // For complex expressions, wrap in parentheses before adding the member
+                            const inspectionPath = needsParentheses(objectName) ? 
+                                `(${objectName}).${memberName}` : 
+                                `${objectName}.${memberName}`;
                             inspectBtn.addEventListener('click', () => {
                                 executeInspection(inspectionPath);
                             });
@@ -2818,6 +2821,37 @@
             }
             
             container.appendChild(membersTree);
+        }
+        
+        // Extract object name from inspect.getmembers() call, handling nested parentheses
+        function extractObjectNameFromInspectCall(code) {
+            const pattern = /inspect\.getmembers\(/;
+            const match = code.match(pattern);
+            if (!match) return 'obj';
+            
+            const start = match.index + match[0].length;
+            let parenCount = 1;
+            let end = start;
+            
+            // Find the matching closing parenthesis
+            for (let i = start; i < code.length && parenCount > 0; i++) {
+                if (code[i] === '(') parenCount++;
+                else if (code[i] === ')') parenCount--;
+                end = i;
+            }
+            
+            return code.substring(start, end).trim() || 'obj';
+        }
+        
+        // Check if an object name needs parentheses when accessing attributes
+        function needsParentheses(objectName) {
+            // If the name contains function calls (parentheses), method calls, or complex expressions,
+            // we need to wrap it in parentheses before accessing attributes
+            return (
+                objectName.includes('(') ||  // Function calls like get_space('name')
+                objectName.includes('[') ||  // Array/dict access like arr[0] or dict['key']
+                objectName.includes(' ')     // Expressions with spaces
+            );
         }
         
         // Execute inspection on an object by running inspect.getmembers() as console input
