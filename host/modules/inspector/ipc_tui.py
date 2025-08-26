@@ -2577,9 +2577,13 @@ class IPCTUIInspector:
         """Enter REPL mode with global context."""
         self.repl_context_type = "global" 
         self.repl_context_id = "global"
+        
         await self._ensure_repl_session()
         self.mode = NavigationMode.REPL_MODE
-        self.status_message = "Entered Python REPL (global context)"
+        
+        # Only set status if no error occurred (don't overwrite error messages)
+        if self.current_repl_session:
+            self.status_message = "Entered Python REPL (global context)"
     
     async def _enter_context_repl(self):
         """Enter REPL mode with context based on current tree node."""
@@ -2610,6 +2614,11 @@ class IPCTUIInspector:
         session_key = f"{self.repl_context_type}:{self.repl_context_id}"
         
         if session_key not in self.repl_sessions:
+            # Check if executor exists
+            if not hasattr(self, 'executor') or self.executor is None:
+                self.status_message = "ERROR: No IPC executor available"
+                return
+                
             try:
                 # Create new REPL session via IPC
                 response = await self.executor.execute_command("repl-create", {
@@ -2617,12 +2626,15 @@ class IPCTUIInspector:
                     "context_id": self.repl_context_id
                 })
                 
+                
                 if response.get("error"):
-                    self.status_message = f"Failed to create REPL session: {response['error']}"
+                    self.status_message = f"REPL create failed: {response['error']}"
                     return
                 
-                session_info = response.get("result", {})
-                session_id = session_info.get("session_id")
+                # Handle the response format from IPC wrapper (result.session.id)
+                result_data = response.get("result", {})
+                session_info = result_data.get("session", {})
+                session_id = session_info.get("id")
                 
                 if not session_id:
                     self.status_message = "Invalid REPL session response"
@@ -2644,7 +2656,9 @@ class IPCTUIInspector:
                 }]
                 
             except Exception as e:
-                self.status_message = f"Error creating REPL session: {str(e)}"
+                import traceback
+                error_details = f"Error creating REPL session: {str(e)} | {traceback.format_exc()[:200]}"
+                self.status_message = error_details
                 return
         
         # Set current session
@@ -2787,6 +2801,7 @@ class IPCTUIInspector:
     
     async def _handle_repl_input(self, key: str):
         """Handle input in REPL mode."""
+        
         # Function key controls (non-printable, safe for REPL)
         if key == 'ESC[11~':  # F1 - Help
             self.status_message = "F2: Back • F3: Clear • F4: Quit • Tab: Complete • Enter: Execute/Drill"
@@ -2823,6 +2838,7 @@ class IPCTUIInspector:
             self.status_message = "Input cleared"
             return
         elif key == '\r' or key == '\n':  # Enter - execute code or drill down
+            
             if self.repl_input_buffer and any(line.strip() for line in self.repl_input_buffer):
                 # If there's input to execute
                 await self._execute_repl_code()
@@ -2877,6 +2893,7 @@ class IPCTUIInspector:
     
     async def _execute_repl_code(self):
         """Execute the current REPL input."""
+        
         if not self.current_repl_session:
             self.status_message = "No active REPL session"
             return
