@@ -794,6 +794,7 @@
                 <div class="toolbar-info">
                     <div id="breadcrumb" style="margin-bottom: 0.25rem; font-size: 0.8rem; color: #74b9ff;"></div>
                     <span id="data-info"></span>
+                    <span id="stream-progress" style="display: none; margin-left: 1rem; color: #00d4aa; font-weight: 600;"></span>
                 </div>
                 <div class="toolbar-actions">
                     <button id="backBtn" onclick="goBack()" style="display: none;">← Back</button>
@@ -928,7 +929,9 @@
                 allFacets: [],
                 allEvents: [],
                 nextOffset: null,
-                afterFacetId: null
+                afterFacetId: null,
+                totalFacets: null,
+                totalEvents: null
             };
             
             // Handle special "browsing" endpoints that need space selection
@@ -988,6 +991,7 @@
                 currentData = null;
                 currentEndpoint = null;
                 toolbar.style.display = 'none';
+                hideStreamProgress();
             } finally {
                 statusEl.style.display = 'none';
             }
@@ -1282,12 +1286,38 @@
             if (data.facets && typeof data.facets === 'object') {
                 // VEIL facets stream view
                 renderFacetsStream(treeContainer, data.facets, append);
+                
+                // Update progress counter for facets (runs for both initial load and pagination)
+                const totalFacets = paginationState.totalFacets || data.summary?.total_matching || data.summary?.total_facets;
+                let loadedFacets;
+                if (append && paginationState.allFacets) {
+                    // For appended data, show cumulative count
+                    loadedFacets = paginationState.allFacets.length;
+                } else {
+                    // For initial load, use current batch count
+                    loadedFacets = data.facets ? Object.keys(data.facets).length : (data.summary?.returned || 0);
+                }
+                updateStreamProgress(loadedFacets, totalFacets, 'facets');
             } else if (data.events && typeof data.events === 'object') {
                 // Timeline events stream view  
                 renderEventsStream(treeContainer, data.events, append);
+                
+                // Update progress counter for events (runs for both initial load and pagination)
+                const totalEvents = paginationState.totalEvents || data.timeline_info?.total_events || currentData?.timeline_info?.total_events;
+                let loadedEvents;
+                if (append && paginationState.allEvents) {
+                    // For appended data, show cumulative count
+                    loadedEvents = paginationState.allEvents.length;
+                } else {
+                    // For initial load, use current batch count
+                    loadedEvents = Array.isArray(data.events) ? data.events.length : (data.events_returned || 0);
+                }
+                updateStreamProgress(loadedEvents, totalEvents, 'events');
             } else if (!append) {
                 // Regular tree view (only if not appending)
                 treeContainer.appendChild(createTreeNode('root', data, 0, true));
+                // Hide progress counter for non-stream views
+                hideStreamProgress();
             }
         }
         
@@ -1554,6 +1584,9 @@
                 paginationState.currentBrowserType = 'veil_facets';
                 paginationState.hasMore = data.summary?.next_cursor !== null && data.summary?.next_cursor !== undefined;
                 paginationState.afterFacetId = data.summary?.next_cursor || null;
+                // Initialize with current facets and store total count
+                paginationState.allFacets = Object.values(data.facets);
+                paginationState.totalFacets = data.summary?.total_matching || data.summary?.total_facets;
             } else if (data.events) {
                 paginationState.currentBrowserType = 'timeline_events';
                 paginationState.hasMore = data.pagination?.has_more || false;
@@ -1562,6 +1595,9 @@
                 paginationState.nextOffset = isNegativeLimit ? 
                     data.pagination?.prev_offset : 
                     data.pagination?.next_offset || null;
+                // Initialize with current events and store total count
+                paginationState.allEvents = Array.isArray(data.events) ? [...data.events] : [];
+                paginationState.totalEvents = data.timeline_info?.total_events;
             }
             
             // Remove any existing scroll listener
@@ -2553,6 +2589,21 @@
         function updateBreadcrumb(path) {
             const breadcrumbEl = document.getElementById('breadcrumb');
             breadcrumbEl.textContent = path;
+        }
+        
+        function updateStreamProgress(loaded, total, streamType) {
+            const progressEl = document.getElementById('stream-progress');
+            if (total && loaded !== undefined) {
+                const percentage = Math.round((loaded / total) * 100);
+                progressEl.textContent = `${streamType}: ${loaded.toLocaleString()} / ${total.toLocaleString()} (${percentage}%)`;
+                progressEl.style.display = 'inline';
+            } else {
+                progressEl.style.display = 'none';
+            }
+        }
+        
+        function hideStreamProgress() {
+            document.getElementById('stream-progress').style.display = 'none';
         }
         
         function pushNavigation(state) {
