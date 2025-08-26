@@ -721,6 +721,12 @@
         }; // For pagination
         
         async function loadEndpoint(endpoint) {
+            // Close console if it's currently active
+            const console = document.getElementById('console');
+            if (console.classList.contains('active')) {
+                console.classList.remove('active');
+            }
+            
             // Update active link
             document.querySelectorAll('.endpoint-list a').forEach(a => a.classList.remove('active'));
             event.target.classList.add('active');
@@ -728,6 +734,10 @@
             const statusEl = document.getElementById('status');
             const contentEl = document.getElementById('content');
             const toolbar = document.getElementById('toolbar');
+            
+            // Ensure content and toolbar are visible
+            contentEl.style.display = 'block';
+            toolbar.style.display = 'flex';
             
             // Handle special "browsing" endpoints that need space selection
             if (['spaces_detailed', 'timeline_events', 'veil_facets'].includes(endpoint)) {
@@ -2440,6 +2450,7 @@
         function closeConsole() {
             document.getElementById('console').classList.remove('active');
             document.getElementById('content').style.display = 'block';
+            document.getElementById('toolbar').style.display = 'flex';
             document.querySelectorAll('.endpoint-list a').forEach(a => a.classList.remove('active'));
         }
         
