@@ -968,6 +968,7 @@
                 const toggleBtn = document.getElementById('viewToggle');
                 if (toggleBtn) {
                     toggleBtn.textContent = 'JSONCrack View';
+                    toggleBtn.style.display = 'inline-block'; // Reset visibility, will be adjusted by showTreeView
                 }
                 
                 // Clear content and create tree container
@@ -1234,15 +1235,24 @@
                 let viewIcon = '🌳';
                 let viewTitle = 'Interactive Tree View';
                 let viewHint = 'Click to expand/collapse';
+                let isStreamView = false;
                 
                 if (data.facets && typeof data.facets === 'object') {
                     viewIcon = '🎭';
                     viewTitle = 'VEIL Facets Stream';
                     viewHint = 'Scroll down to load more facets';
+                    isStreamView = true;
                 } else if (data.events && typeof data.events === 'object') {
                     viewIcon = '⏱️';
                     viewTitle = 'Timeline Events Stream';
                     viewHint = 'Scroll down to load more events';
+                    isStreamView = true;
+                }
+                
+                // Hide/show JSONCrack toggle button based on view type
+                const toggleBtn = document.getElementById('viewToggle');
+                if (toggleBtn) {
+                    toggleBtn.style.display = isStreamView ? 'none' : 'inline-block';
                 }
                 
                 container.innerHTML = `
