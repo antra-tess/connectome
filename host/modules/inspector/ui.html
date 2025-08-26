@@ -580,6 +580,155 @@
             background: #74b9ff;
             color: #1a1a2e;
         }
+
+        /* Veil Facet Styles */
+        .veil-facet {
+            margin-bottom: 0.5rem;
+            padding: 0.75rem;
+            background: #16213e;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .veil-facet:hover {
+            background: #1a2540;
+        }
+
+        .veil-facet--expanded {
+            background: #1a2f4a;
+        }
+
+        .veil-facet--event {
+            border-left: 4px solid #a29bfe;
+        }
+
+        .veil-facet--status {
+            border-left: 4px solid #00d4aa;
+        }
+
+        .veil-facet--ambient {
+            border-left: 4px solid #fd79a8;
+        }
+
+        .veil-facet__header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.25rem;
+        }
+
+        .veil-facet__type-id {
+            color: #74b9ff;
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+
+        .veil-facet__timestamp {
+            color: #999;
+            font-size: 0.8rem;
+        }
+
+        .veil-facet__summary {
+            color: #eee;
+            font-size: 0.85rem;
+            line-height: 1.4;
+        }
+
+        .veil-facet__expanded-content {
+            margin-top: 0.5rem;
+            padding-top: 0.5rem;
+            border-top: 1px solid #555;
+        }
+
+        /* Timeline Event Styles */
+        .timeline-event {
+            margin-bottom: 0.5rem;
+            padding: 0.75rem;
+            background: #16213e;
+            border-left: 4px solid #6c5ce7;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .timeline-event:hover {
+            background: #1a2540;
+        }
+
+        .timeline-event--expanded {
+            background: #1a2f4a;
+        }
+
+        .timeline-event__header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.25rem;
+        }
+
+        .timeline-event__type {
+            color: #a29bfe;
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+
+        .timeline-event__timestamp {
+            color: #999;
+            font-size: 0.8rem;
+        }
+
+        .timeline-event__summary {
+            color: #eee;
+            font-size: 0.85rem;
+            line-height: 1.4;
+        }
+
+        .timeline-event__expanded-content {
+            margin-top: 0.5rem;
+            padding-top: 0.5rem;
+            border-top: 1px solid #555;
+        }
+
+        .stream-container {
+            padding: 1rem;
+            background: #0f3460;
+            border-radius: 4px;
+            height: 100%;
+            overflow: auto;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .stream-container__header {
+            margin-bottom: 1rem;
+            color: #00d4aa;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid #555;
+        }
+
+        .stream-container__title {
+            font-weight: bold;
+        }
+
+        .stream-container__hint {
+            color: #999;
+            font-size: 0.9rem;
+        }
+
+        .stream-container__content {
+            flex: 1;
+        }
+
+        .loading-indicator {
+            display: none;
+            padding: 1rem;
+            text-align: center;
+            color: #00d4aa;
+        }
     </style>
 </head>
 <body>
@@ -1072,14 +1221,14 @@
                 }
                 
                 container.innerHTML = `
-                    <div id="scroll-container" style="padding: 1rem; background: #0f3460; border-radius: 4px; height: 100%; overflow: auto; display: flex; flex-direction: column;">
-                        <div style="margin-bottom: 1rem; color: #00d4aa; display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.5rem; border-bottom: 1px solid #555;">
-                            <strong>${viewIcon} ${viewTitle}</strong>
-                            <small style="color: #999;">${viewHint}</small>
+                    <div id="scroll-container" class="stream-container">
+                        <div class="stream-container__header">
+                            <div class="stream-container__title">${viewIcon} ${viewTitle}</div>
+                            <div class="stream-container__hint">${viewHint}</div>
                         </div>
-                        <div id="tree-container" style="flex: 1;">
+                        <div id="tree-container" class="stream-container__content">
                         </div>
-                        <div id="loading-indicator" style="display: none; padding: 1rem; text-align: center; color: #00d4aa;">
+                        <div id="loading-indicator" class="loading-indicator">
                             Loading more...
                         </div>
                     </div>
@@ -1516,15 +1665,11 @@
             
             facetArray.forEach(facet => {
                 const facetDiv = document.createElement('div');
-                facetDiv.style.cssText = `
-                    margin-bottom: 0.5rem;
-                    padding: 0.75rem;
-                    background: #16213e;
-                    border-left: 4px solid ${getFacetTypeColor(facet.facet_type)};
-                    border-radius: 4px;
-                    cursor: pointer;
-                    transition: background-color 0.2s;
-                `;
+                facetDiv.className = `veil-facet veil-facet--${facet.facet_type.toLowerCase()}`;
+                facetDiv.setAttribute('data-facet-id', facet.facet_id);
+                facetDiv.setAttribute('data-facet-type', facet.facet_type);
+                facetDiv.setAttribute('data-owner-element-id', facet.owner_element_id);
+                facetDiv.setAttribute('data-timestamp', facet.veil_timestamp);
                 
                 // Format timestamp
                 const timeStr = formatTimestamp(facet.veil_timestamp);
@@ -1534,31 +1679,26 @@
                 const truncatedSummary = summary.length > 100 ? summary.substring(0, 100) + '...' : summary;
                 
                 facetDiv.innerHTML = `
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">
-                        <div style="color: #74b9ff; font-weight: 600; font-size: 0.9rem;">
+                    <div class="veil-facet__header">
+                        <div class="veil-facet__type-id">
                             ${facet.facet_type.toUpperCase()} • ${facet.facet_id.substring(0, 8)}...
                         </div>
-                        <div style="color: #999; font-size: 0.8rem;">${timeStr}</div>
+                        <div class="veil-facet__timestamp">${timeStr}</div>
                     </div>
-                    <div style="color: #eee; font-size: 0.85rem; line-height: 1.4;">
+                    <div class="veil-facet__summary">
                         ${truncatedSummary}
                     </div>
                 `;
                 
                 // Add click handler to expand
                 facetDiv.addEventListener('click', () => {
-                    const expanded = facetDiv.querySelector('.expanded-content');
+                    const expanded = facetDiv.querySelector('.veil-facet__expanded-content');
                     if (expanded) {
                         expanded.remove();
-                        facetDiv.style.background = '#16213e';
+                        facetDiv.classList.remove('veil-facet--expanded');
                     } else {
                         const expandedDiv = document.createElement('div');
-                        expandedDiv.className = 'expanded-content';
-                        expandedDiv.style.cssText = `
-                            margin-top: 0.5rem;
-                            padding-top: 0.5rem;
-                            border-top: 1px solid #555;
-                        `;
+                        expandedDiv.className = 'veil-facet__expanded-content';
                         
                         // Stop click propagation to prevent collapsing when interacting with tree
                         expandedDiv.addEventListener('click', (e) => {
@@ -1567,19 +1707,7 @@
                         
                         expandedDiv.appendChild(createTreeNode(facet.facet_id, facet, 0, true, ['facets', facet.facet_id]));
                         facetDiv.appendChild(expandedDiv);
-                        facetDiv.style.background = '#1a2f4a';
-                    }
-                });
-                
-                // Hover effect
-                facetDiv.addEventListener('mouseenter', () => {
-                    if (!facetDiv.querySelector('.expanded-content')) {
-                        facetDiv.style.background = '#1a2f4a';
-                    }
-                });
-                facetDiv.addEventListener('mouseleave', () => {
-                    if (!facetDiv.querySelector('.expanded-content')) {
-                        facetDiv.style.background = '#16213e';
+                        facetDiv.classList.add('veil-facet--expanded');
                     }
                 });
                 
@@ -1612,15 +1740,13 @@
             
             eventArray.forEach(event => {
                 const eventDiv = document.createElement('div');
-                eventDiv.style.cssText = `
-                    margin-bottom: 0.5rem;
-                    padding: 0.75rem;
-                    background: #16213e;
-                    border-left: 4px solid #a29bfe;
-                    border-radius: 4px;
-                    cursor: pointer;
-                    transition: background-color 0.2s;
-                `;
+                eventDiv.className = 'timeline-event';
+                eventDiv.setAttribute('data-event-id', event.id);
+                eventDiv.setAttribute('data-timeline-id', event.timeline_id);
+                eventDiv.setAttribute('data-timestamp', event.timestamp);
+                if (event.payload && event.payload.event_type) {
+                    eventDiv.setAttribute('data-event-type', event.payload.event_type);
+                }
                 
                 // Format timestamp 
                 const timeStr = formatTimestamp(event.timestamp);
@@ -1641,31 +1767,26 @@
                 }
                 
                 eventDiv.innerHTML = `
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">
-                        <div style="color: #74b9ff; font-weight: 600; font-size: 0.9rem;">
+                    <div class="timeline-event__header">
+                        <div class="timeline-event__type">
                             ${eventType.toUpperCase()} • ${event.id.substring(0, 8)}...
                         </div>
-                        <div style="color: #999; font-size: 0.8rem;">${timeStr}</div>
+                        <div class="timeline-event__timestamp">${timeStr}</div>
                     </div>
-                    <div style="color: #eee; font-size: 0.85rem; line-height: 1.4;">
+                    <div class="timeline-event__summary">
                         ${summary}
                     </div>
                 `;
                 
                 // Add click handler to expand
                 eventDiv.addEventListener('click', () => {
-                    const expanded = eventDiv.querySelector('.expanded-content');
+                    const expanded = eventDiv.querySelector('.timeline-event__expanded-content');
                     if (expanded) {
                         expanded.remove();
-                        eventDiv.style.background = '#16213e';
+                        eventDiv.classList.remove('timeline-event--expanded');
                     } else {
                         const expandedDiv = document.createElement('div');
-                        expandedDiv.className = 'expanded-content';
-                        expandedDiv.style.cssText = `
-                            margin-top: 0.5rem;
-                            padding-top: 0.5rem;
-                            border-top: 1px solid #555;
-                        `;
+                        expandedDiv.className = 'timeline-event__expanded-content';
                         
                         // Stop click propagation to prevent collapsing when interacting with tree
                         expandedDiv.addEventListener('click', (e) => {
@@ -1674,19 +1795,7 @@
                         
                         expandedDiv.appendChild(createTreeNode(event.id, event, 0, true, ['events', event.id]));
                         eventDiv.appendChild(expandedDiv);
-                        eventDiv.style.background = '#1a2f4a';
-                    }
-                });
-                
-                // Hover effect
-                eventDiv.addEventListener('mouseenter', () => {
-                    if (!eventDiv.querySelector('.expanded-content')) {
-                        eventDiv.style.background = '#1a2f4a';
-                    }
-                });
-                eventDiv.addEventListener('mouseleave', () => {
-                    if (!eventDiv.querySelector('.expanded-content')) {
-                        eventDiv.style.background = '#16213e';
+                        eventDiv.classList.add('timeline-event--expanded');
                     }
                 });
                 
