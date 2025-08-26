@@ -3212,7 +3212,7 @@ class IPCTUIInspector:
             self.scroll_offset = 0
             self._reset_pagination_state()
             
-            self.status_message = f"Exploring {tree_name} • B: Back • Enter: Inspect 🔍 items"
+            self.status_message = f"Exploring {tree_name} • B: Back • Enter: Inspect 🔍 objects or view 📄 text"
             
         except Exception as e:
             self.status_message = f"Error building drill-down view: {str(e)}"
@@ -3263,11 +3263,16 @@ class IPCTUIInspector:
                     if len(value_str) > 80:
                         value_str = value_str[:77] + "..."
                     
+                    # Check if this is a large text field that should be viewable
+                    is_large_text = isinstance(member_value, str) and len(member_value) > 100
+                    
                     # Create display label with inspection indicator
                     is_inspectable = self._is_value_inspectable(member_value)
                     label = f"{member_name}: {value_str}"
                     if is_inspectable:
                         label += " 🔍"
+                    elif is_large_text:
+                        label += " 📄"  # Text viewing indicator
                     
                     # Create member node
                     member_node = TreeNode(
@@ -3277,7 +3282,8 @@ class IPCTUIInspector:
                             "name": member_name,
                             "value": member_value,
                             "object_name": object_name,
-                            "is_inspectable": is_inspectable
+                            "is_inspectable": is_inspectable,
+                            "is_large_text": is_large_text
                         }
                     )
                     
@@ -3318,10 +3324,77 @@ class IPCTUIInspector:
             return
             
         node_data = current_node.data
-        if not isinstance(node_data, dict) or not node_data.get("is_inspectable"):
-            self.status_message = "Selected item is not inspectable"
+        if not isinstance(node_data, dict):
+            self.status_message = "No action available for selected item"
             return
             
+        is_inspectable = node_data.get("is_inspectable", False)
+        is_large_text = node_data.get("is_large_text", False)
+        
+        if is_large_text:
+            # Handle large text viewing with readonly editor
+            await self._view_large_text(node_data)
+            return
+        elif is_inspectable:
+            # Handle object inspection
+            await self._inspect_member(node_data)
+            return
+        else:
+            self.status_message = "Selected item has no drill-down action"
+            return
+    
+    async def _view_large_text(self, node_data: dict):
+        """View large text content in readonly editor."""
+        import tempfile
+        import subprocess
+        import os
+        
+        member_name = node_data.get("name", "unknown")
+        member_value = node_data.get("value", "")
+        
+        try:
+            # Create temporary file with the full text content
+            with tempfile.NamedTemporaryFile(mode='w+', suffix='.txt', delete=False) as tmp_file:
+                tmp_file.write(f"# {member_name}\n")
+                tmp_file.write(f"# Length: {len(member_value)} characters\n\n")
+                tmp_file.write(str(member_value))
+                tmp_file_path = tmp_file.name
+            
+            # Get editor from environment, default to nano
+            editor = os.environ.get('EDITOR', 'nano')
+            
+            # Clear screen and show viewing message
+            print("\033[2J\033[H", end='')
+            print(f"Viewing {member_name} in readonly mode...")
+            print(f"Editor: {editor}")
+            print(f"Temporary file: {tmp_file_path}")
+            print("Close the editor to return to REPL drill-down.")
+            print()
+            
+            # Add readonly flags for common editors
+            editor_args = [editor]
+            if 'nano' in editor.lower():
+                editor_args.extend(['-R'])  # Readonly mode
+            elif 'vim' in editor.lower() or 'nvim' in editor.lower():
+                editor_args.extend(['-R'])  # Readonly mode
+            elif 'emacs' in editor.lower():
+                editor_args.extend(['--eval', '(setq buffer-read-only t)'])
+            
+            editor_args.append(tmp_file_path)
+            
+            # Launch editor and wait for it to close
+            subprocess.run(editor_args)
+            
+            # Clean up
+            os.unlink(tmp_file_path)
+            
+            self.status_message = f"Finished viewing {member_name}"
+            
+        except Exception as e:
+            self.status_message = f"Error viewing text: {str(e)}"
+    
+    async def _inspect_member(self, node_data: dict):
+        """Inspect a member object with getmembers."""
         # Build the inspection path
         object_name = node_data.get("object_name", "")
         member_name = node_data.get("name", "")
@@ -3334,7 +3407,6 @@ class IPCTUIInspector:
         
         # Execute inspect.getmembers on this member
         inspection_code = f"inspect.getmembers({inspection_path})"
-        
         
         # Exit drill-down mode and execute the inspection
         self.repl_drill_down_mode = False
