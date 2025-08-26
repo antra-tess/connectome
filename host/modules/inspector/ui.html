@@ -800,6 +800,7 @@
                     <button id="backBtn" onclick="goBack()" style="display: none;">← Back</button>
                     <button onclick="refreshData()">Refresh</button>
                     <button onclick="resetVisualization()">Reset View</button>
+                    <button id="realtimeToggle" onclick="toggleRealtime()" style="display: none;" title="Toggle realtime streaming">🔴 Realtime</button>
                     <button id="viewToggle" onclick="toggleView()">JSONCrack View</button>
                 </div>
             </div>
@@ -888,6 +889,14 @@
         let jsoncrackInstance = null;
         let currentView = 'tree'; // 'tree' or 'jsoncrack' - tree is now default
         let navigationStack = []; // For back navigation
+        let realtimeState = {
+            enabled: false,
+            intervalId: null,
+            pollInterval: 3000, // 3 seconds
+            lastPollTimestamp: null,
+            newestEventId: null,
+            newestFacetId: null
+        };
         let paginationState = {
             hasMore: false,
             nextCursor: null,
@@ -933,6 +942,19 @@
                 totalFacets: null,
                 totalEvents: null
             };
+            
+            // Stop any active realtime polling when loading new endpoint
+            if (realtimeState.intervalId) {
+                clearInterval(realtimeState.intervalId);
+                realtimeState.intervalId = null;
+                realtimeState.enabled = false;
+                const realtimeBtn = document.getElementById('realtimeToggle');
+                if (realtimeBtn) {
+                    realtimeBtn.textContent = '🔴 Realtime';
+                    realtimeBtn.style.backgroundColor = '';
+                    realtimeBtn.style.color = '';
+                }
+            }
             
             // Handle special "browsing" endpoints that need space selection
             if (['spaces_detailed', 'timeline_events', 'veil_facets'].includes(endpoint)) {
@@ -992,6 +1014,17 @@
                 currentEndpoint = null;
                 toolbar.style.display = 'none';
                 hideStreamProgress();
+                // Stop realtime polling on error
+                if (realtimeState.intervalId) {
+                    clearInterval(realtimeState.intervalId);
+                    realtimeState.intervalId = null;
+                    realtimeState.enabled = false;
+                    const realtimeBtn = document.getElementById('realtimeToggle');
+                    if (realtimeBtn) {
+                        realtimeBtn.textContent = '🔴 Realtime';
+                        realtimeBtn.style.backgroundColor = '';
+                    }
+                }
             } finally {
                 statusEl.style.display = 'none';
             }
@@ -1253,10 +1286,14 @@
                     isStreamView = true;
                 }
                 
-                // Hide/show JSONCrack toggle button based on view type
+                // Hide/show buttons based on view type
                 const toggleBtn = document.getElementById('viewToggle');
+                const realtimeBtn = document.getElementById('realtimeToggle');
                 if (toggleBtn) {
                     toggleBtn.style.display = isStreamView ? 'none' : 'inline-block';
+                }
+                if (realtimeBtn) {
+                    realtimeBtn.style.display = isStreamView ? 'inline-block' : 'none';
                 }
                 
                 container.innerHTML = `
@@ -1587,6 +1624,13 @@
                 // Initialize with current facets and store total count
                 paginationState.allFacets = Object.values(data.facets);
                 paginationState.totalFacets = data.summary?.total_matching || data.summary?.total_facets;
+                
+                // Initialize realtime tracking with newest facet
+                if (paginationState.allFacets.length > 0) {
+                    // Sort by timestamp to find newest
+                    const sortedFacets = paginationState.allFacets.sort((a, b) => b.veil_timestamp - a.veil_timestamp);
+                    realtimeState.newestFacetId = sortedFacets[0].facet_id;
+                }
             } else if (data.events) {
                 paginationState.currentBrowserType = 'timeline_events';
                 paginationState.hasMore = data.pagination?.has_more || false;
@@ -1598,6 +1642,13 @@
                 // Initialize with current events and store total count
                 paginationState.allEvents = Array.isArray(data.events) ? [...data.events] : [];
                 paginationState.totalEvents = data.timeline_info?.total_events;
+                
+                // Initialize realtime tracking with newest event
+                if (paginationState.allEvents.length > 0) {
+                    // Sort by timestamp to find newest
+                    const sortedEvents = paginationState.allEvents.sort((a, b) => b.timestamp - a.timestamp);
+                    realtimeState.newestEventId = sortedEvents[0].id;
+                }
             }
             
             // Remove any existing scroll listener
@@ -2604,6 +2655,171 @@
         
         function hideStreamProgress() {
             document.getElementById('stream-progress').style.display = 'none';
+        }
+        
+        function toggleRealtime() {
+            const toggleBtn = document.getElementById('realtimeToggle');
+            
+            if (realtimeState.enabled) {
+                // Disable realtime
+                realtimeState.enabled = false;
+                if (realtimeState.intervalId) {
+                    clearInterval(realtimeState.intervalId);
+                    realtimeState.intervalId = null;
+                }
+                toggleBtn.textContent = '🔴 Realtime';
+                toggleBtn.style.backgroundColor = '';
+                console.log('Realtime streaming disabled');
+            } else {
+                // Enable realtime
+                realtimeState.enabled = true;
+                toggleBtn.textContent = '🟢 Realtime';
+                toggleBtn.style.backgroundColor = '#00d4aa';
+                toggleBtn.style.color = '#000';
+                startRealtimePolling();
+                console.log('Realtime streaming enabled');
+            }
+        }
+        
+        function startRealtimePolling() {
+            if (!realtimeState.enabled) return;
+            
+            // Clear any existing interval
+            if (realtimeState.intervalId) {
+                clearInterval(realtimeState.intervalId);
+            }
+            
+            // Start polling for new data
+            realtimeState.intervalId = setInterval(async () => {
+                if (!realtimeState.enabled) return;
+                
+                try {
+                    await pollForNewData();
+                } catch (error) {
+                    console.error('Realtime polling error:', error);
+                }
+            }, realtimeState.pollInterval);
+            
+            // Initial poll
+            setTimeout(pollForNewData, 100);
+        }
+        
+        async function pollForNewData() {
+            if (!currentEndpoint || !realtimeState.enabled) return;
+            
+            // Only poll for stream views
+            if (paginationState.currentBrowserType !== 'veil_facets' && 
+                paginationState.currentBrowserType !== 'timeline_events') {
+                return;
+            }
+            
+            try {
+                let url = currentEndpoint;
+                const separator = url.includes('?') ? '&' : '?';
+                
+                if (paginationState.currentBrowserType === 'timeline_events') {
+                    // For events, always get the latest events (no cursor) and filter client-side
+                    // Use negative limit to get most recent events in reverse chronological order
+                    url += `${separator}limit=-20`;
+                } else if (paginationState.currentBrowserType === 'veil_facets') {
+                    // For facets, always get the latest facets (no cursor) and filter client-side
+                    url += `${separator}limit=20`;
+                }
+                
+                const response = await fetch(url);
+                if (!response.ok) return; // Silently fail for realtime polls
+                
+                const newData = await response.json();
+                
+                // Check if we got new data
+                let hasNewData = false;
+                
+                // Debug logging
+                console.log(`Realtime poll response:`, {
+                    events: newData.events ? `${Array.isArray(newData.events) ? newData.events.length : 'not array'}` : 'none',
+                    facets: newData.facets ? `${Object.keys(newData.facets).length} facets` : 'none',
+                    currentlyLoaded: {
+                        events: paginationState.allEvents.length,
+                        facets: paginationState.allFacets.length
+                    }
+                });
+                
+                if (newData.events && Array.isArray(newData.events) && newData.events.length > 0) {
+                    // Filter out events we already have
+                    const existingEventIds = new Set(paginationState.allEvents.map(e => e.id));
+                    const actuallyNewEvents = newData.events.filter(e => !existingEventIds.has(e.id));
+                    
+                    console.log(`Events: ${newData.events.length} received, ${existingEventIds.size} already loaded, ${actuallyNewEvents.length} actually new`);
+                    
+                    if (actuallyNewEvents.length > 0) {
+                        // Prepend new events to the beginning of the array
+                        paginationState.allEvents.unshift(...actuallyNewEvents);
+                        currentData.events.unshift(...actuallyNewEvents);
+                        
+                        // Update newest event tracking
+                        realtimeState.newestEventId = actuallyNewEvents[0].id;
+                        
+                        hasNewData = true;
+                        console.log(`Realtime: ${actuallyNewEvents.length} new events received`);
+                    }
+                } else if (newData.facets && Object.keys(newData.facets).length > 0) {
+                    // Filter out facets we already have
+                    const existingFacetIds = new Set(paginationState.allFacets.map(f => f.facet_id));
+                    const newFacetValues = Object.values(newData.facets);
+                    const actuallyNewFacets = newFacetValues.filter(f => !existingFacetIds.has(f.facet_id));
+                    
+                    console.log(`Facets: ${newFacetValues.length} received, ${existingFacetIds.size} already loaded, ${actuallyNewFacets.length} actually new`);
+                    
+                    if (actuallyNewFacets.length > 0) {
+                        // Prepend new facets to the beginning of the array
+                        paginationState.allFacets.unshift(...actuallyNewFacets);
+                        
+                        // Add to currentData.facets object
+                        actuallyNewFacets.forEach(facet => {
+                            currentData.facets[facet.facet_id] = facet;
+                        });
+                        
+                        // Update newest facet tracking
+                        realtimeState.newestFacetId = actuallyNewFacets[0].facet_id;
+                        
+                        hasNewData = true;
+                        console.log(`Realtime: ${actuallyNewFacets.length} new facets received`);
+                    }
+                }
+                
+                if (hasNewData) {
+                    // Refresh the view with prepended data
+                    refreshStreamView();
+                    
+                    // Update progress counter
+                    updateProgressAfterRealtimeUpdate();
+                }
+                
+            } catch (error) {
+                console.error('Error polling for new data:', error);
+            }
+        }
+        
+        function refreshStreamView() {
+            const treeContainer = document.getElementById('tree-container');
+            if (!treeContainer || !currentData) return;
+            
+            // Clear and rebuild the stream view
+            treeContainer.innerHTML = '';
+            
+            if (currentData.facets) {
+                renderFacetsStream(treeContainer, currentData.facets, false);
+            } else if (currentData.events) {
+                renderEventsStream(treeContainer, currentData.events, false);
+            }
+        }
+        
+        function updateProgressAfterRealtimeUpdate() {
+            if (paginationState.currentBrowserType === 'veil_facets' && paginationState.allFacets) {
+                updateStreamProgress(paginationState.allFacets.length, paginationState.totalFacets, 'facets');
+            } else if (paginationState.currentBrowserType === 'timeline_events' && paginationState.allEvents) {
+                updateStreamProgress(paginationState.allEvents.length, paginationState.totalEvents, 'events');
+            }
         }
         
         function pushNavigation(state) {
