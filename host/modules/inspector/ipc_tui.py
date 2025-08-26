@@ -2849,6 +2849,8 @@ class IPCTUIInspector:
             self.repl_drill_down_mode = False
             self.current_tree_node = None
             self.tree_root = None
+            self._detail_tree_root = None
+            self._detail_current_node = None
             self.status_message = "Returned to REPL input"
             return
         elif key == '\r' or key == '\n':  # Enter - execute code or drill down
@@ -3175,6 +3177,12 @@ class IPCTUIInspector:
             exec_count = entry.get("execution_count", 0)
             tree_name = f"REPL Output [{exec_count}]"
             
+            # Debug: Write tree data to file to see what we're working with
+            with open("/tmp/repl_tree_debug.json", "w") as f:
+                import json as json_mod
+                f.write(f"JSON Data type: {type(json_data)}\n")
+                f.write(f"JSON Data: {json_mod.dumps(json_data, indent=2, default=str)}\n")
+            
             # Create tree root
             self.tree_root = TreeNode(
                 id=f"repl_output_{exec_count}",
@@ -3185,7 +3193,15 @@ class IPCTUIInspector:
             # Build tree structure from JSON data
             await self._build_json_tree(self.tree_root, json_data)
             
+            # Debug: Write final tree structure
+            with open("/tmp/repl_tree_debug.json", "a") as f:
+                f.write(f"\nTree children count: {len(self.tree_root.children)}\n")
+                f.write(f"First few children: {[c.label for c in self.tree_root.children[:5]]}\n")
+            
             # Stay in REPL mode but set drill-down state
+            # Use detail tree properties for drill-down rendering
+            self._detail_tree_root = self.tree_root
+            self._detail_current_node = self.tree_root
             self.current_tree_node = self.tree_root
             self.repl_drill_down_mode = True
             self.scroll_offset = 0
