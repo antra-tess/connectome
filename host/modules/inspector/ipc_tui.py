@@ -3239,12 +3239,13 @@ class IPCTUIInspector:
         original_code = output_metadata.get("original_code", "")
         object_name = self._extract_object_name_from_getmembers(original_code)
         
-        # Create header
+        # Create a separate header node under the parent
         header = TreeNode(
             id=f"{parent.id}_header",
             label=f"Members of {object_name}:",
             data=None
         )
+        header.is_expanded = True  # Start expanded to show the members
         parent.children.append(header)
         
         if isinstance(members_data, list):
@@ -3275,7 +3276,16 @@ class IPCTUIInspector:
                         }
                     )
                     
-                    parent.children.append(member_node)
+                    # If the value is a complex structure (actual dict/list, not string representation), make it expandable
+                    if isinstance(member_value, (dict, list)):
+                        if member_value:  # If not empty, build sub-tree
+                            await self._build_json_tree(member_node, member_value, max_depth=5, current_depth=0)
+                        else:
+                            # Even empty containers should show as expandable but with no children
+                            # This will show as "▶ name: {}" or "▶ name: []"
+                            pass
+                    
+                    header.children.append(member_node)
     
     def _extract_object_name_from_getmembers(self, code: str) -> str:
         """Extract object name from inspect.getmembers(object_name) call."""
