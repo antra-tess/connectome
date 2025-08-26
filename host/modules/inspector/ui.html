@@ -2714,16 +2714,32 @@
             }
             
             try {
-                let url = currentEndpoint;
-                const separator = url.includes('?') ? '&' : '?';
+                // Strip existing query parameters from currentEndpoint to avoid duplication
+                let baseUrl = currentEndpoint;
+                const queryIndex = baseUrl.indexOf('?');
+                if (queryIndex !== -1) {
+                    baseUrl = baseUrl.substring(0, queryIndex);
+                }
                 
+                // Build realtime polling URL to get items newer than what we have
+                let url = baseUrl;
                 if (paginationState.currentBrowserType === 'timeline_events') {
-                    // For events, always get the latest events (no cursor) and filter client-side
-                    // Use negative limit to get most recent events in reverse chronological order
-                    url += `${separator}limit=-20`;
+                    if (paginationState.allEvents.length > 0) {
+                        // Get events newer than our newest timestamp using positive limit
+                        const newestTimestamp = Math.max(...paginationState.allEvents.map(e => e.timestamp));
+                        url += `?offset=${newestTimestamp}&limit=20`;
+                    } else {
+                        // No events loaded yet, get latest events
+                        url += `?limit=-20`;
+                    }
                 } else if (paginationState.currentBrowserType === 'veil_facets') {
-                    // For facets, always get the latest facets (no cursor) and filter client-side
-                    url += `${separator}limit=20`;
+                    if (paginationState.allFacets.length > 0 && realtimeState.newestFacetId) {
+                        // Get facets newer than our newest facet using cursor
+                        url += `?after_facet_id=${realtimeState.newestFacetId}&limit=-20`;
+                    } else {
+                        // No facets loaded yet, get latest facets  
+                        url += `?limit=20`;
+                    }
                 }
                 
                 const response = await fetch(url);
@@ -2735,42 +2751,63 @@
                 let hasNewData = false;
                 
                 // Debug logging
+                console.log(`Realtime poll request: ${url}`);
                 console.log(`Realtime poll response:`, {
                     events: newData.events ? `${Array.isArray(newData.events) ? newData.events.length : 'not array'}` : 'none',
                     facets: newData.facets ? `${Object.keys(newData.facets).length} facets` : 'none',
                     currentlyLoaded: {
                         events: paginationState.allEvents.length,
                         facets: paginationState.allFacets.length
+                    },
+                    cursors: {
+                        newestEventId: realtimeState.newestEventId,
+                        newestFacetId: realtimeState.newestFacetId
                     }
                 });
                 
                 if (newData.events && Array.isArray(newData.events) && newData.events.length > 0) {
-                    // Filter out events we already have
+                    // Filter out events we already have (by ID) and events that are not actually newer
                     const existingEventIds = new Set(paginationState.allEvents.map(e => e.id));
-                    const actuallyNewEvents = newData.events.filter(e => !existingEventIds.has(e.id));
+                    const newestTimestamp = paginationState.allEvents.length > 0 ? 
+                        Math.max(...paginationState.allEvents.map(e => e.timestamp)) : 0;
                     
-                    console.log(`Events: ${newData.events.length} received, ${existingEventIds.size} already loaded, ${actuallyNewEvents.length} actually new`);
+                    const actuallyNewEvents = newData.events.filter(e => 
+                        !existingEventIds.has(e.id) && e.timestamp > newestTimestamp
+                    );
+                    
+                    console.log(`Events: ${newData.events.length} received, ${existingEventIds.size} already loaded, ${actuallyNewEvents.length} actually new (timestamp > ${newestTimestamp})`);
                     
                     if (actuallyNewEvents.length > 0) {
+                        // Sort by timestamp (newest first) before prepending
+                        actuallyNewEvents.sort((a, b) => b.timestamp - a.timestamp);
+                        
                         // Prepend new events to the beginning of the array
                         paginationState.allEvents.unshift(...actuallyNewEvents);
                         currentData.events.unshift(...actuallyNewEvents);
                         
-                        // Update newest event tracking
+                        // Update newest event tracking with the newest event
                         realtimeState.newestEventId = actuallyNewEvents[0].id;
                         
                         hasNewData = true;
-                        console.log(`Realtime: ${actuallyNewEvents.length} new events received`);
+                        console.log(`Realtime: ${actuallyNewEvents.length} new events received, newest: ${actuallyNewEvents[0].id}`);
                     }
                 } else if (newData.facets && Object.keys(newData.facets).length > 0) {
-                    // Filter out facets we already have
+                    // Filter out facets we already have (by facet_id) and facets that are not actually newer
                     const existingFacetIds = new Set(paginationState.allFacets.map(f => f.facet_id));
-                    const newFacetValues = Object.values(newData.facets);
-                    const actuallyNewFacets = newFacetValues.filter(f => !existingFacetIds.has(f.facet_id));
+                    const newestTimestamp = paginationState.allFacets.length > 0 ? 
+                        Math.max(...paginationState.allFacets.map(f => f.veil_timestamp)) : 0;
                     
-                    console.log(`Facets: ${newFacetValues.length} received, ${existingFacetIds.size} already loaded, ${actuallyNewFacets.length} actually new`);
+                    const newFacetValues = Object.values(newData.facets);
+                    const actuallyNewFacets = newFacetValues.filter(f => 
+                        !existingFacetIds.has(f.facet_id) && f.veil_timestamp > newestTimestamp
+                    );
+                    
+                    console.log(`Facets: ${newFacetValues.length} received, ${existingFacetIds.size} already loaded, ${actuallyNewFacets.length} actually new (timestamp > ${newestTimestamp})`);
                     
                     if (actuallyNewFacets.length > 0) {
+                        // Sort by timestamp (newest first) before prepending
+                        actuallyNewFacets.sort((a, b) => b.veil_timestamp - a.veil_timestamp);
+                        
                         // Prepend new facets to the beginning of the array
                         paginationState.allFacets.unshift(...actuallyNewFacets);
                         
@@ -2779,11 +2816,11 @@
                             currentData.facets[facet.facet_id] = facet;
                         });
                         
-                        // Update newest facet tracking
+                        // Update newest facet tracking with the newest facet
                         realtimeState.newestFacetId = actuallyNewFacets[0].facet_id;
                         
                         hasNewData = true;
-                        console.log(`Realtime: ${actuallyNewFacets.length} new facets received`);
+                        console.log(`Realtime: ${actuallyNewFacets.length} new facets received, newest: ${actuallyNewFacets[0].facet_id}`);
                     }
                 }
                 
