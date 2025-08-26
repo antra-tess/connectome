@@ -1672,13 +1672,13 @@ class IPCTUIInspector:
         elif endpoint_name == "veil_facets":
             command = "veil-facets"
             command_args = endpoint_args.copy()
-            # Add conservative limit to avoid IPC overflow (tested safe threshold is 44, using 20 for safety)
+            # Add conservative limit for consistent pagination (20 items per page)
             if 'limit' not in command_args:
                 command_args['limit'] = 20
         elif endpoint_name == "timeline_details":
             command = "timeline-details"
             command_args = endpoint_args.copy()
-            # Add conservative limit for timeline events to avoid IPC overflow (using 20 to match veil facets)
+            # Add conservative limit for timeline events with consistent pagination (20 items per page)
             # Use negative limit to get older events (reverse chronological order)
             if 'limit' not in command_args:
                 command_args['limit'] = -20

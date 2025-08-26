@@ -67,10 +67,14 @@ class IPCServer:
             if os.path.exists(self.socket_path):
                 os.unlink(self.socket_path)
             
-            # Create Unix socket server
+            # Create Unix socket server with increased buffer limit for large timeline events
+            # Default asyncio limit is 64KB, but timeline events with VEIL data can be much larger
+            # Set to 10MB to handle large events comfortably
+            buffer_limit = 10 * 1024 * 1024  # 10MB
             self.server = await asyncio.start_unix_server(
                 self._handle_client,
-                path=self.socket_path
+                path=self.socket_path,
+                limit=buffer_limit
             )
             
             self.is_running = True

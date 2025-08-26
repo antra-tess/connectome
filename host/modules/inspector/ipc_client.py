@@ -64,8 +64,13 @@ class IPCClient:
                 logger.error(f"Socket does not exist: {self.socket_path}")
                 return False
             
-            # Connect to Unix socket
-            self.reader, self.writer = await asyncio.open_unix_connection(self.socket_path)
+            # Connect to Unix socket with increased buffer limit for large timeline events
+            # Must match the server's buffer limit to handle large responses
+            buffer_limit = 10 * 1024 * 1024  # 10MB
+            self.reader, self.writer = await asyncio.open_unix_connection(
+                self.socket_path, 
+                limit=buffer_limit
+            )
             self.is_connected = True
             
             logger.debug(f"Connected to inspector IPC server: {self.socket_path}")
