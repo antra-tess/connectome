@@ -2853,9 +2853,11 @@ class IPCTUIInspector:
             self._detail_current_node = None
             self.status_message = "Returned to REPL input"
             return
-        elif key == '\r' or key == '\n':  # Enter - execute code or drill down
-            
-            if self.repl_input_buffer and any(line.strip() for line in self.repl_input_buffer):
+        elif key == '\r' or key == '\n':  # Enter - execute code, drill down, or inspect member
+            if self.repl_drill_down_mode:
+                # If in drill-down mode, check if current node is inspectable
+                await self._handle_drill_down_inspect()
+            elif self.repl_input_buffer and any(line.strip() for line in self.repl_input_buffer):
                 # If there's input to execute
                 await self._execute_repl_code()
             else:
@@ -3177,6 +3179,8 @@ class IPCTUIInspector:
             exec_count = entry.get("execution_count", 0)
             tree_name = f"REPL Output [{exec_count}]"
             
+            # Check if this looks like inspect.getmembers output
+            is_getmembers = self._is_getmembers_output(json_data, raw_result)
             
             # Create tree root
             self.tree_root = TreeNode(
@@ -3185,8 +3189,12 @@ class IPCTUIInspector:
                 data=json_data
             )
             
-            # Build tree structure from JSON data
-            await self._build_json_tree(self.tree_root, json_data)
+            if is_getmembers:
+                # Build special tree for getmembers output
+                await self._build_getmembers_tree(self.tree_root, json_data, raw_result)
+            else:
+                # Build regular tree structure from JSON data
+                await self._build_json_tree(self.tree_root, json_data)
             
             # Stay in REPL mode but set drill-down state
             # Use detail tree properties for drill-down rendering
@@ -3199,10 +3207,133 @@ class IPCTUIInspector:
             self.scroll_offset = 0
             self._reset_pagination_state()
             
-            self.status_message = f"Exploring {tree_name} (press B to exit)"
+            self.status_message = f"Exploring {tree_name} • B: Back • Enter: Inspect 🔍 items"
             
         except Exception as e:
             self.status_message = f"Error building drill-down view: {str(e)}"
+    
+    def _is_getmembers_output(self, json_data, raw_result) -> bool:
+        """Check if the data looks like inspect.getmembers output."""
+        # Check if original code contained getmembers
+        original_code = raw_result.get("input", "")
+        if "getmembers" in original_code:
+            return True
+            
+        # Check if data structure looks like getmembers (list of 2-element tuples/lists)
+        if isinstance(json_data, list) and len(json_data) > 0:
+            # Check if most items are 2-element arrays (name, value pairs)
+            tuple_count = 0
+            for item in json_data[:10]:  # Check first 10 items
+                if isinstance(item, list) and len(item) == 2:
+                    tuple_count += 1
+            return tuple_count > len(json_data[:10]) * 0.8  # 80% are tuples
+            
+        return False
+    
+    async def _build_getmembers_tree(self, parent: TreeNode, members_data, raw_result):
+        """Build a special tree structure for inspect.getmembers output."""
+        # Extract object name from the original code
+        original_code = raw_result.get("input", "")
+        object_name = self._extract_object_name_from_getmembers(original_code)
+        
+        # Create header
+        header = TreeNode(
+            id=f"{parent.id}_header",
+            label=f"Members of {object_name}:",
+            data=None
+        )
+        parent.children.append(header)
+        
+        if isinstance(members_data, list):
+            for i, member in enumerate(members_data):
+                if isinstance(member, list) and len(member) >= 2:
+                    member_name, member_value = member[0], member[1]
+                    
+                    # Create display label
+                    value_str = str(member_value) if member_value is not None else "None"
+                    if len(value_str) > 80:
+                        value_str = value_str[:77] + "..."
+                    
+                    # Create display label with inspection indicator
+                    is_inspectable = self._is_value_inspectable(member_value)
+                    label = f"{member_name}: {value_str}"
+                    if is_inspectable:
+                        label += " 🔍"
+                    
+                    # Create member node
+                    member_node = TreeNode(
+                        id=f"{parent.id}_member_{i}",
+                        label=label,
+                        data={
+                            "name": member_name,
+                            "value": member_value,
+                            "object_name": object_name,
+                            "is_inspectable": is_inspectable
+                        }
+                    )
+                    
+                    parent.children.append(member_node)
+    
+    def _extract_object_name_from_getmembers(self, code: str) -> str:
+        """Extract object name from inspect.getmembers(object_name) call."""
+        import re
+        # Look for inspect.getmembers( and extract the parameter
+        match = re.search(r'inspect\.getmembers\s*\(\s*([^)]+)\s*\)', code)
+        if match:
+            return match.group(1).strip()
+        return "object"
+    
+    def _is_value_inspectable(self, value) -> bool:
+        """Check if a value looks like an inspectable object."""
+        if not isinstance(value, str):
+            return False
+        # Look for object representations like "<class 'SomeClass' at 0x...>"
+        return '<' in value and ('at 0x' in value or 'object at' in value)
+    
+    async def _handle_drill_down_inspect(self):
+        """Handle Enter key in drill-down mode - inspect current member if possible."""
+        current_node = self._detail_current_node
+        if not current_node or not current_node.data:
+            self.status_message = "No inspectable item selected"
+            return
+            
+        node_data = current_node.data
+        if not isinstance(node_data, dict) or not node_data.get("is_inspectable"):
+            self.status_message = "Selected item is not inspectable"
+            return
+            
+        # Build the inspection path
+        object_name = node_data.get("object_name", "")
+        member_name = node_data.get("name", "")
+        
+        # Create proper inspection path (handle complex expressions)
+        if self._needs_parentheses(object_name):
+            inspection_path = f"({object_name}).{member_name}"
+        else:
+            inspection_path = f"{object_name}.{member_name}"
+        
+        # Execute inspect.getmembers on this member
+        inspection_code = f"inspect.getmembers({inspection_path})"
+        
+        # Exit drill-down mode and execute the inspection
+        self.repl_drill_down_mode = False
+        self._detail_tree_root = None
+        self._detail_current_node = None
+        self.current_tree_node = None
+        self.tree_root = None
+        
+        # Set the code as input and execute it
+        self.repl_input_buffer = [inspection_code]
+        self.repl_input_cursor_pos = len(inspection_code)
+        
+        self.status_message = f"🔍 Inspecting {inspection_path}..."
+        await self._execute_repl_code()
+    
+    def _needs_parentheses(self, object_name: str) -> bool:
+        """Check if object name needs parentheses when accessing attributes."""
+        # Simple heuristic - if it contains operators, spaces, or brackets, it probably needs parentheses
+        operators = ['+', '-', '*', '/', '%', '=', '[', ']', '(', ')', ' ']
+        return any(op in object_name for op in operators)
     
     async def _build_json_tree(self, parent: TreeNode, data: Any, max_depth: int = 10, current_depth: int = 0):
         """Build tree structure from JSON data."""
