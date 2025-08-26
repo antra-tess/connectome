@@ -242,8 +242,13 @@ class InspectorEndpointHandlers:
                     "timestamp": time.time()
                 }
             
-            # Clamp limit between 1 and 1000
-            limit = min(max(limit, 1), 1000)
+            # Clamp limit between -1000 and 1000 (allow negative for reverse direction)
+            if limit > 1000:
+                limit = 1000
+            elif limit < -1000:
+                limit = -1000
+            elif limit == 0:
+                limit = 100
             
             veil_facets_data = await self.data_collector.collect_veil_facets_data(
                 space_id, facet_type, owner_id, limit, after_facet_id

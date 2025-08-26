@@ -1010,8 +1010,8 @@ class InspectorDataCollector:
             space_id: The ID of the space to inspect
             facet_type: Optional filter by facet type (event, status, ambient)
             owner_id: Optional filter by owner element ID
-            limit: Maximum number of facets to return
-            after_facet_id: Optional cursor for pagination - return facets after this ID
+            limit: Maximum number of facets to return (negative for reverse direction)
+            after_facet_id: Optional cursor for pagination - return facets after/before this ID based on limit sign
             
         Returns:
             Dictionary containing filtered facet data
@@ -1061,22 +1061,38 @@ class InspectorDataCollector:
             
             # Apply filters
             filtered_facets = []
-            skip_until_found = after_facet_id is not None
             
             # Debug pagination
             import logging
             logger = logging.getLogger(__name__)
-            logger.debug(f"Veil facets pagination: after_facet_id={after_facet_id}, skip_until_found={skip_until_found}, total_facets={len(all_facets)}")
+            logger.debug(f"Veil facets pagination: after_facet_id={after_facet_id}, limit={limit}, total_facets={len(all_facets)}")
             
-            for facet in all_facets:
-                # Handle pagination cursor
-                if skip_until_found:
+            # Handle cursor-based filtering based on limit direction
+            if after_facet_id:
+                # Find the cursor facet position
+                cursor_index = None
+                for i, facet in enumerate(all_facets):
                     if facet.facet_id == after_facet_id:
-                        logger.debug(f"Found cursor facet: {facet.facet_id}, stopping skip")
-                        skip_until_found = False
-                        # Continue to skip this exact facet (we want items AFTER it)
-                    continue
+                        cursor_index = i
+                        break
                 
+                if cursor_index is not None:
+                    if limit >= 0:
+                        # Positive limit: get facets AFTER the cursor in pagination order (older facets)
+                        # Since facets are sorted newest first, "after" in pagination means higher indices
+                        all_facets = all_facets[cursor_index + 1:] if cursor_index < len(all_facets) - 1 else []
+                    else:
+                        # Negative limit: get facets BEFORE the cursor in pagination order (newer facets)
+                        # Since facets are sorted newest first, "before" in pagination means lower indices
+                        all_facets = all_facets[:cursor_index] if cursor_index > 0 else []
+                    logger.debug(f"After cursor filtering: {len(all_facets)} facets remaining")
+                else:
+                    # Cursor not found, return empty result
+                    logger.debug(f"Cursor facet {after_facet_id} not found")
+                    all_facets = []
+            
+            # Apply type and owner filters
+            for facet in all_facets:
                 # Filter by facet type
                 if facet_type and facet.facet_type.value != facet_type:
                     continue
@@ -1092,13 +1108,14 @@ class InspectorDataCollector:
                 logger.debug(f"Added facet {len(filtered_facets)}: {facet.facet_id}")
             
             # Apply limit and set pagination info
+            abs_limit = abs(limit) if limit != 0 else 100
             facets_data["summary"]["total_matching"] = len(filtered_facets)
-            limited_facets = filtered_facets[:limit]
+            limited_facets = filtered_facets[:abs_limit]
             facets_data["summary"]["returned"] = len(limited_facets)
-            facets_data["summary"]["limited"] = len(filtered_facets) > limit
+            facets_data["summary"]["limited"] = len(filtered_facets) > abs_limit
             
             # Set next cursor if there are more results
-            if len(filtered_facets) > limit:
+            if len(filtered_facets) > abs_limit:
                 facets_data["summary"]["next_cursor"] = limited_facets[-1].facet_id
                 logger.debug(f"Set next_cursor to: {facets_data['summary']['next_cursor']}")
             else:
