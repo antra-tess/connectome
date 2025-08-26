@@ -146,13 +146,22 @@ class TerminalController:
                     next_char = sys.stdin.read(1)
                     if next_char == '[':
                         third_char = sys.stdin.read(1)
-                        # Handle extended escape sequences like Page Up/Down, End, Home
-                        if third_char in ['5', '6', '4', '1']:  # Page Up, Page Down, End, Home
-                            # Read the trailing '~' character
+                        # Handle extended escape sequences 
+                        if third_char.isdigit():
+                            # Multi-digit sequences like F1-F12, Page Up/Down, etc.
                             try:
-                                tilde = sys.stdin.read(1)
-                                if tilde == '~':
-                                    return f'ESC[{third_char}~'
+                                # Try to read more characters for multi-digit sequences
+                                remaining_chars = third_char
+                                while True:
+                                    next_char = sys.stdin.read(1)
+                                    if next_char == '~':
+                                        # Complete sequence
+                                        return f'ESC[{remaining_chars}~'
+                                    elif next_char.isdigit():
+                                        remaining_chars += next_char
+                                    else:
+                                        # Unexpected character, return what we have
+                                        break
                             except:
                                 pass
                         elif third_char == 'F':  # Alternative End key
@@ -933,7 +942,7 @@ class IPCTUIInspector:
         elif self.mode == NavigationMode.DETAIL_VIEW:
             controls = "↑↓: Navigate • →: Expand • ←: Collapse • E: Edit • P: REPL • B: Back • Q: Quit"
         elif self.mode == NavigationMode.REPL_MODE:
-            controls = "Enter: Execute/Drill • Tab: Complete • ↑↓: Scroll/History • PgUp/Dn: Scroll • Ctrl+C: Clear • B: Back • Q: Quit"
+            controls = "Enter: Execute/Drill • Tab: Complete • ↑↓: Scroll/History • Ctrl+B: Back • Ctrl+L: Clear • Ctrl+D: Quit"
         else:
             controls = "Q: Quit"
         
@@ -945,6 +954,12 @@ class IPCTUIInspector:
     
     async def _handle_input(self, key: str):
         """Handle keyboard input based on current mode."""
+        # REPL mode gets priority for all input except specific control keys
+        if self.mode == NavigationMode.REPL_MODE:
+            await self._handle_repl_input(key)
+            return
+        
+        # Global quit handling for non-REPL modes
         if key in ['q', 'Q']:
             self.running = False
             return
@@ -961,8 +976,6 @@ class IPCTUIInspector:
             await self._handle_tree_view_input(key)
         elif self.mode == NavigationMode.DETAIL_VIEW:
             await self._handle_detail_view_input(key)
-        elif self.mode == NavigationMode.REPL_MODE:
-            await self._handle_repl_input(key)
     
     async def _handle_host_selection_input(self, key: str):
         """Handle input in host selection mode."""
@@ -2774,10 +2787,34 @@ class IPCTUIInspector:
     
     async def _handle_repl_input(self, key: str):
         """Handle input in REPL mode."""
-        if key in ['b', 'B']:
-            # Go back to previous mode
+        # Function key controls (non-printable, safe for REPL)
+        if key == 'ESC[11~':  # F1 - Help
+            self.status_message = "F2: Back • F3: Clear • F4: Quit • Tab: Complete • Enter: Execute/Drill"
+            return
+        elif key == 'ESC[12~':  # F2 - Back
             self.mode = NavigationMode.MAIN_MENU
             self.status_message = ""
+            return
+        elif key == 'ESC[13~':  # F3 - Clear input
+            self.repl_input_buffer = []
+            self.repl_input_cursor_pos = 0
+            self.status_message = "Input cleared"
+            return
+        elif key == 'ESC[14~':  # F4 - Quit
+            self.running = False
+            return
+        # Alternative key combinations (check ASCII codes)  
+        elif len(key) == 1 and ord(key) == 2:  # Ctrl+B (ASCII 2) - Back
+            self.mode = NavigationMode.MAIN_MENU
+            self.status_message = ""
+            return
+        elif len(key) == 1 and ord(key) == 12:  # Ctrl+L (ASCII 12) - Clear input
+            self.repl_input_buffer = []
+            self.repl_input_cursor_pos = 0
+            self.status_message = "Input cleared"
+            return
+        elif len(key) == 1 and ord(key) == 4:  # Ctrl+D (ASCII 4) - Quit
+            self.running = False
             return
         elif key == 'CTRL_C':
             # Clear current input
