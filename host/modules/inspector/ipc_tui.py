@@ -3214,8 +3214,9 @@ class IPCTUIInspector:
     
     def _is_getmembers_output(self, json_data, raw_result) -> bool:
         """Check if the data looks like inspect.getmembers output."""
-        # Check if original code contained getmembers
-        original_code = raw_result.get("input", "")
+        # Check if original code contained getmembers - any getmembers call gets enhanced tree
+        output_metadata = raw_result.get("output_metadata", {})
+        original_code = output_metadata.get("original_code", "")
         if "getmembers" in original_code:
             return True
             
@@ -3232,8 +3233,10 @@ class IPCTUIInspector:
     
     async def _build_getmembers_tree(self, parent: TreeNode, members_data, raw_result):
         """Build a special tree structure for inspect.getmembers output."""
+        
         # Extract object name from the original code
-        original_code = raw_result.get("input", "")
+        output_metadata = raw_result.get("output_metadata", {})
+        original_code = output_metadata.get("original_code", "")
         object_name = self._extract_object_name_from_getmembers(original_code)
         
         # Create header
@@ -3277,6 +3280,7 @@ class IPCTUIInspector:
     def _extract_object_name_from_getmembers(self, code: str) -> str:
         """Extract object name from inspect.getmembers(object_name) call."""
         import re
+        
         # Look for inspect.getmembers( and extract the parameter
         match = re.search(r'inspect\.getmembers\s*\(\s*([^)]+)\s*\)', code)
         if match:
@@ -3314,6 +3318,7 @@ class IPCTUIInspector:
         
         # Execute inspect.getmembers on this member
         inspection_code = f"inspect.getmembers({inspection_path})"
+        
         
         # Exit drill-down mode and execute the inspection
         self.repl_drill_down_mode = False
