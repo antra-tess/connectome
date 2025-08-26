@@ -430,16 +430,42 @@ class IPCTUIInspector:
         
         # Add realtime indicator to title
         realtime_indicator = ""
-        if (self.mode in [NavigationMode.TREE_VIEW, NavigationMode.DETAIL_VIEW] and 
-            self._realtime_enabled and 
-            self._current_view_type in ['veil_facets', 'timeline_events']):
+        show_realtime_indicator = (self.mode in [NavigationMode.TREE_VIEW, NavigationMode.DETAIL_VIEW] and 
+                                  self._realtime_enabled and 
+                                  self._current_view_type in ['veil_facets', 'timeline_events'])
+        if show_realtime_indicator:
             realtime_indicator = " [●T]"
         
-        full_title = title + breadcrumb + realtime_indicator
-        if len(full_title) > cols - 2:
-            full_title = full_title[:cols-5] + "..."
+        # Build title without realtime indicator first for length check
+        base_title = title + breadcrumb
+        full_title = base_title + realtime_indicator
         
-        print(full_title.ljust(cols), end='')
+        if len(full_title) > cols - 2:
+            # Truncate base title if too long, but try to keep realtime indicator
+            if show_realtime_indicator and len(base_title) + len(realtime_indicator) > cols - 2:
+                available_for_base = cols - 2 - len(realtime_indicator) - 3  # Space for "..."
+                if available_for_base > 0:
+                    base_title = base_title[:available_for_base] + "..."
+                else:
+                    base_title = title[:cols-8] + "..."
+                    realtime_indicator = ""  # Drop indicator if no space
+            else:
+                full_title = full_title[:cols-5] + "..."
+                realtime_indicator = ""
+        
+        # Print base title
+        print(base_title, end='')
+        
+        # Print realtime indicator with green color if active
+        if show_realtime_indicator:
+            self.terminal.set_color('bright_green', bold=True)
+            print(realtime_indicator, end='')
+            self.terminal.set_color('bright_cyan', bold=True)  # Reset to title color
+        
+        # Pad to full width
+        current_len = len(base_title) + len(realtime_indicator)
+        if current_len < cols:
+            print(' ' * (cols - current_len), end='')
         
         # Separator line
         self.terminal.move_cursor(2, 1)
@@ -1016,7 +1042,10 @@ class IPCTUIInspector:
             # Show realtime toggle for applicable views
             if self._current_view_type in ['veil_facets', 'timeline_events']:
                 rt_status = "ON" if self._realtime_enabled else "OFF"
-                controls = f"↑↓: Navigate • →: Expand • ←: Collapse • Enter: Details • E: Edit • B: Back • T: Realtime({rt_status}) • R: Refresh • Q: Quit"
+                # Build controls with colored realtime status
+                controls_base = "↑↓: Navigate • →: Expand • ←: Collapse • Enter: Details • E: Edit • B: Back • T: Realtime("
+                controls_end = ") • R: Refresh • Q: Quit"
+                controls = (controls_base, rt_status, controls_end)  # Store as tuple for colored rendering
             else:
                 controls = "↑↓: Navigate • →: Expand • ←: Collapse • Enter: Details • E: Edit • B: Back • R: Refresh • Q: Quit"
         elif self.mode == NavigationMode.DETAIL_VIEW:
@@ -1026,10 +1055,39 @@ class IPCTUIInspector:
         else:
             controls = "Q: Quit"
         
-        if len(controls) > cols - 4:
-            controls = controls[:cols-7] + "..."
+        # Handle both string and tuple controls (for colored segments)
+        if isinstance(controls, tuple):
+            # controls is (base, rt_status, end) - render with colored rt_status
+            controls_base, rt_status, controls_end = controls
+            full_controls = controls_base + rt_status + controls_end
+            
+            if len(full_controls) > cols - 4:
+                # Truncate if too long
+                total_len = cols - 7  # Space for "..."
+                base_len = len(controls_base)
+                end_len = len(controls_end)
+                status_len = len(rt_status)
+                
+                if base_len + end_len + status_len > total_len:
+                    # Truncate from the end
+                    available_for_end = max(0, total_len - base_len - status_len)
+                    controls_end = controls_end[:available_for_end] + "..." if available_for_end > 3 else "..."
+            
+            # Print with colors
+            print(controls_base, end='')
+            if self._realtime_enabled:
+                self.terminal.set_color('bright_green', bold=True)
+            else:
+                self.terminal.set_color('bright_black')
+            print(rt_status, end='')
+            self.terminal.set_color('bright_black')  # Reset to controls color
+            print(controls_end)
+        else:
+            # Regular string controls
+            if len(controls) > cols - 4:
+                controls = controls[:cols-7] + "..."
+            print(controls)
         
-        print(controls)
         self.terminal.reset_colors()
     
     async def _handle_input(self, key: str):
