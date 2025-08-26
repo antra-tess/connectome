@@ -251,6 +251,15 @@ class IPCTUIInspector:
         self._last_scroll_direction = None  # Track last scroll direction for pagination
         self._rendering = False  # Prevent tree modifications during rendering
         
+        # Realtime streaming state
+        self._realtime_enabled = False  # Whether realtime streaming is active
+        self._realtime_task = None  # Background task for polling
+        self._realtime_poll_interval = 3.0  # Poll every 3 seconds
+        self._realtime_newest_event_id = None  # Track newest event for cursor
+        self._realtime_newest_facet_id = None  # Track newest facet for cursor
+        self._current_endpoint_args = {}  # Store current endpoint args for realtime polling
+        self._current_view_type = None  # Track current view type: 'veil_facets', 'timeline_events', or None
+        
         # REPL state
         self.repl_sessions = {}  # session_id -> session_info
         self.current_repl_session = None  # Active session
@@ -297,6 +306,9 @@ class IPCTUIInspector:
         self.terminal.show_cursor()
         self.terminal.reset_colors()
         self.terminal.restore_terminal()
+        
+        # Stop realtime polling
+        self._stop_realtime_polling()
         
         # Disconnect IPC client
         if self.ipc_client.is_connected:
@@ -416,7 +428,14 @@ class IPCTUIInspector:
             context_desc = f"{self.repl_context_type}:{self.repl_context_id}" if self.repl_context_type != "global" else "global"
             breadcrumb = f" > Python REPL [{context_desc}]"
         
-        full_title = title + breadcrumb
+        # Add realtime indicator to title
+        realtime_indicator = ""
+        if (self.mode in [NavigationMode.TREE_VIEW, NavigationMode.DETAIL_VIEW] and 
+            self._realtime_enabled and 
+            self._current_view_type in ['veil_facets', 'timeline_events']):
+            realtime_indicator = " [●T]"
+        
+        full_title = title + breadcrumb + realtime_indicator
         if len(full_title) > cols - 2:
             full_title = full_title[:cols-5] + "..."
         
@@ -994,7 +1013,12 @@ class IPCTUIInspector:
         elif self.mode == NavigationMode.MAIN_MENU:
             controls = "↑↓: Navigate • Enter: Select • Q: Quit"
         elif self.mode == NavigationMode.TREE_VIEW:
-            controls = "↑↓: Navigate • →: Expand • ←: Collapse • Enter: Details • E: Edit • B: Back • R: Refresh • Q: Quit"
+            # Show realtime toggle for applicable views
+            if self._current_view_type in ['veil_facets', 'timeline_events']:
+                rt_status = "ON" if self._realtime_enabled else "OFF"
+                controls = f"↑↓: Navigate • →: Expand • ←: Collapse • Enter: Details • E: Edit • B: Back • T: Realtime({rt_status}) • R: Refresh • Q: Quit"
+            else:
+                controls = "↑↓: Navigate • →: Expand • ←: Collapse • Enter: Details • E: Edit • B: Back • R: Refresh • Q: Quit"
         elif self.mode == NavigationMode.DETAIL_VIEW:
             controls = "↑↓: Navigate • →: Expand • ←: Collapse • E: Edit • B: Back • Q: Quit"
         elif self.mode == NavigationMode.REPL_MODE:
@@ -1041,7 +1065,7 @@ class IPCTUIInspector:
             self.current_host_index = min(len(self.available_hosts) - 1, self.current_host_index + 1)
         elif key == '\r' or key == '\n':  # Enter
             await self._select_host()
-        elif key in ['r', 'R']:
+        elif key in ['r', 'R', 'F5', 'ESC[15~']:  # R, F5
             await self._discover_hosts()
     
     async def _handle_main_menu_input(self, key: str):
@@ -1079,7 +1103,9 @@ class IPCTUIInspector:
             self.mode = NavigationMode.MAIN_MENU
             self.status_message = ""
             self._reset_pagination_state()
-        elif key in ['r', 'R']:
+        elif key in ['t', 'T']:
+            await self._toggle_realtime()
+        elif key in ['r', 'R', 'F5', 'ESC[15~']:  # R or F5 key
             await self._refresh_current_data()
     
     async def _handle_detail_view_input(self, key: str):
@@ -1600,6 +1626,17 @@ class IPCTUIInspector:
             
             # Fetch data from the drill-down endpoint
             data = await self._fetch_drill_down_data(endpoint_name, endpoint_args)
+            
+            # Store current endpoint args for realtime polling
+            self._current_endpoint_args = endpoint_args
+            
+            # Set current view type for realtime streaming detection
+            if endpoint_name == "veil_facets":
+                self._current_view_type = "veil_facets"
+            elif endpoint_name == "timeline_details":
+                self._current_view_type = "timeline_events"
+            else:
+                self._current_view_type = None
             
             # Add pagination info to display name if available
             if endpoint_name in ["veil_facets", "timeline_details"]:
@@ -2471,6 +2508,331 @@ class IPCTUIInspector:
         self._pagination_has_more = False
         self._pagination_loading = False
         self._last_scroll_direction = None
+        
+        # Reset realtime state when switching views
+        self._stop_realtime_polling()
+        self._realtime_newest_event_id = None
+        self._realtime_newest_facet_id = None
+        self._current_view_type = None
+    
+    async def _toggle_realtime(self):
+        """Toggle realtime streaming for applicable data types."""
+        # Check if we're in a streamable view type
+        if self._current_view_type not in ['veil_facets', 'timeline_events']:
+            if self._current_view_type is None:
+                self.status_message = "Realtime streaming only available for timeline events and VEIL facets views"
+            else:
+                self.status_message = f"Realtime streaming only available for timeline events and VEIL facets (current view: {self._current_view_type})"
+            return
+        
+        if self._realtime_enabled:
+            # Disable realtime
+            self._stop_realtime_polling()
+            self.status_message = "Realtime streaming disabled"
+        else:
+            # Enable realtime
+            self._start_realtime_polling()
+            self.status_message = "Realtime streaming enabled"
+    
+    def _start_realtime_polling(self):
+        """Start background polling for new data."""
+        self._realtime_enabled = True
+        
+        # Initialize newest data tracking from current data
+        self._initialize_realtime_cursors()
+        
+        # Start background polling task
+        if self._realtime_task:
+            self._realtime_task.cancel()
+        
+        self._realtime_task = asyncio.create_task(self._realtime_poll_loop())
+    
+    def _stop_realtime_polling(self):
+        """Stop background polling for new data."""
+        self._realtime_enabled = False
+        
+        if self._realtime_task:
+            self._realtime_task.cancel()
+            self._realtime_task = None
+    
+    async def _realtime_poll_loop(self):
+        """Background task that polls for new data at regular intervals."""
+        try:
+            while self._realtime_enabled:
+                await asyncio.sleep(self._realtime_poll_interval)
+                
+                if not self._realtime_enabled:
+                    break
+                    
+                await self._poll_for_new_data()
+                
+        except asyncio.CancelledError:
+            # Task was cancelled, clean up
+            pass
+        except Exception as e:
+            logger.error(f"Realtime polling error: {e}", exc_info=True)
+            self._realtime_enabled = False
+            self.status_message = f"Realtime polling error: {str(e)}"
+    
+    def _initialize_realtime_cursors(self):
+        """Initialize cursor tracking from currently loaded data."""
+        if not self.current_tree_node or not self._current_view_type:
+            return
+        
+        if self._current_view_type == 'timeline_events' and hasattr(self.current_tree_node, 'children'):
+            # Find newest event by timestamp
+            newest_timestamp = 0
+            newest_event_id = None
+            
+            for child in self.current_tree_node.children:
+                if hasattr(child, 'data') and isinstance(child.data, dict):
+                    event_timestamp = child.data.get('timestamp', 0)
+                    if event_timestamp > newest_timestamp:
+                        newest_timestamp = event_timestamp
+                        newest_event_id = child.data.get('id')
+            
+            self._realtime_newest_event_id = newest_event_id
+            
+        elif self._current_view_type == 'veil_facets' and hasattr(self.current_tree_node, 'children'):
+            # Find newest facet by veil_timestamp
+            newest_timestamp = 0
+            newest_facet_id = None
+            
+            for child in self.current_tree_node.children:
+                if hasattr(child, 'data') and isinstance(child.data, dict):
+                    veil_timestamp = child.data.get('veil_timestamp', 0)
+                    if veil_timestamp > newest_timestamp:
+                        newest_timestamp = veil_timestamp
+                        newest_facet_id = child.data.get('facet_id')
+            
+            self._realtime_newest_facet_id = newest_facet_id
+    
+    async def _poll_for_new_data(self):
+        """Poll for new data and prepend it to the current view."""
+        if not self._current_view_type:
+            return
+        
+        try:
+            if self._current_view_type == 'timeline_events':
+                await self._poll_for_new_events()
+            elif self._current_view_type == 'veil_facets':
+                await self._poll_for_new_facets()
+        except Exception as e:
+            logger.error(f"Error polling for new data: {e}", exc_info=True)
+    
+    async def _poll_for_new_events(self):
+        """Poll for new timeline events using reverse limit logic."""
+        if not hasattr(self, '_current_endpoint_args'):
+            return
+            
+        # Build polling request with reverse limit to get newer events
+        endpoint_args = dict(self._current_endpoint_args)
+        
+        if self._realtime_newest_event_id and hasattr(self.current_tree_node, 'children'):
+            # Find newest timestamp from loaded data
+            newest_timestamp = 0
+            for child in self.current_tree_node.children:
+                if hasattr(child, 'data') and isinstance(child.data, dict):
+                    timestamp = child.data.get('timestamp', 0)
+                    if timestamp > newest_timestamp:
+                        newest_timestamp = timestamp
+            
+            # Use positive limit to get events newer than our newest timestamp
+            endpoint_args['offset'] = newest_timestamp
+            endpoint_args['limit'] = 20
+        else:
+            # No reference point, get latest events
+            endpoint_args['limit'] = -20
+        
+        # Make the request
+        response = await self.executor.execute_command('timeline-details', endpoint_args)
+        
+        if response.get('status') != 'success':
+            return
+            
+        data = response.get('data', {})
+        new_events = data.get('events', [])
+        
+        if not new_events:
+            return
+            
+        # Filter out events we already have and events that aren't actually newer
+        existing_event_ids = set()
+        newest_existing_timestamp = 0
+        
+        for child in self.current_tree_node.children:
+            if hasattr(child, 'data') and isinstance(child.data, dict):
+                event_id = child.data.get('id')
+                if event_id:
+                    existing_event_ids.add(event_id)
+                timestamp = child.data.get('timestamp', 0)
+                if timestamp > newest_existing_timestamp:
+                    newest_existing_timestamp = timestamp
+        
+        actually_new_events = []
+        for event in new_events:
+            event_id = event.get('id')
+            event_timestamp = event.get('timestamp', 0)
+            if (event_id and event_id not in existing_event_ids and 
+                event_timestamp > newest_existing_timestamp):
+                actually_new_events.append(event)
+        
+        if not actually_new_events:
+            return
+            
+        # Sort by timestamp (newest first) and prepend to tree
+        actually_new_events.sort(key=lambda e: e.get('timestamp', 0), reverse=True)
+        await self._prepend_new_events(actually_new_events)
+    
+    async def _poll_for_new_facets(self):
+        """Poll for new VEIL facets using reverse limit logic."""
+        if not hasattr(self, '_current_endpoint_args'):
+            return
+            
+        # Build polling request with reverse limit to get newer facets
+        endpoint_args = dict(self._current_endpoint_args)
+        
+        if self._realtime_newest_facet_id:
+            # Get facets newer than our newest facet using cursor
+            endpoint_args['after_facet_id'] = self._realtime_newest_facet_id
+            endpoint_args['limit'] = -20  # Negative limit for reverse logic
+        else:
+            # No reference point, get latest facets
+            endpoint_args['limit'] = 20
+        
+        # Make the request  
+        response = await self.executor.execute_command('veil-facets', endpoint_args)
+        
+        if response.get('status') != 'success':
+            return
+            
+        data = response.get('data', {})
+        facets_dict = data.get('facets', {})
+        
+        if not facets_dict:
+            return
+        
+        new_facets = list(facets_dict.values())
+        
+        # Filter out facets we already have and facets that aren't actually newer
+        existing_facet_ids = set()
+        newest_existing_timestamp = 0
+        
+        for child in self.current_tree_node.children:
+            if hasattr(child, 'data') and isinstance(child.data, dict):
+                facet_id = child.data.get('facet_id')
+                if facet_id:
+                    existing_facet_ids.add(facet_id)
+                veil_timestamp = child.data.get('veil_timestamp', 0)
+                if veil_timestamp > newest_existing_timestamp:
+                    newest_existing_timestamp = veil_timestamp
+        
+        actually_new_facets = []
+        for facet in new_facets:
+            facet_id = facet.get('facet_id')
+            veil_timestamp = facet.get('veil_timestamp', 0)
+            if (facet_id and facet_id not in existing_facet_ids and 
+                veil_timestamp > newest_existing_timestamp):
+                actually_new_facets.append(facet)
+        
+        if not actually_new_facets:
+            return
+            
+        # Sort by veil_timestamp (newest first) and prepend to tree
+        actually_new_facets.sort(key=lambda f: f.get('veil_timestamp', 0), reverse=True)
+        await self._prepend_new_facets(actually_new_facets)
+    
+    async def _prepend_new_events(self, new_events: List[Dict[str, Any]]):
+        """Prepend new events to the current tree view."""
+        if not new_events or not self.current_tree_node:
+            return
+            
+        # Create new TreeNode objects for the events
+        new_nodes = []
+        for i, event in enumerate(new_events):
+            event_id = event.get("id", f"event_{i}")
+            payload = event.get("payload", {})
+            event_type = payload.get("event_type", "unknown")
+            timestamp = event.get("timestamp", 0)
+            
+            # Create a readable label for the event
+            import datetime
+            try:
+                dt = datetime.datetime.fromtimestamp(timestamp)
+                time_str = dt.strftime("%H:%M:%S")
+            except (ValueError, OSError):
+                time_str = str(timestamp)[:10]
+            
+            label = f"{event_id} ({event_type}) at {time_str}"
+            
+            # Build the event node with expandable structure
+            event_node = TreeNode(event_id, label, event, parent=self.current_tree_node)
+            
+            # Make event data expandable by creating child nodes
+            if isinstance(event, dict):
+                event_node.children = []
+                for key, value in event.items():
+                    child_path = f"{event_id}.{key}"
+                    child = self._build_node_from_value(value, key, event_node, child_path, 1)
+                    event_node.children.append(child)
+                    
+                # Start collapsed by default
+                event_node.is_expanded = False
+            
+            new_nodes.append(event_node)
+        
+        # Prepend new nodes to the beginning of children list
+        self.current_tree_node.children = new_nodes + self.current_tree_node.children
+        
+        # Update realtime cursor to newest event
+        if new_events:
+            self._realtime_newest_event_id = new_events[0].get('id')
+        
+        # Trigger UI refresh
+        await self._render_current_view()
+        
+        self.status_message = f"Added {len(new_events)} new events"
+    
+    async def _prepend_new_facets(self, new_facets: List[Dict[str, Any]]):
+        """Prepend new facets to the current tree view."""
+        if not new_facets or not self.current_tree_node:
+            return
+            
+        # Create new TreeNode objects for the facets
+        new_nodes = []
+        for i, facet in enumerate(new_facets):
+            facet_id = facet.get("facet_id", f"facet_{i}")
+            facet_type = facet.get("facet_type", "unknown")
+            
+            label = f"{facet_id} ({facet_type})"
+            
+            # Build the facet node with expandable structure
+            facet_node = TreeNode(facet_id, label, facet, parent=self.current_tree_node)
+            
+            # Make facet data expandable by creating child nodes
+            if isinstance(facet, dict):
+                facet_node.children = []
+                for key, value in facet.items():
+                    child_path = f"{facet_id}.{key}"
+                    child = self._build_node_from_value(value, key, facet_node, child_path, 1)
+                    facet_node.children.append(child)
+                    
+                # Start collapsed by default
+                facet_node.is_expanded = False
+            
+            new_nodes.append(facet_node)
+        
+        # Prepend new nodes to the beginning of children list
+        self.current_tree_node.children = new_nodes + self.current_tree_node.children
+        
+        # Update realtime cursor to newest facet
+        if new_facets:
+            self._realtime_newest_facet_id = new_facets[0].get('facet_id')
+        
+        # Trigger UI refresh
+        await self._render_current_view()
+        
+        self.status_message = f"Added {len(new_facets)} new facets"
     
     def _find_current_node_index(self, visible_nodes):
         """Find the index of the currently selected node in the visible nodes list."""
