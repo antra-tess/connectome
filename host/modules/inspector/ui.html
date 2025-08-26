@@ -717,7 +717,12 @@
             hasMore: false,
             nextCursor: null,
             currentSpaceId: null,
-            currentBrowserType: null
+            currentBrowserType: null,
+            isLoading: false,
+            allFacets: [],  // Store all loaded facets
+            allEvents: [],  // Store all loaded events
+            nextOffset: null, // For timeline events
+            afterFacetId: null // For veil facets
         }; // For pagination
         
         async function loadEndpoint(endpoint) {
@@ -738,6 +743,19 @@
             // Ensure content and toolbar are visible
             contentEl.style.display = 'block';
             toolbar.style.display = 'flex';
+            
+            // Reset pagination state for new endpoint load
+            paginationState = {
+                hasMore: false,
+                nextCursor: null,
+                currentSpaceId: null,
+                currentBrowserType: null,
+                isLoading: false,
+                allFacets: [],
+                allEvents: [],
+                nextOffset: null,
+                afterFacetId: null
+            };
             
             // Handle special "browsing" endpoints that need space selection
             if (['spaces_detailed', 'timeline_events', 'veil_facets'].includes(endpoint)) {
@@ -1022,49 +1040,55 @@
             }
         }
         
-        function showTreeView(data) {
+        function showTreeView(data, append = false) {
             const container = document.getElementById('jsoncrack-container') || document.getElementById('content');
             
-            // Clean up any existing JSONCrack instance
-            if (jsoncrackInstance && jsoncrackInstance.cleanup) {
-                jsoncrackInstance.cleanup();
-            }
-            
-            // Check if this data has pagination metadata
-            const hasPagination = data.has_more !== undefined || data.next_cursor !== undefined;
-            
-            // Determine view type and header text
-            let viewIcon = '🌳';
-            let viewTitle = 'Interactive Tree View';
-            let viewHint = 'Click to expand/collapse';
-            
-            if (data.facets && typeof data.facets === 'object') {
-                viewIcon = '🎭';
-                viewTitle = 'VEIL Facets Stream';
-                viewHint = 'Click entries to expand details';
-            } else if (data.events && typeof data.events === 'object') {
-                viewIcon = '⏱️';
-                viewTitle = 'Timeline Events Stream';
-                viewHint = 'Click events to expand details';
-            }
-            
-            container.innerHTML = `
-                <div style="padding: 1rem; background: #0f3460; border-radius: 4px; height: 100%; overflow: auto; display: flex; flex-direction: column;">
-                    <div style="margin-bottom: 1rem; color: #00d4aa; display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.5rem; border-bottom: 1px solid #555;">
-                        <strong>${viewIcon} ${viewTitle}</strong>
-                        <small style="color: #999;">${viewHint}</small>
+            // Only clean up and rebuild if not appending
+            if (!append) {
+                // Clean up any existing JSONCrack instance
+                if (jsoncrackInstance && jsoncrackInstance.cleanup) {
+                    jsoncrackInstance.cleanup();
+                }
+                
+                // Check if this data has pagination metadata
+                const hasPagination = data.has_more !== undefined || 
+                                    data.next_cursor !== undefined ||
+                                    data.summary?.next_cursor !== undefined ||
+                                    data.pagination?.has_more !== undefined;
+                
+                // Determine view type and header text
+                let viewIcon = '🌳';
+                let viewTitle = 'Interactive Tree View';
+                let viewHint = 'Click to expand/collapse';
+                
+                if (data.facets && typeof data.facets === 'object') {
+                    viewIcon = '🎭';
+                    viewTitle = 'VEIL Facets Stream';
+                    viewHint = 'Scroll down to load more facets';
+                } else if (data.events && typeof data.events === 'object') {
+                    viewIcon = '⏱️';
+                    viewTitle = 'Timeline Events Stream';
+                    viewHint = 'Scroll down to load more events';
+                }
+                
+                container.innerHTML = `
+                    <div id="scroll-container" style="padding: 1rem; background: #0f3460; border-radius: 4px; height: 100%; overflow: auto; display: flex; flex-direction: column;">
+                        <div style="margin-bottom: 1rem; color: #00d4aa; display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.5rem; border-bottom: 1px solid #555;">
+                            <strong>${viewIcon} ${viewTitle}</strong>
+                            <small style="color: #999;">${viewHint}</small>
+                        </div>
+                        <div id="tree-container" style="flex: 1;">
+                        </div>
+                        <div id="loading-indicator" style="display: none; padding: 1rem; text-align: center; color: #00d4aa;">
+                            Loading more...
+                        </div>
                     </div>
-                    ${hasPagination ? '<div id="pagination-top"></div>' : ''}
-                    <div style="flex: 1; overflow: auto;">
-                        <div id="tree-container"></div>
-                    </div>
-                    ${hasPagination ? '<div id="pagination-bottom"></div>' : ''}
-                </div>
-            `;
-            
-            // Add pagination controls if needed
-            if (hasPagination) {
-                addPaginationControls(data);
+                `;
+                
+                // Set up infinite scrolling
+                if (hasPagination) {
+                    setupInfiniteScroll(data);
+                }
             }
             
             // Build interactive tree or stream view
@@ -1073,12 +1097,12 @@
             // Check if this is facets or events data and render as stream
             if (data.facets && typeof data.facets === 'object') {
                 // VEIL facets stream view
-                renderFacetsStream(treeContainer, data.facets);
+                renderFacetsStream(treeContainer, data.facets, append);
             } else if (data.events && typeof data.events === 'object') {
                 // Timeline events stream view  
-                renderEventsStream(treeContainer, data.events);
-            } else {
-                // Regular tree view
+                renderEventsStream(treeContainer, data.events, append);
+            } else if (!append) {
+                // Regular tree view (only if not appending)
                 treeContainer.appendChild(createTreeNode('root', data, 0, true));
             }
         }
@@ -1337,9 +1361,158 @@
             return colors[type] || '#eee';
         }
         
-        function renderFacetsStream(container, facets) {
+        function setupInfiniteScroll(data) {
+            const scrollContainer = document.getElementById('scroll-container');
+            if (!scrollContainer) return;
+            
+            // Update pagination state based on data structure
+            if (data.facets) {
+                paginationState.currentBrowserType = 'veil_facets';
+                paginationState.hasMore = data.summary?.next_cursor !== null && data.summary?.next_cursor !== undefined;
+                paginationState.afterFacetId = data.summary?.next_cursor || null;
+            } else if (data.events) {
+                paginationState.currentBrowserType = 'timeline_events';
+                paginationState.hasMore = data.pagination?.has_more || false;
+                // For negative limit, use prev_offset; for positive limit, use next_offset
+                const isNegativeLimit = data.pagination?.limit < 0;
+                paginationState.nextOffset = isNegativeLimit ? 
+                    data.pagination?.prev_offset : 
+                    data.pagination?.next_offset || null;
+            }
+            
+            // Remove any existing scroll listener
+            scrollContainer.onscroll = null;
+            
+            // Add scroll listener for infinite loading
+            scrollContainer.onscroll = async function() {
+                // Check if scrolled near bottom (within 200px)
+                const scrolledToBottom = this.scrollHeight - this.scrollTop <= this.clientHeight + 200;
+                
+                if (scrolledToBottom && !paginationState.isLoading && paginationState.hasMore) {
+                    await loadMoreData();
+                }
+            };
+        }
+        
+        async function loadMoreData() {
+            if (paginationState.isLoading || !paginationState.hasMore) return;
+            
+            paginationState.isLoading = true;
+            const loadingIndicator = document.getElementById('loading-indicator');
+            if (loadingIndicator) {
+                loadingIndicator.style.display = 'block';
+            }
+            
+            try {
+                let url = currentEndpoint;
+                
+                // Add pagination parameters based on type
+                const separator = url.includes('?') ? '&' : '?';
+                if (paginationState.currentBrowserType === 'timeline_events' && paginationState.nextOffset) {
+                    // Use negative limit to get older events (reverse chronological order)
+                    url += `${separator}offset=${paginationState.nextOffset}&limit=-20`;
+                } else if (paginationState.currentBrowserType === 'veil_facets' && paginationState.afterFacetId) {
+                    url += `${separator}after_facet_id=${paginationState.afterFacetId}&limit=20`;
+                } else {
+                    // No cursor available, can't load more
+                    paginationState.hasMore = false;
+                    return;
+                }
+                
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const newData = await response.json();
+                
+                // Merge new data with existing
+                if (newData.facets) {
+                    // Merge facets
+                    const newFacets = Object.values(newData.facets);
+                    if (newFacets.length > 0) {
+                        Object.assign(currentData.facets, newData.facets);
+                        paginationState.allFacets.push(...newFacets);
+                        
+                        // Update cursor - use the last facet's ID from the new batch
+                        // The summary.next_cursor should already be set correctly by the server
+                        // but if not, we use the last facet's ID
+                        if (newData.summary?.next_cursor) {
+                            paginationState.afterFacetId = newData.summary.next_cursor;
+                            paginationState.hasMore = true;
+                        } else if (newFacets.length > 0) {
+                            // Fallback: use the last facet's ID as cursor
+                            const sortedFacets = newFacets.sort((a, b) => b.veil_timestamp - a.veil_timestamp);
+                            paginationState.afterFacetId = sortedFacets[sortedFacets.length - 1].facet_id;
+                            // If we got fewer items than requested, assume no more data
+                            paginationState.hasMore = newFacets.length >= 20;
+                        } else {
+                            paginationState.hasMore = false;
+                            paginationState.afterFacetId = null;
+                        }
+                    } else {
+                        // No new facets returned, we've reached the end
+                        paginationState.hasMore = false;
+                    }
+                } else if (newData.events) {
+                    // Merge events
+                    if (!currentData.events) currentData.events = [];
+                    if (newData.events.length > 0) {
+                        currentData.events.push(...newData.events);
+                        paginationState.allEvents.push(...newData.events);
+                        
+                        // Update offset - for negative limit, use prev_offset (points to older events)
+                        // For positive limit, use next_offset (points to newer events)
+                        const isNegativeLimit = newData.pagination?.limit < 0;
+                        const offsetToUse = isNegativeLimit ? 
+                            newData.pagination?.prev_offset : 
+                            newData.pagination?.next_offset;
+                        
+                        if (offsetToUse !== null && offsetToUse !== undefined) {
+                            paginationState.nextOffset = offsetToUse;
+                            paginationState.hasMore = newData.pagination?.has_more || false;
+                        } else if (newData.events.length > 0) {
+                            // Fallback: use the last event's timestamp as offset
+                            const lastEvent = newData.events[newData.events.length - 1];
+                            paginationState.nextOffset = lastEvent.timestamp;
+                            // If we got fewer items than requested, assume no more data
+                            paginationState.hasMore = newData.events.length >= 20;
+                        } else {
+                            paginationState.hasMore = false;
+                            paginationState.nextOffset = null;
+                        }
+                    } else {
+                        // No new events returned, we've reached the end
+                        paginationState.hasMore = false;
+                    }
+                }
+                
+                // Append the new data to the view
+                showTreeView(newData, true);
+                
+            } catch (error) {
+                console.error('Error loading more data:', error);
+                // Don't show alert for pagination errors, just log them
+            } finally {
+                paginationState.isLoading = false;
+                if (loadingIndicator) {
+                    loadingIndicator.style.display = 'none';
+                }
+            }
+        }
+        
+        function renderFacetsStream(container, facets, append = false) {
             // Convert facets object to array and sort by timestamp (newest first)
             const facetArray = Object.values(facets).sort((a, b) => b.veil_timestamp - a.veil_timestamp);
+            
+            // If appending, create a fragment to add new facets
+            const fragment = append ? document.createDocumentFragment() : null;
+            const targetContainer = append ? fragment : container;
+            
+            // Clear container if not appending
+            if (!append) {
+                container.innerHTML = '';
+            }
             
             facetArray.forEach(facet => {
                 const facetDiv = document.createElement('div');
@@ -1410,13 +1583,32 @@
                     }
                 });
                 
-                container.appendChild(facetDiv);
+                // Append to the appropriate container
+                if (append) {
+                    fragment.appendChild(facetDiv);
+                } else {
+                    container.appendChild(facetDiv);
+                }
             });
+            
+            // If appending, add the fragment to the container
+            if (append && fragment) {
+                container.appendChild(fragment);
+            }
         }
         
-        function renderEventsStream(container, events) {
+        function renderEventsStream(container, events, append = false) {
             // Convert events object to array and sort by timestamp (newest first)
-            const eventArray = Object.values(events).sort((a, b) => b.timestamp - a.timestamp);
+            const eventArray = Array.isArray(events) ? events : Object.values(events);
+            eventArray.sort((a, b) => b.timestamp - a.timestamp);
+            
+            // If appending, create a fragment to add new events
+            const fragment = append ? document.createDocumentFragment() : null;
+            
+            // Clear container if not appending
+            if (!append) {
+                container.innerHTML = '';
+            }
             
             eventArray.forEach(event => {
                 const eventDiv = document.createElement('div');
@@ -1498,8 +1690,18 @@
                     }
                 });
                 
-                container.appendChild(eventDiv);
+                // Append to the appropriate container
+                if (append) {
+                    fragment.appendChild(eventDiv);
+                } else {
+                    container.appendChild(eventDiv);
+                }
             });
+            
+            // If appending, add the fragment to the container
+            if (append && fragment) {
+                container.appendChild(fragment);
+            }
         }
         
         function getFacetTypeColor(facetType) {
@@ -2085,6 +2287,19 @@
             // Push current state to navigation stack
             pushNavigation();
             
+            // Reset pagination state for new drill-down load
+            paginationState = {
+                hasMore: false,
+                nextCursor: null,
+                currentSpaceId: drillInfo.spaceId || null,
+                currentBrowserType: null,
+                isLoading: false,
+                allFacets: [],
+                allEvents: [],
+                nextOffset: null,
+                afterFacetId: null
+            };
+            
             const statusEl = document.getElementById('status');
             statusEl.style.display = 'inline';
             statusEl.textContent = 'Loading drill-down data...';
@@ -2096,28 +2311,28 @@
                 
                 switch(drillInfo.type) {
                     case 'timeline_events':
-                        endpoint = `/timelines/${drillInfo.spaceId}/${drillInfo.timelineId}`;
+                        endpoint = `/timelines/${drillInfo.spaceId}/${drillInfo.timelineId}?limit=-20`;
                         title = `⏱️ Timeline Events: ${drillInfo.timelineId}`;
                         breadcrumb = `Inspector → Timeline Events → ${drillInfo.spaceId} → ${drillInfo.timelineId}`;
                         paginationState.currentBrowserType = 'timeline_events';
                         break;
                         
                     case 'space_timelines':
-                        endpoint = `/timelines/${drillInfo.spaceId}`;
+                        endpoint = `/timelines/${drillInfo.spaceId}?limit=-20`;
                         title = `⏱️ Timeline Overview: ${drillInfo.spaceId}`;
                         breadcrumb = `Inspector → Timelines → ${drillInfo.spaceId}`;
                         paginationState.currentBrowserType = 'timeline_events';
                         break;
                         
                     case 'all_timeline_events':
-                        endpoint = `/timelines`;
+                        endpoint = `/timelines?limit=-20`;
                         title = `⏱️ All Timeline Events`;
                         breadcrumb = `Inspector → Timeline Events → All Spaces`;
                         paginationState.currentBrowserType = 'timeline_events';
                         break;
                         
                     case 'veil_facets':
-                        endpoint = `/veil/${drillInfo.spaceId}/facets`;
+                        endpoint = `/veil/${drillInfo.spaceId}/facets?limit=20`;
                         title = `🎭 VEIL Facets: ${drillInfo.spaceId}`;
                         breadcrumb = `Inspector → VEIL Facets → ${drillInfo.spaceId}`;
                         paginationState.currentBrowserType = 'veil_facets';
@@ -2356,12 +2571,12 @@
                         break;
                     case 'timeline_events':
                         // Load timeline events for this space with pagination
-                        endpoint = `/timelines/${spaceId}`;
+                        endpoint = `/timelines/${spaceId}?limit=-20`;
                         title = `⏱️ Timeline Events: ${spaceId}`;
                         break;
                     case 'veil_facets':
                         // Load VEIL facets for this space
-                        endpoint = `/veil/${spaceId}/facets`;
+                        endpoint = `/veil/${spaceId}/facets?limit=20`;
                         title = `🎭 VEIL Facets: ${spaceId}`;
                         break;
                 }

@@ -273,7 +273,16 @@ class InspectorServer:
         except (ValueError, TypeError):
             limit = 100
         
-        data = await self.handlers.handle_timeline_details(space_id, timeline_id, limit)
+        # Get offset for pagination
+        offset_str = request.query.get('offset')
+        offset = None
+        if offset_str:
+            try:
+                offset = float(offset_str)
+            except (ValueError, TypeError):
+                offset = None
+        
+        data = await self.handlers.handle_timeline_details(space_id, timeline_id, limit, offset)
         status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if "error" in data else 200)
         return self._json_response(data, status=status_code)
     
@@ -298,12 +307,13 @@ class InspectorServer:
         # Get optional query parameters for filtering
         facet_type = request.query.get('type')  # event, status, ambient
         owner_id = request.query.get('owner')
+        after_facet_id = request.query.get('after_facet_id')  # For pagination
         try:
             limit = int(request.query.get('limit', 100))
         except (ValueError, TypeError):
             limit = 100
         
-        data = await self.handlers.handle_veil_facets(space_id, facet_type, owner_id, limit)
+        data = await self.handlers.handle_veil_facets(space_id, facet_type, owner_id, limit, after_facet_id)
         status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if "error" in data else 200)
         return self._json_response(data, status=status_code)
 
