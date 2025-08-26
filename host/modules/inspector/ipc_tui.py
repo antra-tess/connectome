@@ -730,9 +730,14 @@ class IPCTUIInspector:
             
             # For leaf nodes, show the value alongside the key
             if not node.children:
-                # Format the value for display
-                value_str = self._format_value_for_display(node.data)
-                display_text = f"{tree_line}{icon} {node.label}: {value_str}"
+                # Format the value for display, but skip for getmembers nodes which already have formatted labels
+                if isinstance(node.data, dict) and node.data.get("is_inspectable") is not None:
+                    # This is a getmembers node - don't append formatted value
+                    display_text = f"{tree_line}{icon} {node.label}"
+                else:
+                    # Regular tree node - append formatted value
+                    value_str = self._format_value_for_display(node.data)
+                    display_text = f"{tree_line}{icon} {node.label}: {value_str}"
             else:
                 display_text = f"{tree_line}{icon} {node.label}"
             
@@ -3275,6 +3280,7 @@ class IPCTUIInspector:
                             "is_inspectable": is_inspectable
                         }
                     )
+                    
                     
                     # If the value is a complex structure (actual dict/list, not string representation), make it expandable
                     if isinstance(member_value, (dict, list)):
