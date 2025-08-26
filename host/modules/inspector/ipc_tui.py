@@ -3343,6 +3343,9 @@ class IPCTUIInspector:
         
         self.status_message = f"🔍 Inspecting {inspection_path}..."
         await self._execute_repl_code()
+        
+        # Automatically drill down into the results after execution
+        await self._handle_repl_output_drill_down()
     
     def _needs_parentheses(self, object_name: str) -> bool:
         """Check if object name needs parentheses when accessing attributes."""
