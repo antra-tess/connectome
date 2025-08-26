@@ -262,6 +262,7 @@ class IPCTUIInspector:
         self.repl_input_cursor_pos = 0  # Cursor position in current input line
         self.repl_context_type = "global"  # Current REPL context type
         self.repl_context_id = "global"  # Current REPL context id
+        self.repl_drill_down_mode = False  # Are we viewing drill-down data?
         
     async def start(self):
         """Start the IPC TUI inspector."""
@@ -2669,27 +2670,32 @@ class IPCTUIInspector:
     
     async def _render_repl_view(self):
         """Render the REPL interface."""
-        rows, cols = self.terminal.get_terminal_size()
-        
-        # Calculate areas: header (2 rows) + output area + input area (3 rows) + footer (2 rows)
-        output_start_row = 4
-        input_start_row = rows - 5  # Leave space for 3 input rows + 2 footer rows
-        output_height = input_start_row - output_start_row
-        
-        # Render output history area
-        await self._render_repl_output(output_start_row, output_height, cols)
-        
-        # Render input area
-        await self._render_repl_input(input_start_row, cols)
-        
-        # Show status
-        status_row = input_start_row + 3
-        self.terminal.move_cursor(status_row, 2)
-        if self.current_repl_session:
-            session_info = f"Session: {self.current_repl_session['session_id'][:8]}..."
-            self.terminal.set_color('bright_black')
-            print(session_info)
-            self.terminal.reset_colors()
+        if self.repl_drill_down_mode:
+            # Render drill-down tree view
+            self._render_tree_generic(is_detail_mode=True)
+        else:
+            # Render normal REPL interface
+            rows, cols = self.terminal.get_terminal_size()
+            
+            # Calculate areas: header (2 rows) + output area + input area (3 rows) + footer (2 rows)
+            output_start_row = 4
+            input_start_row = rows - 5  # Leave space for 3 input rows + 2 footer rows
+            output_height = input_start_row - output_start_row
+            
+            # Render output history area
+            await self._render_repl_output(output_start_row, output_height, cols)
+            
+            # Render input area
+            await self._render_repl_input(input_start_row, cols)
+            
+            # Show status (only in normal REPL mode)
+            status_row = input_start_row + 3
+            self.terminal.move_cursor(status_row, 2)
+            if self.current_repl_session:
+                session_info = f"Session: {self.current_repl_session['session_id'][:8]}..."
+                self.terminal.set_color('bright_black')
+                print(session_info)
+                self.terminal.reset_colors()
     
     async def _render_repl_output(self, start_row: int, height: int, cols: int):
         """Render REPL output history with scrolling."""
@@ -2837,6 +2843,14 @@ class IPCTUIInspector:
             self.repl_input_cursor_pos = 0
             self.status_message = "Input cleared"
             return
+        # Handle drill-down navigation when we're viewing drill-down results
+        elif key in ['b', 'B'] and self.repl_drill_down_mode:
+            # Exit drill-down mode back to REPL input
+            self.repl_drill_down_mode = False
+            self.current_tree_node = None
+            self.tree_root = None
+            self.status_message = "Returned to REPL input"
+            return
         elif key == '\r' or key == '\n':  # Enter - execute code or drill down
             
             if self.repl_input_buffer and any(line.strip() for line in self.repl_input_buffer):
@@ -2849,21 +2863,43 @@ class IPCTUIInspector:
         elif key == '\t':  # Tab - completion
             await self._handle_repl_completion()
             return
-        elif key == 'ESC[A':  # Up arrow - history or scroll
-            if self.repl_input_buffer and self.repl_input_buffer[0].strip():
+        elif key == 'ESC[A':  # Up arrow - history or navigate drill-down
+            if self.repl_drill_down_mode:
+                # If viewing drill-down results, navigate the tree
+                await self._navigate_tree_up()
+            elif self.repl_input_buffer and self.repl_input_buffer[0].strip():
                 # If typing, navigate history
                 await self._navigate_repl_history(-1)
             else:
                 # If not typing, scroll output up
                 await self._scroll_repl_output(-1)
             return
-        elif key == 'ESC[B':  # Down arrow - history or scroll
-            if self.repl_input_buffer and self.repl_input_buffer[0].strip():
+        elif key == 'ESC[B':  # Down arrow - history or navigate drill-down
+            if self.repl_drill_down_mode:
+                # If viewing drill-down results, navigate the tree
+                await self._navigate_tree_down()
+            elif self.repl_input_buffer and self.repl_input_buffer[0].strip():
                 # If typing, navigate history
                 await self._navigate_repl_history(1)
             else:
                 # If not typing, scroll output down
                 await self._scroll_repl_output(1)
+            return
+        elif key == 'ESC[C':  # Right arrow - expand drill-down or move cursor
+            if self.repl_drill_down_mode:
+                # If viewing drill-down results, expand node
+                await self._expand_current_node()
+            else:
+                # Move cursor right in input
+                await self._handle_repl_char_input(key)
+            return
+        elif key == 'ESC[D':  # Left arrow - collapse drill-down or move cursor
+            if self.repl_drill_down_mode:
+                # If viewing drill-down results, collapse node
+                await self._collapse_current_node()
+            else:
+                # Move cursor left in input
+                await self._handle_repl_char_input(key)
             return
         elif key == 'ESC[5~':  # Page Up - scroll output
             await self._scroll_repl_output(-5)
@@ -3149,13 +3185,13 @@ class IPCTUIInspector:
             # Build tree structure from JSON data
             await self._build_json_tree(self.tree_root, json_data)
             
-            # Switch to detail view
+            # Stay in REPL mode but set drill-down state
             self.current_tree_node = self.tree_root
-            self.mode = NavigationMode.DETAIL_VIEW
+            self.repl_drill_down_mode = True
             self.scroll_offset = 0
             self._reset_pagination_state()
             
-            self.status_message = f"Exploring {tree_name}"
+            self.status_message = f"Exploring {tree_name} (press B to exit)"
             
         except Exception as e:
             self.status_message = f"Error building drill-down view: {str(e)}"
