@@ -994,9 +994,9 @@ class IPCTUIInspector:
         elif self.mode == NavigationMode.MAIN_MENU:
             controls = "↑↓: Navigate • Enter: Select • Q: Quit"
         elif self.mode == NavigationMode.TREE_VIEW:
-            controls = "↑↓: Navigate • →: Expand • ←: Collapse • Enter: Details • E: Edit • P: REPL • B: Back • R: Refresh • Q: Quit"
+            controls = "↑↓: Navigate • →: Expand • ←: Collapse • Enter: Details • E: Edit • B: Back • R: Refresh • Q: Quit"
         elif self.mode == NavigationMode.DETAIL_VIEW:
-            controls = "↑↓: Navigate • →: Expand • ←: Collapse • E: Edit • P: REPL • B: Back • Q: Quit"
+            controls = "↑↓: Navigate • →: Expand • ←: Collapse • E: Edit • B: Back • Q: Quit"
         elif self.mode == NavigationMode.REPL_MODE:
             controls = "Enter: Execute/Drill • Tab: Complete • ↑↓: Scroll/History • Ctrl+B: Back • Ctrl+L: Clear • Ctrl+D: Quit"
         else:
@@ -1075,8 +1075,6 @@ class IPCTUIInspector:
             await self._view_node_details()
         elif key in ['e', 'E']:
             await self._edit_current_node()
-        elif key in ['p', 'P']:
-            await self._enter_context_repl()
         elif key in ['b', 'B']:
             self.mode = NavigationMode.MAIN_MENU
             self.status_message = ""
@@ -1104,8 +1102,6 @@ class IPCTUIInspector:
             await self._navigate_detail_tree_home()
         elif key in ['e', 'E']:
             await self._edit_detail_node()
-        elif key in ['p', 'P']:
-            await self._enter_context_repl()
         elif key in ['b', 'B']:
             self.mode = NavigationMode.TREE_VIEW
             # Reset scroll offset when going back
@@ -2641,26 +2637,6 @@ class IPCTUIInspector:
         if self.current_repl_session:
             self.status_message = "Entered Python REPL (global context)"
     
-    async def _enter_context_repl(self):
-        """Enter REPL mode with context based on current tree node."""
-        if not self.current_tree_node:
-            await self._enter_repl_mode()  # Fallback to global
-            return
-            
-        # Determine context based on current node
-        node_id = self.current_tree_node.id
-        
-        # Extract context from node path - spaces have ids like "space_main_space"
-        if "space_" in node_id and self._current_endpoint in ["spaces", "veil"]:
-            space_id = node_id.replace("space_", "").replace("_", "")
-            self.repl_context_type = "space"
-            self.repl_context_id = space_id
-            self.status_message = f"Entered Python REPL (space: {space_id})"
-        else:
-            # Default to global for now
-            self.repl_context_type = "global"
-            self.repl_context_id = "global"  
-            self.status_message = "Entered Python REPL (global context)"
         
         await self._ensure_repl_session()
         self.mode = NavigationMode.REPL_MODE
