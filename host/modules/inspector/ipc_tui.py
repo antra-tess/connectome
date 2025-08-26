@@ -725,8 +725,32 @@ class IPCTUIInspector:
                 icon = "🔧"
             elif node.children:
                 icon = "📁"
+            elif isinstance(node.data, dict) and node.data.get("is_inspectable"):
+                icon = "🔍"  # Inspectable objects
+            elif isinstance(node.data, dict) and node.data.get("is_large_text"):
+                icon = "📄"  # Large text files
             else:
-                icon = "📄"
+                # Choose icon based on value type for getmembers nodes
+                if isinstance(node.data, dict) and "value" in node.data:
+                    value = node.data["value"]
+                    if isinstance(value, bool):
+                        icon = "◉" if value else "○"  # Filled/empty circles for bool
+                    elif isinstance(value, (int, float)):
+                        icon = "🔢"  # Numbers
+                    elif isinstance(value, str):
+                        icon = "📝"  # Strings
+                    elif isinstance(value, dict):
+                        icon = "📊"  # Dictionaries
+                    elif isinstance(value, list):
+                        icon = "📋"  # Lists
+                    elif value is None:
+                        icon = "∅"   # Null values
+                    elif callable(value):
+                        icon = "⚙️"   # Functions/methods
+                    else:
+                        icon = "●"   # Other/unknown types
+                else:
+                    icon = "●"  # Default bullet
             
             # For leaf nodes, show the value alongside the key
             if not node.children:
@@ -750,6 +774,32 @@ class IPCTUIInspector:
             max_width = cols - col - 2
             if len(display_text) > max_width:
                 display_text = display_text[:max_width-3] + "..."
+            
+            # Apply colors based on member type for getmembers nodes
+            if isinstance(node.data, dict) and "value" in node.data:
+                value = node.data["value"]
+                if isinstance(value, bool):
+                    self.terminal.set_color('cyan')  # Boolean values
+                elif isinstance(value, (int, float)):
+                    self.terminal.set_color('yellow')  # Numbers
+                elif isinstance(value, str):
+                    if node.data.get("is_large_text"):
+                        self.terminal.set_color('magenta')  # Large text
+                    else:
+                        self.terminal.set_color('green')  # Regular strings
+                elif isinstance(value, dict):
+                    self.terminal.set_color('blue')  # Dictionaries
+                elif isinstance(value, list):
+                    self.terminal.set_color('blue')  # Lists
+                elif value is None:
+                    self.terminal.set_color('bright_black')  # Null values
+                elif callable(value):
+                    if node.data.get("is_inspectable"):
+                        self.terminal.set_color('red')  # Inspectable methods/functions
+                    else:
+                        self.terminal.set_color('bright_red')  # Regular callables
+                else:
+                    self.terminal.set_color('white')  # Other types
             
             print(display_text)
             self.terminal.reset_colors()
@@ -3263,11 +3313,16 @@ class IPCTUIInspector:
                     if len(value_str) > 80:
                         value_str = value_str[:77] + "..."
                     
-                    # Check if this is a large text field that should be viewable
-                    is_large_text = isinstance(member_value, str) and len(member_value) > 100
+                    # Check if this is an inspectable object FIRST (priority over text)
+                    is_inspectable = self._is_value_inspectable(member_value)
+                    
+                    # Only check for large text if it's not an inspectable object
+                    # This ensures objects with long representations get 🔍 not 📄
+                    is_large_text = (not is_inspectable and 
+                                   isinstance(member_value, str) and 
+                                   len(member_value) > 100)
                     
                     # Create display label with inspection indicator
-                    is_inspectable = self._is_value_inspectable(member_value)
                     label = f"{member_name}: {value_str}"
                     if is_inspectable:
                         label += " 🔍"
