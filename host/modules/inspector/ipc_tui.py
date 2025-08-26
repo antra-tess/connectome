@@ -2890,7 +2890,7 @@ class IPCTUIInspector:
         elif key == 'ESC[C':  # Right arrow - expand drill-down or move cursor
             if self.repl_drill_down_mode:
                 # If viewing drill-down results, expand node in detail mode
-                self._expand_collapse_generic(expand=True, is_detail_mode=True)
+                self._expand_collapse_node_generic(expand=True, is_detail_mode=True)
             else:
                 # Move cursor right in input
                 await self._handle_repl_char_input(key)
@@ -2898,7 +2898,7 @@ class IPCTUIInspector:
         elif key == 'ESC[D':  # Left arrow - collapse drill-down or move cursor
             if self.repl_drill_down_mode:
                 # If viewing drill-down results, collapse node in detail mode
-                self._expand_collapse_generic(expand=False, is_detail_mode=True)
+                self._expand_collapse_node_generic(expand=False, is_detail_mode=True)
             else:
                 # Move cursor left in input
                 await self._handle_repl_char_input(key)
