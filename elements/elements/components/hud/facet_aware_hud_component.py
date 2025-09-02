@@ -1861,8 +1861,15 @@ class FacetAwareHUDComponent(Component):
                 # Add status indicators
                 if message_status == "pending_send":
                     message_content += " [PENDING CONFIRMATION]"
+                elif message_status == "retrying":
+                    retry_count = facet.get_property("retry_count", 0)
+                    message_content += f" [RETRYING (attempt {retry_count})]"
                 elif message_status == "failed_to_send":
-                    message_content += " [SEND FAILED]"
+                    retry_count = facet.get_property("retry_count", 0)
+                    if retry_count > 0:
+                        message_content += f" [SEND FAILED - {retry_count} retries]"
+                    else:
+                        message_content += " [SEND FAILED]"
 
                 if self._focus_required(facet.facet_id):
                     return f"{focus_content}\n\n{msg_tag}{message_content}</msg>"
@@ -2050,6 +2057,9 @@ class FacetAwareHUDComponent(Component):
                 # Add status indicators
                 if message_status == "pending_send":
                     message_content += " [PENDING CONFIRMATION]"
+                elif message_status == "retrying":
+                    # Note: retry_count not available in this method context, using generic message
+                    message_content += " [RETRYING]"
                 elif message_status == "failed_to_send":
                     message_content += " [SEND FAILED]"
 
@@ -2407,26 +2417,19 @@ class FacetAwareHUDComponent(Component):
         return """TOOL CALL FORMAT: Use XML format for all tool calls. Do NOT use JSON format.
 
 To call tools, use this ultra-concise XML format to send messages:
-<tool_calls>
+
 <msg source="element_name">message</msg>
-</tool_calls>
 
 and this format to use any other tool:
-<tool_calls>
 <tool_name param1="value1" param2="value2" source="element_name">
-</tool_calls>
 
 Examples:
-<tool_calls>
 <msg source="discord_chat">Hello, world!</msg>
-</tool_calls>
 
-<tool_calls>
 <execute_command command="ls -la" source="Terminal">
 <msg source="zulip_chat">Command executed!</msg>
-</tool_calls>
 
-Use the actual tool name as the XML element name. You can make multiple tool calls in one <tool_calls> block. The source parameter specifies which conversation or element to use - choose from the sources listed for each tool type."""
+Use the actual tool name as the XML element name. You can make multiple tool calls in one response. The source parameter specifies which conversation or element to use - choose from the sources listed for each tool type."""
 
     def _should_render_agent_message(self, message_facet: VEILFacet, system_state: Dict[str, Any]) -> bool:
         """

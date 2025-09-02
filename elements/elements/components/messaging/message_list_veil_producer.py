@@ -142,6 +142,9 @@ class MessageListVeilProducer(VeilProducer):
                     # NEW: Include reaction data for HUD rendering
                     "reactions": msg_data.get('reactions', {}),  # Include full reaction dict {emoji: [user_ids]}
                     "message_status": msg_data.get('status', 'received'),  # Include message status for pending states
+                    # NEW: Include retry information for HUD display
+                    "retry_count": msg_data.get('retry_count', 0),
+                    "retry_reason": msg_data.get('retry_reason', None),
                     # VEIL_ATTACHMENT_METADATA_PROP: processed_attachments_from_mlc # Store the rich attachment dicts
                     # Let's refine this: the VEIL_ATTACHMENT_METADATA_PROP should probably just be the metadata part,
                     # and the content part should lead to a child node if content exists.

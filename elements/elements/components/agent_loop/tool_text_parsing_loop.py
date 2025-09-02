@@ -172,8 +172,7 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
             if not llm_response_obj:
                 logger.warning(f"{self.agent_loop_name} ({self.id}): LLM returned no response. Aborting cycle.")
                 return
-            logger.critical("RESPONSE RECEIVED")
-            logger.critical(f"LLM response: {llm_response_obj}")
+
             agent_response_text = llm_response_obj.content or ""
             logger.info(f"LLM response: {len(agent_response_text)} chars")
 
@@ -362,62 +361,52 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
         try:
             parsed_calls = []
 
-            # Find <tool_calls> blocks
-            tool_calls_pattern = r'<tool_calls>(.*?)</tool_calls>'
-            tool_calls_matches = re.findall(tool_calls_pattern, response_text, re.DOTALL)
-            logger.critical(f"Tool calls matches: {tool_calls_matches}")
-            logger.critical(f"Response text: {response_text}")
+            element_pattern = r'<([a-zA-Z_][a-zA-Z0-9_]*)\s*([^>]*)>(.*?)</\1>'
+            element_matches = re.findall(element_pattern, response_text, re.DOTALL)
 
-            for tool_calls_block in tool_calls_matches:
-                # Find all XML elements with their attributes AND content
-                # This pattern captures: tag name, attributes string, and inner content
-                element_pattern = r'<([a-zA-Z_][a-zA-Z0-9_]*)\s*([^>]*)>(.*?)</\1>'
-                element_matches = re.findall(element_pattern, tool_calls_block, re.DOTALL)
+            for tool_name, attributes_str, inner_content in element_matches:
+                try:
+                    # Parse attributes from the attributes string
+                    parameters = {}
 
-                for tool_name, attributes_str, inner_content in element_matches:
-                    try:
-                        # Parse attributes from the attributes string
-                        parameters = {}
+                    # Add the inner content to the parameters (if not empty)
+                    inner_content = inner_content.strip()
+                    if inner_content:
+                        parameters["inner_content"] = inner_content
 
-                        # Add the inner content to the parameters (if not empty)
-                        inner_content = inner_content.strip()
-                        if inner_content:
-                            parameters["inner_content"] = inner_content
+                    # Extract all attribute="value" pairs
+                    attr_pattern = r'(\w+)="([^"]*)"'
+                    attr_matches = re.findall(attr_pattern, attributes_str)
 
-                        # Extract all attribute="value" pairs
-                        attr_pattern = r'(\w+)="([^"]*)"'
-                        attr_matches = re.findall(attr_pattern, attributes_str)
-
-                        for attr_name, attr_value in attr_matches:
-                            # Try to parse as JSON/number, fall back to string
-                            try:
-                                # Try parsing as number first
-                                if attr_value.isdigit():
-                                    parameters[attr_name] = int(attr_value)
-                                elif attr_value.replace('.', '').replace('-', '').isdigit():
-                                    parameters[attr_name] = float(attr_value)
-                                # Try parsing as JSON for complex types
-                                elif attr_value.startswith(('[', '{')):
-                                    parameters[attr_name] = json.loads(attr_value)
-                                else:
-                                    parameters[attr_name] = attr_value
-                            except:
+                    for attr_name, attr_value in attr_matches:
+                        # Try to parse as JSON/number, fall back to string
+                        try:
+                            # Try parsing as number first
+                            if attr_value.isdigit():
+                                parameters[attr_name] = int(attr_value)
+                            elif attr_value.replace('.', '').replace('-', '').isdigit():
+                                parameters[attr_name] = float(attr_value)
+                            # Try parsing as JSON for complex types
+                            elif attr_value.startswith(('[', '{')):
+                                parameters[attr_name] = json.loads(attr_value)
+                            else:
                                 parameters[attr_name] = attr_value
+                        except:
+                            parameters[attr_name] = attr_value
 
-                        if tool_name:
-                            logger.critical(f"Parsed ultra-concise XML tool call: {tool_name} with params: {list(parameters.keys())}")
-                            parsed_call = ParsedToolCall(
-                                tool_name=tool_name,
-                                parameters=parameters,
-                                target_element_name=parameters.get("source"),
-                                raw_text=f'<{tool_name} {attributes_str}>'
-                            )
-                            parsed_calls.append(parsed_call)
-                            logger.info(f"Parsed ultra-concise XML tool call: {tool_name} with params: {list(parameters.keys())}")
+                    if tool_name:
+                        parsed_call = ParsedToolCall(
+                            tool_name=tool_name,
+                            parameters=parameters,
+                            target_element_name=parameters.get("source"),
+                            raw_text=f'<{tool_name} {attributes_str}>'
+                        )
+                        parsed_calls.append(parsed_call)
+                        logger.info(f"Parsed ultra-concise XML tool call: {tool_name} with params: {list(parameters.keys())}")
 
-                    except Exception as e:
-                        logger.warning(f"Failed to parse ultra-concise XML tool call '{tool_name}': {e}")
-                        continue
+                except Exception as e:
+                    logger.warning(f"Failed to parse ultra-concise XML tool call '{tool_name}': {e}")
+                    continue
 
             return parsed_calls
 
@@ -531,11 +520,10 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
         try:
             cleaned_text = response_text
 
-            # Remove <tool_calls> XML blocks (ultra-concise format)
-            cleaned_text = re.sub(r'<tool_calls>.*?</tool_calls>', '', cleaned_text, flags=re.DOTALL)
-
-            # Remove old-style <tool_call> XML blocks (backward compatibility)
-            cleaned_text = re.sub(r'<tool_call\s+[^>]*>.*?</tool_call>', '', cleaned_text, flags=re.DOTALL)
+            # Remove individual tool XML elements using the same pattern as parsing
+            # This matches the same format as _parse_xml_tool_calls: <tool_name attributes>content</tool_name>
+            element_pattern = r'<([a-zA-Z_][a-zA-Z0-9_]*)\s*([^>]*)>(.*?)</\1>'
+            cleaned_text = re.sub(element_pattern, '', cleaned_text, flags=re.DOTALL)
 
             # Clean up extra whitespace
             cleaned_text = re.sub(r'\n\s*\n', '\n\n', cleaned_text)
