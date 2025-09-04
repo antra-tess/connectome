@@ -760,6 +760,17 @@ class TUIInspector:
         self.status_message = f"Loading {name}..."
         try:
             data = await self._fetch_endpoint_data(cmd)
+            
+            # DEBUG: Save actual data structure to file for inspection
+            import json
+            debug_file = f"/tmp/inspector_data_{cmd}.json"
+            try:
+                with open(debug_file, 'w') as f:
+                    json.dump(data, f, indent=2, default=str)
+                logger.info(f"DEBUG: Saved actual data structure to {debug_file}")
+            except Exception as e:
+                logger.error(f"Failed to save debug data: {e}")
+            
             self.tree_root = await self._build_tree_from_data(data, name)
             self.current_tree_node = self.tree_root.children[0] if self.tree_root.children else None
             self.mode = NavigationMode.TREE_VIEW
@@ -824,12 +835,27 @@ class TUIInspector:
         def build_node(obj: Any, label: str, parent: TreeNode, path: str = "") -> TreeNode:
             node = TreeNode(path or label, label, obj, parent=parent)
             
-            # Check if this node is HUD viewable (matching web UI logic)
-            if isinstance(obj, dict) and self._is_space_like_node(obj, label, path):
-                hud_info = self._check_hud_viewable(obj, label, path)
-                if hud_info:
-                    node.is_hud_viewable = True
-                    node.hud_space_id = hud_info
+            # Debug logging for all dict nodes
+            if isinstance(obj, dict):
+                logger.debug(f"Processing node: label='{label}', path='{path}', keys={list(obj.keys())[:5]}...")
+                
+                # Check if this is a space-like node
+                is_space_like = self._is_space_like_node(obj, label, path)
+                logger.debug(f"  -> is_space_like: {is_space_like}")
+                
+                if is_space_like:
+                    # Check if it's HUD viewable
+                    hud_info = self._check_hud_viewable(obj, label, path)
+                    logger.debug(f"  -> hud_info: {hud_info}")
+                    
+                    if hud_info:
+                        node.is_hud_viewable = True
+                        node.hud_space_id = hud_info
+                        logger.info(f"✓ Found HUD-viewable node: {label} at {path} -> space_id: {hud_info}")
+                    else:
+                        logger.debug(f"  -> No HUD capability found for {label}")
+                else:
+                    logger.debug(f"  -> Not space-like: {label}")
             
             if isinstance(obj, dict):
                 node.children = []
@@ -1027,10 +1053,27 @@ class TUIInspector:
         if not isinstance(obj, dict):
             return False
         
-        # Check for common space-like properties
-        space_indicators = ['type', 'id', 'name', 'elements', 'agent_id', 
-                           'space_info', 'agent_loop', 'components', 'hud']
-        return any(key in obj for key in space_indicators)
+        path_parts = path.split('.')
+        logger.debug(f"    _is_space_like_node: path_parts={path_parts}, obj_keys={list(obj.keys())[:3]}")
+        
+        # Check for space structure (from spaces endpoint)
+        if len(path_parts) >= 2 and path_parts[-2] == "details":
+            has_type = 'type' in obj
+            has_elements_or_components = 'elements' in obj or 'components' in obj
+            result = has_type and has_elements_or_components
+            logger.debug(f"    -> Space check: has_type={has_type}, has_elements_or_components={has_elements_or_components} -> {result}")
+            return result
+        
+        # Check for agent structure (from agents endpoint)  
+        if len(path_parts) >= 2 and path_parts[-2] == "agents":
+            has_agent_id = 'agent_id' in obj
+            is_inner_space = 'type' in obj and 'InnerSpace' in str(obj.get('type', ''))
+            result = has_agent_id or is_inner_space
+            logger.debug(f"    -> Agent check: has_agent_id={has_agent_id}, is_inner_space={is_inner_space} -> {result}")
+            return result
+            
+        logger.debug(f"    -> Neither space nor agent structure")
+        return False
     
     def _check_hud_viewable(self, obj: Dict[str, Any], label: str, path: str) -> Optional[str]:
         """Check if a node has HUD view capability and return space_id if available."""
@@ -1038,51 +1081,84 @@ class TUIInspector:
         if 'hud' in obj:
             return self._extract_space_id(obj, label, path)
         
-        # Check if it has a 'components' child with facet-aware HUD component  
-        if 'components' in obj and isinstance(obj['components'], dict):
+        # Check if it has a 'components' with facet-aware HUD component  
+        if 'components' in obj:
             if self._has_facet_aware_hud_component(obj['components']):
                 return self._extract_space_id(obj, label, path)
         
+        # Check if any of its elements have HUD components
+        if 'elements' in obj and isinstance(obj['elements'], dict):
+            for element_id, element_data in obj['elements'].items():
+                if isinstance(element_data, dict) and 'components' in element_data:
+                    if self._has_facet_aware_hud_component(element_data['components']):
+                        return self._extract_space_id(obj, label, path)
+        
         return None
     
-    def _has_facet_aware_hud_component(self, components: Dict[str, Any]) -> bool:
+    def _has_facet_aware_hud_component(self, components) -> bool:
         """Check if components contain a facet-aware HUD component."""
-        for comp_id, comp in components.items():
-            if isinstance(comp, dict):
-                # Check component ID patterns
-                comp_id_lower = comp_id.lower()
-                if ('facetawarehudcomponent' in comp_id_lower or
-                    'facet_aware_hud' in comp_id_lower or
-                    'hud' in comp_id_lower):
-                    return True
-                    
-                # Check component type
-                comp_type = comp.get('type', '')
-                if isinstance(comp_type, str):
-                    comp_type_lower = comp_type.lower()
-                    if ('facetawarehudcomponent' in comp_type_lower or
-                        'facet_aware_hud' in comp_type_lower):
+        # Components can be either a dict (old format) or a list (new format)
+        if isinstance(components, list):
+            # New format: list of component info dicts
+            for comp in components:
+                if isinstance(comp, dict):
+                    # Check component ID patterns
+                    comp_id = comp.get('id', '').lower()
+                    if ('facetawarehudcomponent' in comp_id or
+                        'facet_aware_hud' in comp_id or
+                        'hud' in comp_id):
                         return True
+                        
+                    # Check component type and class_path
+                    comp_type = comp.get('type', '').lower()
+                    class_path = comp.get('class_path', '').lower()
+                    if ('facetawarehudcomponent' in comp_type or
+                        'facet_aware_hud' in comp_type or
+                        'facetawarehudcomponent' in class_path or
+                        'facet_aware_hud' in class_path):
+                        return True
+        elif isinstance(components, dict):
+            # Old format: dict of component_id -> component_info
+            for comp_id, comp in components.items():
+                if isinstance(comp, dict):
+                    # Check component ID patterns
+                    comp_id_lower = comp_id.lower()
+                    if ('facetawarehudcomponent' in comp_id_lower or
+                        'facet_aware_hud' in comp_id_lower or
+                        'hud' in comp_id_lower):
+                        return True
+                        
+                    # Check component type
+                    comp_type = comp.get('type', '')
+                    if isinstance(comp_type, str):
+                        comp_type_lower = comp_type.lower()
+                        if ('facetawarehudcomponent' in comp_type_lower or
+                            'facet_aware_hud' in comp_type_lower):
+                            return True
         
         return False
     
     def _extract_space_id(self, obj: Dict[str, Any], label: str, path: str) -> str:
         """Extract space ID from object, label, or path."""
+        # For spaces/agents endpoints, the space ID is typically the key in the path
+        path_parts = path.split('.')
+        
+        # For spaces endpoint: path like "details.space_id"
+        if len(path_parts) >= 2 and path_parts[-2] == "details":
+            return path_parts[-1]  # space_id
+            
+        # For agents endpoint: path like "agents.agent_id"
+        if len(path_parts) >= 2 and path_parts[-2] == "agents":
+            return path_parts[-1]  # agent_id (which is the space_id)
+        
         # Try direct space ID field
-        for id_field in ['space_id', 'id', 'agent_id']:
+        for id_field in ['id', 'agent_id']:
             if id_field in obj:
                 return str(obj[id_field])
         
-        # Use label as space ID (common case for spaces/agents views)
+        # Use label as space ID (fallback case)
         if label and label != "root":
             return label
-        
-        # Extract from path
-        if path:
-            path_parts = path.split('.')
-            for part in reversed(path_parts):
-                if part and part != "root":
-                    return part
         
         return "unknown"
 

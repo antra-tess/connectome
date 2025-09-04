@@ -37,6 +37,7 @@ class NavigationMode(Enum):
     DETAIL_VIEW = "detail_view"
     HOST_SELECTION = "host_selection"
     REPL_MODE = "repl_mode"
+    HUD_VIEW = "hud_view"
 
 
 @dataclass
@@ -53,6 +54,8 @@ class TreeNode:
     command_path: Optional[str] = None  # For executable commands
     write_endpoint: Optional[str] = None  # For editable nodes
     drill_down_endpoint: Optional[str] = None  # For nodes that support detail drilling
+    is_hud_viewable: bool = False  # For HUD-viewable nodes
+    hud_space_id: Optional[str] = None  # Space ID for HUD view
 
 
 class TerminalController:
@@ -212,6 +215,10 @@ class IPCTUIInspector:
         self.tree_root = None
         self.scroll_offset = 0
         self.search_query = ""
+        
+        # HUD view state
+        self.hud_content = ""
+        self.current_hud_space_id = None
         
         # Detail view state
         self._detail_tree_root = None
@@ -407,6 +414,8 @@ class IPCTUIInspector:
                 await self._render_tree_view()
             elif self.mode == NavigationMode.DETAIL_VIEW:
                 await self._render_detail_view()
+            elif self.mode == NavigationMode.HUD_VIEW:
+                await self._render_hud_view()
             elif self.mode == NavigationMode.REPL_MODE:
                 await self._render_repl_view()
             
@@ -437,6 +446,8 @@ class IPCTUIInspector:
             breadcrumb = f" > {self.current_tree_node.label} > Details"
         elif self.mode == NavigationMode.HOST_SELECTION:
             breadcrumb = " > Select Host"
+        elif self.mode == NavigationMode.HUD_VIEW:
+            breadcrumb = f" > HUD View > {self.current_hud_space_id or 'Unknown'}"
         elif self.mode == NavigationMode.REPL_MODE:
             context_desc = f"{self.repl_context_type}:{self.repl_context_id}" if self.repl_context_type != "global" else "global"
             breadcrumb = f" > Python REPL [{context_desc}]"
@@ -828,6 +839,10 @@ class IPCTUIInspector:
             if not is_detail_mode and (node.node_type in ["command", "action"] or node.drill_down_endpoint) and not node.is_editable:
                 display_text += " [Enter - 🔎]"
             
+            # Add HUD view indicator if available
+            if node.is_hud_viewable:
+                display_text += " [H - 👁️]"
+            
             # Truncate if too long
             max_width = cols - col - 2
             if len(display_text) > max_width:
@@ -1060,9 +1075,11 @@ class IPCTUIInspector:
                 controls_end = ") • R: Refresh • Q: Quit"
                 controls = (controls_base, rt_status, controls_end)  # Store as tuple for colored rendering
             else:
-                controls = "↑↓: Navigate • →: Expand • ←: Collapse • Enter: Details • E: Edit • B: Back • R: Refresh • Q: Quit"
+                controls = "↑↓: Navigate • →: Expand • ←: Collapse • Enter: Details • E: Edit • H: HUD • B: Back • R: Refresh • Q: Quit"
         elif self.mode == NavigationMode.DETAIL_VIEW:
             controls = "↑↓: Navigate • →: Expand • ←: Collapse • E: Edit • B: Back • Q: Quit"
+        elif self.mode == NavigationMode.HUD_VIEW:
+            controls = "↑↓: Scroll • Page Up/Down: Page • Home/End: Jump • R: Refresh • B: Back • Q: Quit"
         elif self.mode == NavigationMode.REPL_MODE:
             controls = "Enter: Execute/Drill • Tab: Complete • ↑↓: Scroll/History • Ctrl+B: Back • Ctrl+L: Clear • Ctrl+D: Quit"
         else:
@@ -1180,6 +1197,8 @@ class IPCTUIInspector:
             await self._handle_tree_view_input(key)
         elif self.mode == NavigationMode.DETAIL_VIEW:
             await self._handle_detail_view_input(key)
+        elif self.mode == NavigationMode.HUD_VIEW:
+            await self._handle_hud_view_input(key)
     
     async def _handle_host_selection_input(self, key: str):
         """Handle input in host selection mode."""
@@ -1223,6 +1242,8 @@ class IPCTUIInspector:
             await self._view_node_details()
         elif key in ['e', 'E']:
             await self._edit_current_node()
+        elif key in ['h', 'H']:
+            await self._view_hud()
         elif key in ['b', 'B']:
             self.mode = NavigationMode.MAIN_MENU
             self.status_message = ""
@@ -1316,6 +1337,119 @@ class IPCTUIInspector:
         
         return response.get("result", {})
     
+    def _is_space_like_node(self, obj: Dict[str, Any], label: str, path: str) -> bool:
+        """Check if a node is space-like (matches web UI logic)."""
+        if not isinstance(obj, dict):
+            return False
+        
+        path_parts = path.split('.')
+        logger.debug(f"    _is_space_like_node: path_parts={path_parts}, obj_keys={list(obj.keys())[:3]}")
+        
+        # Check for space structure (from spaces endpoint)
+        if len(path_parts) >= 2 and path_parts[-2] == "details":
+            has_type = 'type' in obj
+            has_elements_or_components = 'elements' in obj or 'components' in obj
+            result = has_type and has_elements_or_components
+            logger.debug(f"    -> Space check: has_type={has_type}, has_elements_or_components={has_elements_or_components} -> {result}")
+            return result
+        
+        # Check for agent structure (from agents endpoint)  
+        if len(path_parts) >= 2 and path_parts[-2] == "agents":
+            has_agent_id = 'agent_id' in obj
+            is_inner_space = 'type' in obj and 'InnerSpace' in str(obj.get('type', ''))
+            result = has_agent_id or is_inner_space
+            logger.debug(f"    -> Agent check: has_agent_id={has_agent_id}, is_inner_space={is_inner_space} -> {result}")
+            return result
+            
+        logger.debug(f"    -> Neither space nor agent structure")
+        return False
+    
+    def _check_hud_viewable(self, obj: Dict[str, Any], label: str, path: str) -> Optional[str]:
+        """Check if a node has HUD view capability and return space_id if available."""
+        # Check if it has a direct 'hud' child
+        if 'hud' in obj:
+            return self._extract_space_id(obj, label, path)
+        
+        # Check if it has a 'components' with facet-aware HUD component  
+        if 'components' in obj:
+            if self._has_facet_aware_hud_component(obj['components']):
+                return self._extract_space_id(obj, label, path)
+        
+        # Check if any of its elements have HUD components
+        if 'elements' in obj and isinstance(obj['elements'], dict):
+            for element_id, element_data in obj['elements'].items():
+                if isinstance(element_data, dict) and 'components' in element_data:
+                    if self._has_facet_aware_hud_component(element_data['components']):
+                        return self._extract_space_id(obj, label, path)
+        
+        return None
+    
+    def _has_facet_aware_hud_component(self, components) -> bool:
+        """Check if components contain a facet-aware HUD component."""
+        # Components can be either a dict (old format) or a list (new format)
+        if isinstance(components, list):
+            # New format: list of component info dicts
+            for comp in components:
+                if isinstance(comp, dict):
+                    # Check component ID patterns
+                    comp_id = comp.get('id', '').lower()
+                    if ('facetawarehudcomponent' in comp_id or
+                        'facet_aware_hud' in comp_id or
+                        'hud' in comp_id):
+                        return True
+                        
+                    # Check component type and class_path
+                    comp_type = comp.get('type', '').lower()
+                    class_path = comp.get('class_path', '').lower()
+                    if ('facetawarehudcomponent' in comp_type or
+                        'facet_aware_hud' in comp_type or
+                        'facetawarehudcomponent' in class_path or
+                        'facet_aware_hud' in class_path):
+                        return True
+        elif isinstance(components, dict):
+            # Old format: dict of component_id -> component_info
+            for comp_id, comp in components.items():
+                if isinstance(comp, dict):
+                    # Check component ID patterns
+                    comp_id_lower = comp_id.lower()
+                    if ('facetawarehudcomponent' in comp_id_lower or
+                        'facet_aware_hud' in comp_id_lower or
+                        'hud' in comp_id_lower):
+                        return True
+                        
+                    # Check component type field
+                    comp_type = comp.get('type', '').lower()
+                    if comp_type:
+                        if ('facetawarehudcomponent' in comp_type or
+                            'facet_aware_hud' in comp_type):
+                            return True
+        
+        return False
+    
+    def _extract_space_id(self, obj: Dict[str, Any], label: str, path: str) -> str:
+        """Extract space ID from object, label, or path."""
+        # For spaces/agents endpoints, the space ID is typically the key in the path
+        path_parts = path.split('.')
+        
+        # For spaces endpoint: path like "details.space_id"
+        if len(path_parts) >= 2 and path_parts[-2] == "details":
+            return path_parts[-1]  # space_id
+            
+        # For agents endpoint: path like "agents.agent_id"
+        if len(path_parts) >= 2 and path_parts[-2] == "agents":
+            return path_parts[-1]  # agent_id (which is the space_id)
+        
+        # Try direct space ID field
+        for id_field in ['id', 'agent_id']:
+            if id_field in obj:
+                return str(obj[id_field])
+        
+        # Use label as space ID (fallback case)
+        if label and label != "root":
+            return label
+        
+        return "unknown"
+    
     async def _build_tree_from_data(self, data: Any, root_label: str, endpoint: str, context: Dict[str, Any] = None) -> TreeNode:
         """Build a tree structure from the data."""
         root = TreeNode("root", root_label)
@@ -1323,6 +1457,28 @@ class IPCTUIInspector:
         
         def build_node(obj: Any, label: str, parent: TreeNode, path: str = "", depth: int = 0) -> TreeNode:
             node = TreeNode(path or label, label, obj, parent=parent)
+            
+            # Check for HUD viewability
+            if isinstance(obj, dict):
+                logger.debug(f"Processing node: label='{label}', path='{path}', keys={list(obj.keys())[:5]}...")
+                
+                # Check if this is a space-like node
+                is_space_like = self._is_space_like_node(obj, label, path)
+                logger.debug(f"  -> is_space_like: {is_space_like}")
+                
+                if is_space_like:
+                    # Check if it's HUD viewable
+                    hud_info = self._check_hud_viewable(obj, label, path)
+                    logger.debug(f"  -> hud_info: {hud_info}")
+                    
+                    if hud_info:
+                        node.is_hud_viewable = True
+                        node.hud_space_id = hud_info
+                        logger.info(f"✓ Found HUD-viewable node: {label} at {path} -> space_id: {hud_info}")
+                    else:
+                        logger.debug(f"  -> No HUD capability found for {label}")
+                else:
+                    logger.debug(f"  -> Not space-like: {label}")
             
             # Determine if this is a writable endpoint based on the data structure and endpoint type
             if isinstance(obj, dict):
@@ -3199,6 +3355,124 @@ class IPCTUIInspector:
 
     # === REPL FUNCTIONALITY ===
     
+    async def _view_hud(self):
+        """Switch to HUD view for the current node."""
+        if not self.current_tree_node or not self.current_tree_node.is_hud_viewable:
+            self.status_message = "This node does not have HUD view capability"
+            return
+        
+        # Set HUD view state
+        self.current_hud_space_id = self.current_tree_node.hud_space_id
+        self.mode = NavigationMode.HUD_VIEW
+        self.scroll_offset = 0
+        self.hud_content = ""  # Clear old content
+        
+        # Load HUD content
+        await self._load_hud_content()
+    
+    async def _load_hud_content(self):
+        """Load HUD content from the server."""
+        if not self.current_hud_space_id:
+            self.status_message = "No space ID available for HUD view"
+            return
+        
+        try:
+            self.status_message = "Loading HUD content..."
+            
+            # Request HUD rendering via IPC
+            response = await self.executor.execute_command(
+                "space-render",
+                {
+                    "space_id": self.current_hud_space_id,
+                    "format": "markdown"
+                }
+            )
+            
+            if response.get("error"):
+                self.hud_content = f"Error loading HUD: {response['error']}"
+            else:
+                result = response.get("result", {})
+                self.hud_content = result.get('content', 'No content available')
+            
+            self.status_message = f"Loaded HUD for {self.current_hud_space_id}"
+            
+        except Exception as e:
+            self.hud_content = f"Error loading HUD: {str(e)}"
+            self.status_message = f"Failed to load HUD: {str(e)}"
+    
+    async def _render_hud_view(self):
+        """Render HUD view interface."""
+        rows, cols = self.terminal.get_terminal_size()
+        
+        # HUD header
+        self.terminal.move_cursor(4, 2)
+        self.terminal.set_color('bright_green', bold=True)
+        print(f"👁️ HUD View: {self.current_hud_space_id or 'Unknown'}")
+        self.terminal.reset_colors()
+        
+        if not self.hud_content:
+            self.terminal.move_cursor(6, 2)
+            self.terminal.set_color('yellow')
+            print("Loading HUD content...")
+            self.terminal.reset_colors()
+            return
+        
+        # HUD content
+        content_start_row = 6
+        hud_lines = self.hud_content.split('\n')
+        max_display_lines = rows - 8  # Leave space for header and footer
+        
+        for i, line in enumerate(hud_lines[self.scroll_offset:]):
+            if i >= max_display_lines:
+                break
+            
+            self.terminal.move_cursor(content_start_row + i, 2)
+            
+            # Simple markdown formatting
+            if line.startswith('#'):
+                self.terminal.set_color('bright_cyan', bold=True)
+            elif line.startswith('-') or line.startswith('*'):
+                self.terminal.set_color('green')
+            elif line.startswith('  '):
+                self.terminal.set_color('bright_black')
+            else:
+                self.terminal.set_color('white')
+            
+            # Truncate long lines
+            if len(line) > cols - 4:
+                line = line[:cols - 7] + "..."
+            
+            print(line)
+            self.terminal.reset_colors()
+    
+    async def _handle_hud_view_input(self, key: str):
+        """Handle input in HUD view mode."""
+        hud_lines = self.hud_content.split('\n')
+        rows, cols = self.terminal.get_terminal_size()
+        max_display_lines = rows - 8
+        
+        if key == 'ESC[A':  # Up arrow
+            self.scroll_offset = max(0, self.scroll_offset - 1)
+        elif key == 'ESC[B':  # Down arrow
+            max_offset = max(0, len(hud_lines) - max_display_lines)
+            self.scroll_offset = min(max_offset, self.scroll_offset + 1)
+        elif key == 'ESC[5~':  # Page Up
+            self.scroll_offset = max(0, self.scroll_offset - max_display_lines)
+        elif key == 'ESC[6~':  # Page Down
+            max_offset = max(0, len(hud_lines) - max_display_lines)
+            self.scroll_offset = min(max_offset, self.scroll_offset + max_display_lines)
+        elif key in ['ESC[1~', 'ESC[H']:  # Home
+            self.scroll_offset = 0
+        elif key in ['ESC[4~', 'ESC[F']:  # End
+            max_offset = max(0, len(hud_lines) - max_display_lines)
+            self.scroll_offset = max_offset
+        elif key in ['b', 'B', 'ESC']:
+            # Back to tree view
+            self.mode = NavigationMode.TREE_VIEW
+            self.status_message = ""
+        elif key in ['r', 'R', 'F5', 'ESC[15~']:
+            await self._load_hud_content()
+
     async def _enter_repl_mode(self):
         """Enter REPL mode with global context."""
         self.repl_context_type = "global" 
