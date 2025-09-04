@@ -79,6 +79,7 @@ class CLICommandHandler:
             'veil-facets': self._handle_veil_facets,
             'veil-facet-details': self._handle_veil_facet_details,
             'health': self._handle_health,
+            'space-render': self._handle_space_render,
             # Write commands
             'update-timeline-event': self._handle_update_timeline_event,
             'update-veil-facet': self._handle_update_veil_facet,
@@ -342,6 +343,16 @@ class CLICommandHandler:
     async def _handle_health(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Handle health command."""
         return await self.handlers.handle_health()
+    
+    async def _handle_space_render(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle space-render command."""
+        space_id = args.get('space_id')
+        options = {
+            'format': args.get('format', 'markdown'),
+            'include_tools': args.get('include_tools', False),
+            'max_messages': args.get('max_messages', 50)
+        }
+        return await self.handlers.handle_space_render(space_id, options)
     
     async def _handle_update_timeline_event(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Handle update-timeline-event command."""
