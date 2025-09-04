@@ -75,6 +75,10 @@ class BaseElement:
         # Components
         self._components: Dict[str, 'Component'] = {}
 
+        # Godot-inspired ready system
+        self._is_ready = False
+        self._ready_called = False
+
         logger.info(f"Created element: {name} ({element_id})")
 
         # Note: Components are typically added by subclasses or factories *after* base init.
@@ -494,3 +498,68 @@ class BaseElement:
             parent.receive_delta(delta)
         else:
             logger.warning(f"[{self.id}] No owner or receive_delta method on owner for element {self.id}")
+    
+    # --- Godot-inspired Ready Cascade System ---
+    
+    def _ready(self) -> None:
+        """
+        Godot-inspired ready method - called when this element becomes ready.
+        
+        Override in subclasses for element-specific ready logic.
+        The ready cascade ensures no element is ready until its parent is ready.
+        """
+        if self._ready_called:
+            return
+        
+        self._ready_called = True
+        self._is_ready = True
+        
+        logger.debug(f"[{self.id}] Element entering ready state")
+        
+        # First, cascade ready to all mounted child elements (if we're a container)
+        self._cascade_ready_to_children()
+        
+        # Then, notify all components that this element is ready
+        self._notify_components_element_ready()
+    
+    def _cascade_ready_to_children(self) -> None:
+        """
+        Cascade ready to child elements if this element has a container.
+        """
+        # Check if this element has a container component (i.e., it's a Space)
+        if hasattr(self, '_container') and self._container:
+            mounted_elements = self._container.get_mounted_elements()
+            logger.debug(f"[{self.id}] Cascading ready to {len(mounted_elements)} child elements")
+            
+            for mount_id, element in mounted_elements.items():
+                if hasattr(element, '_ready'):
+                    try:
+                        element._ready()
+                        logger.debug(f"[{self.id}] ✓ Ready cascaded to child element {mount_id}")
+                    except Exception as e:
+                        logger.error(f"[{self.id}] Error cascading ready to child element {mount_id}: {e}", exc_info=True)
+        else:
+            logger.debug(f"[{self.id}] No container component, no children to cascade ready to")
+    
+    def _notify_components_element_ready(self) -> None:
+        """
+        Notify all components that this element is ready.
+        """
+        logger.debug(f"[{self.id}] Notifying {len(self._components)} components that element is ready")
+        
+        for component_id, component in self._components.items():
+            if hasattr(component, '_on_element_ready'):
+                try:
+                    component._on_element_ready()
+                    logger.debug(f"[{self.id}] ✓ Notified component {component_id} that element is ready")
+                except Exception as e:
+                    logger.error(f"[{self.id}] Error notifying component {component_id} of element ready: {e}", exc_info=True)
+    
+    def is_ready(self) -> bool:
+        """
+        Check if this element is ready.
+        
+        Returns:
+            True if the element is ready, False otherwise
+        """
+        return self._is_ready
