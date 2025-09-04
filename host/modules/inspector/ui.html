@@ -399,6 +399,82 @@
             color: #1a1a2e;
         }
         
+        /* HUD Modal Styles */
+        .hud-modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .hud-modal-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            backdrop-filter: blur(3px);
+        }
+        
+        .hud-modal-content {
+            position: relative;
+            background: #16213e;
+            border-radius: 12px;
+            border: 2px solid #0f3460;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+            max-width: 90vw;
+            max-height: 90vh;
+            width: 1000px;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .hud-modal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid #0f3460;
+            flex-shrink: 0;
+        }
+        
+        .hud-modal-header h2 {
+            color: #00d4aa;
+            font-size: 1.2rem;
+            font-weight: 600;
+            margin: 0;
+        }
+        
+        .hud-modal-close {
+            background: none;
+            border: none;
+            color: #999;
+            font-size: 1.5rem;
+            cursor: pointer;
+            padding: 0.5rem;
+            line-height: 1;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+        
+        .hud-modal-close:hover {
+            background: #0f3460;
+            color: #fff;
+        }
+        
+        .hud-modal-body {
+            padding: 1.5rem;
+            overflow: auto;
+            flex: 1;
+            min-height: 0;
+        }
+        
         /* Console Styles */
         .console-container {
             display: none;
@@ -2755,9 +2831,6 @@
         }
         
         async function showHUDView(hudInfo, originalPath) {
-            // Push current state to navigation stack
-            pushNavigation();
-            
             const statusEl = document.getElementById('status');
             statusEl.style.display = 'inline';
             statusEl.textContent = 'Loading HUD view...';
@@ -2794,11 +2867,7 @@
                     // Success - rendered HUD content
                     const hudContent = await response.text();
                     
-                    // Update UI with HUD content
-                    updateBreadcrumb(breadcrumb);
-                    document.getElementById('data-info').textContent = `${title} • ${formatBytes(hudContent.length)}`;
-                    
-                    // Show HUD content in a special display mode
+                    // Show HUD content in modal
                     showHUDContent(hudContent, hudInfo);
                 }
                 
@@ -2812,21 +2881,28 @@
         }
         
         function showHUDContent(hudContent, hudInfo) {
-            // Clear the main content area 
-            const mainContent = document.querySelector('.main-content');
-            mainContent.innerHTML = '';
+            // Show the modal
+            const modal = document.getElementById('hud-modal');
+            const modalTitle = document.getElementById('hud-modal-title');
+            const modalBody = document.getElementById('hud-modal-body');
+            
+            // Set modal title
+            modalTitle.textContent = `HUD View: ${hudInfo.spaceId}`;
+            
+            // Clear and populate modal body
+            modalBody.innerHTML = '';
             
             // Create HUD content container
             const hudContainer = document.createElement('div');
             hudContainer.className = 'hud-content-container';
+            hudContainer.style.margin = '0'; // Remove margin for modal
+            hudContainer.style.borderRadius = '0'; // Remove border radius for modal
+            hudContainer.style.background = 'transparent'; // Transparent background in modal
             
-            // Create header with controls
+            // Create header with format controls
             const headerDiv = document.createElement('div');
             headerDiv.className = 'hud-content-header';
-            
-            const titleDiv = document.createElement('div');
-            titleDiv.innerHTML = `<strong>HUD View: ${hudInfo.spaceId}</strong>`;
-            headerDiv.appendChild(titleDiv);
+            headerDiv.style.paddingTop = '0'; // Reduce padding since modal has its own header
             
             // Format controls
             const controlsDiv = document.createElement('div');
@@ -2856,8 +2932,33 @@
             contentDiv.textContent = hudContent;
             hudContainer.appendChild(contentDiv);
             
-            mainContent.appendChild(hudContainer);
+            modalBody.appendChild(hudContainer);
+            
+            // Show the modal
+            modal.style.display = 'flex';
+            
+            // Store hudInfo globally for format switching
+            window.currentHudInfo = hudInfo;
         }
+        
+        function closeHUDModal() {
+            const modal = document.getElementById('hud-modal');
+            modal.style.display = 'none';
+            
+            // Clean up global state
+            window.currentHudInfo = null;
+        }
+        
+        // Add keyboard navigation for the modal
+        document.addEventListener('keydown', function(event) {
+            const modal = document.getElementById('hud-modal');
+            if (modal.style.display === 'flex') {
+                if (event.key === 'Escape') {
+                    closeHUDModal();
+                    event.preventDefault();
+                }
+            }
+        });
         
         async function switchHUDFormat(format, hudInfo, controlsContainer) {
             const statusEl = document.getElementById('status');
@@ -4244,5 +4345,19 @@
             // loadEndpoint('/status');
         });
     </script>
+
+    <!-- HUD Modal -->
+    <div id="hud-modal" class="hud-modal" style="display: none;">
+        <div class="hud-modal-overlay" onclick="closeHUDModal()"></div>
+        <div class="hud-modal-content">
+            <div class="hud-modal-header">
+                <h2 id="hud-modal-title">HUD View</h2>
+                <button class="hud-modal-close" onclick="closeHUDModal()">&times;</button>
+            </div>
+            <div class="hud-modal-body" id="hud-modal-body">
+                <!-- HUD content will be inserted here -->
+            </div>
+        </div>
+    </div>
 </body>
 </html>
