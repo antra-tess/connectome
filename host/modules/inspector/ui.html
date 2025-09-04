@@ -331,6 +331,74 @@
             opacity: 1;
         }
         
+        /* HUD View functionality styles */
+        .hud-view-btn {
+            background: #00d4aa !important;
+            color: #1a1a2e !important;
+            border: none !important;
+            padding: 2px 6px !important;
+            margin-left: 4px !important;
+            font-size: 0.7rem !important;
+            border-radius: 3px !important;
+            cursor: pointer !important;
+            opacity: 0.8;
+            transition: opacity 0.2s, background-color 0.2s;
+            font-weight: 600 !important;
+        }
+        
+        .hud-view-btn:hover {
+            opacity: 1;
+            background: #00b894 !important;
+        }
+        
+        /* HUD Content Display Styles */
+        .hud-content-container {
+            padding: 1rem;
+            background: #16213e;
+            border-radius: 8px;
+            margin: 1rem;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            line-height: 1.6;
+            color: #eee;
+            white-space: pre-wrap;
+            overflow-x: auto;
+            max-width: 100%;
+        }
+        
+        .hud-content-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.5rem 0 1rem 0;
+            border-bottom: 1px solid #0f3460;
+            margin-bottom: 1rem;
+        }
+        
+        .hud-format-controls {
+            display: flex;
+            gap: 0.5rem;
+        }
+        
+        .hud-format-btn {
+            background: #0f3460;
+            color: #eee;
+            border: 1px solid #00d4aa;
+            padding: 0.3rem 0.8rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            cursor: pointer;
+        }
+        
+        .hud-format-btn.active {
+            background: #00d4aa;
+            color: #1a1a2e;
+        }
+        
+        .hud-format-btn:hover {
+            background: #00b894;
+            color: #1a1a2e;
+        }
+        
         /* Console Styles */
         .console-container {
             display: none;
@@ -1455,6 +1523,10 @@
             const drillInfo = isDrillableNode(currentPath, value);
             const isDrillable = drillInfo !== null;
             
+            // Determine if this node has HUD view capability
+            const hudInfo = isHUDViewableNode(currentPath, value);
+            const isHUDViewable = hudInfo !== null;
+            
             // Create node header
             const headerDiv = document.createElement('div');
             headerDiv.className = isEditable ? 'editable-node' : (isDrillable ? 'drillable-node' : '');
@@ -1541,6 +1613,20 @@
                     drillDown(drillInfo, currentPath);
                 };
                 headerDiv.appendChild(drillBtn);
+            }
+            
+            // Add HUD view button for HUD-viewable nodes  
+            if (isHUDViewable) {
+                const hudBtn = document.createElement('button');
+                hudBtn.textContent = '👁️';
+                hudBtn.className = 'hud-view-btn';
+                hudBtn.title = 'View HUD';
+                
+                hudBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    showHUDView(hudInfo, currentPath);
+                };
+                headerDiv.appendChild(hudBtn);
             }
             
             nodeDiv.appendChild(headerDiv);
@@ -2511,6 +2597,40 @@
             return null;
         }
         
+        function isHUDViewableNode(path, value) {
+            const pathStr = path.join('.');
+            const key = path[path.length - 1];
+            
+            // 1. Space nodes (from /spaces endpoint) - identify by space ID pattern and space-like properties
+            if ((currentEndpoint === '/spaces' || currentEndpoint === '/agents') && 
+                pathStr.match(/^root\.spaces\.[^.]+$/) && 
+                typeof value === 'object' && value !== null &&
+                (value.type || value.id || value.name || value.elements)) {
+                const spaceId = key; // The key is the space ID
+                return { type: 'space_hud', spaceId: spaceId };
+            }
+            
+            // 2. Agent nodes (from /agents endpoint) - identify by agent ID pattern and agent-like properties
+            if (currentEndpoint === '/agents' && 
+                pathStr.match(/^root\.agents\.[^.]+$/) && 
+                typeof value === 'object' && value !== null &&
+                (value.agent_id || value.space_info || value.agent_loop || value.hud)) {
+                const spaceId = key; // Agent ID matches the space ID for InnerSpaces
+                return { type: 'space_hud', spaceId: spaceId };
+            }
+            
+            // 3. HUD components within agents or spaces
+            if (pathStr.includes('hud') && typeof value === 'object' && value !== null &&
+                (value.id || value.type || value.component_type)) {
+                const spaceId = getSpaceIdFromPath(path);
+                if (spaceId) {
+                    return { type: 'space_hud', spaceId: spaceId };
+                }
+            }
+            
+            return null;
+        }
+        
         async function drillDown(drillInfo, originalPath) {
             // Push current state to navigation stack
             pushNavigation();
@@ -2629,6 +2749,150 @@
                 console.error('Error during drill-down:', error);
                 alert(`Error loading drill-down data: ${error.message}`);
                 // Don't pop navigation on error, let user use back button
+            } finally {
+                statusEl.style.display = 'none';
+            }
+        }
+        
+        async function showHUDView(hudInfo, originalPath) {
+            // Push current state to navigation stack
+            pushNavigation();
+            
+            const statusEl = document.getElementById('status');
+            statusEl.style.display = 'inline';
+            statusEl.textContent = 'Loading HUD view...';
+            
+            try {
+                let endpoint = '';
+                let title = '';
+                let breadcrumb = '';
+                
+                switch(hudInfo.type) {
+                    case 'space_hud':
+                        // Use the inspector's render endpoint
+                        endpoint = `/spaces/${hudInfo.spaceId}/render?format=markdown`;
+                        title = `👁️ HUD View: ${hudInfo.spaceId}`;
+                        breadcrumb = `Inspector → HUD View → ${hudInfo.spaceId}`;
+                        break;
+                        
+                    default:
+                        throw new Error(`Unknown HUD view type: ${hudInfo.type}`);
+                }
+                
+                const response = await fetch(endpoint);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                // Check if response is JSON (error) or text (rendered HUD)
+                const contentType = response.headers.get('content-type');
+                if (contentType && contentType.includes('application/json')) {
+                    // Error response
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Unknown error from HUD endpoint');
+                } else {
+                    // Success - rendered HUD content
+                    const hudContent = await response.text();
+                    
+                    // Update UI with HUD content
+                    updateBreadcrumb(breadcrumb);
+                    document.getElementById('data-info').textContent = `${title} • ${formatBytes(hudContent.length)}`;
+                    
+                    // Show HUD content in a special display mode
+                    showHUDContent(hudContent, hudInfo);
+                }
+                
+            } catch (error) {
+                console.error('Error during HUD view:', error);
+                alert(`Error loading HUD view: ${error.message}`);
+                // Don't pop navigation on error, let user use back button
+            } finally {
+                statusEl.style.display = 'none';
+            }
+        }
+        
+        function showHUDContent(hudContent, hudInfo) {
+            // Clear the main content area 
+            const mainContent = document.getElementById('main-content');
+            mainContent.innerHTML = '';
+            
+            // Create HUD content container
+            const hudContainer = document.createElement('div');
+            hudContainer.className = 'hud-content-container';
+            
+            // Create header with controls
+            const headerDiv = document.createElement('div');
+            headerDiv.className = 'hud-content-header';
+            
+            const titleDiv = document.createElement('div');
+            titleDiv.innerHTML = `<strong>HUD View: ${hudInfo.spaceId}</strong>`;
+            headerDiv.appendChild(titleDiv);
+            
+            // Format controls
+            const controlsDiv = document.createElement('div');
+            controlsDiv.className = 'hud-format-controls';
+            
+            const formats = [
+                { key: 'text', label: 'Text' },
+                { key: 'markdown', label: 'Markdown' }
+            ];
+            
+            let currentFormat = 'markdown'; // Start with markdown
+            
+            formats.forEach(format => {
+                const btn = document.createElement('button');
+                btn.className = `hud-format-btn ${format.key === currentFormat ? 'active' : ''}`;
+                btn.textContent = format.label;
+                btn.onclick = () => switchHUDFormat(format.key, hudInfo, controlsDiv);
+                controlsDiv.appendChild(btn);
+            });
+            
+            headerDiv.appendChild(controlsDiv);
+            hudContainer.appendChild(headerDiv);
+            
+            // Content area
+            const contentDiv = document.createElement('div');
+            contentDiv.id = 'hud-content-display';
+            contentDiv.textContent = hudContent;
+            hudContainer.appendChild(contentDiv);
+            
+            mainContent.appendChild(hudContainer);
+        }
+        
+        async function switchHUDFormat(format, hudInfo, controlsContainer) {
+            const statusEl = document.getElementById('status');
+            statusEl.style.display = 'inline';
+            statusEl.textContent = `Switching to ${format} format...`;
+            
+            try {
+                const endpoint = `/spaces/${hudInfo.spaceId}/render?format=${format}`;
+                const response = await fetch(endpoint);
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const contentType = response.headers.get('content-type');
+                if (contentType && contentType.includes('application/json')) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Unknown error from HUD endpoint');
+                } else {
+                    const hudContent = await response.text();
+                    
+                    // Update content display
+                    const contentDiv = document.getElementById('hud-content-display');
+                    contentDiv.textContent = hudContent;
+                    
+                    // Update active button
+                    const buttons = controlsContainer.querySelectorAll('.hud-format-btn');
+                    buttons.forEach(btn => {
+                        btn.classList.toggle('active', btn.textContent.toLowerCase() === format);
+                    });
+                }
+                
+            } catch (error) {
+                console.error('Error switching HUD format:', error);
+                alert(`Error switching format: ${error.message}`);
             } finally {
                 statusEl.style.display = 'none';
             }

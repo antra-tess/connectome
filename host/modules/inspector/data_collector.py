@@ -1828,7 +1828,7 @@ class InspectorDataCollector:
                 try:
                     # Check if space has timeline storage component
                     timeline_storage = None
-                    for component in space.components.values():
+                    for component in space.get_components().values():
                         if hasattr(component, 'get_all_timelines'):
                             timeline_storage = component
                             break
@@ -1921,7 +1921,7 @@ class InspectorDataCollector:
             
             # Get the SpaceVeilProducer component
             space_veil_producer = None
-            for component in space.components.values():
+            for component in space.get_components().values():
                 if component.__class__.__name__ == "SpaceVeilProducer":
                     space_veil_producer = component
                     break
@@ -1942,7 +1942,7 @@ class InspectorDataCollector:
             
             # Get the FacetAwareHUDComponent
             hud_component = None
-            for component in space.components.values():
+            for component in space.get_components().values():
                 if component.__class__.__name__ == "FacetAwareHUDComponent":
                     hud_component = component
                     break
