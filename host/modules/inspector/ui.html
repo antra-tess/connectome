@@ -451,6 +451,37 @@
             margin: 0;
         }
         
+        .hud-modal-actions {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .hud-modal-refresh {
+            background: none;
+            border: 1px solid #0f3460;
+            color: #00d4aa;
+            font-size: 1rem;
+            cursor: pointer;
+            padding: 0.5rem;
+            line-height: 1;
+            border-radius: 4px;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .hud-modal-refresh:hover {
+            background: #0f3460;
+            color: #fff;
+            transform: rotate(180deg);
+        }
+        
+        .hud-modal-refresh:active {
+            transform: rotate(360deg);
+        }
+        
         .hud-modal-close {
             background: none;
             border: none;
@@ -2949,6 +2980,74 @@
             window.currentHudInfo = null;
         }
         
+        async function refreshHUDModal() {
+            if (!window.currentHudInfo) {
+                console.error('No HUD info available for refresh');
+                return;
+            }
+            
+            const refreshBtn = document.querySelector('.hud-modal-refresh');
+            const originalContent = refreshBtn.innerHTML;
+            
+            try {
+                // Show loading state
+                refreshBtn.innerHTML = '⏳';
+                refreshBtn.disabled = true;
+                refreshBtn.style.transform = 'rotate(180deg)';
+                
+                // Get current format from active button
+                const activeFormatBtn = document.querySelector('.hud-format-btn.active');
+                const currentFormat = activeFormatBtn ? activeFormatBtn.textContent.toLowerCase() : 'markdown';
+                
+                // Fetch fresh content
+                const endpoint = `/spaces/${window.currentHudInfo.spaceId}/render?format=${currentFormat}`;
+                const response = await fetch(endpoint);
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const contentType = response.headers.get('content-type');
+                if (contentType && contentType.includes('application/json')) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Unknown error from HUD endpoint');
+                }
+                
+                // Get the fresh content
+                const freshContent = await response.text();
+                
+                // Update the content display
+                const contentDisplay = document.getElementById('hud-content-display');
+                if (contentDisplay) {
+                    contentDisplay.textContent = freshContent;
+                }
+                
+                // Brief success animation
+                refreshBtn.innerHTML = '✅';
+                refreshBtn.style.transform = 'rotate(360deg)';
+                
+                setTimeout(() => {
+                    refreshBtn.innerHTML = originalContent;
+                    refreshBtn.style.transform = 'rotate(0deg)';
+                }, 1000);
+                
+            } catch (error) {
+                console.error('Error refreshing HUD content:', error);
+                
+                // Show error state
+                refreshBtn.innerHTML = '❌';
+                refreshBtn.style.transform = 'rotate(0deg)';
+                
+                setTimeout(() => {
+                    refreshBtn.innerHTML = originalContent;
+                }, 2000);
+                
+                alert(`Error refreshing HUD: ${error.message}`);
+            } finally {
+                refreshBtn.disabled = false;
+            }
+        }
+        
         // Add keyboard navigation for the modal
         document.addEventListener('keydown', function(event) {
             const modal = document.getElementById('hud-modal');
@@ -2956,6 +3055,10 @@
                 if (event.key === 'Escape') {
                     closeHUDModal();
                     event.preventDefault();
+                } else if (event.key === 'F5' || (event.ctrlKey && event.key === 'r')) {
+                    // Refresh HUD content with F5 or Ctrl+R
+                    event.preventDefault();
+                    refreshHUDModal();
                 }
             }
         });
@@ -4352,7 +4455,10 @@
         <div class="hud-modal-content">
             <div class="hud-modal-header">
                 <h2 id="hud-modal-title">HUD View</h2>
-                <button class="hud-modal-close" onclick="closeHUDModal()">&times;</button>
+                <div class="hud-modal-actions">
+                    <button class="hud-modal-refresh" onclick="refreshHUDModal()" title="Refresh HUD content">🔄</button>
+                    <button class="hud-modal-close" onclick="closeHUDModal()" title="Close">&times;</button>
+                </div>
             </div>
             <div class="hud-modal-body" id="hud-modal-body">
                 <!-- HUD content will be inserted here -->
