@@ -2705,33 +2705,61 @@
         }
         
         function isHUDViewableNode(path, value) {
-            const pathStr = path.join('.');
             const key = path[path.length - 1];
             
-            // 1. Space nodes (from /spaces endpoint) - identify by space ID pattern and space-like properties
-            if ((currentEndpoint === '/spaces' || currentEndpoint === '/agents') && 
-                pathStr.match(/^root\.spaces\.[^.]+$/) && 
-                typeof value === 'object' && value !== null &&
-                (value.type || value.id || value.name || value.elements)) {
-                const spaceId = key; // The key is the space ID
-                return { type: 'space_hud', spaceId: spaceId };
+            // Helper function to check if a node is space-like
+            function isSpaceLike(obj) {
+                if (typeof obj !== 'object' || obj === null) return false;
+                return obj.type || obj.id || obj.name || obj.elements || 
+                       obj.agent_id || obj.space_info || obj.agent_loop ||
+                       obj.components || obj.hud;
             }
             
-            // 2. Agent nodes (from /agents endpoint) - identify by agent ID pattern and agent-like properties
-            if (currentEndpoint === '/agents' && 
-                pathStr.match(/^root\.agents\.[^.]+$/) && 
-                typeof value === 'object' && value !== null &&
-                (value.agent_id || value.space_info || value.agent_loop || value.hud)) {
-                const spaceId = key; // Agent ID matches the space ID for InnerSpaces
-                return { type: 'space_hud', spaceId: spaceId };
+            // Helper function to check if components contain facet-aware HUD component
+            function hasFacetAwareHUDComponent(components) {
+                if (typeof components !== 'object' || components === null) return false;
+                for (const [compId, comp] of Object.entries(components)) {
+                    if (typeof comp === 'object' && comp !== null) {
+                        // Check if component ID contains facet-aware patterns
+                        if (compId.toLowerCase().includes('facetawarehudcomponent') ||
+                            compId.toLowerCase().includes('facet_aware_hud') ||
+                            compId.toLowerCase().includes('hud')) {
+                            return true;
+                        }
+                        // Check component type
+                        if (comp.component_type && 
+                            (comp.component_type.toLowerCase().includes('facetawarehud') ||
+                             comp.component_type.toLowerCase().includes('hud'))) {
+                            return true;
+                        }
+                        // Check if it has COMPONENT_TYPE property
+                        if (comp.COMPONENT_TYPE && 
+                            comp.COMPONENT_TYPE.toLowerCase().includes('hud')) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
             }
             
-            // 3. HUD components within agents or spaces
-            if (pathStr.includes('hud') && typeof value === 'object' && value !== null &&
-                (value.id || value.type || value.component_type)) {
-                const spaceId = getSpaceIdFromPath(path);
-                if (spaceId) {
-                    return { type: 'space_hud', spaceId: spaceId };
+            // Main logic: Show eye icon for any space-like tree that has either:
+            // 1. A 'hud' child, OR
+            // 2. A 'components' child which has a facet-aware HUD component
+            if (isSpaceLike(value)) {
+                // Check if it has a direct 'hud' child
+                if (value.hud) {
+                    const spaceId = key || getSpaceIdFromPath(path);
+                    if (spaceId) {
+                        return { type: 'space_hud', spaceId: spaceId };
+                    }
+                }
+                
+                // Check if it has a 'components' child with facet-aware HUD component
+                if (value.components && hasFacetAwareHUDComponent(value.components)) {
+                    const spaceId = key || getSpaceIdFromPath(path);
+                    if (spaceId) {
+                        return { type: 'space_hud', spaceId: spaceId };
+                    }
                 }
             }
             
