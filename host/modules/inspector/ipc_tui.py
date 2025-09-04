@@ -1390,18 +1390,8 @@ class IPCTUIInspector:
                 
                 # For other endpoints, add drill-down logic based on patterns
                 if endpoint == "spaces" and depth == 1 and parent and parent.label == "details":
-                    # Individual spaces under details can drill down to their timelines, veil, etc.
-                    # But InnerSpaces (agent spaces) should drill down to agent details instead
-                    if label.endswith("_inner_space"):
-                        # This is an InnerSpace (agent space) - drill down to agent details
-                        agent_id = label.replace("_inner_space", "")
-                        node.drill_down_endpoint = f"agent_details_{agent_id}"
-                    else:
-                        # Regular Space - drill down to VEIL space data
-                        node.drill_down_endpoint = f"veil_space_{label}"
-                elif endpoint == "agents" and depth == 1 and parent and parent.label == "agents":
-                    # Individual agents under the agents node can drill down to their inner space details
-                    node.drill_down_endpoint = f"agent_details_{label}"
+                    # Individual spaces under details can drill down to VEIL space data
+                    node.drill_down_endpoint = f"veil_space_{label}"
                             
             elif isinstance(obj, list) and obj:
                 node.children = []
