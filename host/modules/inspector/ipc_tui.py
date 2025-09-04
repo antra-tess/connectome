@@ -2739,31 +2739,54 @@ class IPCTUIInspector:
     
     def _initialize_realtime_cursors(self):
         """Initialize cursor tracking from currently loaded data."""
-        if not self.current_tree_node or not self._current_view_type:
-            logger.debug(f"Realtime: Cannot initialize cursors - tree_node={self.current_tree_node is not None}, view_type={self._current_view_type}")
+        if not self.tree_root or not self._current_view_type:
+            logger.debug(f"Realtime: Cannot initialize cursors - tree_root={self.tree_root is not None}, view_type={self._current_view_type}")
             return
         
-        if self._current_view_type == 'timeline_events' and hasattr(self.current_tree_node, 'children'):
+        if self._current_view_type == 'timeline_events':
+            # Use tree_root which contains all events, not current_tree_node which is the selected event
+            if not hasattr(self.tree_root, 'children'):
+                logger.debug(f"Realtime: tree_root has no 'children' attribute")
+                return
+            
+            if not self.tree_root.children:
+                logger.debug(f"Realtime: tree_root.children is empty")
+                return
+            
+            logger.debug(f"Realtime: Attempting to initialize timeline cursor from {len(self.tree_root.children)} children")
+            
             # Find newest event by timestamp
             newest_timestamp = 0
             newest_event_id = None
+            valid_events_found = 0
             
-            for child in self.current_tree_node.children:
+            for i, child in enumerate(self.tree_root.children):
+                logger.debug(f"Realtime: Child {i}: has_data={hasattr(child, 'data')}, data_type={type(child.data) if hasattr(child, 'data') else 'None'}")
+                
                 if hasattr(child, 'data') and isinstance(child.data, dict):
                     event_timestamp = child.data.get('timestamp', 0)
+                    event_id = child.data.get('id', 'unknown')
+                    valid_events_found += 1
+                    logger.debug(f"Realtime: Child {i} - event_id={event_id}, timestamp={event_timestamp}")
+                    
                     if event_timestamp > newest_timestamp:
                         newest_timestamp = event_timestamp
-                        newest_event_id = child.data.get('id')
+                        newest_event_id = event_id
             
-            self._realtime_newest_event_id = newest_event_id
-            logger.debug(f"Realtime: Initialized timeline cursor - newest_event_id={newest_event_id}, newest_timestamp={newest_timestamp}, children_count={len(self.current_tree_node.children) if hasattr(self.current_tree_node, 'children') else 0}")
+            logger.debug(f"Realtime: Found {valid_events_found} valid events, newest_event_id={newest_event_id}, newest_timestamp={newest_timestamp}")
             
-        elif self._current_view_type == 'veil_facets' and hasattr(self.current_tree_node, 'children'):
+            if newest_event_id:
+                self._realtime_newest_event_id = newest_event_id
+                logger.debug(f"Realtime: Successfully initialized timeline cursor - newest_event_id={newest_event_id}, newest_timestamp={newest_timestamp}")
+            else:
+                logger.debug(f"Realtime: Could not find any valid events with timestamps")
+            
+        elif self._current_view_type == 'veil_facets' and hasattr(self.tree_root, 'children') and self.tree_root.children:
             # Find newest facet by veil_timestamp
             newest_timestamp = 0
             newest_facet_id = None
             
-            for child in self.current_tree_node.children:
+            for child in self.tree_root.children:
                 if hasattr(child, 'data') and isinstance(child.data, dict):
                     veil_timestamp = child.data.get('veil_timestamp', 0)
                     if veil_timestamp > newest_timestamp:
@@ -2771,6 +2794,9 @@ class IPCTUIInspector:
                         newest_facet_id = child.data.get('facet_id')
             
             self._realtime_newest_facet_id = newest_facet_id
+            logger.debug(f"Realtime: Initialized VEIL facets cursor - newest_facet_id={newest_facet_id}, newest_timestamp={newest_timestamp}, children_count={len(self.tree_root.children)}")
+        elif self._current_view_type == 'veil_facets':
+            logger.debug(f"Realtime: Cannot initialize VEIL facets cursor - no children in tree root")
     
     async def _poll_for_new_data(self):
         """Poll for new data and prepend it to the current view."""
@@ -2798,10 +2824,17 @@ class IPCTUIInspector:
         # Build polling request with reverse limit to get newer events
         endpoint_args = dict(self._current_endpoint_args)
         
-        if self._realtime_newest_event_id and hasattr(self.current_tree_node, 'children'):
+        logger.debug(f"Realtime: _realtime_newest_event_id={self._realtime_newest_event_id}, has_children={hasattr(self.tree_root, 'children')}, children_count={len(self.tree_root.children) if hasattr(self.tree_root, 'children') else 0}")
+        
+        # If we don't have a reference point but should have events, try to reinitialize cursor
+        if not self._realtime_newest_event_id and hasattr(self.tree_root, 'children') and self.tree_root.children:
+            logger.debug("Realtime: No cursor but events exist, attempting to reinitialize cursor")
+            self._initialize_realtime_cursors()
+        
+        if self._realtime_newest_event_id and hasattr(self.tree_root, 'children') and self.tree_root.children:
             # Find newest timestamp from loaded data
             newest_timestamp = 0
-            for child in self.current_tree_node.children:
+            for child in self.tree_root.children:
                 if hasattr(child, 'data') and isinstance(child.data, dict):
                     timestamp = child.data.get('timestamp', 0)
                     if timestamp > newest_timestamp:
@@ -2812,9 +2845,10 @@ class IPCTUIInspector:
             endpoint_args['limit'] = 20
             logger.debug(f"Realtime: Polling for events newer than {newest_timestamp} with args: {endpoint_args}")
         else:
-            # No reference point, get latest events
-            endpoint_args['limit'] = -20
-            logger.debug(f"Realtime: No newest event ID, polling with args: {endpoint_args}")
+            # No reference point - skip this poll to avoid false positives
+            logger.debug(f"Realtime: No newest event ID or children, skipping poll to avoid false positives")
+            self.status_message = "Realtime polling waiting for reference point"
+            return
         
         # Make the request using the same method as refresh (which works)
         try:
@@ -2835,7 +2869,7 @@ class IPCTUIInspector:
         existing_event_ids = set()
         newest_existing_timestamp = 0
         
-        for child in self.current_tree_node.children:
+        for child in self.tree_root.children:
             if hasattr(child, 'data') and isinstance(child.data, dict):
                 event_id = child.data.get('id')
                 if event_id:
@@ -2874,9 +2908,12 @@ class IPCTUIInspector:
             # Get facets newer than our newest facet using cursor
             endpoint_args['after_facet_id'] = self._realtime_newest_facet_id
             endpoint_args['limit'] = -20  # Negative limit for reverse logic
+            logger.debug(f"Realtime facets: Polling for facets after {self._realtime_newest_facet_id}")
         else:
-            # No reference point, get latest facets
-            endpoint_args['limit'] = 20
+            # No reference point - skip this poll to avoid false positives
+            logger.debug(f"Realtime facets: No newest facet ID, skipping poll to avoid false positives")
+            self.status_message = "Realtime facets polling waiting for reference point"
+            return
         
         # Make the request using the same method as refresh (which works)
         try:
@@ -2885,13 +2922,13 @@ class IPCTUIInspector:
             logger.debug(f"Realtime facets: Error fetching data: {e}")
             return
             
-        facets_dict = data.get('facets', {})
+        facets_list = data.get('facets', [])
         
-        if not facets_dict:
+        if not facets_list:
             self.status_message = "No new VEIL facets found"
             return
         
-        new_facets = list(facets_dict.values())
+        new_facets = facets_list
         
         # Filter out facets we already have and facets that aren't actually newer
         existing_facet_ids = set()
@@ -2924,8 +2961,8 @@ class IPCTUIInspector:
     
     async def _prepend_new_events(self, new_events: List[Dict[str, Any]]):
         """Prepend new events to the current tree view."""
-        if not new_events or not self.current_tree_node:
-            logger.debug(f"Realtime: _prepend_new_events called with {len(new_events) if new_events else 0} events, tree_node={self.current_tree_node is not None}")
+        if not new_events or not self.tree_root:
+            logger.debug(f"Realtime: _prepend_new_events called with {len(new_events) if new_events else 0} events, tree_root={self.tree_root is not None}")
             return
             
         # Create new TreeNode objects for the events
@@ -2947,7 +2984,7 @@ class IPCTUIInspector:
             label = f"{event_id} ({event_type}) at {time_str}"
             
             # Build the event node with expandable structure
-            event_node = TreeNode(event_id, label, event, parent=self.current_tree_node)
+            event_node = TreeNode(event_id, label, event, parent=self.tree_root)
             
             # Make event data expandable by creating child nodes
             if isinstance(event, dict):
@@ -2963,8 +3000,8 @@ class IPCTUIInspector:
             new_nodes.append(event_node)
         
         # Prepend new nodes to the beginning of children list
-        logger.debug(f"Realtime: Adding {len(new_nodes)} new nodes to tree with {len(self.current_tree_node.children)} existing children")
-        self.current_tree_node.children = new_nodes + self.current_tree_node.children
+        logger.debug(f"Realtime: Adding {len(new_nodes)} new nodes to tree with {len(self.tree_root.children)} existing children")
+        self.tree_root.children = new_nodes + self.tree_root.children
         
         # Update realtime cursor to newest event
         if new_events:
