@@ -1886,6 +1886,180 @@ class InspectorDataCollector:
                 "timestamp": time.time()
             }
 
+    async def render_space_as_text(self, space_id: str, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Render a space (Hub) in its textual representation as it would appear to an LLM or human.
+        
+        Args:
+            space_id: The ID of the space to render
+            options: Rendering options including:
+                - format: "text" (default), "markdown", "json_messages"
+                - include_tools: Include tool/ambient facets (default: True)
+                - include_system: Include system messages (default: True)
+                - max_turns: Limit number of turns to render
+                - from_timestamp: Start rendering from specific timestamp
+                
+        Returns:
+            Dictionary containing the rendered text and metadata
+        """
+        try:
+            if not self.space_registry:
+                return {
+                    "error": "Space registry not available",
+                    "timestamp": time.time()
+                }
+            
+            # Get the space
+            spaces_dict = self.space_registry.get_spaces()
+            space = spaces_dict.get(space_id)
+            
+            if not space:
+                return {
+                    "error": f"Space '{space_id}' not found",
+                    "timestamp": time.time()
+                }
+            
+            # Get the SpaceVeilProducer component
+            space_veil_producer = None
+            for component in space.components.values():
+                if component.__class__.__name__ == "SpaceVeilProducer":
+                    space_veil_producer = component
+                    break
+            
+            if not space_veil_producer:
+                return {
+                    "error": f"Space '{space_id}' does not have a SpaceVeilProducer component",
+                    "timestamp": time.time()
+                }
+            
+            # Get the VEILFacetCache
+            facet_cache = space_veil_producer.get_facet_cache()
+            if not facet_cache:
+                return {
+                    "error": f"Could not retrieve facet cache for space '{space_id}'",
+                    "timestamp": time.time()
+                }
+            
+            # Get the FacetAwareHUDComponent
+            hud_component = None
+            for component in space.components.values():
+                if component.__class__.__name__ == "FacetAwareHUDComponent":
+                    hud_component = component
+                    break
+            
+            if not hud_component:
+                return {
+                    "error": f"Space '{space_id}' does not have a FacetAwareHUDComponent",
+                    "timestamp": time.time()
+                }
+            
+            # Parse options
+            render_format = options.get("format", "text") if options else "text"
+            include_tools = options.get("include_tools", True) if options else True
+            include_system = options.get("include_system", True) if options else True
+            max_turns = options.get("max_turns") if options else None
+            from_timestamp = options.get("from_timestamp") if options else None
+            
+            # Prepare rendering options for HUD component
+            hud_options = {
+                "exclude_ambient": not include_tools,
+                "include_system_messages": include_system,
+                "render_mode": "normal"
+            }
+            
+            # Process facets into turns using the HUD component
+            turn_messages = await hud_component._process_facets_into_turns(
+                facet_cache,
+                hud_options,
+                tools=None
+            )
+            
+            # Filter by timestamp if specified
+            if from_timestamp:
+                turn_messages = [
+                    msg for msg in turn_messages 
+                    if msg.get("turn_metadata", {}).get("timestamp", 0) >= from_timestamp
+                ]
+            
+            # Limit turns if specified
+            if max_turns and len(turn_messages) > max_turns:
+                turn_messages = turn_messages[-max_turns:]
+            
+            # Format the output based on requested format
+            if render_format == "json_messages":
+                # Return the raw message list
+                rendered_content = turn_messages
+                content_type = "application/json"
+            elif render_format == "markdown":
+                # Format as markdown
+                lines = []
+                space_name = getattr(space, 'name', space_id)
+                agent_name = getattr(space, 'agent_name', 'Agent')
+                
+                lines.append(f"# {space_name} - {agent_name}\n")
+                
+                for msg in turn_messages:
+                    role = msg.get("role", "unknown")
+                    content = msg.get("content", "")
+                    
+                    if role == "user":
+                        lines.append(f"## User\n\n{content}\n")
+                    elif role == "assistant":
+                        lines.append(f"## {agent_name}\n\n{content}\n")
+                    elif role == "system":
+                        if include_system:
+                            lines.append(f"## System\n\n{content}\n")
+                
+                rendered_content = "\n".join(lines)
+                content_type = "text/markdown"
+            else:
+                # Default plain text format
+                lines = []
+                space_name = getattr(space, 'name', space_id)
+                agent_name = getattr(space, 'agent_name', 'Agent')
+                
+                lines.append(f"[{space_name} - {agent_name}]")
+                lines.append("=" * 50)
+                
+                for msg in turn_messages:
+                    role = msg.get("role", "unknown")
+                    content = msg.get("content", "")
+                    
+                    if role == "user":
+                        lines.append(f"\nUser: {content}")
+                    elif role == "assistant":
+                        lines.append(f"\n{agent_name}: {content}")
+                    elif role == "system" and include_system:
+                        lines.append(f"\n[System]: {content}")
+                
+                rendered_content = "\n".join(lines)
+                content_type = "text/plain"
+            
+            # Return the rendered content with metadata
+            return {
+                "content": rendered_content,
+                "metadata": {
+                    "space_id": space_id,
+                    "space_name": getattr(space, 'name', space_id),
+                    "space_type": type(space).__name__,
+                    "agent_name": getattr(space, 'agent_name', 'Unknown'),
+                    "turn_count": len(turn_messages),
+                    "facet_count": len(facet_cache.facets) if hasattr(facet_cache, 'facets') else 0,
+                    "format": render_format,
+                    "content_type": content_type,
+                    "options": options or {}
+                },
+                "timestamp": time.time()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error rendering space {space_id} as text: {e}", exc_info=True)
+            return {
+                "error": "Failed to render space as text",
+                "details": str(e),
+                "timestamp": time.time()
+            }
+    
     def get_object_by_path(self, path: str) -> Optional[Any]:
         """
         Resolve an object by its path identifier.

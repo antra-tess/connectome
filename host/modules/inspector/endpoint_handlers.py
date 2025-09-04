@@ -583,3 +583,36 @@ class InspectorEndpointHandlers:
                 "details": str(e),
                 "timestamp": time.time()
             }
+    
+    async def handle_space_render(self, space_id: str, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Handle space text rendering endpoint.
+        
+        Args:
+            space_id: The ID of the space to render
+            options: Rendering options (format, include_tools, etc.)
+            
+        Returns:
+            Dictionary containing rendered text and metadata
+        """
+        self.request_count += 1
+        
+        try:
+            if not space_id:
+                return {
+                    "error": "space_id is required",
+                    "timestamp": time.time()
+                }
+            
+            # Call the data collector's render method
+            result = await self.data_collector.render_space_as_text(space_id, options)
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error rendering space {space_id}: {e}", exc_info=True)
+            return {
+                "error": "Failed to render space",
+                "details": str(e),
+                "timestamp": time.time()
+            }

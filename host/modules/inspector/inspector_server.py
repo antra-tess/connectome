@@ -58,6 +58,7 @@ class InspectorServer:
         app.router.add_get('/favicon.png', self.handle_favicon)
         app.router.add_get('/status', self.handle_status)
         app.router.add_get('/spaces', self.handle_spaces)
+        app.router.add_get('/spaces/{space_id}/render', self.handle_space_render)
         app.router.add_get('/agents', self.handle_agents)
         app.router.add_get('/adapters', self.handle_adapters)
         app.router.add_get('/metrics', self.handle_metrics)
@@ -106,6 +107,7 @@ class InspectorServer:
             logger.info(f"  GET http://localhost:{self.port}/ui/ - Web UI with JSON visualization")
             logger.info(f"  GET http://localhost:{self.port}/status - System status")
             logger.info(f"  GET http://localhost:{self.port}/spaces - Space details")
+            logger.info(f"  GET http://localhost:{self.port}/spaces/{{space_id}}/render - Render space as text")
             logger.info(f"  GET http://localhost:{self.port}/agents - Agent information")
             logger.info(f"  GET http://localhost:{self.port}/adapters - Adapter status")
             logger.info(f"  GET http://localhost:{self.port}/metrics - System metrics")
@@ -493,3 +495,54 @@ class InspectorServer:
         data = await self.handlers.handle_repl_inspect(session_id, obj_name)
         status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if "error" in data else 200)
         return self._json_response(data, status=status_code)
+    
+    async def handle_space_render(self, request: Request) -> Response:
+        """Handle space text rendering endpoint."""
+        space_id = request.match_info.get('space_id')
+        
+        # Parse query parameters for rendering options
+        options = {}
+        if request.query.get('format'):
+            options['format'] = request.query.get('format')
+        if request.query.get('include_tools'):
+            options['include_tools'] = request.query.get('include_tools').lower() == 'true'
+        if request.query.get('include_system'):
+            options['include_system'] = request.query.get('include_system').lower() == 'true'
+        if request.query.get('max_turns'):
+            try:
+                options['max_turns'] = int(request.query.get('max_turns'))
+            except ValueError:
+                pass
+        if request.query.get('from_timestamp'):
+            try:
+                options['from_timestamp'] = float(request.query.get('from_timestamp'))
+            except ValueError:
+                pass
+        
+        data = await self.handlers.handle_space_render(space_id, options if options else None)
+        
+        # Handle different response formats
+        if not data.get("error"):
+            content = data.get("content", "")
+            metadata = data.get("metadata", {})
+            content_type = metadata.get("content_type", "text/plain")
+            
+            # For JSON format, return as JSON response
+            if metadata.get("format") == "json_messages":
+                return self._json_response(content)
+            
+            # For text/markdown formats, return as plain text response
+            return web.Response(
+                text=content if isinstance(content, str) else json.dumps(content),
+                content_type=content_type,
+                headers={
+                    'Access-Control-Allow-Origin': '*',
+                    'X-Space-ID': space_id,
+                    'X-Turn-Count': str(metadata.get("turn_count", 0)),
+                    'X-Facet-Count': str(metadata.get("facet_count", 0))
+                }
+            )
+        else:
+            # Error response
+            status_code = 400 if "not found" in data.get("error", "") else 500
+            return self._json_response(data, status=status_code)
