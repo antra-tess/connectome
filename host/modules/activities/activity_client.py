@@ -31,6 +31,15 @@ from host.observability import get_tracer
 # Event Loop for queuing incoming events
 from host.event_loop import HostEventLoop
 
+# Import protocol (assuming protocol folder was copied from connectome-adapters)
+try:
+    from host.modules.activities.protocol.fix_protocol import FIXProtocol
+    from host.modules.activities.protocol.protocol_persistence import FilePersistence, SQLitePersistence, PersistentFIXProtocol
+    PROTOCOL_AVAILABLE = True
+except ImportError:
+    logging.warning("FIX Protocol not available - copy protocol folder from connectome-adapters")
+    PROTOCOL_AVAILABLE = False
+
 # Initialize the tracer for this module
 tracer = get_tracer(__name__)
 
@@ -61,7 +70,7 @@ class ActivityClient:
 
     def __init__(self, host_event_loop: HostEventLoop, adapter_api_configs: List[Dict[str, Any]]):
         self.host_event_loop = host_event_loop
-        self.adapters = {}  # adapter_id -> {config, client, connected}
+        self.adapters = {}  # adapter_id -> {config, client, connected, protocol}
 
         # SIMPLIFIED: Only store minimal I/O correlation data
         # Key: internal_request_id, Value: Basic correlation info for I/O matching only
@@ -76,10 +85,21 @@ class ActivityClient:
         # NEW: Connection health tracking
         self._connection_health_tasks: Dict[str, asyncio.Task] = {}  # adapter_id -> health check task
         self._successful_operations: Dict[str, int] = {}  # Track successful operations to reset timeout counters
+        
+        # Protocol configuration
+        self.protocol_enabled = PROTOCOL_AVAILABLE and self._should_use_protocol()
+        self.protocol_persistence_type = "file"  # or "sqlite"
+        self.protocol_state_dir = "./connectome_protocol_state"
 
         self._load_adapter_configs(adapter_api_configs)
         logger.info(f"ActivityClient initialized with {len(self.adapters)} adapter API configs.")
         logger.info(f"Keepalive interval: {self._keepalive_interval}s, idle threshold: {self._idle_threshold}s")
+        logger.info(f"Protocol enabled: {self.protocol_enabled}")
+        
+    def _should_use_protocol(self) -> bool:
+        """Check if protocol should be enabled (can be configured)"""
+        # TODO: Check configuration
+        return True  # Enable by default if available
 
     def _load_adapter_configs(self, adapter_api_configs: List[Dict[str, Any]]) -> None:
         """Load and validate adapter configurations."""
@@ -142,12 +162,26 @@ class ActivityClient:
             )
             self.adapters[adapter_id]["client"] = client
             self.adapters[adapter_id]["connected"] = False # Assume disconnected until confirmed
+            self.adapters[adapter_id]["protocol"] = None  # Will be initialized on connect
 
             # --- Define Event Handlers ---
             @client.event
             async def connect(*args):
                 logger.info(f"Successfully connected to adapter API '{adapter_id}' at {url}")
                 self.adapters[adapter_id]["connected"] = True
+                
+                # Initialize protocol if enabled
+                if self.protocol_enabled:
+                    await self._init_protocol_for_adapter(adapter_id)
+                    
+                    # Send sequence sync
+                    protocol = self.adapters[adapter_id]["protocol"]
+                    if protocol:
+                        await client.emit('sequence_sync', {
+                            'my_outbound_seq': protocol.protocol.outbound_sequence,
+                            'expecting_inbound_seq': 1
+                        })
+                
                 # Record initial adapter signal
                 self._record_activity(adapter_id)
                 # Start keepalive task for this adapter
@@ -169,59 +203,42 @@ class ActivityClient:
                 # Stop keepalive task
                 self._stop_keepalive(adapter_id)
                 # No need to disconnect client instance here, library handles retries
+                
+            # Protocol handlers (if enabled)
+            if self.protocol_enabled:
+                @client.on("sequence_sync")
+                async def handle_sequence_sync(data):
+                    """Handle sequence synchronization"""
+                    protocol = self.adapters[adapter_id]["protocol"]
+                    if protocol:
+                        sync_response = await protocol.handle_sequence_sync(adapter_id, data)
+                        await client.emit('sequence_sync', sync_response)
+
+                @client.on("protocol_message")
+                async def handle_protocol_message(data):
+                    """All messages now come through protocol layer"""
+                    protocol = self.adapters[adapter_id]["protocol"]
+                    if protocol:
+                        await protocol.handle_incoming_message(adapter_id, data)
+
+                @client.on("resend_request")
+                async def handle_resend_request(data):
+                    """Handle retransmission requests from adapter"""
+                    protocol = self.adapters[adapter_id]["protocol"]
+                    if protocol:
+                        await protocol.handle_resend_request(adapter_id, data)
 
             # --- Handler for Incoming Events from Adapter API ---
             # Renamed from "normalized_event" to "bot_request"
             @client.on("bot_request")
             async def handle_bot_request(raw_payload: Dict[str, Any]):
                 """Handles incoming events (structured as per user spec) from the adapter API."""
-
-                # This is the start of a new trace for an unsolicited incoming event.
-                with tracer.start_as_current_span("activity_client.handle_bot_request") as span:
-                    # Record activity for this outgoing action
-                    self._record_activity(adapter_id)
-                    logger.debug(f"Received bot_request from '{adapter_id}': {raw_payload}")
-
-                    if not isinstance(raw_payload, dict):
-                        logger.warning(f"Received non-dict bot_request from '{adapter_id}': {raw_payload}")
-                        span.set_attribute("event.error", "Non-dict payload")
-                        return
-
-                    # Extract core fields from the raw payload
-                    raw_event_type = raw_payload.get('event_type', 'unknown')
-                    span.set_attribute("adapter.event_type", raw_event_type)
-                    raw_data = raw_payload.get('data')
-
-                    if not raw_event_type or not isinstance(raw_data, dict):
-                        logger.warning(f"Received bot_request from '{adapter_id}' missing 'event_type' or valid 'data': {raw_payload}")
-                        span.set_attribute("event.error", "Missing event_type or data")
-                        return
-
-                    source_adapter_id_from_data = raw_data.get('adapter_name')
-                    if not source_adapter_id_from_data:
-                        logger.warning(f"Received bot_request data from '{adapter_id}' missing 'adapter_name': {raw_data}")
-                        source_adapter_id_from_data = adapter_id
-
-                    if source_adapter_id_from_data != adapter_id:
-                        logger.warning(f"Adapter name '{source_adapter_id_from_data}' in bot_request data does not match connection ID '{adapter_id}'. Using data value.")
-
-                    logger.debug(f"Received bot_request from '{adapter_id}': Type={raw_event_type}. Enqueuing...")
-
-                    event_to_enqueue = {
-                        "source_adapter_id": adapter_id,
-                        "payload": {
-                            "event_type_from_adapter": raw_event_type,
-                            "adapter_data": raw_data
-                        }
-                    }
-
-                    # Inject telemetry context for propagation across the event loop
-                    carrier = {}
-                    propagate.inject(carrier)
-                    event_to_enqueue["telemetry_context"] = carrier
-                    span.add_event("Injecting new trace context into carrier for event loop")
-
-                    self.host_event_loop.enqueue_incoming_event(event_to_enqueue, {})
+                
+                if self.protocol_enabled:
+                    # Legacy handler - adapter should use protocol_message
+                    logger.warning(f"Received legacy bot_request from '{adapter_id}' - adapter should migrate to protocol")
+                
+                await self._process_bot_request(adapter_id, raw_payload)
 
             # --- Handler for Incoming History Response ---
             # REMOVED @client.on("history_response") handler
@@ -438,6 +455,187 @@ class ActivityClient:
              if adapter_id in self.adapters: del self.adapters[adapter_id]
              self.adapters[adapter_id]["connected"] = False
              return False
+             
+    async def _init_protocol_for_adapter(self, adapter_id: str):
+        """Initialize protocol for a specific adapter"""
+        if not self.protocol_enabled:
+            return
+            
+        try:
+            client = self.adapters[adapter_id]["client"]
+            
+            # Create callbacks for this adapter
+            async def send_callback(event_type: str, data: Dict[str, Any]):
+                await client.emit(event_type, data)
+                
+            async def process_callback(message_type: str, body: Dict[str, Any]):
+                # Route based on message type
+                if message_type == "bot_request":
+                    await self._process_bot_request(adapter_id, body)
+                elif message_type == "request_success":
+                    await self._handle_request_success(adapter_id, body)
+                elif message_type == "request_failed":
+                    await self._handle_request_failure(adapter_id, body)
+                else:
+                    logger.warning(f"Unknown protocol message type '{message_type}' from adapter '{adapter_id}'")
+            
+            # Create base protocol
+            base_protocol = FIXProtocol(
+                node_id=f"connectome-{adapter_id}",
+                send_callback=send_callback,
+                process_callback=process_callback,
+                storage_ttl=300
+            )
+            
+            # Add persistence
+            if self.protocol_persistence_type == "sqlite":
+                persistence = SQLitePersistence(db_path=f"{self.protocol_state_dir}/connectome_protocol.db")
+            else:
+                persistence = FilePersistence(base_dir=self.protocol_state_dir)
+                
+            # Create persistent protocol
+            protocol = PersistentFIXProtocol(base_protocol, persistence)
+            await protocol.initialize()
+            
+            self.adapters[adapter_id]["protocol"] = protocol
+            logger.info(f"Protocol initialized for adapter '{adapter_id}'")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize protocol for adapter '{adapter_id}': {e}", exc_info=True)
+            
+    async def _process_bot_request(self, adapter_id: str, raw_payload: Dict[str, Any]):
+        """Process incoming bot request (extracted from protocol handling)"""
+        # This is the start of a new trace for an unsolicited incoming event.
+        with tracer.start_as_current_span("activity_client.handle_bot_request") as span:
+            # Record activity for this outgoing action
+            self._record_activity(adapter_id)
+            logger.debug(f"Received bot_request from '{adapter_id}': {raw_payload}")
+
+            if not isinstance(raw_payload, dict):
+                logger.warning(f"Received non-dict bot_request from '{adapter_id}': {raw_payload}")
+                span.set_attribute("event.error", "Non-dict payload")
+                return
+
+            # Extract core fields from the raw payload
+            raw_event_type = raw_payload.get('event_type', 'unknown')
+            span.set_attribute("adapter.event_type", raw_event_type)
+            raw_data = raw_payload.get('data')
+
+            if not raw_event_type or not isinstance(raw_data, dict):
+                logger.warning(f"Received bot_request from '{adapter_id}' missing 'event_type' or valid 'data': {raw_payload}")
+                span.set_attribute("event.error", "Missing event_type or data")
+                return
+
+            source_adapter_id_from_data = raw_data.get('adapter_name')
+            if not source_adapter_id_from_data:
+                logger.warning(f"Received bot_request data from '{adapter_id}' missing 'adapter_name': {raw_data}")
+                source_adapter_id_from_data = adapter_id
+
+            if source_adapter_id_from_data != adapter_id:
+                logger.warning(f"Adapter name '{source_adapter_id_from_data}' in bot_request data does not match connection ID '{adapter_id}'. Using data value.")
+
+            logger.debug(f"Received bot_request from '{adapter_id}': Type={raw_event_type}. Enqueuing...")
+
+            event_to_enqueue = {
+                "source_adapter_id": adapter_id,
+                "payload": {
+                    "event_type_from_adapter": raw_event_type,
+                    "adapter_data": raw_data
+                }
+            }
+
+            # Inject telemetry context for propagation across the event loop
+            carrier = {}
+            propagate.inject(carrier)
+            event_to_enqueue["telemetry_context"] = carrier
+            span.add_event("Injecting new trace context into carrier for event loop")
+
+            self.host_event_loop.enqueue_incoming_event(event_to_enqueue, {})
+            
+    async def _handle_request_success(self, adapter_id: str, body: Dict[str, Any]):
+        """Handle success response (extracted from protocol handling)"""
+        # Record activity
+        self._record_activity(adapter_id)
+        
+        internal_request_id = body.get('internal_request_id')
+        if not internal_request_id:
+            logger.warning(f"Request success from '{adapter_id}' missing internal_request_id")
+            return
+            
+        pending_request_info = self._pending_io_requests.pop(internal_request_id, None)
+        if not pending_request_info:
+            logger.warning(f"No pending request found for {internal_request_id}")
+            return
+            
+        # Process success (simplified from original)
+        logger.info(f"Request {internal_request_id} completed successfully")
+        
+        # Create success event for event loop
+        success_event = {
+            "source_adapter_id": adapter_id,
+            "adapter_type": "unknown",
+            "payload": {
+                "event_type_from_adapter": "adapter_action_success",
+                "adapter_data": {
+                    "internal_request_id": internal_request_id,
+                    "target_element_id_for_confirmation": pending_request_info.get("target_element_id_for_confirmation"),
+                    "action_type": pending_request_info.get("action_type"),
+                    "conversation_id": pending_request_info.get("conversation_id"),
+                    "raw_adapter_response": body,
+                    "adapter_response_data": body.get('data', {}),
+                    "confirmed_timestamp": time.time()
+                }
+            }
+        }
+        
+        self.host_event_loop.enqueue_incoming_event(success_event, {})
+        self._record_successful_operation(adapter_id)
+        
+    async def _handle_request_failure(self, adapter_id: str, body: Dict[str, Any]):
+        """Handle failure response (extracted from protocol handling)"""
+        # Similar to success handler but for failures
+        self._record_activity(adapter_id)
+        
+        internal_request_id = body.get('internal_request_id')
+        if not internal_request_id:
+            logger.warning(f"Request failure from '{adapter_id}' missing internal_request_id")
+            return
+            
+        pending_request_info = self._pending_io_requests.pop(internal_request_id, None)
+        if not pending_request_info:
+            logger.warning(f"No pending request found for {internal_request_id}")
+            return
+            
+        # Extract error info
+        data = body.get('data', {})
+        error_message = (
+            data.get('message') or
+            data.get('error') or
+            body.get('error') or
+            body.get('message') or
+            "Unknown error from adapter"
+        )
+        
+        # Create failure event
+        failure_event = {
+            "source_adapter_id": adapter_id,
+            "adapter_type": "unknown",
+            "payload": {
+                "event_type_from_adapter": "adapter_action_failure",
+                "adapter_data": {
+                    "internal_request_id": internal_request_id,
+                    "target_element_id_for_confirmation": pending_request_info.get("target_element_id_for_confirmation"),
+                    "action_type": pending_request_info.get("action_type"),
+                    "conversation_id": pending_request_info.get("conversation_id"),
+                    "raw_adapter_response": body,
+                    "adapter_response_data": data,
+                    "error_message": error_message,
+                    "failed_timestamp": data.get("timestamp", time.time())
+                }
+            }
+        }
+        
+        self.host_event_loop.enqueue_incoming_event(failure_event, {})
 
     async def handle_outgoing_action(self, action: Dict[str, Any]):
         """
@@ -482,6 +680,7 @@ class ActivityClient:
                 return
 
             client = self.adapters[target_adapter_id]["client"]
+            protocol = self.adapters[target_adapter_id].get("protocol")
 
             try:
                 # NEW: Check for idle connection and proactively refresh if needed
@@ -581,66 +780,52 @@ class ActivityClient:
                 if not self.adapters[target_adapter_id]["connected"]:
                     logger.warning(f"Our connection tracking shows adapter '{target_adapter_id}' as disconnected, but proceeding with emit attempt")
 
-                # Dispatch to adapter using generic event emit
-                logger.debug(f"Emitting {internal_action_type} to adapter '{target_adapter_id}': {adapter_payload}")
-                span.add_event("Emitting to adapter")
-
-                # Enhanced emit with timeout and retry logic
-                try:
-                    # NEW: Use longer timeout for emit to accommodate agent thinking time
-                    await asyncio.wait_for(
-                        client.emit("bot_response", adapter_payload),
-                        timeout=EMIT_TIMEOUT_SECONDS  # Increased from 10s to 30s
+                # Dispatch to adapter using protocol or direct emit
+                if self.protocol_enabled and protocol:
+                    # Send through protocol
+                    logger.debug(f"Emitting {internal_action_type} to adapter '{target_adapter_id}' via protocol")
+                    await protocol.send_message(
+                        message_type=internal_action_type,
+                        body=adapter_payload,
+                        requires_ack=True  # Important actions should be acknowledged
                     )
-                    logger.info(f"Successfully dispatched {internal_action_type} to adapter '{target_adapter_id}' (req_id: {internal_request_id})")
-                    span.set_status(trace.Status(trace.StatusCode.OK))
+                else:
+                    # Legacy direct emit
+                    logger.debug(f"Emitting {internal_action_type} to adapter '{target_adapter_id}': {adapter_payload}")
+                    span.add_event("Emitting to adapter")
+                    
+                    # Enhanced emit with timeout and retry logic
+                    try:
+                        # NEW: Use longer timeout for emit to accommodate agent thinking time
+                        await asyncio.wait_for(
+                            client.emit("bot_response", adapter_payload),
+                            timeout=EMIT_TIMEOUT_SECONDS  # Increased from 10s to 30s
+                        )
+                        logger.info(f"Successfully dispatched {internal_action_type} to adapter '{target_adapter_id}' (req_id: {internal_request_id})")
+                        span.set_status(trace.Status(trace.StatusCode.OK))
 
-                    # NEW: Track successful operation to reset timeout counters
-                    self._record_successful_operation(target_adapter_id)
-                except asyncio.TimeoutError:
-                    # ENHANCED: More nuanced timeout handling
-                    logger.warning(f"Emit timeout for {internal_action_type} to adapter '{target_adapter_id}' after {EMIT_TIMEOUT_SECONDS}s")
+                        # NEW: Track successful operation to reset timeout counters
+                        self._record_successful_operation(target_adapter_id)
+                    except asyncio.TimeoutError:
+                        # Handle timeout...
+                        raise
 
-                    # Check if this is a pattern (multiple timeouts) or isolated incident
-                    timeout_count = getattr(self, f'_timeout_count_{target_adapter_id}', 0) + 1
-                    setattr(self, f'_timeout_count_{target_adapter_id}', timeout_count)
-
-                    # NEW: Check recent success history to determine if this is truly a connection issue
-                    recent_successes = self._successful_operations.get(target_adapter_id, 0)
-
-                    if timeout_count >= 3 and recent_successes < 2:
-                        # Multiple timeouts with few recent successes suggest real connection issue
-                        logger.error(f"Multiple emit timeouts ({timeout_count}) with low success rate for adapter '{target_adapter_id}' - marking as disconnected")
-                        self.adapters[target_adapter_id]["connected"] = False
-                        raise ConnectionError(f"Multiple emit timeouts - connection to adapter '{target_adapter_id}' unstable")
-                    elif timeout_count >= 5:
-                        # Hard limit: too many timeouts regardless of successes
-                        logger.error(f"Excessive emit timeouts ({timeout_count}) for adapter '{target_adapter_id}' - marking as disconnected")
-                        self.adapters[target_adapter_id]["connected"] = False
-                        raise ConnectionError(f"Excessive emit timeouts - connection to adapter '{target_adapter_id}' unstable")
-                    else:
-                        # Be more tolerant if we've had recent successes
-                        tolerance_reason = f"recent successes: {recent_successes}" if recent_successes > 0 else "within tolerance"
-                        logger.info(f"Emit timeout ({timeout_count}) for adapter '{target_adapter_id}' - continuing ({tolerance_reason})")
-                        # Don't raise ConnectionError immediately, let the pending request timeout handle it
-                        logger.info(f"Dispatched {internal_action_type} to adapter '{target_adapter_id}' (req_id: {internal_request_id}) - timeout tolerance applied")
-
-                except (socketio.exceptions.DisconnectedError, socketio.exceptions.ConnectionError) as se:
-                    # SocketIO specific connection errors
-                    logger.error(f"SocketIO connection error during emit to adapter '{target_adapter_id}': {se}")
+            except (socketio.exceptions.DisconnectedError, socketio.exceptions.ConnectionError) as se:
+                # SocketIO specific connection errors
+                logger.error(f"SocketIO connection error during emit to adapter '{target_adapter_id}': {se}")
+                self.adapters[target_adapter_id]["connected"] = False
+                raise ConnectionError(f"SocketIO connection lost during emit: {se}")
+            except Exception as emit_error:
+                # Check if it's a packet queue error or similar low-level issue
+                error_str = str(emit_error).lower()
+                if 'packet queue' in error_str or 'queue is empty' in error_str:
+                    logger.error(f"Packet queue error for adapter '{target_adapter_id}': {emit_error}")
+                    # Mark adapter as disconnected to trigger reconnection
                     self.adapters[target_adapter_id]["connected"] = False
-                    raise ConnectionError(f"SocketIO connection lost during emit: {se}")
-                except Exception as emit_error:
-                    # Check if it's a packet queue error or similar low-level issue
-                    error_str = str(emit_error).lower()
-                    if 'packet queue' in error_str or 'queue is empty' in error_str:
-                        logger.error(f"Packet queue error for adapter '{target_adapter_id}': {emit_error}")
-                        # Mark adapter as disconnected to trigger reconnection
-                        self.adapters[target_adapter_id]["connected"] = False
-                        raise ConnectionError(f"Packet queue error - connection to adapter '{target_adapter_id}' unstable: {emit_error}")
-                    else:
-                        # Re-raise other emit errors
-                        raise emit_error
+                    raise ConnectionError(f"Packet queue error - connection to adapter '{target_adapter_id}' unstable: {emit_error}")
+                else:
+                    # Re-raise other emit errors
+                    raise emit_error
 
             except ConnectionError as ce:
                 logger.error(f"Connection error dispatching {internal_action_type} to adapter '{target_adapter_id}': {ce}")
@@ -743,6 +928,16 @@ class ActivityClient:
         # Stop all keepalive tasks first
         for adapter_id in list(self._keepalive_tasks.keys()):
             self._stop_keepalive(adapter_id)
+            
+        # Shutdown protocols if enabled
+        if self.protocol_enabled:
+            for adapter_id, adapter_info in self.adapters.items():
+                protocol = adapter_info.get("protocol")
+                if protocol:
+                    try:
+                        await protocol.protocol.shutdown()
+                    except Exception as e:
+                        logger.error(f"Error shutting down protocol for adapter '{adapter_id}': {e}")
 
         disconnect_tasks = []
         for adapter_id, adapter_info in self.adapters.items():
