@@ -1,0 +1,52 @@
+version: 1
+
+# NOTE: Agent handles are read from environment. Set one of:
+#   CONNECTOME_AGENT_HANDLES="connectome,@connectome,ConnectomeBot"
+#   AGENT_HANDLES="..." or BOT_HANDLES="..."
+# Deciders will match mentions against these handles in addition to agent_name/alias.
+
+interrupt_rules:
+  # Simple type-level overrides (optional)
+  interrupt_event_types:
+    - agent_response_stream_error
+  force_normal_event_types:
+    - bulk_history_fetched
+    - agent_response_generated
+
+  # Optional condition rules (first match wins)
+  # Examples below show how to make typing from the same author who triggered the last activation an interrupt.
+  conditions:
+    - type: typing_from_last_activator
+      interrupt: true
+    # Generic matcher example:
+    # - type: field_equals
+    #   field: channel_visibility
+    #   value: private
+    #   interrupt: true
+    # - type: event_type
+    #   value: message_reaction_added
+    #   interrupt: false
+
+activation_rules:
+  # Optional type-level triggers
+  activate_event_types: []
+  preempt_event_types: []
+
+  # The decider defaults already do:
+  # - message_received with payload.is_dm: activate + preempt
+  # - message_received with mention: activate (no preempt)
+  # You can still add explicit rules here in future if needed.
+
+focus_selection:
+  strategy: conversation     # conversation | last_active | explicit
+  tie_breaker: recent_message
+  adapter_overrides:
+    slack:
+      thread_focus: true
+    discord:
+      thread_focus: false
+
+hud:
+  snapshot_ttl_ms: 5000
+  refresh_on_interrupt: true
+  refresh_on_pulse: true 

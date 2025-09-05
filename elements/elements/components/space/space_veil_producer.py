@@ -61,7 +61,6 @@ class SpaceVeilProducer(VeilProducer):
             operations: List of VEILFacetOperation instances to process
         """
         if not isinstance(operations, list) or not operations:
-            logger.debug(f"[{self.owner.id if self.owner else 'Unknown'}] SpaceVeilProducer received no valid facet operations")
             return
 
         # Apply operations to facet cache

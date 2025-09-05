@@ -142,6 +142,9 @@ class MessageListVeilProducer(VeilProducer):
                     # NEW: Include reaction data for HUD rendering
                     "reactions": msg_data.get('reactions', {}),  # Include full reaction dict {emoji: [user_ids]}
                     "message_status": msg_data.get('status', 'received'),  # Include message status for pending states
+                    # NEW: Include retry information for HUD display
+                    "retry_count": msg_data.get('retry_count', 0),
+                    "retry_reason": msg_data.get('retry_reason', None),
                     # VEIL_ATTACHMENT_METADATA_PROP: processed_attachments_from_mlc # Store the rich attachment dicts
                     # Let's refine this: the VEIL_ATTACHMENT_METADATA_PROP should probably just be the metadata part,
                     # and the content part should lead to a child node if content exists.
@@ -245,9 +248,11 @@ class MessageListVeilProducer(VeilProducer):
         Returns:
             List of VEILFacetOperation instances for the message list
         """
+        
         # NEW: Check if we're in structural replay phase and should defer content processing
-        if self._should_defer_content_processing():
-            logger.debug(f"[{self.owner.id}/{self.COMPONENT_TYPE}] Deferring content processing during structural phase")
+        should_defer = self._should_defer_content_processing()
+        
+        if should_defer:
             return None
 
         facet_operations = []
@@ -479,11 +484,6 @@ class MessageListVeilProducer(VeilProducer):
 
         self._state['_last_list_root_properties'] = current_container_state
         self._state['_last_generated_veil_message_ids'] = current_message_ids
-
-        if facet_operations:
-            logger.info(f"[{owner_id}/{self.COMPONENT_TYPE}] Calculated {len(facet_operations)} facet operations")
-        else:
-            logger.debug(f"[{owner_id}/{self.COMPONENT_TYPE}] No facet operations calculated")
 
         return facet_operations if facet_operations else None
 

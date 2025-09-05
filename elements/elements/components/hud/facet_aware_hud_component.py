@@ -12,6 +12,8 @@ import time
 import copy
 from typing import Dict, Any, Optional, List, Union
 from dataclasses import dataclass
+import asyncio
+import os
 
 from ..base_component import Component
 from elements.component_registry import register_component
@@ -33,6 +35,61 @@ MINOR_STATUS_TYPES = {
     "user_presence_updated",   # Online/offline status, not structural
     "notification_received"    # Notifications, not capabilities
 }
+
+@dataclass
+class SnapshotEntry:
+    data: Dict[str, Any]
+    timestamp_ms: int
+    access_count: int = 0
+
+
+class SnapshotCache:
+    def __init__(self, ttl_ms: int = 5000):
+        self._cache: Dict[str, SnapshotEntry] = {}
+        self._ttl_ms = ttl_ms
+        self._metrics = {
+            "hits": 0,
+            "misses": 0,
+            "evictions": 0,
+            "refreshes": 0
+        }
+        
+    def get(self, key: str, max_age_ms: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        now = int(time.time() * 1000)
+        max_age = max_age_ms or self._ttl_ms
+        
+        if key in self._cache:
+            entry = self._cache[key]
+            age = now - entry.timestamp_ms
+            if age <= max_age:
+                entry.access_count += 1
+                self._metrics["hits"] += 1
+                logger.debug(f"Snapshot cache hit: {key}, age={age}ms")
+                return entry.data
+            else:
+                del self._cache[key]
+                self._metrics["evictions"] += 1
+                
+        self._metrics["misses"] += 1
+        return None
+        
+    def put(self, key: str, data: Dict[str, Any]) -> None:
+        self._cache[key] = SnapshotEntry(
+            data=data,
+            timestamp_ms=int(time.time() * 1000)
+        )
+        self._metrics["refreshes"] += 1
+        
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return cache metrics with hit rate calculation."""
+        total = self._metrics["hits"] + self._metrics["misses"]
+        hit_rate = self._metrics["hits"] / total if total > 0 else 0
+        return {
+            **self._metrics,
+            "hit_rate": hit_rate,
+            "cache_size": len(self._cache)
+        }
+
 
 @dataclass
 class RenderingOptions:
@@ -110,18 +167,103 @@ class FacetAwareHUDComponent(Component):
         self._agent_name = "Agent"
         self._focus_change_history = []
         self._current_focus = None
+        # NEW: Enhanced snapshot cache with TTL and metrics
+        ttl_ms = kwargs.get('snapshot_ttl_ms', 5000)
+        self._snapshot_cache = SnapshotCache(ttl_ms=ttl_ms)
+        # Start metrics logging task
+        self._metrics_task = asyncio.create_task(self._log_metrics_periodically())
         logger.debug(f"FacetAwareHUDComponent initialized for Element {self.owner.id}")
         logger.info("Turn-based rendering with sophisticated status repetition and ambient threshold rules is active")
 
+    async def _log_metrics_periodically(self):
+        """Log snapshot cache metrics periodically."""
+        while True:
+            try:
+                await asyncio.sleep(60)  # Every minute
+                metrics = self._snapshot_cache.get_metrics()
+                logger.info(f"[HUD Snapshot Cache] Metrics: {metrics}")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"Metrics logging error: {e}")
+
+    def cleanup(self) -> bool:
+        """Clean up the component including stopping metrics task."""
+        try:
+            if hasattr(self, '_metrics_task'):
+                self._metrics_task.cancel()
+        except Exception as e:
+            logger.debug(f"Error cancelling metrics task: {e}")
+        return super().cleanup()
+
+    def _extract_element_type_from_id(self, element_id: str) -> str:
+        """Extract element type from element ID."""
+        try:
+            # Element IDs typically contain adapter type information
+            # Format examples: "discord_conversation_...", "terminal_...", etc.
+            if not element_id:
+                return "unknown"
+                
+            # Try to extract from common patterns
+            if "conversation" in element_id.lower():
+                return "conversation"
+            elif "terminal" in element_id.lower():
+                return "terminal"
+            elif "scratchpad" in element_id.lower():
+                return "scratchpad"
+            elif "file" in element_id.lower():
+                return "file"
+            else:
+                # Extract first part before underscore as type
+                parts = element_id.split('_')
+                return parts[0] if parts else "unknown"
+        except Exception as e:
+            logger.debug(f"Error extracting element type from ID {element_id}: {e}")
+            return "unknown"
+
+    def _extract_element_name_from_id(self, element_id: str) -> str:
+        """Extract element name from element ID."""
+        try:
+            if not element_id:
+                return "Unknown Element"
+                
+            # For conversation elements, try to extract conversation name
+            if "conversation" in element_id.lower():
+                # Element IDs might contain conversation names after certain patterns
+                # This is a simplified extraction - could be enhanced based on actual ID format
+                parts = element_id.split('_')
+                if len(parts) > 2:
+                    # Try to find a meaningful name part
+                    for part in parts:
+                        if part and part not in ['conversation', 'discord', 'slack', 'terminal']:
+                            return part.replace('-', ' ').title()
+                return "Conversation"
+            else:
+                # For non-conversation elements, use a generic name
+                element_type = self._extract_element_type_from_id(element_id)
+                return f"{element_type.title()} Element"
+        except Exception as e:
+            logger.debug(f"Error extracting element name from ID {element_id}: {e}")
+            return "Unknown Element"
+
     def record_focus_change(self, focus_info: Dict[str, Any]) -> None:
         """Record focus change history for debugging."""
+        focus_element_id = focus_info.get('focus_element_id')
+        if not focus_element_id:
+            logger.debug("Cannot record focus change: no focus_element_id provided")
+            return
+            
+        # Extract element type and name from element_id if not provided
+        focus_element_type = focus_info.get('focus_element_type', self._extract_element_type_from_id(focus_element_id))
+        focus_element_name = focus_info.get('focus_element_name', self._extract_element_name_from_id(focus_element_id))
+        
         self._focus_change_history.append({
             "veil_timestamp": ConnectomeEpoch.get_veil_timestamp(),
-            "owner_element_id": focus_info['focus_element_id'],
+            "owner_element_id": focus_element_id,
             "current_state": {
-                "focused_element_id": focus_info['focus_element_id'],
-                "focused_element_type": focus_info['focus_element_type'],
-                "focused_element_name": focus_info['focus_element_name']
+                "focused_element_id": focus_element_id,
+                "focused_element_type": focus_element_type,
+                "focused_element_name": focus_element_name
             }
         })
 
@@ -157,6 +299,7 @@ class FacetAwareHUDComponent(Component):
                 return "Error: VEILFacetCache not available"
 
             facet_cache = veil_producer.get_facet_cache()  # NEW: Get VEILFacetCache
+            
             self._extract_current_focus_info(options) # NEW: Extract current focus at HUD level
 
             # Get VEILFacetCompressionEngine
@@ -1718,8 +1861,15 @@ class FacetAwareHUDComponent(Component):
                 # Add status indicators
                 if message_status == "pending_send":
                     message_content += " [PENDING CONFIRMATION]"
+                elif message_status == "retrying":
+                    retry_count = facet.get_property("retry_count", 0)
+                    message_content += f" [RETRYING (attempt {retry_count})]"
                 elif message_status == "failed_to_send":
-                    message_content += " [SEND FAILED]"
+                    retry_count = facet.get_property("retry_count", 0)
+                    if retry_count > 0:
+                        message_content += f" [SEND FAILED - {retry_count} retries]"
+                    else:
+                        message_content += " [SEND FAILED]"
 
                 if self._focus_required(facet.facet_id):
                     return f"{focus_content}\n\n{msg_tag}{message_content}</msg>"
@@ -1907,6 +2057,9 @@ class FacetAwareHUDComponent(Component):
                 # Add status indicators
                 if message_status == "pending_send":
                     message_content += " [PENDING CONFIRMATION]"
+                elif message_status == "retrying":
+                    # Note: retry_count not available in this method context, using generic message
+                    message_content += " [RETRYING]"
                 elif message_status == "failed_to_send":
                     message_content += " [SEND FAILED]"
 
@@ -2264,26 +2417,19 @@ class FacetAwareHUDComponent(Component):
         return """TOOL CALL FORMAT: Use XML format for all tool calls. Do NOT use JSON format.
 
 To call tools, use this ultra-concise XML format to send messages:
-<tool_calls>
+
 <msg source="element_name">message</msg>
-</tool_calls>
 
 and this format to use any other tool:
-<tool_calls>
 <tool_name param1="value1" param2="value2" source="element_name">
-</tool_calls>
 
 Examples:
-<tool_calls>
 <msg source="discord_chat">Hello, world!</msg>
-</tool_calls>
 
-<tool_calls>
 <execute_command command="ls -la" source="Terminal">
 <msg source="zulip_chat">Command executed!</msg>
-</tool_calls>
 
-Use the actual tool name as the XML element name. You can make multiple tool calls in one <tool_calls> block. The source parameter specifies which conversation or element to use - choose from the sources listed for each tool type."""
+Use the actual tool name as the XML element name. You can make multiple tool calls in one response. The source parameter specifies which conversation or element to use - choose from the sources listed for each tool type."""
 
     def _should_render_agent_message(self, message_facet: VEILFacet, system_state: Dict[str, Any]) -> bool:
         """
@@ -2496,20 +2642,26 @@ Use the actual tool name as the XML element name. You can make multiple tool cal
         focus_context = options.get('focus_context', {})
         explicit_focus = focus_context.get('focus_element_id')
 
-        if self._current_focus:
-            self.record_focus_change(focus_context)
-
         if explicit_focus:
+            # Check if this is actually a focus change
+            current_focus_id = self._current_focus.get('focus_element_id') if self._current_focus else None
+            if current_focus_id != explicit_focus:
+                # This is a focus change - record it
+                self.record_focus_change(focus_context)
+            
             self._current_focus = {
                 "focus_element_id": explicit_focus,
                 "focus_source": "explicit_override",
-                "focus_timestamp": None,
+                "focus_timestamp": ConnectomeEpoch.get_veil_timestamp(),
                 "focus_context": focus_context
             }
-            logger.debug(f"Focus override happened: {explicit_focus}")
+            logger.debug(f"Focus set to: {explicit_focus}")
         else:
-            self._current_focus = None
-            logger.error(f"No current focus info found")
+            # No explicit focus provided - keep current focus if any
+            if not self._current_focus:
+                logger.debug("No focus information available - no current focus set")
+            else:
+                logger.debug(f"Using existing focus: {self._current_focus.get('focus_element_id')}")
 
     def _focus_required(self, facet_id: str) -> bool:
         """
@@ -2525,3 +2677,49 @@ Use the actual tool name as the XML element name. You can make multiple tool cal
             return False
 
         return self._current_focus.get('focus_context', {}).get('focus_element_id', None) in facet_id
+
+    # --- Snapshot Cache APIs ---
+    def get_snapshot(self, focus_element_id: str, max_age_ms: Optional[int] = None, generate_if_missing: bool = False) -> Optional[Dict[str, Any]]:
+        try:
+            entry = self._snapshot_cache.get(focus_element_id, max_age_ms)
+            if entry:
+                return entry
+            if generate_if_missing:
+                # Caller should await refresh_snapshot then re-fetch
+                return None
+            return None
+        except Exception as e:
+            logger.debug(f"HUD get_snapshot error: {e}")
+            return None
+
+    async def refresh_snapshot(self, focus_element_id: str) -> Optional[Dict[str, Any]]:
+        try:
+            options = {
+                'focus_context': { 'focus_element_id': focus_element_id },
+                'include_memory': True,
+                'render_mode': 'normal',
+                'include_time_markers': True,
+                'include_system_messages': True
+            }
+            # Use VEIL-enhanced tools if needed; pass None to keep interface simple here
+            snapshot = await self.get_agent_context_via_compression_engine(options=options, tools=None)
+            # Store with timestamp and metadata
+            wrapped = {
+                "messages": snapshot if isinstance(snapshot, list) or isinstance(snapshot, dict) else snapshot,
+                "_snapshot_timestamp": time.time(),
+                "_focus_element_id": focus_element_id
+            }
+            self._snapshot_cache.put(focus_element_id, wrapped)
+            # Optional: emit internal event here (skipped)
+            return wrapped
+        except Exception as e:
+            logger.error(f"HUD refresh_snapshot error: {e}", exc_info=True)
+            return None
+
+    async def refresh_snapshots(self, focus_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        results: Dict[str, Dict[str, Any]] = {}
+        for fid in focus_ids or []:
+            snap = await self.refresh_snapshot(fid)
+            if snap:
+                results[fid] = snap
+        return results

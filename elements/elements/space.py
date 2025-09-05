@@ -322,6 +322,29 @@ class Space(BaseElement):
         """Get the element factory component."""
         return self._element_factory
 
+    # --- NEW: VEIL Operations ---
+    def receive_delta(self, delta_operations: List[Dict[str, Any]]) -> None:
+        """
+        Receive VEIL facet operations from child elements and route to SpaceVeilProducer.
+        
+        Args:
+            delta_operations: List of VEILFacetOperation instances
+        """
+        if not self._veil_producer:
+            logger.critical(f"🔨🏠 [{self.id}] No SpaceVeilProducer available - VEIL operations lost!")
+            return
+            
+        # Route to SpaceVeilProducer for processing
+        try:
+            import asyncio
+            
+            # SpaceVeilProducer.receive_facet_operations is async, so we need to handle it properly
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._veil_producer.receive_facet_operations(delta_operations))
+            
+        except Exception as e:
+            logger.error(f"Error routing VEIL operations to SpaceVeilProducer: {e}", exc_info=True)
+
     # --- NEW: Method to find an element by ID ---
     def get_element_by_id(self, element_id: str) -> Optional[BaseElement]:
         """
@@ -391,10 +414,6 @@ class Space(BaseElement):
         """
         Receive an event, record it in the timeline, and dispatch it to components
         and potentially mounted child elements.
-
-        Args:
-            event_payload: The core data of the event (e.g., {'event_type': ..., 'target_element_id': ..., 'payload': ...}).
-            timeline_context: Timeline context information (e.g., {'timeline_id': ...}).
         """
         event_type = event_payload.get("event_type")
         target_element_id = event_payload.get("target_element_id")
@@ -408,13 +427,80 @@ class Space(BaseElement):
         # 1. Add event to the timeline via TimelineComponent (unless in replay mode)
         new_event_id = None
         if not is_replay_mode:
+            # Decider classification (persist decisions for determinism)
+            try:
+                # Prefer InterruptDecider for pre-classification
+                interrupt_decider = None
+                activation_decider = None
+                for _name, comp in self.get_components().items():
+                    ctype = getattr(comp, 'COMPONENT_TYPE', '')
+                    if ctype == 'InterruptDeciderComponent':
+                        interrupt_decider = comp
+                    elif ctype == 'ActivationDeciderComponent':
+                        activation_decider = comp
+                decider = activation_decider or interrupt_decider
+            except Exception:
+                decider = None
+            if interrupt_decider and isinstance(event_payload, dict):
+                try:
+                    interrupt_decision = interrupt_decider.classify_interrupt(event_payload)
+                    if isinstance(interrupt_decision, dict):
+                        # Store under event_payload.decider.interrupt_class
+                        event_payload.setdefault('decider', {}).update(interrupt_decision)
+                except Exception:
+                    pass
+            # ActivationDecider can also produce activation hints per event
+            if activation_decider and isinstance(event_payload, dict):
+                try:
+                    act_decision = activation_decider.classify_event(event_payload)
+                    if isinstance(act_decision, dict):
+                        event_payload.setdefault('decider', {}).update(act_decision)
+                except Exception:
+                    pass
+
             new_event_id = self.add_event_to_timeline(event_payload, timeline_context)
             if not new_event_id:
                 logger.error(f"[{self.id}] Failed to add event to timeline. Aborting processing for this event. Event: {event_payload}")
                 return
+            # Remember decisions and routing context
+            try:
+                if activation_decider and event_payload.get('decider') and hasattr(activation_decider, 'remember_decision'):
+                    activation_decider.remember_decision(new_event_id, event_payload.get('decider'))
+                if activation_decider and hasattr(activation_decider, 'remember_event_context'):
+                    ctx = {
+						'adapter_id': event_payload.get('source_adapter_id') or event_payload.get('payload', {}).get('source_adapter_id'),
+						'conversation_id': event_payload.get('external_conversation_id') or event_payload.get('payload', {}).get('external_conversation_id'),
+						'is_dm': bool(event_payload.get('payload', {}).get('is_dm', False)),
+						# NEW: sender info for conditional rules like typing_from_last_activator
+						'sender_id': event_payload.get('payload', {}).get('sender_id') or event_payload.get('payload', {}).get('user_id') or event_payload.get('payload', {}).get('author_id')
+					}
+                activation_decider.remember_event_context(new_event_id, ctx)
+            except Exception:
+                pass
         else:
-            # In replay mode, use a dummy event ID for processing
+			# In replay mode, use a dummy event ID for processing
             new_event_id = f"replay_{event_type}_{int(time.time() * 1000)}"
+			# Remember persisted activation decision for ack-based activation
+            try:
+                activation_decider = None
+                for _name, comp in self.get_components().items():
+                    if getattr(comp, 'COMPONENT_TYPE', '') == 'ActivationDeciderComponent':
+                        activation_decider = comp
+                    break
+                if activation_decider and isinstance(event_payload, dict) and event_payload.get('decider'):
+                    if hasattr(activation_decider, 'remember_decision'):
+                        activation_decider.remember_decision(new_event_id, event_payload.get('decider'))
+                    if hasattr(activation_decider, 'remember_event_context'):
+                        ctx = {
+							'adapter_id': event_payload.get('source_adapter_id') or event_payload.get('payload', {}).get('source_adapter_id'),
+							'conversation_id': event_payload.get('external_conversation_id') or event_payload.get('payload', {}).get('external_conversation_id'),
+							'is_dm': bool(event_payload.get('payload', {}).get('is_dm', False)),
+							# NEW: sender info for conditional rules like typing_from_last_activator
+							'sender_id': event_payload.get('payload', {}).get('sender_id') or event_payload.get('payload', {}).get('user_id') or event_payload.get('payload', {}).get('author_id')
+						}
+                        activation_decider.remember_event_context(new_event_id, ctx)
+            except Exception:
+                pass
 
         # NEW: Handle adapter mapping registration for message events (only for InnerSpaces)
         if self.IS_INNER_SPACE:
@@ -424,69 +510,36 @@ class Space(BaseElement):
         full_event_node = {
              'id': new_event_id,
              'timeline_id': timeline_context.get('timeline_id', self.get_primary_timeline()),
-             # We don't easily know parent_ids/timestamp here without querying timeline again,
-             # so components should rely on the payload for now, or query if needed.
-             'payload': event_payload.copy() # PASS A SHALLOW COPY TO COMPONENTS
+             'payload': event_payload.copy()
         }
 
-        # 2. Dispatch event to *own* components
-        # Iterate through all components attached to this Space element
-        handled_by_component = False
-        for comp_name, component in self.get_components().items():
-            if hasattr(component, 'handle_event') and callable(component.handle_event):
-                try:
-                    # Pass the full event node as recorded (or just payload if preferred)
-                    # Passing full_event_node gives components access to event ID etc.
-                    if component.handle_event(full_event_node, timeline_context):
-                        logger.debug(f"[{self.id}] Event '{new_event_id}' ({event_type}) handled by component: {comp_name}")
-                        handled_by_component = True
-                        # Allow multiple components to handle the same event
-                except Exception as comp_err:
-                     logger.error(f"[{self.id}] Error in component '{comp_name}' handling event '{new_event_id}': {comp_err}", exc_info=True)
+        # NEW: Handle system events directly (bypass heartbeat classification)
+        # These events represent internal system decisions/acknowledgments, not external content
+        if event_type in ["activation_call", "component_processed"]:
+            self.process_event_for_components(full_event_node, timeline_context)
+            return
 
-        # 3. Dispatch event to targeted *child* element, if specified
-        # Use the original event_payload (the first argument to this method) for dispatching to child
-        original_target_element_id = event_payload.get("target_element_id")
-
-        if original_target_element_id:
-            # Ensure lookup is by actual element ID if mounted_elements keys are mount_ids that might differ
-            # For now, assuming get_mounted_element can handle element_id or mount_id.
-            # Or, iterate values:
-            mounted_element = None
-            if self._container: # Check if ContainerComponent exists
-                direct_child = self._container.get_mounted_element(original_target_element_id)
-                if direct_child and direct_child.id == original_target_element_id:
-                    mounted_element = direct_child
-                else: # Fallback: iterate if mount_id != element_id
-                    for elem in self._container.get_mounted_elements().values():
-                        if elem.id == original_target_element_id:
-                            mounted_element = elem
-                            break
-
-            if mounted_element:
-                if hasattr(mounted_element, 'receive_event') and callable(mounted_element.receive_event):
-                    logger.debug(f"[{self.id}] Routing event (ID: '{new_event_id}', Type: '{event_payload.get('event_type')}') to mounted element: {mounted_element.id}")
-                    try:
-                        # Child element receives the original event_payload and timeline context
-                        mounted_element.receive_event(event_payload, timeline_context)
-                    except Exception as mounted_err:
-                        logger.error(f"[{self.id}] Error in mounted element '{mounted_element.id}' receiving event '{new_event_id}': {mounted_err}", exc_info=True)
+        # Route event to Heartbeat queues instead of immediate broadcast
+        try:
+            heartbeat = None
+            for _name, comp in self.get_components().items():
+                if getattr(comp, 'COMPONENT_TYPE', '') == 'HeartbeatComponent':
+                    heartbeat = comp
+                    break
+            if heartbeat:
+                interrupt_class = (event_payload or {}).get('decider', {}).get('interrupt_class') if isinstance(event_payload, dict) else None
+                
+                loop = asyncio.get_running_loop()
+                if interrupt_class == 'interrupt':
+                    loop.create_task(heartbeat.handle_interrupt_now(full_event_node, timeline_context))
                 else:
-                    logger.warning(f"[{self.id}] Mounted element '{original_target_element_id}' found but has no receive_event method.")
-                    raise ValueError(f"Mounted element '{original_target_element_id}' has no receive_event method.")
+                    loop.create_task(heartbeat.enqueue_normal(full_event_node, timeline_context))
             else:
-                 # This could happen if the event targets an element nested deeper
-                 # We rely on parent elements routing downwards. If it wasn't found here,
-                 # it means the target wasn't a direct child.
-                 logger.debug(f"[{self.id}] Event '{new_event_id}' targets element '{original_target_element_id}', which is not directly mounted here.")
-        else:
-             # Event was not targeted at a specific child element
-             # Ensure this logging happens only if no specific child target AND not handled by own components in a way that stops propagation.
-             # For now, this is fine as a general log if no specific target_element_id was in the original event_payload.
-             if not original_target_element_id and not handled_by_component:
-                 logger.debug(f"[{self.id}] Event '{new_event_id}' ({event_type}) processed by Space components (or no specific child target and no component handled it).")
-             elif not original_target_element_id and handled_by_component:
-                 logger.debug(f"[{self.id}] Event '{new_event_id}' ({event_type}) handled by Space component(s); no specific child target.")
+                # Fallback to immediate processing if heartbeat missing
+                self.process_event_for_components(full_event_node, timeline_context)
+        except Exception as e:
+            logger.debug(f"[{self.id}] Heartbeat routing error, falling back to immediate processing: {e}")
+            self.process_event_for_components(full_event_node, timeline_context)
 
         # --- NEW: Handle action_request_for_remote ---
         if event_type == "action_request_for_remote":
@@ -498,272 +551,48 @@ class Space(BaseElement):
             parameters_from_payload = event_payload.get("action_parameters", {})
 
             if target_id_for_action and action_name_from_payload:
-                # Construct calling_context for the action on the remote element
                 remote_action_calling_context = {
                     "source_agent_id": event_payload.get("source_agent_id"),
                     "source_agent_name": event_payload.get("source_agent_name"),
                     "source_uplink_id": event_payload.get("source_uplink_id"),
-                    "original_event_id": new_event_id # Link back to this triggering event
+                    "original_event_id": new_event_id
                 }
                 logger.info(f"[{self.id}] Executing remote action on element '{target_id_for_action}', action: '{action_name_from_payload}', context: {remote_action_calling_context}")
-
-                # Execute the action.
-                # This needs to be async if execute_action_on_element can be.
-                # For now, assuming it might involve async tool execution eventually.
                 asyncio.create_task(
                     self.execute_action_on_element(
                         element_id=target_id_for_action,
                         action_name=action_name_from_payload,
                         parameters=parameters_from_payload,
-                        calling_context=remote_action_calling_context # PASS THE CONSTRUCTED CONTEXT
+                        calling_context=remote_action_calling_context
                     )
                 )
             else:
                 logger.error(f"[{self.id}] 'action_request_for_remote' event (ID: {new_event_id}) missing remote_target_element_id or action_name. Payload: {event_payload}")
-            return # Event processed by this specific handler
-        # --- End handle action_request_for_remote ---
-
-    # NEW methods for listener registration
-    def register_uplink_listener(self, callback: Callable[[List], None]):
-        """Registers a callback function to be notified when new VEILFacet operations are generated."""
-        if callable(callback):
-            self._uplink_listeners.add(callback)
-            logger.debug(f"[{self.id}] Registered uplink listener: {callback}")
-        else:
-            logger.warning(f"[{self.id}] Attempted to register non-callable uplink listener: {callback}")
-
-    def unregister_uplink_listener(self, callback: Callable[[List], None]):
-        """Unregisters a previously registered uplink listener callback."""
-        self._uplink_listeners.discard(callback)
-        logger.debug(f"[{self.id}] Unregistered uplink listener: {callback}")
-
-    # NEW: Frame end processing method
-    def on_frame_end(self) -> None:
-        """
-        Called by the HostEventLoop (or owning Space) after its processing frame.
-        In the new VEILFacet model:
-        1. Triggers its own SpaceVeilProducer to emit VEILFacet operations.
-        2. Sends accumulated VEILFacet operations to uplink listeners.
-        """
-        # 1. Trigger this Space's own VeilProducer to emit VEILFacet operations
-        if not self.IS_UPLINK_SPACE and self._veil_producer and hasattr(self._veil_producer, 'emit_delta'):
-            try:
-                logger.debug(f"[{self.id}] on_frame_end: Triggering emit_delta for own SpaceVeilProducer.")
-                self._veil_producer.emit_delta()  # This calls calculate_delta and then self.receive_delta
-            except Exception as e:
-                logger.error(f"[{self.id}] on_frame_end: Error triggering emit_delta for SpaceVeilProducer: {e}", exc_info=True)
-
-        # 2. Send accumulated VEILFacet operations to listeners
-        if not self.IS_UPLINK_SPACE and self._veil_producer:
-            try:
-                accumulated_operations = self._veil_producer.get_accumulated_facet_operations()
-
-                if accumulated_operations:
-                    logger.debug(f"[{self.id}] on_frame_end: Sending {len(accumulated_operations)} accumulated VEILFacet operations to {len(self._uplink_listeners)} listeners.")
-
-                    # Create a copy for sending
-                    operations_to_send = list(accumulated_operations)
-
-                    all_listeners_notified_successfully = True
-                    for listener_callback in self._uplink_listeners:
-                        try:
-                            listener_callback(operations_to_send)
-                        except Exception as e:
-                            all_listeners_notified_successfully = False
-                            logger.error(f"[{self.id}] Error calling uplink listener {listener_callback}: {e}", exc_info=True)
-                else:
-                    logger.debug(f"[{self.id}] on_frame_end: No accumulated VEILFacet operations to send.")
-
-            except Exception as e:
-                logger.error(f"[{self.id}] on_frame_end: Error processing accumulated VEILFacet operations: {e}", exc_info=True)
-
-    # --- Uplink Support Methods ---
-    def get_space_metadata_for_uplink(self) -> Dict[str, Any]:
-        """
-        Provides essential metadata about this space for an UplinkProxy
-        during its initial synchronization.
-
-        Returns:
-            A dictionary containing space ID, name, description, and potentially
-            adapter-specific identifiers if available from a component.
-        """
-        metadata = {
-            "space_id": self.id,
-            "name": self.name,
-            "description": self.description,
-            "element_type": self.__class__.__name__,
-            "adapter_id": self.adapter_id,
-            "external_conversation_id": self.external_conversation_id
-        }
-        # Example: If a space represents an external channel, it might have a component
-        # holding this info. For now, this is illustrative.
-        # channel_info_comp = self.get_component_by_type("ChannelInfoComponent")
-        # if channel_info_comp:
-        #     metadata["adapter_id"] = channel_info_comp.get_adapter_id()
-        #     metadata["external_conversation_id"] = channel_info_comp.get_external_id()
-
-        logger.debug(f"[{self.id}] Providing metadata for uplink: {metadata}")
-        return metadata
-
-    def get_full_veil_snapshot(self) -> Optional[Dict[str, Any]]:
-        """
-        Generates and returns a full VEIL snapshot of this space and its contents.
-        Delegates the construction of the hierarchy to its SpaceVeilProducer,
-        providing it with the Space's internal flat cache.
-        """
-        if self.IS_UPLINK_SPACE: # UplinkSpaces might not have a standard _veil_producer
-            logger.warning(f"[{self.id}] get_full_veil_snapshot() called on an UplinkSpace. UplinkSpaces typically do not produce their own VEIL in this manner.")
-            # Or, they might have a different producer type. For now, return None or basic info.
-            # Consider what an UplinkSpace should return here.
-            # For now, let's provide its own root if the cache has it.
-            space_root_id = f"{self.id}_space_root"
-            if self._veil_producer and self._veil_producer.check_node_exists(space_root_id):
-                veil_cache = self._veil_producer.get_flat_veil_cache()
-                return copy.deepcopy(veil_cache.get(space_root_id, {})) # Just its own node
-            return {"veil_id": space_root_id, "properties": {"name": self.name, "status": "UplinkSpace - snapshot not applicable"}, "children": []}
-
-
-        if not self._veil_producer:
-            logger.error(f"[{self.id}] Cannot generate full VEIL snapshot: _veil_producer (SpaceVeilProducer) not found.")
-            # Fallback: return basic space info if producer is missing
-            space_root_id = f"{self.id}_space_root"
-            return {
-                "veil_id": space_root_id,
-                "node_type": "space_root", # VEIL_SPACE_ROOT_TYPE, # - might not be defined here
-                "properties": {
-                    "element_id": self.id,
-                    "element_name": self.name,
-                    "description": self.description,
-                    "element_type": self.__class__.__name__,
-                    "veil_status": "veil_producer_missing_on_space"
-                },
-                "children": []
-            }
-
-        # The SpaceVeilProducer's get_full_veil method now handles building from this Space's cache.
-        logger.debug(f"[{self.id}] get_full_veil_snapshot: Delegating to SpaceVeilProducer to build VEIL from internal cache.")
-        try:
-            # SpaceVeilProducer.get_full_veil() will use its own internal _flat_veil_cache
-            # and self.owner.id (which are this Space's attributes)
-            full_reconstructed_veil = self._veil_producer.get_full_veil()
-
-            if full_reconstructed_veil:
-                return full_reconstructed_veil # Already a deepcopy from the producer's builder
-            else:
-                # This case implies an issue within the producer's get_full_veil or its builder
-                logger.error(f"[{self.id}] SpaceVeilProducer.get_full_veil() returned None or empty. Snapshot generation failed.")
-                space_root_id = f"{self.id}_space_root"
-                return {
-                    "veil_id": space_root_id,
-                    "node_type": "space_root",
-                    "properties": {
-                        "element_id": self.id,
-                        "element_name": self.name,
-                        "description": self.description,
-                        "element_type": self.__class__.__name__,
-                        "veil_status": "veil_producer_failed_to_build_hierarchy"
-                     },
-                    "children": list(self._veil_producer.get_flat_veil_cache().values()) if self._veil_producer else []
-                }
-        except Exception as e:
-            logger.error(f"[{self.id}] Error calling SpaceVeilProducer.get_full_veil() for snapshot: {e}", exc_info=True)
-            space_root_id = f"{self.id}_space_root"
-            return {
-                "veil_id": space_root_id,
-                "node_type": "space_root",
-                "properties": {
-                    "element_id": self.id,
-                    "element_name": self.name,
-                    "description": self.description,
-                    "element_type": self.__class__.__name__,
-                    "veil_status": f"error_delegating_to_veil_producer: {e}"
-                },
-                "children": []
-            }
-
-    # --- Lifecycle & Debug ---
-    def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(id={self.id}, name={self.name}, description={self.description})"
-
-    # Optional: Method for listeners to pull cached VEILFacet operations if needed
-    def get_cached_facet_operations(self) -> List:
-        """Returns the VEILFacet operations calculated in the last frame."""
-        if self._veil_producer:
-            return self._veil_producer.get_accumulated_facet_operations()
-        return []
-
-    def receive_delta(self, facet_operations: List) -> None:
-        """
-        NEW: Pure VEILFacet operation processing.
-
-        Space now only handles VEILFacetOperations from child producers.
-        All legacy delta operation complexity has been removed.
-
-        Args:
-            facet_operations: List of VEILFacetOperation instances from child producers
-        """
-        if not isinstance(facet_operations, list) or not facet_operations:
-            logger.debug(f"[{self.id}] Space.receive_delta called with no valid facet operations.")
             return
 
-        # Validate that these are VEILFacetOperation instances
-        if not (facet_operations and hasattr(facet_operations[0], 'operation_type')):
-            logger.error(f"[{self.id}] Space.receive_delta received non-VEILFacetOperation objects. Legacy deltas are no longer supported.")
-            return
-
-        logger.debug(f"[{self.id}] Space.receive_delta: Received {len(facet_operations)} VEILFacetOperations, routing to SpaceVeilProducer.")
-
-        # Route VEILFacetOperations to SpaceVeilProducer
-        veil_producer = self._veil_producer
-        if veil_producer:
-            import asyncio
-            try:
-                if asyncio.iscoroutinefunction(veil_producer.receive_facet_operations):
-                    asyncio.create_task(veil_producer.receive_facet_operations(facet_operations))
-                else:
-                    veil_producer.receive_facet_operations(facet_operations)
-            except Exception as e:
-                logger.error(f"[{self.id}] Error delegating VEILFacetOperations to SpaceVeilProducer: {e}", exc_info=True)
-        else:
-            logger.error(f"[{self.id}] SpaceVeilProducer not available for facet operation processing")
-
-        # Record VEILFacet operation event to timeline
-        event_payload = {
-            "event_type": "veil_facet_operations_received_by_space",
-            "payload": {
-                "source": "child_producer_emission",
-                "facet_operation_count": len(facet_operations),
-                "operation_types": [op.operation_type for op in facet_operations[:5]]  # Sample first 5 for logging
-            }
-        }
-        timeline_context = {}
-        primary_timeline = self.get_primary_timeline()
-        if primary_timeline:
-            timeline_context['timeline_id'] = primary_timeline
+    # New method: process event by broadcasting to own components and all mounted elements
+    def process_event_for_components(self, event_payload: Dict[str, Any], timeline_context: Dict[str, Any]) -> None:
         try:
-            self.add_event_to_timeline(event_payload, timeline_context)
+            # 2. Dispatch event to own components
+            handled_by_component = False
+            for comp_name, component in self.get_components().items():
+                if hasattr(component, 'handle_event') and callable(component.handle_event):
+                    try:
+                        if component.handle_event(event_payload, timeline_context):
+                            handled_by_component = True
+                    except Exception as comp_err:
+                        logger.error(f"[{self.id}] Error in component '{comp_name}' handling event: {comp_err}", exc_info=True)
+            # 3. Broadcast to all mounted child elements
+            try:
+                mounted_elements = self._container.get_mounted_elements() if self._container else {}  
+                for elem in mounted_elements.values():
+                    if hasattr(elem, 'receive_event') and callable(elem.receive_event):
+                        elem.receive_event(event_payload, timeline_context)
+            except Exception as e:
+                logger.error(f"[{self.id}] Error broadcasting event to mounted elements: {e}", exc_info=True)
         except Exception as e:
-            logger.error(f"[{self.id}] Space.receive_delta: Error adding event to timeline: {e}", exc_info=True)
+            logger.error(f"[{self.id}] process_event_for_components error: {e}", exc_info=True)
 
-    # REMOVED: get_flat_veil_snapshot(), get_flat_veil_cache_snapshot()
-    # Flat cache methods removed after VEILFacet architecture completion
-    # Use get_facet_cache_snapshot() for native VEILFacet access
-
-    def get_facet_cache_snapshot(self) -> 'VEILFacetCache':
-        """
-        NEW: Get VEILFacetCache snapshot directly.
-
-        Returns:
-            Copy of the VEILFacetCache from SpaceVeilProducer
-        """
-        veil_producer = self._veil_producer
-        if veil_producer:
-            return veil_producer.get_facet_cache_copy()
-        logger.warning(f"[{self.id}] Cannot get VEILFacetCache snapshot: SpaceVeilProducer not available")
-        from ..components.veil import VEILFacetCache
-        return VEILFacetCache()  # Return empty cache
-
-    # --- Action Execution ---
     async def execute_action_on_element(self,
                                         element_id: str,
                                         action_name: str,
@@ -781,7 +610,6 @@ class Space(BaseElement):
         else:
             # Otherwise, look for the element in mounted elements (using ContainerComponent)
             target_element = self.get_mounted_element(element_id)
-
         if not target_element:
             # If not found by mount_id, maybe element_id is a direct ID of a mounted element?
             # This is less common for actions but could happen.
@@ -826,50 +654,23 @@ class Space(BaseElement):
 
         return action_result if isinstance(action_result, dict) else {"success": True, "result": action_result}
 
-    def get_public_tool_definitions(self) -> List[Dict[str, Any]]:
+    # --- NEW: Method to find an element by ID ---
+    def get_element_by_id(self, element_id: str) -> Optional[BaseElement]:
         """
-        Collects tool definitions from this Space and its mounted child elements
-        that have a ToolProviderComponent.
-
-        Returns:
-            A list of dictionaries, where each dictionary contains:
-            - 'provider_element_id': The ID of the element providing the tool.
-            - 'tool_name': The name of the tool.
-            - 'description': The tool's description.
-            - 'parameters_schema': The schema for the tool's parameters.
+        Finds an element by its ID.
+        Checks if it's the Space itself or one of its directly mounted elements.
         """
-        all_tool_definitions: List[Dict[str, Any]] = []
+        if self.id == element_id:
+            return self
 
-        # 1. Get tools from this Space itself
-        space_tool_provider = self.get_component_by_type(ToolProviderComponent)
-        if space_tool_provider:
-            raw_tools = space_tool_provider.get_llm_tool_definitions() # Returns List[LLMToolDefinition]
-            for tool_def in raw_tools:
-                all_tool_definitions.append({
-                    "provider_element_id": self.id,
-                    "tool_name": tool_def.name,
-                    "description": tool_def.description,
-                    "parameters_schema": tool_def.parameters
-                })
-            logger.debug(f"[{self.id}] Found {len(raw_tools)} tools on Space itself.")
+        # Check mounted elements by their actual element ID (not just mount_id)
+        if self._container:
+            for mounted_element in self._container.get_mounted_elements().values():
+                if mounted_element.id == element_id:
+                    return mounted_element
 
-        # 2. Get tools from mounted child elements
-        if self._container: # Ensure ContainerComponent exists
-            for child_element in self._container.get_mounted_elements().values():
-                child_tool_provider = child_element.get_component_by_type(ToolProviderComponent)
-                if child_tool_provider:
-                    child_raw_tools = child_tool_provider.get_llm_tool_definitions()
-                    for tool_def in child_raw_tools:
-                        all_tool_definitions.append({
-                            "provider_element_id": child_element.id,
-                            "tool_name": tool_def.name,
-                            "description": tool_def.description,
-                            "parameters_schema": tool_def.parameters
-                        })
-                    logger.debug(f"[{self.id}] Found {len(child_raw_tools)} tools on child element '{child_element.id}'.")
-
-        logger.info(f"[{self.id}] Collected {len(all_tool_definitions)} public tool definitions in total.")
-        return all_tool_definitions
+        logger.debug(f"[{self.id}] Element with ID '{element_id}' not found in this space or its direct children.")
+        return None
 
     # --- NEW: Event Replay Methods ---
 

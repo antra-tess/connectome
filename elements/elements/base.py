@@ -494,6 +494,7 @@ class BaseElement:
 
     def receive_delta(self, delta: List[Dict[str, Any]]) -> None:
         parent = self.get_parent_object()
+        
         if parent and hasattr(parent, 'receive_delta'):
             parent.receive_delta(delta)
         else:
