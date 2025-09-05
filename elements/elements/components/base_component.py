@@ -291,13 +291,32 @@ class Component:
                 logger.error(f"Missing dependency {dependency} for component {self.COMPONENT_TYPE}")
                 return False
                 
-        return True 
+        return True
+    
+    def _on_element_ready(self) -> None:
+        """
+        Called when the owning element becomes ready.
+        
+        This is part of the Godot-inspired ready cascade system.
+        Override in subclasses to implement element-ready behavior.
+        """
+        pass 
     
 class VeilProducer(Component):
     """
     Base class for components that produce VEIL representations.
     """
     COMPONENT_TYPE = "VeilProducer"
+    
+    def _on_element_ready(self) -> None:
+        """
+        VeilProducer implementation - emit initial VEIL state when element is ready.
+        
+        This replaces the deferred emission system with the Godot-inspired ready cascade.
+        Parent lookup is now guaranteed to work since ready cascade ensures parent chain is ready.
+        """
+        logger.debug(f"[{self.owner.id if self.owner else 'Unknown'}] VeilProducer element ready, emitting initial VEIL")
+        self.emit_delta()
     
     def emit_delta(self) -> None:
         """

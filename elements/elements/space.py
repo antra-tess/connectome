@@ -158,6 +158,16 @@ class Space(BaseElement):
             logger.info(f"[{self.id}] Event replay mode: {self._event_replay_mode.value}")
 
         logger.info(f"Created space: {name} ({self.id})")
+    
+    def on_registered(self) -> None:
+        """
+        Called by SpaceRegistry when this space is successfully registered.
+        
+        This triggers the Godot-inspired ready cascade, ensuring all child elements
+        and their components become ready in proper dependency order.
+        """
+        logger.info(f"[{self.id}] Space registered in SpaceRegistry, triggering ready cascade")
+        self._ready()
 
     def _determine_replay_mode(self) -> EventReplayMode:
         """Determine event replay mode from environment variables or configuration."""
