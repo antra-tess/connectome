@@ -55,8 +55,10 @@ class InspectorServer:
         # Add routes
         app.router.add_get('/', self.handle_root)
         app.router.add_get('/ui/', self.handle_ui)
+        app.router.add_get('/favicon.png', self.handle_favicon)
         app.router.add_get('/status', self.handle_status)
         app.router.add_get('/spaces', self.handle_spaces)
+        app.router.add_get('/spaces/{space_id}/render', self.handle_space_render)
         app.router.add_get('/agents', self.handle_agents)
         app.router.add_get('/adapters', self.handle_adapters)
         app.router.add_get('/metrics', self.handle_metrics)
@@ -75,6 +77,14 @@ class InspectorServer:
         app.router.add_patch('/events/{event_id}', self.handle_update_timeline_event)
         app.router.add_put('/veil/{space_id}/facets/{facet_id}', self.handle_update_veil_facet)
         app.router.add_patch('/veil/{space_id}/facets/{facet_id}', self.handle_update_veil_facet)
+        
+        # REPL endpoints
+        app.router.add_post('/repl/create', self.handle_repl_create)
+        app.router.add_post('/repl/execute', self.handle_repl_execute)
+        app.router.add_post('/repl/complete', self.handle_repl_complete)
+        app.router.add_post('/repl/inspect', self.handle_repl_inspect)
+        app.router.add_get('/repl/sessions', self.handle_repl_sessions)
+        app.router.add_get('/repl/session/{session_id}/history', self.handle_repl_session_history)
         
         # Add middleware for request counting
         app.middlewares.append(self.request_counter_middleware)
@@ -97,6 +107,7 @@ class InspectorServer:
             logger.info(f"  GET http://localhost:{self.port}/ui/ - Web UI with JSON visualization")
             logger.info(f"  GET http://localhost:{self.port}/status - System status")
             logger.info(f"  GET http://localhost:{self.port}/spaces - Space details")
+            logger.info(f"  GET http://localhost:{self.port}/spaces/{{space_id}}/render - Render space as text")
             logger.info(f"  GET http://localhost:{self.port}/agents - Agent information")
             logger.info(f"  GET http://localhost:{self.port}/adapters - Adapter status")
             logger.info(f"  GET http://localhost:{self.port}/metrics - System metrics")
@@ -109,6 +120,12 @@ class InspectorServer:
             logger.info(f"  GET http://localhost:{self.port}/veil/{{space_id}}/facets/{{facet_id}} - Specific facet details")
             logger.info(f"  PUT/PATCH http://localhost:{self.port}/events/{{event_id}} - Update timeline event")
             logger.info(f"  PUT/PATCH http://localhost:{self.port}/veil/{{space_id}}/facets/{{facet_id}} - Update VEIL facet")
+            logger.info(f"  POST http://localhost:{self.port}/repl/create - Create new REPL session")
+            logger.info(f"  POST http://localhost:{self.port}/repl/execute - Execute code in REPL session")
+            logger.info(f"  POST http://localhost:{self.port}/repl/complete - Get code completions for REPL session")
+            logger.info(f"  POST http://localhost:{self.port}/repl/inspect - Inspect object in REPL session")
+            logger.info(f"  GET http://localhost:{self.port}/repl/sessions - List active REPL sessions")
+            logger.info(f"  GET http://localhost:{self.port}/repl/session/{{session_id}}/history - Get REPL session history")
             
         except Exception as e:
             logger.error(f"Failed to start inspector server: {e}", exc_info=True)
@@ -147,7 +164,7 @@ class InspectorServer:
             status=status,
             headers={
                 'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Methods': 'GET, PUT, PATCH, OPTIONS',
+                'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, OPTIONS',
                 'Access-Control-Allow-Headers': 'Content-Type'
             }
         )
@@ -183,6 +200,32 @@ class InspectorServer:
                 text=f"<html><body><h1>Error loading UI</h1><p>{str(e)}</p></body></html>",
                 content_type='text/html',
                 status=500
+            )
+    
+    async def handle_favicon(self, request: Request) -> Response:
+        """Handle favicon.png endpoint."""
+        import os
+        try:
+            # Get the path to the favicon file in the same directory as this module
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            favicon_path = os.path.join(current_dir, 'favicon.png')
+            
+            with open(favicon_path, 'rb') as f:
+                favicon_content = f.read()
+            
+            return web.Response(
+                body=favicon_content,
+                content_type='image/png',
+                headers={
+                    'Access-Control-Allow-Origin': '*',
+                    'Cache-Control': 'public, max-age=86400'  # Cache for 1 day
+                }
+            )
+        except Exception as e:
+            logger.error(f"Error serving favicon: {e}", exc_info=True)
+            return web.Response(
+                text="Favicon not found",
+                status=404
             )
     
     async def handle_status(self, request: Request) -> Response:
@@ -232,7 +275,16 @@ class InspectorServer:
         except (ValueError, TypeError):
             limit = 100
         
-        data = await self.handlers.handle_timeline_details(space_id, timeline_id, limit)
+        # Get offset for pagination
+        offset_str = request.query.get('offset')
+        offset = None
+        if offset_str:
+            try:
+                offset = float(offset_str)
+            except (ValueError, TypeError):
+                offset = None
+        
+        data = await self.handlers.handle_timeline_details(space_id, timeline_id, limit, offset)
         status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if "error" in data else 200)
         return self._json_response(data, status=status_code)
     
@@ -257,12 +309,13 @@ class InspectorServer:
         # Get optional query parameters for filtering
         facet_type = request.query.get('type')  # event, status, ambient
         owner_id = request.query.get('owner')
+        after_facet_id = request.query.get('after_facet_id')  # For pagination
         try:
             limit = int(request.query.get('limit', 100))
         except (ValueError, TypeError):
             limit = 100
         
-        data = await self.handlers.handle_veil_facets(space_id, facet_type, owner_id, limit)
+        data = await self.handlers.handle_veil_facets(space_id, facet_type, owner_id, limit, after_facet_id)
         status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if "error" in data else 200)
         return self._json_response(data, status=status_code)
 
@@ -335,3 +388,161 @@ class InspectorServer:
         data = await self.handlers.handle_update_veil_facet(space_id, facet_id, update_data)
         status_code = 400 if not data.get("success", False) and "required" in data.get("error", "") else (500 if not data.get("success", False) else 200)
         return self._json_response(data, status=status_code)
+
+    async def handle_repl_create(self, request: Request) -> Response:
+        """Handle REPL session creation endpoint."""
+        # Parse JSON body
+        try:
+            body = await request.json()
+        except Exception as e:
+            return self._json_response({
+                "error": "Invalid JSON in request body",
+                "details": str(e),
+                "success": False
+            }, status=400)
+        
+        # Extract required parameters
+        context_type = body.get('context_type')
+        context_id = body.get('context_id')
+        target_path = body.get('target_path')
+        
+        data = await self.handlers.handle_repl_create(context_type, context_id, target_path)
+        status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if "error" in data else 200)
+        return self._json_response(data, status=status_code)
+
+    async def handle_repl_execute(self, request: Request) -> Response:
+        """Handle REPL code execution endpoint."""
+        # Parse JSON body
+        try:
+            body = await request.json()
+        except Exception as e:
+            return self._json_response({
+                "error": "Invalid JSON in request body",
+                "details": str(e),
+                "success": False
+            }, status=400)
+        
+        # Extract required parameters
+        session_id = body.get('session_id')
+        code = body.get('code')
+        timeout = body.get('timeout', 5.0)
+        
+        data = await self.handlers.handle_repl_execute(session_id, code, timeout)
+        status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if not data.get("success", False) and "error" in data else 200)
+        return self._json_response(data, status=status_code)
+
+    async def handle_repl_sessions(self, request: Request) -> Response:
+        """Handle REPL sessions list endpoint."""
+        _ = request  # Request parameter required by aiohttp interface
+        data = await self.handlers.handle_repl_sessions()
+        status_code = 500 if "error" in data else 200
+        return self._json_response(data, status=status_code)
+
+    async def handle_repl_session_history(self, request: Request) -> Response:
+        """Handle REPL session history endpoint."""
+        session_id = request.match_info.get('session_id')
+        
+        # Get optional query parameters
+        try:
+            limit = int(request.query.get('limit', 50))
+        except (ValueError, TypeError):
+            limit = 50
+        
+        try:
+            offset = int(request.query.get('offset', 0))
+        except (ValueError, TypeError):
+            offset = 0
+        
+        data = await self.handlers.handle_repl_session_history(session_id, limit, offset)
+        status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if "error" in data else 200)
+        return self._json_response(data, status=status_code)
+    
+    async def handle_repl_complete(self, request: Request) -> Response:
+        """Handle REPL code completion endpoint."""
+        try:
+            request_data = await request.json()
+            
+            session_id = request_data.get('session_id', '')
+            code = request_data.get('code', '')
+            cursor_pos = request_data.get('cursor_pos', len(code))  # Default to end of code
+            
+        except (ValueError, TypeError) as e:
+            return self._json_response({
+                "error": "Invalid JSON in request body",
+                "details": str(e),
+                "timestamp": time.time()
+            }, status=400)
+        
+        data = await self.handlers.handle_repl_complete(session_id, code, cursor_pos)
+        status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if "error" in data and data.get("error") else 200)
+        return self._json_response(data, status=status_code)
+    
+    async def handle_repl_inspect(self, request: Request) -> Response:
+        """Handle REPL object inspection endpoint."""
+        try:
+            request_data = await request.json()
+            
+            session_id = request_data.get('session_id', '')
+            obj_name = request_data.get('obj_name', '')
+            
+        except (ValueError, TypeError) as e:
+            return self._json_response({
+                "error": "Invalid JSON in request body",
+                "details": str(e),
+                "timestamp": time.time()
+            }, status=400)
+        
+        data = await self.handlers.handle_repl_inspect(session_id, obj_name)
+        status_code = 400 if "error" in data and "required" in data.get("error", "") else (500 if "error" in data else 200)
+        return self._json_response(data, status=status_code)
+    
+    async def handle_space_render(self, request: Request) -> Response:
+        """Handle space text rendering endpoint."""
+        space_id = request.match_info.get('space_id')
+        
+        # Parse query parameters for rendering options
+        options = {}
+        if request.query.get('format'):
+            options['format'] = request.query.get('format')
+        if request.query.get('include_tools'):
+            options['include_tools'] = request.query.get('include_tools').lower() == 'true'
+        if request.query.get('include_system'):
+            options['include_system'] = request.query.get('include_system').lower() == 'true'
+        if request.query.get('max_turns'):
+            try:
+                options['max_turns'] = int(request.query.get('max_turns'))
+            except ValueError:
+                pass
+        if request.query.get('from_timestamp'):
+            try:
+                options['from_timestamp'] = float(request.query.get('from_timestamp'))
+            except ValueError:
+                pass
+        
+        data = await self.handlers.handle_space_render(space_id, options if options else None)
+        
+        # Handle different response formats
+        if not data.get("error"):
+            content = data.get("content", "")
+            metadata = data.get("metadata", {})
+            content_type = metadata.get("content_type", "text/plain")
+            
+            # For JSON format, return as JSON response
+            if metadata.get("format") == "json_messages":
+                return self._json_response(content)
+            
+            # For text/markdown formats, return as plain text response
+            return web.Response(
+                text=content if isinstance(content, str) else json.dumps(content),
+                content_type=content_type,
+                headers={
+                    'Access-Control-Allow-Origin': '*',
+                    'X-Space-ID': space_id,
+                    'X-Turn-Count': str(metadata.get("turn_count", 0)),
+                    'X-Facet-Count': str(metadata.get("facet_count", 0))
+                }
+            )
+        else:
+            # Error response
+            status_code = 400 if "not found" in data.get("error", "") else 500
+            return self._json_response(data, status=status_code)

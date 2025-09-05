@@ -6,10 +6,12 @@ External CLI processes use this to communicate with the in-process command handl
 """
 
 import asyncio
+import argparse
 import json
 import logging
 import os
 import socket
+import sys
 import time
 from typing import Dict, Any, Optional, List
 import uuid
@@ -62,8 +64,13 @@ class IPCClient:
                 logger.error(f"Socket does not exist: {self.socket_path}")
                 return False
             
-            # Connect to Unix socket
-            self.reader, self.writer = await asyncio.open_unix_connection(self.socket_path)
+            # Connect to Unix socket with increased buffer limit for large timeline events
+            # Must match the server's buffer limit to handle large responses
+            buffer_limit = 10 * 1024 * 1024  # 10MB
+            self.reader, self.writer = await asyncio.open_unix_connection(
+                self.socket_path, 
+                limit=buffer_limit
+            )
             self.is_connected = True
             
             logger.debug(f"Connected to inspector IPC server: {self.socket_path}")
@@ -325,3 +332,282 @@ def discover_connectome_hosts() -> List[Dict[str, Any]]:
     except Exception as e:
         logger.debug(f"Error discovering hosts: {e}")
         return []
+
+
+class InteractiveREPL:
+    """
+    Interactive REPL for Connectome Inspector via IPC.
+    
+    Provides a Python-like interactive console that sends commands to a REPL session
+    in the running Connectome host.
+    """
+    
+    # ANSI color codes
+    RED = '\033[91m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    BLUE = '\033[94m'
+    MAGENTA = '\033[95m'
+    CYAN = '\033[96m'
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    
+    def __init__(self, context: str, socket_path: str = None, timeout: float = 30.0):
+        """
+        Initialize the interactive REPL.
+        
+        Args:
+            context: REPL context in format 'context_type:context_id' (e.g., 'global:test')
+            socket_path: Path to Unix socket (auto-discovered if None)
+            timeout: Command timeout in seconds
+        """
+        self.context = context
+        self.socket_path = socket_path
+        self.timeout = timeout
+        self.session_id = None
+        self.executor = IPCCommandExecutor(socket_path, timeout)
+        self.code_buffer = []
+        
+        # Parse context
+        if ':' in context:
+            self.context_type, self.context_id = context.split(':', 1)
+        else:
+            self.context_type = 'global'
+            self.context_id = context
+    
+    async def start(self):
+        """Start the interactive REPL session."""
+        try:
+            print(f"{self.CYAN}Connectome Interactive REPL{self.RESET}")
+            print(f"Context: {self.BOLD}{self.context}{self.RESET}")
+            print("Type 'exit()' or press Ctrl+D to exit")
+            print("=" * 50)
+            
+            # Create REPL session
+            await self._create_session()
+            
+            # Start interactive loop
+            await self._interactive_loop()
+            
+        except KeyboardInterrupt:
+            print(f"\n{self.YELLOW}Interrupted by user{self.RESET}")
+        except EOFError:
+            print(f"\n{self.CYAN}Goodbye!{self.RESET}")
+        except Exception as e:
+            print(f"\n{self.RED}Error: {e}{self.RESET}")
+        finally:
+            print()
+    
+    async def _create_session(self):
+        """Create a new REPL session."""
+        print(f"Creating REPL session...")
+        
+        result = await self.executor.execute_command("repl-create", {
+            "context_type": self.context_type,
+            "context_id": self.context_id
+        })
+        
+        if result.get("error"):
+            raise RuntimeError(f"Failed to create REPL session: {result['error']}")
+        
+        session_data = result.get("result", {})
+        if not session_data.get("success"):
+            raise RuntimeError(f"Failed to create REPL session: {session_data.get('error', 'Unknown error')}")
+        
+        self.session_id = session_data["session"]["id"]
+        session_info = session_data["session"]
+        
+        print(f"{self.GREEN}✓ REPL session created: {self.session_id}{self.RESET}")
+        print(f"Available variables: {len(session_info.get('namespace_keys', []))} items")
+        print()
+    
+    async def _interactive_loop(self):
+        """Main interactive loop."""
+        while True:
+            try:
+                # Show appropriate prompt
+                if self.code_buffer:
+                    prompt = "... "
+                else:
+                    prompt = ">>> "
+                
+                # Read input with proper handling of EOF
+                try:
+                    line = input(prompt).rstrip('\r\n')
+                except EOFError:
+                    # Ctrl+D pressed
+                    break
+                
+                # Handle special commands
+                if line.strip() in ('exit()', 'quit()', 'exit', 'quit'):
+                    break
+                
+                # Add to code buffer
+                self.code_buffer.append(line)
+                
+                # Check if code is complete
+                code = '\n'.join(self.code_buffer)
+                
+                if self._is_code_complete(code):
+                    # Execute complete code block
+                    if code.strip():  # Only execute if there's actual code
+                        await self._execute_code(code)
+                    self.code_buffer = []
+                
+            except KeyboardInterrupt:
+                # Ctrl+C pressed - clear current input and start fresh
+                print()
+                self.code_buffer = []
+                continue
+    
+    def _is_code_complete(self, code: str) -> bool:
+        """
+        Check if the code is complete and can be executed.
+        
+        Args:
+            code: Code string to check
+            
+        Returns:
+            True if code is complete, False if more input is needed
+        """
+        if not code.strip():
+            return True
+        
+        try:
+            # Try to compile the code
+            compile(code, '<stdin>', 'single')
+            return True
+        except SyntaxError as e:
+            # Check if this is an incomplete statement
+            if 'unexpected EOF' in str(e) or 'expected an indented block' in str(e):
+                return False
+            # If it's a different syntax error, the code is complete but invalid
+            return True
+        except Exception:
+            # Other compilation errors - consider it complete
+            return True
+    
+    async def _execute_code(self, code: str):
+        """
+        Execute code in the REPL session.
+        
+        Args:
+            code: Code to execute
+        """
+        try:
+            result = await self.executor.execute_command("repl-exec", {
+                "session_id": self.session_id,
+                "code": code
+            })
+            
+            if result.get("error"):
+                print(f"{self.RED}Communication error: {result['error']}{self.RESET}")
+                return
+            
+            exec_result = result.get("result", {})
+            
+            # Show output if present
+            output = exec_result.get("output", "").strip()
+            if output:
+                print(output)
+            
+            # Show error if present
+            error = exec_result.get("error", "").strip()
+            if error:
+                print(f"{self.RED}{error}{self.RESET}")
+            
+            # Show namespace changes
+            namespace_changes = exec_result.get("namespace_changes", [])
+            if namespace_changes and len(namespace_changes) > 0:
+                vars_str = ", ".join(namespace_changes)
+                print(f"{self.BLUE}# New variables: {vars_str}{self.RESET}")
+        
+        except Exception as e:
+            print(f"{self.RED}Execution error: {e}{self.RESET}")
+
+
+async def run_interactive_repl(context: str, socket_path: str = None, timeout: float = 30.0):
+    """
+    Run an interactive REPL session.
+    
+    Args:
+        context: REPL context in format 'context_type:context_id'
+        socket_path: Path to Unix socket
+        timeout: Command timeout in seconds
+    """
+    repl = InteractiveREPL(context, socket_path, timeout)
+    await repl.start()
+
+
+def main():
+    """Main entry point for IPC client CLI."""
+    parser = argparse.ArgumentParser(
+        description="Connectome Inspector IPC Client",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Start interactive REPL in global context
+  python -m host.modules.inspector.ipc_client --repl global:test
+  
+  # Start REPL with auto-generated session ID
+  python -m host.modules.inspector.ipc_client --repl global
+  
+  # Execute a single command
+  python -m host.modules.inspector.ipc_client --command status
+        """
+    )
+    
+    parser.add_argument("--repl", metavar="CONTEXT", 
+                        help="Start interactive REPL mode with given context (format: context_type:context_id or just context_id)")
+    parser.add_argument("--command", metavar="CMD",
+                        help="Execute a single inspector command")
+    parser.add_argument("--socket", metavar="PATH",
+                        help="Path to Unix socket (auto-discovered if not specified)")
+    parser.add_argument("--timeout", type=float, default=30.0,
+                        help="Command timeout in seconds (default: 30)")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="Enable verbose logging")
+    
+    args = parser.parse_args()
+    
+    # Configure logging
+    if args.verbose:
+        logging.basicConfig(level=logging.DEBUG)
+    else:
+        logging.basicConfig(level=logging.WARNING)
+    
+    async def run_async():
+        if args.repl:
+            # Auto-generate context_id if not provided
+            context = args.repl
+            if ':' not in context:
+                import time
+                context = f"global:{context}_{int(time.time())}"
+            
+            await run_interactive_repl(context, args.socket, args.timeout)
+        
+        elif args.command:
+            # Execute single command
+            result = await execute_inspector_command(args.command, socket_path=args.socket, timeout=args.timeout)
+            
+            # Pretty print result
+            if result.get("error"):
+                print(f"Error: {result['error']}", file=sys.stderr)
+                sys.exit(1)
+            else:
+                import json
+                print(json.dumps(result, indent=2))
+        
+        else:
+            parser.print_help()
+    
+    # Run async main
+    try:
+        asyncio.run(run_async())
+    except KeyboardInterrupt:
+        print("\nInterrupted by user")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

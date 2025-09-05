@@ -36,6 +36,8 @@ class NavigationMode(Enum):
     TREE_VIEW = "tree_view"
     DETAIL_VIEW = "detail_view"
     HOST_SELECTION = "host_selection"
+    REPL_MODE = "repl_mode"
+    HUD_VIEW = "hud_view"
 
 
 @dataclass
@@ -52,6 +54,8 @@ class TreeNode:
     command_path: Optional[str] = None  # For executable commands
     write_endpoint: Optional[str] = None  # For editable nodes
     drill_down_endpoint: Optional[str] = None  # For nodes that support detail drilling
+    is_hud_viewable: bool = False  # For HUD-viewable nodes
+    hud_space_id: Optional[str] = None  # Space ID for HUD view
 
 
 class TerminalController:
@@ -145,13 +149,22 @@ class TerminalController:
                     next_char = sys.stdin.read(1)
                     if next_char == '[':
                         third_char = sys.stdin.read(1)
-                        # Handle extended escape sequences like Page Up/Down, End, Home
-                        if third_char in ['5', '6', '4', '1']:  # Page Up, Page Down, End, Home
-                            # Read the trailing '~' character
+                        # Handle extended escape sequences 
+                        if third_char.isdigit():
+                            # Multi-digit sequences like F1-F12, Page Up/Down, etc.
                             try:
-                                tilde = sys.stdin.read(1)
-                                if tilde == '~':
-                                    return f'ESC[{third_char}~'
+                                # Try to read more characters for multi-digit sequences
+                                remaining_chars = third_char
+                                while True:
+                                    next_char = sys.stdin.read(1)
+                                    if next_char == '~':
+                                        # Complete sequence
+                                        return f'ESC[{remaining_chars}~'
+                                    elif next_char.isdigit():
+                                        remaining_chars += next_char
+                                    else:
+                                        # Unexpected character, return what we have
+                                        break
                             except:
                                 pass
                         elif third_char == 'F':  # Alternative End key
@@ -196,14 +209,16 @@ class IPCTUIInspector:
         self.terminal = TerminalController()
         
         # UI State
-        self.mode = NavigationMode.HOST_SELECTION if not socket_path else NavigationMode.MAIN_MENU
         self.current_menu_index = 0
         self.current_tree_index = 0
         self.current_tree_node = None
         self.tree_root = None
         self.scroll_offset = 0
-        self.status_message = ""
         self.search_query = ""
+        
+        # HUD view state
+        self.hud_content = ""
+        self.current_hud_space_id = None
         
         # Detail view state
         self._detail_tree_root = None
@@ -224,6 +239,7 @@ class IPCTUIInspector:
             ("Metrics", "metrics", "📈 System performance metrics"),
             ("Timelines", "timelines", "⏰ Timeline DAG overview"),
             ("VEIL Overview", "veil", "👁️ VEIL system overview"),
+            ("Python REPL", "repl", "🐍 Interactive Python debugging console"),
             ("Health Check", "health", "✅ Simple health check"),
             ("Switch Host", "switch_host", "🔄 Connect to a different host"),
             ("Quit", "quit", "❌ Exit the inspector")
@@ -239,6 +255,35 @@ class IPCTUIInspector:
         self._pagination_loading = False  # Prevent recursive loading
         self._last_scroll_direction = None  # Track last scroll direction for pagination
         self._rendering = False  # Prevent tree modifications during rendering
+        
+        # Realtime streaming state
+        self._realtime_enabled = False  # Whether realtime streaming is active
+        self._realtime_task = None  # Background task for polling
+        self._realtime_poll_interval = 3.0  # Poll every 3 seconds
+        self._realtime_newest_event_id = None  # Track newest event for cursor
+        self._realtime_newest_facet_id = None  # Track newest facet for cursor
+        self._current_endpoint_args = {}  # Store current endpoint args for realtime polling
+        self._current_view_type = None  # Track current view type: 'veil_facets', 'timeline_events', or None
+        
+        # REPL state
+        self.repl_sessions = {}  # session_id -> session_info
+        self.current_repl_session = None  # Active session
+        
+        # Render state tracking
+        self._needs_render = True  # Always render initially
+        self._last_status_message = ""
+        self._last_mode = None
+        self._status_message = ""  # Private backing field
+        self._mode = NavigationMode.HOST_SELECTION if not socket_path else NavigationMode.MAIN_MENU
+        self.repl_input_buffer = []  # Current input lines
+        self.repl_output_history = []  # [{"type": "input/output/error", "content": str, "execution_count": int}]
+        self.repl_scroll_offset = 0  # For scrolling through output
+        self.repl_completion_suggestions = []  # Tab completion suggestions
+        self.repl_completion_index = -1  # Current completion selection
+        self.repl_input_cursor_pos = 0  # Cursor position in current input line
+        self.repl_context_type = "global"  # Current REPL context type
+        self.repl_context_id = "global"  # Current REPL context id
+        self.repl_drill_down_mode = False  # Are we viewing drill-down data?
         
     async def start(self):
         """Start the IPC TUI inspector."""
@@ -273,6 +318,9 @@ class IPCTUIInspector:
         self.terminal.show_cursor()
         self.terminal.reset_colors()
         self.terminal.restore_terminal()
+        
+        # Stop realtime polling
+        self._stop_realtime_polling()
         
         # Disconnect IPC client
         if self.ipc_client.is_connected:
@@ -319,19 +367,27 @@ class IPCTUIInspector:
         """Main UI event loop."""
         while self.running:
             try:
-                # Render current screen
-                await self._render_screen()
+                # Only render if something has changed
+                if self._needs_render or self._has_ui_changed():
+                    await self._render_screen()
+                    self._needs_render = False
+                    self._update_last_state()
                 
-                # Get user input
-                key = self.terminal.get_key()
+                # Get user input with timeout to allow background tasks to run
+                key = await self._get_key_with_timeout(0.1)  # 100ms timeout
                 
-                # Handle input based on current mode
-                await self._handle_input(key)
+                # Handle input if we got a key
+                if key:
+                    await self._handle_input(key)
+                    self._needs_render = True  # Input might change UI
                 
                 # Check for pagination after input handling (safe from recursion)
                 if self._last_scroll_direction == "down":
                     await self._check_pagination_on_scroll(self._last_scroll_direction)
                 self._last_scroll_direction = None  # Reset after check
+                
+                # Yield control to allow background tasks (like realtime polling) to run
+                await asyncio.sleep(0)
                 
             except KeyboardInterrupt:
                 break
@@ -358,6 +414,10 @@ class IPCTUIInspector:
                 await self._render_tree_view()
             elif self.mode == NavigationMode.DETAIL_VIEW:
                 await self._render_detail_view()
+            elif self.mode == NavigationMode.HUD_VIEW:
+                await self._render_hud_view()
+            elif self.mode == NavigationMode.REPL_MODE:
+                await self._render_repl_view()
             
             # Render footer
             await self._render_footer()
@@ -386,12 +446,50 @@ class IPCTUIInspector:
             breadcrumb = f" > {self.current_tree_node.label} > Details"
         elif self.mode == NavigationMode.HOST_SELECTION:
             breadcrumb = " > Select Host"
+        elif self.mode == NavigationMode.HUD_VIEW:
+            breadcrumb = f" > HUD View > {self.current_hud_space_id or 'Unknown'}"
+        elif self.mode == NavigationMode.REPL_MODE:
+            context_desc = f"{self.repl_context_type}:{self.repl_context_id}" if self.repl_context_type != "global" else "global"
+            breadcrumb = f" > Python REPL [{context_desc}]"
         
-        full_title = title + breadcrumb
+        # Add realtime indicator to title
+        realtime_indicator = ""
+        show_realtime_indicator = (self.mode in [NavigationMode.TREE_VIEW, NavigationMode.DETAIL_VIEW] and 
+                                  self._realtime_enabled and 
+                                  self._current_view_type in ['veil_facets', 'timeline_events'])
+        if show_realtime_indicator:
+            realtime_indicator = " [●T]"
+        
+        # Build title without realtime indicator first for length check
+        base_title = title + breadcrumb
+        full_title = base_title + realtime_indicator
+        
         if len(full_title) > cols - 2:
-            full_title = full_title[:cols-5] + "..."
+            # Truncate base title if too long, but try to keep realtime indicator
+            if show_realtime_indicator and len(base_title) + len(realtime_indicator) > cols - 2:
+                available_for_base = cols - 2 - len(realtime_indicator) - 3  # Space for "..."
+                if available_for_base > 0:
+                    base_title = base_title[:available_for_base] + "..."
+                else:
+                    base_title = title[:cols-8] + "..."
+                    realtime_indicator = ""  # Drop indicator if no space
+            else:
+                full_title = full_title[:cols-5] + "..."
+                realtime_indicator = ""
         
-        print(full_title.ljust(cols), end='')
+        # Print base title
+        print(base_title, end='')
+        
+        # Print realtime indicator with green color if active
+        if show_realtime_indicator:
+            self.terminal.set_color('bright_green', bold=True)
+            print(realtime_indicator, end='')
+            self.terminal.set_color('bright_cyan', bold=True)  # Reset to title color
+        
+        # Pad to full width
+        current_len = len(base_title) + len(realtime_indicator)
+        if current_len < cols:
+            print(' ' * (cols - current_len), end='')
         
         # Separator line
         self.terminal.move_cursor(2, 1)
@@ -696,14 +794,43 @@ class IPCTUIInspector:
                 icon = "🔧"
             elif node.children:
                 icon = "📁"
+            elif isinstance(node.data, dict) and node.data.get("is_inspectable"):
+                icon = "🔍"  # Inspectable objects
+            elif isinstance(node.data, dict) and node.data.get("is_large_text"):
+                icon = "📄"  # Large text files
             else:
-                icon = "📄"
+                # Choose icon based on value type for getmembers nodes
+                if isinstance(node.data, dict) and "value" in node.data:
+                    value = node.data["value"]
+                    if isinstance(value, bool):
+                        icon = "◉" if value else "○"  # Filled/empty circles for bool
+                    elif isinstance(value, (int, float)):
+                        icon = "🔢"  # Numbers
+                    elif isinstance(value, str):
+                        icon = "📝"  # Strings
+                    elif isinstance(value, dict):
+                        icon = "📊"  # Dictionaries
+                    elif isinstance(value, list):
+                        icon = "📋"  # Lists
+                    elif value is None:
+                        icon = "∅"   # Null values
+                    elif callable(value):
+                        icon = "⚙️"   # Functions/methods
+                    else:
+                        icon = "●"   # Other/unknown types
+                else:
+                    icon = "●"  # Default bullet
             
             # For leaf nodes, show the value alongside the key
             if not node.children:
-                # Format the value for display
-                value_str = self._format_value_for_display(node.data)
-                display_text = f"{tree_line}{icon} {node.label}: {value_str}"
+                # Format the value for display, but skip for getmembers nodes which already have formatted labels
+                if isinstance(node.data, dict) and node.data.get("is_inspectable") is not None:
+                    # This is a getmembers node - don't append formatted value
+                    display_text = f"{tree_line}{icon} {node.label}"
+                else:
+                    # Regular tree node - append formatted value
+                    value_str = self._format_value_for_display(node.data)
+                    display_text = f"{tree_line}{icon} {node.label}: {value_str}"
             else:
                 display_text = f"{tree_line}{icon} {node.label}"
             
@@ -712,10 +839,40 @@ class IPCTUIInspector:
             if not is_detail_mode and (node.node_type in ["command", "action"] or node.drill_down_endpoint) and not node.is_editable:
                 display_text += " [Enter - 🔎]"
             
+            # Add HUD view indicator if available
+            if node.is_hud_viewable:
+                display_text += " [H - 👁️]"
+            
             # Truncate if too long
             max_width = cols - col - 2
             if len(display_text) > max_width:
                 display_text = display_text[:max_width-3] + "..."
+            
+            # Apply colors based on member type for getmembers nodes
+            if isinstance(node.data, dict) and "value" in node.data:
+                value = node.data["value"]
+                if isinstance(value, bool):
+                    self.terminal.set_color('cyan')  # Boolean values
+                elif isinstance(value, (int, float)):
+                    self.terminal.set_color('yellow')  # Numbers
+                elif isinstance(value, str):
+                    if node.data.get("is_large_text"):
+                        self.terminal.set_color('magenta')  # Large text
+                    else:
+                        self.terminal.set_color('green')  # Regular strings
+                elif isinstance(value, dict):
+                    self.terminal.set_color('blue')  # Dictionaries
+                elif isinstance(value, list):
+                    self.terminal.set_color('blue')  # Lists
+                elif value is None:
+                    self.terminal.set_color('bright_black')  # Null values
+                elif callable(value):
+                    if node.data.get("is_inspectable"):
+                        self.terminal.set_color('red')  # Inspectable methods/functions
+                    else:
+                        self.terminal.set_color('bright_red')  # Regular callables
+                else:
+                    self.terminal.set_color('white')  # Other types
             
             print(display_text)
             self.terminal.reset_colors()
@@ -910,20 +1067,120 @@ class IPCTUIInspector:
         elif self.mode == NavigationMode.MAIN_MENU:
             controls = "↑↓: Navigate • Enter: Select • Q: Quit"
         elif self.mode == NavigationMode.TREE_VIEW:
-            controls = "↑↓: Navigate • →: Expand • ←: Collapse • Enter: Details • E: Edit • B: Back • R: Refresh • Q: Quit"
+            # Show realtime toggle for applicable views
+            if self._current_view_type in ['veil_facets', 'timeline_events']:
+                rt_status = "ON" if self._realtime_enabled else "OFF"
+                # Build controls with colored realtime status
+                controls_base = "↑↓: Navigate • →: Expand • ←: Collapse • Enter: Details • E: Edit • B: Back • T: Realtime("
+                controls_end = ") • R: Refresh • Q: Quit"
+                controls = (controls_base, rt_status, controls_end)  # Store as tuple for colored rendering
+            else:
+                controls = "↑↓: Navigate • →: Expand • ←: Collapse • Enter: Details • E: Edit • H: HUD • B: Back • R: Refresh • Q: Quit"
         elif self.mode == NavigationMode.DETAIL_VIEW:
             controls = "↑↓: Navigate • →: Expand • ←: Collapse • E: Edit • B: Back • Q: Quit"
+        elif self.mode == NavigationMode.HUD_VIEW:
+            controls = "↑↓: Scroll • Page Up/Down: Page • Home/End: Jump • R: Refresh • B: Back • Q: Quit"
+        elif self.mode == NavigationMode.REPL_MODE:
+            controls = "Enter: Execute/Drill • Tab: Complete • ↑↓: Scroll/History • Ctrl+B: Back • Ctrl+L: Clear • Ctrl+D: Quit"
         else:
             controls = "Q: Quit"
         
-        if len(controls) > cols - 4:
-            controls = controls[:cols-7] + "..."
+        # Handle both string and tuple controls (for colored segments)
+        if isinstance(controls, tuple):
+            # controls is (base, rt_status, end) - render with colored rt_status
+            controls_base, rt_status, controls_end = controls
+            full_controls = controls_base + rt_status + controls_end
+            
+            if len(full_controls) > cols - 4:
+                # Truncate if too long
+                total_len = cols - 7  # Space for "..."
+                base_len = len(controls_base)
+                end_len = len(controls_end)
+                status_len = len(rt_status)
+                
+                if base_len + end_len + status_len > total_len:
+                    # Truncate from the end
+                    available_for_end = max(0, total_len - base_len - status_len)
+                    controls_end = controls_end[:available_for_end] + "..." if available_for_end > 3 else "..."
+            
+            # Print with colors
+            print(controls_base, end='')
+            if self._realtime_enabled:
+                self.terminal.set_color('bright_green', bold=True)
+            else:
+                self.terminal.set_color('bright_black')
+            print(rt_status, end='')
+            self.terminal.set_color('bright_black')  # Reset to controls color
+            print(controls_end)
+        else:
+            # Regular string controls
+            if len(controls) > cols - 4:
+                controls = controls[:cols-7] + "..."
+            print(controls)
         
-        print(controls)
         self.terminal.reset_colors()
+    
+    def _has_ui_changed(self) -> bool:
+        """Check if UI state has changed since last render."""
+        return (
+            self.status_message != self._last_status_message or
+            self.mode != self._last_mode
+        )
+    
+    def _update_last_state(self):
+        """Update tracked state after rendering."""
+        self._last_status_message = self.status_message
+        self._last_mode = self.mode
+    
+    def _mark_for_render(self):
+        """Mark the UI as needing a refresh."""
+        self._needs_render = True
+    
+    @property
+    def status_message(self) -> str:
+        """Get the current status message."""
+        return self._status_message
+    
+    @status_message.setter
+    def status_message(self, value: str):
+        """Set the status message and mark for render if changed."""
+        if value != self._status_message:
+            self._status_message = value
+            self._mark_for_render()
+    
+    @property
+    def mode(self) -> NavigationMode:
+        """Get the current navigation mode."""
+        return self._mode
+    
+    @mode.setter
+    def mode(self, value: NavigationMode):
+        """Set the navigation mode and mark for render if changed."""
+        if value != self._mode:
+            self._mode = value
+            self._mark_for_render()
+    
+    async def _get_key_with_timeout(self, timeout: float) -> Optional[str]:
+        """Get a key with timeout to allow background tasks to run."""
+        import select
+        
+        # Check if input is available without blocking
+        if select.select([sys.stdin], [], [], 0)[0]:
+            # Input is available, read it
+            return self.terminal.get_key()
+        
+        # No input available, yield control for a short time
+        await asyncio.sleep(timeout)
+        return None
     
     async def _handle_input(self, key: str):
         """Handle keyboard input based on current mode."""
+        # REPL mode gets priority for all input except specific control keys
+        if self.mode == NavigationMode.REPL_MODE:
+            await self._handle_repl_input(key)
+            return
+        
+        # Global quit handling for non-REPL modes
         if key in ['q', 'Q']:
             self.running = False
             return
@@ -940,6 +1197,8 @@ class IPCTUIInspector:
             await self._handle_tree_view_input(key)
         elif self.mode == NavigationMode.DETAIL_VIEW:
             await self._handle_detail_view_input(key)
+        elif self.mode == NavigationMode.HUD_VIEW:
+            await self._handle_hud_view_input(key)
     
     async def _handle_host_selection_input(self, key: str):
         """Handle input in host selection mode."""
@@ -949,7 +1208,7 @@ class IPCTUIInspector:
             self.current_host_index = min(len(self.available_hosts) - 1, self.current_host_index + 1)
         elif key == '\r' or key == '\n':  # Enter
             await self._select_host()
-        elif key in ['r', 'R']:
+        elif key in ['r', 'R', 'F5', 'ESC[15~']:  # R, F5
             await self._discover_hosts()
     
     async def _handle_main_menu_input(self, key: str):
@@ -983,11 +1242,15 @@ class IPCTUIInspector:
             await self._view_node_details()
         elif key in ['e', 'E']:
             await self._edit_current_node()
+        elif key in ['h', 'H']:
+            await self._view_hud()
         elif key in ['b', 'B']:
             self.mode = NavigationMode.MAIN_MENU
             self.status_message = ""
             self._reset_pagination_state()
-        elif key in ['r', 'R']:
+        elif key in ['t', 'T']:
+            await self._toggle_realtime()
+        elif key in ['r', 'R', 'F5', 'ESC[15~']:  # R or F5 key
             await self._refresh_current_data()
     
     async def _handle_detail_view_input(self, key: str):
@@ -1044,6 +1307,9 @@ class IPCTUIInspector:
             self.mode = NavigationMode.HOST_SELECTION
             self.current_host_index = 0
             return
+        elif cmd == "repl":
+            await self._enter_repl_mode()
+            return
         
         # Load data for the selected endpoint
         self.status_message = f"Loading {name}..."
@@ -1071,6 +1337,119 @@ class IPCTUIInspector:
         
         return response.get("result", {})
     
+    def _is_space_like_node(self, obj: Dict[str, Any], label: str, path: str) -> bool:
+        """Check if a node is space-like (matches web UI logic)."""
+        if not isinstance(obj, dict):
+            return False
+        
+        path_parts = path.split('.')
+        logger.debug(f"    _is_space_like_node: path_parts={path_parts}, obj_keys={list(obj.keys())[:3]}")
+        
+        # Check for space structure (from spaces endpoint)
+        if len(path_parts) >= 2 and path_parts[-2] == "details":
+            has_type = 'type' in obj
+            has_elements_or_components = 'elements' in obj or 'components' in obj
+            result = has_type and has_elements_or_components
+            logger.debug(f"    -> Space check: has_type={has_type}, has_elements_or_components={has_elements_or_components} -> {result}")
+            return result
+        
+        # Check for agent structure (from agents endpoint)  
+        if len(path_parts) >= 2 and path_parts[-2] == "agents":
+            has_agent_id = 'agent_id' in obj
+            is_inner_space = 'type' in obj and 'InnerSpace' in str(obj.get('type', ''))
+            result = has_agent_id or is_inner_space
+            logger.debug(f"    -> Agent check: has_agent_id={has_agent_id}, is_inner_space={is_inner_space} -> {result}")
+            return result
+            
+        logger.debug(f"    -> Neither space nor agent structure")
+        return False
+    
+    def _check_hud_viewable(self, obj: Dict[str, Any], label: str, path: str) -> Optional[str]:
+        """Check if a node has HUD view capability and return space_id if available."""
+        # Check if it has a direct 'hud' child
+        if 'hud' in obj:
+            return self._extract_space_id(obj, label, path)
+        
+        # Check if it has a 'components' with facet-aware HUD component  
+        if 'components' in obj:
+            if self._has_facet_aware_hud_component(obj['components']):
+                return self._extract_space_id(obj, label, path)
+        
+        # Check if any of its elements have HUD components
+        if 'elements' in obj and isinstance(obj['elements'], dict):
+            for element_id, element_data in obj['elements'].items():
+                if isinstance(element_data, dict) and 'components' in element_data:
+                    if self._has_facet_aware_hud_component(element_data['components']):
+                        return self._extract_space_id(obj, label, path)
+        
+        return None
+    
+    def _has_facet_aware_hud_component(self, components) -> bool:
+        """Check if components contain a facet-aware HUD component."""
+        # Components can be either a dict (old format) or a list (new format)
+        if isinstance(components, list):
+            # New format: list of component info dicts
+            for comp in components:
+                if isinstance(comp, dict):
+                    # Check component ID patterns
+                    comp_id = comp.get('id', '').lower()
+                    if ('facetawarehudcomponent' in comp_id or
+                        'facet_aware_hud' in comp_id or
+                        'hud' in comp_id):
+                        return True
+                        
+                    # Check component type and class_path
+                    comp_type = comp.get('type', '').lower()
+                    class_path = comp.get('class_path', '').lower()
+                    if ('facetawarehudcomponent' in comp_type or
+                        'facet_aware_hud' in comp_type or
+                        'facetawarehudcomponent' in class_path or
+                        'facet_aware_hud' in class_path):
+                        return True
+        elif isinstance(components, dict):
+            # Old format: dict of component_id -> component_info
+            for comp_id, comp in components.items():
+                if isinstance(comp, dict):
+                    # Check component ID patterns
+                    comp_id_lower = comp_id.lower()
+                    if ('facetawarehudcomponent' in comp_id_lower or
+                        'facet_aware_hud' in comp_id_lower or
+                        'hud' in comp_id_lower):
+                        return True
+                        
+                    # Check component type field
+                    comp_type = comp.get('type', '').lower()
+                    if comp_type:
+                        if ('facetawarehudcomponent' in comp_type or
+                            'facet_aware_hud' in comp_type):
+                            return True
+        
+        return False
+    
+    def _extract_space_id(self, obj: Dict[str, Any], label: str, path: str) -> str:
+        """Extract space ID from object, label, or path."""
+        # For spaces/agents endpoints, the space ID is typically the key in the path
+        path_parts = path.split('.')
+        
+        # For spaces endpoint: path like "details.space_id"
+        if len(path_parts) >= 2 and path_parts[-2] == "details":
+            return path_parts[-1]  # space_id
+            
+        # For agents endpoint: path like "agents.agent_id"
+        if len(path_parts) >= 2 and path_parts[-2] == "agents":
+            return path_parts[-1]  # agent_id (which is the space_id)
+        
+        # Try direct space ID field
+        for id_field in ['id', 'agent_id']:
+            if id_field in obj:
+                return str(obj[id_field])
+        
+        # Use label as space ID (fallback case)
+        if label and label != "root":
+            return label
+        
+        return "unknown"
+    
     async def _build_tree_from_data(self, data: Any, root_label: str, endpoint: str, context: Dict[str, Any] = None) -> TreeNode:
         """Build a tree structure from the data."""
         root = TreeNode("root", root_label)
@@ -1078,6 +1457,28 @@ class IPCTUIInspector:
         
         def build_node(obj: Any, label: str, parent: TreeNode, path: str = "", depth: int = 0) -> TreeNode:
             node = TreeNode(path or label, label, obj, parent=parent)
+            
+            # Check for HUD viewability
+            if isinstance(obj, dict):
+                logger.debug(f"Processing node: label='{label}', path='{path}', keys={list(obj.keys())[:5]}...")
+                
+                # Check if this is a space-like node
+                is_space_like = self._is_space_like_node(obj, label, path)
+                logger.debug(f"  -> is_space_like: {is_space_like}")
+                
+                if is_space_like:
+                    # Check if it's HUD viewable
+                    hud_info = self._check_hud_viewable(obj, label, path)
+                    logger.debug(f"  -> hud_info: {hud_info}")
+                    
+                    if hud_info:
+                        node.is_hud_viewable = True
+                        node.hud_space_id = hud_info
+                        logger.info(f"✓ Found HUD-viewable node: {label} at {path} -> space_id: {hud_info}")
+                    else:
+                        logger.debug(f"  -> No HUD capability found for {label}")
+                else:
+                    logger.debug(f"  -> Not space-like: {label}")
             
             # Determine if this is a writable endpoint based on the data structure and endpoint type
             if isinstance(obj, dict):
@@ -1145,18 +1546,8 @@ class IPCTUIInspector:
                 
                 # For other endpoints, add drill-down logic based on patterns
                 if endpoint == "spaces" and depth == 1 and parent and parent.label == "details":
-                    # Individual spaces under details can drill down to their timelines, veil, etc.
-                    # But InnerSpaces (agent spaces) should drill down to agent details instead
-                    if label.endswith("_inner_space"):
-                        # This is an InnerSpace (agent space) - drill down to agent details
-                        agent_id = label.replace("_inner_space", "")
-                        node.drill_down_endpoint = f"agent_details_{agent_id}"
-                    else:
-                        # Regular Space - drill down to VEIL space data
-                        node.drill_down_endpoint = f"veil_space_{label}"
-                elif endpoint == "agents" and depth == 1 and parent and parent.label == "agents":
-                    # Individual agents under the agents node can drill down to their inner space details
-                    node.drill_down_endpoint = f"agent_details_{label}"
+                    # Individual spaces under details can drill down to VEIL space data
+                    node.drill_down_endpoint = f"veil_space_{label}"
                             
             elif isinstance(obj, list) and obj:
                 node.children = []
@@ -1218,8 +1609,8 @@ class IPCTUIInspector:
                     child = self._build_node_from_value(value, key, facet_node, child_path, 1)
                     facet_node.children.append(child)
                     
-                # Auto-expand the facet to show its properties  
-                facet_node.is_expanded = True
+                # Start collapsed by default to avoid overwhelming display
+                facet_node.is_expanded = False
             
             root.children.append(facet_node)
         
@@ -1262,8 +1653,8 @@ class IPCTUIInspector:
                     child = self._build_node_from_value(value, key, event_node, child_path, 1)
                     event_node.children.append(child)
                     
-                # Auto-expand the event to show its properties  
-                event_node.is_expanded = True
+                # Start collapsed by default to avoid overwhelming display
+                event_node.is_expanded = False
             
             root.children.append(event_node)
         
@@ -1506,6 +1897,17 @@ class IPCTUIInspector:
             # Fetch data from the drill-down endpoint
             data = await self._fetch_drill_down_data(endpoint_name, endpoint_args)
             
+            # Store current endpoint args for realtime polling
+            self._current_endpoint_args = endpoint_args
+            
+            # Set current view type for realtime streaming detection
+            if endpoint_name == "veil_facets":
+                self._current_view_type = "veil_facets"
+            elif endpoint_name == "timeline_details":
+                self._current_view_type = "timeline_events"
+            else:
+                self._current_view_type = None
+            
             # Add pagination info to display name if available
             if endpoint_name in ["veil_facets", "timeline_details"]:
                 # Handle different pagination response formats
@@ -1577,13 +1979,13 @@ class IPCTUIInspector:
         elif endpoint_name == "veil_facets":
             command = "veil-facets"
             command_args = endpoint_args.copy()
-            # Add conservative limit to avoid IPC overflow (tested safe threshold is 44, using 20 for safety)
+            # Add conservative limit for consistent pagination (20 items per page)
             if 'limit' not in command_args:
                 command_args['limit'] = 20
         elif endpoint_name == "timeline_details":
             command = "timeline-details"
             command_args = endpoint_args.copy()
-            # Add conservative limit for timeline events to avoid IPC overflow (using 20 to match veil facets)
+            # Add conservative limit for timeline events with consistent pagination (20 items per page)
             # Use negative limit to get older events (reverse chronological order)
             if 'limit' not in command_args:
                 command_args['limit'] = -20
@@ -2267,7 +2669,7 @@ class IPCTUIInspector:
                     child_path = f"{unique_facet_id}.{key}"
                     child = self._build_node_from_value(value, key, facet_node, child_path, 1)
                     facet_node.children.append(child)
-                facet_node.is_expanded = True
+                facet_node.is_expanded = False
             
             self.tree_root.children.append(facet_node)
     
@@ -2333,7 +2735,7 @@ class IPCTUIInspector:
                     child_path = f"{unique_event_id}.{key}"
                     child = self._build_node_from_value(value, key, event_node, child_path, 1)
                     event_node.children.append(child)
-                event_node.is_expanded = True
+                event_node.is_expanded = False
             
             self.tree_root.children.append(event_node)
     
@@ -2376,6 +2778,429 @@ class IPCTUIInspector:
         self._pagination_has_more = False
         self._pagination_loading = False
         self._last_scroll_direction = None
+        
+        # Reset realtime state when switching views
+        self._stop_realtime_polling()
+        self._realtime_newest_event_id = None
+        self._realtime_newest_facet_id = None
+        self._current_view_type = None
+    
+    async def _toggle_realtime(self):
+        """Toggle realtime streaming for applicable data types."""
+        # Check if we're in a streamable view type
+        if self._current_view_type not in ['veil_facets', 'timeline_events']:
+            if self._current_view_type is None:
+                self.status_message = "Realtime streaming only available for timeline events and VEIL facets views"
+            else:
+                self.status_message = f"Realtime streaming only available for timeline events and VEIL facets (current view: {self._current_view_type})"
+            return
+        
+        if self._realtime_enabled:
+            # Disable realtime
+            self._stop_realtime_polling()
+            self.status_message = "Realtime streaming disabled"
+        else:
+            # Enable realtime
+            await self._start_realtime_polling()
+    
+    async def _start_realtime_polling(self):
+        """Start background polling for new data."""
+        logger.debug(f"Realtime: Starting realtime polling for view_type={self._current_view_type}")
+        self._realtime_enabled = True
+        
+        # Initialize newest data tracking from current data
+        self._initialize_realtime_cursors()
+        
+        # Start background polling task
+        if self._realtime_task:
+            logger.debug(f"Realtime: Cancelling existing task: {self._realtime_task}")
+            self._realtime_task.cancel()
+        
+        try:
+            self._realtime_task = asyncio.create_task(self._realtime_poll_loop())
+            logger.debug(f"Realtime: Background polling task created: {self._realtime_task}")
+            
+            # Add a callback to see what happens to the task
+            def task_done_callback(task):
+                if task.cancelled():
+                    logger.debug(f"Realtime: Task was cancelled")
+                elif task.exception():
+                    logger.error(f"Realtime: Task failed with exception: {task.exception()}")
+                else:
+                    logger.debug(f"Realtime: Task completed normally")
+            
+            self._realtime_task.add_done_callback(task_done_callback)
+            
+            # Yield control to allow the task to start
+            await asyncio.sleep(0)
+            
+            # Check task status immediately  
+            if self._realtime_task.done():
+                if self._realtime_task.cancelled():
+                    self.status_message = "Realtime task was cancelled immediately"
+                elif self._realtime_task.exception():
+                    exc = self._realtime_task.exception()
+                    self.status_message = f"Realtime task failed: {exc}"
+                    logger.error(f"Realtime task failed immediately: {exc}", exc_info=True)
+                else:
+                    self.status_message = "Realtime task completed immediately"
+            else:
+                self.status_message = f"Realtime polling active (every {self._realtime_poll_interval}s) - waiting for first poll..."
+            
+        except Exception as e:
+            logger.error(f"Realtime: Failed to create background task: {e}", exc_info=True)
+            self.status_message = f"Failed to start realtime polling: {e}"
+    
+    def _stop_realtime_polling(self):
+        """Stop background polling for new data."""
+        self._realtime_enabled = False
+        
+        if self._realtime_task:
+            self._realtime_task.cancel()
+            self._realtime_task = None
+    
+    async def _realtime_poll_loop(self):
+        """Background task that polls for new data at regular intervals."""
+        logger.debug(f"Realtime: Poll loop starting, enabled={self._realtime_enabled}, interval={self._realtime_poll_interval}")
+        try:
+            poll_count = 0
+            while self._realtime_enabled:
+                await asyncio.sleep(self._realtime_poll_interval)
+                
+                if not self._realtime_enabled:
+                    break
+                    
+                poll_count += 1
+                logger.debug(f"Realtime: Starting poll #{poll_count}")
+                await self._poll_for_new_data()
+                
+        except asyncio.CancelledError:
+            # Task was cancelled, clean up
+            logger.debug("Realtime: Poll loop cancelled")
+            pass
+        except Exception as e:
+            logger.error(f"Realtime polling error: {e}", exc_info=True)
+            self._realtime_enabled = False
+            self.status_message = f"Realtime polling error: {str(e)}"
+    
+    def _initialize_realtime_cursors(self):
+        """Initialize cursor tracking from currently loaded data."""
+        if not self.tree_root or not self._current_view_type:
+            logger.debug(f"Realtime: Cannot initialize cursors - tree_root={self.tree_root is not None}, view_type={self._current_view_type}")
+            return
+        
+        if self._current_view_type == 'timeline_events':
+            # Use tree_root which contains all events, not current_tree_node which is the selected event
+            if not hasattr(self.tree_root, 'children'):
+                logger.debug(f"Realtime: tree_root has no 'children' attribute")
+                return
+            
+            if not self.tree_root.children:
+                logger.debug(f"Realtime: tree_root.children is empty")
+                return
+            
+            logger.debug(f"Realtime: Attempting to initialize timeline cursor from {len(self.tree_root.children)} children")
+            
+            # Find newest event by timestamp
+            newest_timestamp = 0
+            newest_event_id = None
+            valid_events_found = 0
+            
+            for i, child in enumerate(self.tree_root.children):
+                logger.debug(f"Realtime: Child {i}: has_data={hasattr(child, 'data')}, data_type={type(child.data) if hasattr(child, 'data') else 'None'}")
+                
+                if hasattr(child, 'data') and isinstance(child.data, dict):
+                    event_timestamp = child.data.get('timestamp', 0)
+                    event_id = child.data.get('id', 'unknown')
+                    valid_events_found += 1
+                    logger.debug(f"Realtime: Child {i} - event_id={event_id}, timestamp={event_timestamp}")
+                    
+                    if event_timestamp > newest_timestamp:
+                        newest_timestamp = event_timestamp
+                        newest_event_id = event_id
+            
+            logger.debug(f"Realtime: Found {valid_events_found} valid events, newest_event_id={newest_event_id}, newest_timestamp={newest_timestamp}")
+            
+            if newest_event_id:
+                self._realtime_newest_event_id = newest_event_id
+                logger.debug(f"Realtime: Successfully initialized timeline cursor - newest_event_id={newest_event_id}, newest_timestamp={newest_timestamp}")
+            else:
+                logger.debug(f"Realtime: Could not find any valid events with timestamps")
+            
+        elif self._current_view_type == 'veil_facets' and hasattr(self.tree_root, 'children') and self.tree_root.children:
+            # Find newest facet by veil_timestamp
+            newest_timestamp = 0
+            newest_facet_id = None
+            
+            for child in self.tree_root.children:
+                if hasattr(child, 'data') and isinstance(child.data, dict):
+                    veil_timestamp = child.data.get('veil_timestamp', 0)
+                    if veil_timestamp > newest_timestamp:
+                        newest_timestamp = veil_timestamp
+                        newest_facet_id = child.data.get('facet_id')
+            
+            self._realtime_newest_facet_id = newest_facet_id
+            logger.debug(f"Realtime: Initialized VEIL facets cursor - newest_facet_id={newest_facet_id}, newest_timestamp={newest_timestamp}, children_count={len(self.tree_root.children)}")
+        elif self._current_view_type == 'veil_facets':
+            logger.debug(f"Realtime: Cannot initialize VEIL facets cursor - no children in tree root")
+    
+    async def _poll_for_new_data(self):
+        """Poll for new data and prepend it to the current view."""
+        if not self._current_view_type:
+            return
+        
+        # Set status message to show polling is active
+        self.status_message = f"Polling for new {self._current_view_type.replace('_', ' ')}..."
+        
+        try:
+            if self._current_view_type == 'timeline_events':
+                await self._poll_for_new_events()
+            elif self._current_view_type == 'veil_facets':
+                await self._poll_for_new_facets()
+        except Exception as e:
+            logger.error(f"Error polling for new data: {e}", exc_info=True)
+            self.status_message = f"Polling error: {str(e)}"
+    
+    async def _poll_for_new_events(self):
+        """Poll for new timeline events using reverse limit logic."""
+        if not hasattr(self, '_current_endpoint_args'):
+            logger.debug("Realtime: No current endpoint args, skipping poll")
+            return
+            
+        # Build polling request with reverse limit to get newer events
+        endpoint_args = dict(self._current_endpoint_args)
+        
+        logger.debug(f"Realtime: _realtime_newest_event_id={self._realtime_newest_event_id}, has_children={hasattr(self.tree_root, 'children')}, children_count={len(self.tree_root.children) if hasattr(self.tree_root, 'children') else 0}")
+        
+        # If we don't have a reference point but should have events, try to reinitialize cursor
+        if not self._realtime_newest_event_id and hasattr(self.tree_root, 'children') and self.tree_root.children:
+            logger.debug("Realtime: No cursor but events exist, attempting to reinitialize cursor")
+            self._initialize_realtime_cursors()
+        
+        if self._realtime_newest_event_id and hasattr(self.tree_root, 'children') and self.tree_root.children:
+            # Find newest timestamp from loaded data
+            newest_timestamp = 0
+            for child in self.tree_root.children:
+                if hasattr(child, 'data') and isinstance(child.data, dict):
+                    timestamp = child.data.get('timestamp', 0)
+                    if timestamp > newest_timestamp:
+                        newest_timestamp = timestamp
+            
+            # Use positive limit to get events newer than our newest timestamp
+            endpoint_args['offset'] = newest_timestamp
+            endpoint_args['limit'] = 20
+            logger.debug(f"Realtime: Polling for events newer than {newest_timestamp} with args: {endpoint_args}")
+        else:
+            # No reference point - skip this poll to avoid false positives
+            logger.debug(f"Realtime: No newest event ID or children, skipping poll to avoid false positives")
+            self.status_message = "Realtime polling waiting for reference point"
+            return
+        
+        # Make the request using the same method as refresh (which works)
+        try:
+            data = await self._fetch_drill_down_data('timeline_details', endpoint_args)
+            logger.debug(f"Realtime: Got response data with keys: {list(data.keys()) if isinstance(data, dict) else type(data)}")
+        except Exception as e:
+            logger.debug(f"Realtime: Error fetching data: {e}")
+            return
+            
+        new_events = data.get('events', [])
+        
+        logger.debug(f"Realtime: Got {len(new_events)} new events from API")
+        if not new_events:
+            self.status_message = "No new timeline events found"
+            return
+            
+        # Filter out events we already have and events that aren't actually newer
+        existing_event_ids = set()
+        newest_existing_timestamp = 0
+        
+        for child in self.tree_root.children:
+            if hasattr(child, 'data') and isinstance(child.data, dict):
+                event_id = child.data.get('id')
+                if event_id:
+                    existing_event_ids.add(event_id)
+                timestamp = child.data.get('timestamp', 0)
+                if timestamp > newest_existing_timestamp:
+                    newest_existing_timestamp = timestamp
+        
+        actually_new_events = []
+        for event in new_events:
+            event_id = event.get('id')
+            event_timestamp = event.get('timestamp', 0)
+            if (event_id and event_id not in existing_event_ids and 
+                event_timestamp > newest_existing_timestamp):
+                actually_new_events.append(event)
+        
+        logger.debug(f"Realtime: After filtering, {len(actually_new_events)} actually new events")
+        if not actually_new_events:
+            self.status_message = "No actually new timeline events after filtering"
+            return
+            
+        # Sort by timestamp (newest first) and prepend to tree
+        actually_new_events.sort(key=lambda e: e.get('timestamp', 0), reverse=True)
+        logger.debug(f"Realtime: Prepending {len(actually_new_events)} new events to tree")
+        await self._prepend_new_events(actually_new_events)
+    
+    async def _poll_for_new_facets(self):
+        """Poll for new VEIL facets using reverse limit logic."""
+        if not hasattr(self, '_current_endpoint_args'):
+            return
+            
+        # Build polling request with reverse limit to get newer facets
+        endpoint_args = dict(self._current_endpoint_args)
+        
+        if self._realtime_newest_facet_id:
+            # Get facets newer than our newest facet using cursor
+            endpoint_args['after_facet_id'] = self._realtime_newest_facet_id
+            endpoint_args['limit'] = -20  # Negative limit for reverse logic
+            logger.debug(f"Realtime facets: Polling for facets after {self._realtime_newest_facet_id}")
+        else:
+            # No reference point - skip this poll to avoid false positives
+            logger.debug(f"Realtime facets: No newest facet ID, skipping poll to avoid false positives")
+            self.status_message = "Realtime facets polling waiting for reference point"
+            return
+        
+        # Make the request using the same method as refresh (which works)
+        try:
+            data = await self._fetch_drill_down_data('veil_facets', endpoint_args)
+        except Exception as e:
+            logger.debug(f"Realtime facets: Error fetching data: {e}")
+            return
+            
+        facets_list = data.get('facets', [])
+        
+        if not facets_list:
+            self.status_message = "No new VEIL facets found"
+            return
+        
+        new_facets = facets_list
+        
+        # Filter out facets we already have and facets that aren't actually newer
+        existing_facet_ids = set()
+        newest_existing_timestamp = 0
+        
+        for child in self.current_tree_node.children:
+            if hasattr(child, 'data') and isinstance(child.data, dict):
+                facet_id = child.data.get('facet_id')
+                if facet_id:
+                    existing_facet_ids.add(facet_id)
+                veil_timestamp = child.data.get('veil_timestamp', 0)
+                if veil_timestamp > newest_existing_timestamp:
+                    newest_existing_timestamp = veil_timestamp
+        
+        actually_new_facets = []
+        for facet in new_facets:
+            facet_id = facet.get('facet_id')
+            veil_timestamp = facet.get('veil_timestamp', 0)
+            if (facet_id and facet_id not in existing_facet_ids and 
+                veil_timestamp > newest_existing_timestamp):
+                actually_new_facets.append(facet)
+        
+        if not actually_new_facets:
+            self.status_message = "No actually new VEIL facets after filtering"
+            return
+            
+        # Sort by veil_timestamp (newest first) and prepend to tree
+        actually_new_facets.sort(key=lambda f: f.get('veil_timestamp', 0), reverse=True)
+        await self._prepend_new_facets(actually_new_facets)
+    
+    async def _prepend_new_events(self, new_events: List[Dict[str, Any]]):
+        """Prepend new events to the current tree view."""
+        if not new_events or not self.tree_root:
+            logger.debug(f"Realtime: _prepend_new_events called with {len(new_events) if new_events else 0} events, tree_root={self.tree_root is not None}")
+            return
+            
+        # Create new TreeNode objects for the events
+        new_nodes = []
+        for i, event in enumerate(new_events):
+            event_id = event.get("id", f"event_{i}")
+            payload = event.get("payload", {})
+            event_type = payload.get("event_type", "unknown")
+            timestamp = event.get("timestamp", 0)
+            
+            # Create a readable label for the event
+            import datetime
+            try:
+                dt = datetime.datetime.fromtimestamp(timestamp)
+                time_str = dt.strftime("%H:%M:%S")
+            except (ValueError, OSError):
+                time_str = str(timestamp)[:10]
+            
+            label = f"{event_id} ({event_type}) at {time_str}"
+            
+            # Build the event node with expandable structure
+            event_node = TreeNode(event_id, label, event, parent=self.tree_root)
+            
+            # Make event data expandable by creating child nodes
+            if isinstance(event, dict):
+                event_node.children = []
+                for key, value in event.items():
+                    child_path = f"{event_id}.{key}"
+                    child = self._build_node_from_value(value, key, event_node, child_path, 1)
+                    event_node.children.append(child)
+                    
+                # Start collapsed by default
+                event_node.is_expanded = False
+            
+            new_nodes.append(event_node)
+        
+        # Prepend new nodes to the beginning of children list
+        logger.debug(f"Realtime: Adding {len(new_nodes)} new nodes to tree with {len(self.tree_root.children)} existing children")
+        self.tree_root.children = new_nodes + self.tree_root.children
+        
+        # Update realtime cursor to newest event
+        if new_events:
+            self._realtime_newest_event_id = new_events[0].get('id')
+            logger.debug(f"Realtime: Updated newest event ID to {self._realtime_newest_event_id}")
+        
+        # Mark for UI refresh (will render on next loop iteration)
+        logger.debug("Realtime: Marking for UI refresh")
+        self._mark_for_render()
+        
+        self.status_message = f"Added {len(new_events)} new events"
+        logger.debug(f"Realtime: Status message set: {self.status_message}")
+    
+    async def _prepend_new_facets(self, new_facets: List[Dict[str, Any]]):
+        """Prepend new facets to the current tree view."""
+        if not new_facets or not self.current_tree_node:
+            return
+            
+        # Create new TreeNode objects for the facets
+        new_nodes = []
+        for i, facet in enumerate(new_facets):
+            facet_id = facet.get("facet_id", f"facet_{i}")
+            facet_type = facet.get("facet_type", "unknown")
+            
+            label = f"{facet_id} ({facet_type})"
+            
+            # Build the facet node with expandable structure
+            facet_node = TreeNode(facet_id, label, facet, parent=self.current_tree_node)
+            
+            # Make facet data expandable by creating child nodes
+            if isinstance(facet, dict):
+                facet_node.children = []
+                for key, value in facet.items():
+                    child_path = f"{facet_id}.{key}"
+                    child = self._build_node_from_value(value, key, facet_node, child_path, 1)
+                    facet_node.children.append(child)
+                    
+                # Start collapsed by default
+                facet_node.is_expanded = False
+            
+            new_nodes.append(facet_node)
+        
+        # Prepend new nodes to the beginning of children list
+        self.current_tree_node.children = new_nodes + self.current_tree_node.children
+        
+        # Update realtime cursor to newest facet
+        if new_facets:
+            self._realtime_newest_facet_id = new_facets[0].get('facet_id')
+        
+        # Mark for UI refresh (will render on next loop iteration)
+        self._mark_for_render()
+        
+        self.status_message = f"Added {len(new_facets)} new facets"
     
     def _find_current_node_index(self, visible_nodes):
         """Find the index of the currently selected node in the visible nodes list."""
@@ -2527,6 +3352,1023 @@ class IPCTUIInspector:
         self.tree_root.children = new_nodes + self.tree_root.children
         
         self.status_message = f"Added {len(events)} new events"
+
+    # === REPL FUNCTIONALITY ===
+    
+    async def _view_hud(self):
+        """Switch to HUD view for the current node."""
+        if not self.current_tree_node or not self.current_tree_node.is_hud_viewable:
+            self.status_message = "This node does not have HUD view capability"
+            return
+        
+        # Set HUD view state
+        self.current_hud_space_id = self.current_tree_node.hud_space_id
+        self.mode = NavigationMode.HUD_VIEW
+        self.scroll_offset = 0
+        self.hud_content = ""  # Clear old content
+        
+        # Load HUD content
+        await self._load_hud_content()
+    
+    async def _load_hud_content(self):
+        """Load HUD content from the server."""
+        if not self.current_hud_space_id:
+            self.status_message = "No space ID available for HUD view"
+            return
+        
+        try:
+            self.status_message = "Loading HUD content..."
+            
+            # Request HUD rendering via IPC
+            response = await self.executor.execute_command(
+                "space-render",
+                {
+                    "space_id": self.current_hud_space_id,
+                    "format": "markdown"
+                }
+            )
+            
+            if response.get("error"):
+                self.hud_content = f"Error loading HUD: {response['error']}"
+            else:
+                result = response.get("result", {})
+                self.hud_content = result.get('content', 'No content available')
+            
+            self.status_message = f"Loaded HUD for {self.current_hud_space_id}"
+            
+        except Exception as e:
+            self.hud_content = f"Error loading HUD: {str(e)}"
+            self.status_message = f"Failed to load HUD: {str(e)}"
+    
+    async def _render_hud_view(self):
+        """Render HUD view interface."""
+        rows, cols = self.terminal.get_terminal_size()
+        
+        # HUD header
+        self.terminal.move_cursor(4, 2)
+        self.terminal.set_color('bright_green', bold=True)
+        print(f"👁️ HUD View: {self.current_hud_space_id or 'Unknown'}")
+        self.terminal.reset_colors()
+        
+        if not self.hud_content:
+            self.terminal.move_cursor(6, 2)
+            self.terminal.set_color('yellow')
+            print("Loading HUD content...")
+            self.terminal.reset_colors()
+            return
+        
+        # HUD content
+        content_start_row = 6
+        hud_lines = self.hud_content.split('\n')
+        max_display_lines = rows - 8  # Leave space for header and footer
+        
+        for i, line in enumerate(hud_lines[self.scroll_offset:]):
+            if i >= max_display_lines:
+                break
+            
+            self.terminal.move_cursor(content_start_row + i, 2)
+            
+            # Simple markdown formatting
+            if line.startswith('#'):
+                self.terminal.set_color('bright_cyan', bold=True)
+            elif line.startswith('-') or line.startswith('*'):
+                self.terminal.set_color('green')
+            elif line.startswith('  '):
+                self.terminal.set_color('bright_black')
+            else:
+                self.terminal.set_color('white')
+            
+            # Truncate long lines
+            if len(line) > cols - 4:
+                line = line[:cols - 7] + "..."
+            
+            print(line)
+            self.terminal.reset_colors()
+    
+    async def _handle_hud_view_input(self, key: str):
+        """Handle input in HUD view mode."""
+        hud_lines = self.hud_content.split('\n')
+        rows, cols = self.terminal.get_terminal_size()
+        max_display_lines = rows - 8
+        
+        if key == 'ESC[A':  # Up arrow
+            self.scroll_offset = max(0, self.scroll_offset - 1)
+        elif key == 'ESC[B':  # Down arrow
+            max_offset = max(0, len(hud_lines) - max_display_lines)
+            self.scroll_offset = min(max_offset, self.scroll_offset + 1)
+        elif key == 'ESC[5~':  # Page Up
+            self.scroll_offset = max(0, self.scroll_offset - max_display_lines)
+        elif key == 'ESC[6~':  # Page Down
+            max_offset = max(0, len(hud_lines) - max_display_lines)
+            self.scroll_offset = min(max_offset, self.scroll_offset + max_display_lines)
+        elif key in ['ESC[1~', 'ESC[H']:  # Home
+            self.scroll_offset = 0
+        elif key in ['ESC[4~', 'ESC[F']:  # End
+            max_offset = max(0, len(hud_lines) - max_display_lines)
+            self.scroll_offset = max_offset
+        elif key in ['b', 'B', 'ESC']:
+            # Back to tree view
+            self.mode = NavigationMode.TREE_VIEW
+            self.status_message = ""
+        elif key in ['r', 'R', 'F5', 'ESC[15~']:
+            await self._load_hud_content()
+
+    async def _enter_repl_mode(self):
+        """Enter REPL mode with global context."""
+        self.repl_context_type = "global" 
+        self.repl_context_id = "global"
+        
+        await self._ensure_repl_session()
+        self.mode = NavigationMode.REPL_MODE
+        
+        # Only set status if no error occurred (don't overwrite error messages)
+        if self.current_repl_session:
+            self.status_message = "Entered Python REPL (global context)"
+    
+        
+        await self._ensure_repl_session()
+        self.mode = NavigationMode.REPL_MODE
+    
+    async def _ensure_repl_session(self):
+        """Ensure a REPL session exists for the current context."""
+        session_key = f"{self.repl_context_type}:{self.repl_context_id}"
+        
+        if session_key not in self.repl_sessions:
+            # Check if executor exists
+            if not hasattr(self, 'executor') or self.executor is None:
+                self.status_message = "ERROR: No IPC executor available"
+                return
+                
+            try:
+                # Create new REPL session via IPC
+                response = await self.executor.execute_command("repl-create", {
+                    "context_type": self.repl_context_type,
+                    "context_id": self.repl_context_id
+                })
+                
+                
+                if response.get("error"):
+                    self.status_message = f"REPL create failed: {response['error']}"
+                    return
+                
+                # Handle the response format from IPC wrapper (result.session.id)
+                result_data = response.get("result", {})
+                session_info = result_data.get("session", {})
+                session_id = session_info.get("id")
+                
+                if not session_id:
+                    self.status_message = "Invalid REPL session response"
+                    return
+                
+                self.repl_sessions[session_key] = {
+                    "session_id": session_id,
+                    "context_type": self.repl_context_type,
+                    "context_id": self.repl_context_id,
+                    "created_at": session_info.get("created_at"),
+                    "output_history": []
+                }
+                
+                # Add welcome message
+                self.repl_output_history = [{
+                    "type": "info",
+                    "content": f"🐍 Python REPL session started ({session_key})",
+                    "execution_count": 0
+                }]
+                
+            except Exception as e:
+                import traceback
+                error_details = f"Error creating REPL session: {str(e)} | {traceback.format_exc()[:200]}"
+                self.status_message = error_details
+                return
+        
+        # Set current session
+        self.current_repl_session = self.repl_sessions[session_key]
+        
+        # Restore output history for this session
+        self.repl_output_history = self.current_repl_session.get("output_history", [])
+    
+    async def _render_repl_view(self):
+        """Render the REPL interface."""
+        if self.repl_drill_down_mode:
+            # Render drill-down tree view
+            self._render_tree_generic(is_detail_mode=True)
+        else:
+            # Render normal REPL interface
+            rows, cols = self.terminal.get_terminal_size()
+            
+            # Calculate areas: header (2 rows) + output area + input area (3 rows) + footer (2 rows)
+            output_start_row = 4
+            input_start_row = rows - 5  # Leave space for 3 input rows + 2 footer rows
+            output_height = input_start_row - output_start_row
+            
+            # Render output history area
+            await self._render_repl_output(output_start_row, output_height, cols)
+            
+            # Render input area
+            await self._render_repl_input(input_start_row, cols)
+            
+            # Show status (only in normal REPL mode)
+            status_row = input_start_row + 3
+            self.terminal.move_cursor(status_row, 2)
+            if self.current_repl_session:
+                session_info = f"Session: {self.current_repl_session['session_id'][:8]}..."
+                self.terminal.set_color('bright_black')
+                print(session_info)
+                self.terminal.reset_colors()
+    
+    async def _render_repl_output(self, start_row: int, height: int, cols: int):
+        """Render REPL output history with scrolling."""
+        if not self.repl_output_history:
+            self.terminal.move_cursor(start_row + height//2, cols//2 - 10)
+            self.terminal.set_color('bright_black')
+            print("No output yet. Start typing!")
+            self.terminal.reset_colors()
+            return
+        
+        # Calculate visible entries with scroll offset
+        visible_entries = self.repl_output_history[self.repl_scroll_offset:self.repl_scroll_offset + height]
+        
+        row = start_row
+        for entry in visible_entries:
+            if row >= start_row + height:
+                break
+                
+            self.terminal.move_cursor(row, 2)
+            
+            entry_type = entry.get("type", "output")
+            content = entry.get("content", "")
+            exec_count = entry.get("execution_count", 0)
+            
+            if entry_type == "input":
+                self.terminal.set_color('bright_blue')
+                prefix = f"[{exec_count}] >>> "
+            elif entry_type == "error":
+                self.terminal.set_color('bright_red')
+                prefix = f"[{exec_count}] !!! "
+            elif entry_type == "info":
+                self.terminal.set_color('bright_green')
+                prefix = "     "
+            else:
+                self.terminal.set_color('bright_white')
+                prefix = f"[{exec_count}] <<< "
+            
+            # Truncate content to fit terminal width
+            max_content_width = cols - len(prefix) - 4
+            if len(content) > max_content_width:
+                content = content[:max_content_width-3] + "..."
+            
+            print(prefix + content)
+            self.terminal.reset_colors()
+            row += 1
+        
+        # Show scroll indicators
+        if self.repl_scroll_offset > 0:
+            self.terminal.move_cursor(start_row, cols - 20)
+            self.terminal.set_color('bright_yellow')
+            print("↑ More above ↑")
+        
+        if self.repl_scroll_offset + height < len(self.repl_output_history):
+            self.terminal.move_cursor(start_row + height - 1, cols - 20)
+            self.terminal.set_color('bright_yellow')
+            print("↓ More below ↓")
+        
+        self.terminal.reset_colors()
+    
+    async def _render_repl_input(self, start_row: int, cols: int):
+        """Render REPL input area."""
+        # Current input buffer (supporting multi-line)
+        input_lines = self.repl_input_buffer if self.repl_input_buffer else [""]
+        
+        # Show up to 3 lines of input
+        for i in range(3):
+            self.terminal.move_cursor(start_row + i, 2)
+            
+            if i < len(input_lines):
+                if i == 0:
+                    self.terminal.set_color('bright_green', bold=True)
+                    prompt = ">>> "
+                else:
+                    self.terminal.set_color('bright_green')
+                    prompt = "... "
+                
+                print(prompt, end="")
+                self.terminal.reset_colors()
+                
+                # Show current line with cursor
+                line = input_lines[i]
+                max_line_width = cols - 8  # Leave space for prompt and margins
+                display_line = line[:max_line_width]
+                
+                if i == len(input_lines) - 1:  # Current line
+                    # Show cursor position
+                    cursor_pos = min(self.repl_input_cursor_pos, len(display_line))
+                    before_cursor = display_line[:cursor_pos]
+                    at_cursor = display_line[cursor_pos:cursor_pos+1] or " "
+                    after_cursor = display_line[cursor_pos+1:]
+                    
+                    print(before_cursor, end="")
+                    self.terminal.set_color('black', 'bright_white')  # Highlight cursor
+                    print(at_cursor, end="")
+                    self.terminal.reset_colors()
+                    print(after_cursor, end="")
+                else:
+                    print(display_line, end="")
+            else:
+                # Empty line
+                if i == 0:
+                    self.terminal.set_color('bright_green', bold=True)
+                    print(">>> ", end="")
+                    self.terminal.reset_colors()
+                    # Show cursor on empty line
+                    self.terminal.set_color('black', 'bright_white')
+                    print(" ", end="")
+                    self.terminal.reset_colors()
+    
+    async def _handle_repl_input(self, key: str):
+        """Handle input in REPL mode."""
+        
+        # Function key controls (non-printable, safe for REPL)
+        if key == 'ESC[11~':  # F1 - Help
+            self.status_message = "F2: Back • F3: Clear • F4: Quit • Tab: Complete • Enter: Execute/Drill"
+            return
+        elif key == 'ESC[12~':  # F2 - Back
+            self.mode = NavigationMode.MAIN_MENU
+            self.status_message = ""
+            return
+        elif key == 'ESC[13~':  # F3 - Clear input
+            self.repl_input_buffer = []
+            self.repl_input_cursor_pos = 0
+            self.status_message = "Input cleared"
+            return
+        elif key == 'ESC[14~':  # F4 - Quit
+            self.running = False
+            return
+        # Alternative key combinations (check ASCII codes)  
+        elif len(key) == 1 and ord(key) == 2:  # Ctrl+B (ASCII 2) - Back
+            self.mode = NavigationMode.MAIN_MENU
+            self.status_message = ""
+            return
+        elif len(key) == 1 and ord(key) == 12:  # Ctrl+L (ASCII 12) - Clear input
+            self.repl_input_buffer = []
+            self.repl_input_cursor_pos = 0
+            self.status_message = "Input cleared"
+            return
+        elif len(key) == 1 and ord(key) == 4:  # Ctrl+D (ASCII 4) - Quit
+            self.running = False
+            return
+        elif key == 'CTRL_C':
+            # Clear current input
+            self.repl_input_buffer = []
+            self.repl_input_cursor_pos = 0
+            self.status_message = "Input cleared"
+            return
+        # Handle drill-down navigation when we're viewing drill-down results
+        elif key in ['b', 'B'] and self.repl_drill_down_mode:
+            # Exit drill-down mode back to REPL input
+            self.repl_drill_down_mode = False
+            self.current_tree_node = None
+            self.tree_root = None
+            self._detail_tree_root = None
+            self._detail_current_node = None
+            self.status_message = "Returned to REPL input"
+            return
+        elif key == '\r' or key == '\n':  # Enter - execute code, drill down, or inspect member
+            if self.repl_drill_down_mode:
+                # If in drill-down mode, check if current node is inspectable
+                await self._handle_drill_down_inspect()
+            elif self.repl_input_buffer and any(line.strip() for line in self.repl_input_buffer):
+                # If there's input to execute
+                await self._execute_repl_code()
+            else:
+                # If no input, try drill-down on recent output
+                await self._handle_repl_output_drill_down()
+            return
+        elif key == '\t':  # Tab - completion
+            await self._handle_repl_completion()
+            return
+        elif key == 'ESC[A':  # Up arrow - history or navigate drill-down
+            if self.repl_drill_down_mode:
+                # If viewing drill-down results, navigate the tree in detail mode
+                self._navigate_tree_generic("up", is_detail_mode=True)
+            elif self.repl_input_buffer and self.repl_input_buffer[0].strip():
+                # If typing, navigate history
+                await self._navigate_repl_history(-1)
+            else:
+                # If not typing, scroll output up
+                await self._scroll_repl_output(-1)
+            return
+        elif key == 'ESC[B':  # Down arrow - history or navigate drill-down
+            if self.repl_drill_down_mode:
+                # If viewing drill-down results, navigate the tree in detail mode
+                self._navigate_tree_generic("down", is_detail_mode=True)
+            elif self.repl_input_buffer and self.repl_input_buffer[0].strip():
+                # If typing, navigate history
+                await self._navigate_repl_history(1)
+            else:
+                # If not typing, scroll output down
+                await self._scroll_repl_output(1)
+            return
+        elif key == 'ESC[C':  # Right arrow - expand drill-down or move cursor
+            if self.repl_drill_down_mode:
+                # If viewing drill-down results, expand node in detail mode
+                self._expand_collapse_node_generic(expand=True, is_detail_mode=True)
+            else:
+                # Move cursor right in input
+                await self._handle_repl_char_input(key)
+            return
+        elif key == 'ESC[D':  # Left arrow - collapse drill-down or move cursor
+            if self.repl_drill_down_mode:
+                # If viewing drill-down results, collapse node in detail mode
+                self._expand_collapse_node_generic(expand=False, is_detail_mode=True)
+            else:
+                # Move cursor left in input
+                await self._handle_repl_char_input(key)
+            return
+        elif key == 'ESC[5~':  # Page Up - scroll output
+            await self._scroll_repl_output(-5)
+            return
+        elif key == 'ESC[6~':  # Page Down - scroll output
+            await self._scroll_repl_output(5)
+            return
+        elif key == 'ESC[D':  # Left arrow - move cursor left
+            if self.repl_input_cursor_pos > 0:
+                self.repl_input_cursor_pos -= 1
+            return
+        elif key == 'ESC[C':  # Right arrow - move cursor right
+            current_line = self.repl_input_buffer[-1] if self.repl_input_buffer else ""
+            if self.repl_input_cursor_pos < len(current_line):
+                self.repl_input_cursor_pos += 1
+            return
+        elif key == 'ESC[3~':  # Delete key
+            await self._handle_repl_delete()
+            return
+        elif key == '\x08' or key == '\x7f':  # Backspace
+            await self._handle_repl_backspace()
+            return
+        
+        # Regular character input
+        if len(key) == 1 and ord(key) >= 32:  # Printable character
+            await self._handle_repl_char_input(key)
+    
+    async def _execute_repl_code(self):
+        """Execute the current REPL input."""
+        
+        if not self.current_repl_session:
+            self.status_message = "No active REPL session"
+            return
+        
+        # Join all input lines
+        code = "\n".join(self.repl_input_buffer) if self.repl_input_buffer else ""
+        
+        if not code.strip():
+            return  # Nothing to execute
+        
+        # Add input to history
+        exec_count = len([e for e in self.repl_output_history if e.get("type") == "input"]) + 1
+        self.repl_output_history.append({
+            "type": "input",
+            "content": code.replace("\n", " "),  # Show as single line in history
+            "execution_count": exec_count
+        })
+        
+        try:
+            # Execute code via IPC
+            response = await self.executor.execute_command("repl-exec", {
+                "session_id": self.current_repl_session["session_id"],
+                "code": code
+            })
+            
+            if response.get("error"):
+                self.repl_output_history.append({
+                    "type": "error",
+                    "content": response["error"],
+                    "execution_count": exec_count
+                })
+            else:
+                result = response.get("result", {})
+                output = result.get("output", "")
+                error = result.get("error", "")
+                
+                if output:
+                    # Check for drill-down indicators
+                    content, has_drill_down = self._process_repl_output(output, result)
+                    
+                    self.repl_output_history.append({
+                        "type": "output",
+                        "content": content,
+                        "execution_count": exec_count,
+                        "drill_down": has_drill_down,
+                        "raw_result": result if has_drill_down else None
+                    })
+                
+                if error:
+                    self.repl_output_history.append({
+                        "type": "error", 
+                        "content": error,
+                        "execution_count": exec_count
+                    })
+            
+        except Exception as e:
+            self.repl_output_history.append({
+                "type": "error",
+                "content": f"Execution error: {str(e)}",
+                "execution_count": exec_count
+            })
+        
+        # Update session history
+        self.current_repl_session["output_history"] = self.repl_output_history
+        
+        # Clear input buffer and scroll to bottom
+        self.repl_input_buffer = []
+        self.repl_input_cursor_pos = 0
+        self.repl_scroll_offset = max(0, len(self.repl_output_history) - 10)  # Show recent output
+        
+        self.status_message = "Code executed"
+    
+    def _process_repl_output(self, output: str, result: dict) -> tuple[str, bool]:
+        """Process REPL output and determine if drill-down is available."""
+        # Check for large structured data that should have drill-down
+        output_metadata = result.get("output_metadata", {})
+        
+        if output_metadata.get("has_json") and output_metadata.get("json_data"):
+            data = output_metadata["json_data"]
+            if isinstance(data, dict) and len(data) > 5:
+                return f"dict({len(data)} keys) [Enter to 🔍]", True
+            elif isinstance(data, list) and len(data) > 10:
+                return f"list({len(data)} items) [Enter to 🔍]", True
+        
+        # Check for inspect.getmembers patterns
+        if "getmembers" in output or (isinstance(output, str) and output.count("(") > 10):
+            return "[members of object: Enter to 🔍]", True
+        
+        # Return original output if no drill-down needed
+        return output.strip()[:100] + ("..." if len(output) > 100 else ""), False
+    
+    async def _handle_repl_completion(self):
+        """Handle tab completion in REPL."""
+        if not self.current_repl_session or not self.repl_input_buffer:
+            return
+        
+        current_line = self.repl_input_buffer[-1] if self.repl_input_buffer else ""
+        cursor_pos = self.repl_input_cursor_pos
+        
+        try:
+            response = await self.executor.execute_command("repl-complete", {
+                "session_id": self.current_repl_session["session_id"],
+                "code": current_line,
+                "cursor_pos": cursor_pos
+            })
+            
+            if response.get("error"):
+                self.status_message = f"Completion error: {response['error']}"
+                return
+            
+            result = response.get("result", {})
+            completions = result.get("completions", [])
+            
+            if not completions:
+                self.status_message = "No completions available"
+                return
+            
+            if len(completions) == 1:
+                # Single completion - insert it
+                completion = completions[0]
+                # Simple insertion at cursor position
+                before = current_line[:cursor_pos]
+                after = current_line[cursor_pos:]
+                
+                # Find the prefix to replace (basic word boundary detection)
+                word_start = cursor_pos
+                while word_start > 0 and current_line[word_start-1].isalnum() or current_line[word_start-1] == '_':
+                    word_start -= 1
+                
+                new_line = current_line[:word_start] + completion + after
+                self.repl_input_buffer[-1] = new_line
+                self.repl_input_cursor_pos = word_start + len(completion)
+                self.status_message = f"Completed: {completion}"
+                
+            else:
+                # Multiple completions - show in status (simplified for now)
+                self.status_message = f"Completions: {', '.join(completions[:3])}" + ("..." if len(completions) > 3 else "")
+        
+        except Exception as e:
+            self.status_message = f"Completion failed: {str(e)}"
+    
+    async def _navigate_repl_history(self, direction: int):
+        """Navigate through REPL command history."""
+        # Find previous input commands
+        input_commands = [e for e in self.repl_output_history if e.get("type") == "input"]
+        
+        if not input_commands:
+            return
+        
+        # Simple history navigation (can be enhanced later)
+        if direction < 0 and input_commands:  # Up arrow - get last command
+            last_cmd = input_commands[-1]["content"]
+            self.repl_input_buffer = [last_cmd]
+            self.repl_input_cursor_pos = len(last_cmd)
+            self.status_message = "Previous command loaded"
+    
+    async def _handle_repl_char_input(self, char: str):
+        """Handle character input in REPL."""
+        # Ensure we have at least one line in buffer
+        if not self.repl_input_buffer:
+            self.repl_input_buffer = [""]
+        
+        # Insert character at cursor position
+        current_line = self.repl_input_buffer[-1]
+        cursor_pos = self.repl_input_cursor_pos
+        
+        new_line = current_line[:cursor_pos] + char + current_line[cursor_pos:]
+        self.repl_input_buffer[-1] = new_line
+        self.repl_input_cursor_pos += 1
+    
+    async def _handle_repl_backspace(self):
+        """Handle backspace in REPL input."""
+        if not self.repl_input_buffer or self.repl_input_cursor_pos == 0:
+            return
+        
+        current_line = self.repl_input_buffer[-1]
+        cursor_pos = self.repl_input_cursor_pos
+        
+        # Remove character before cursor
+        new_line = current_line[:cursor_pos-1] + current_line[cursor_pos:]
+        self.repl_input_buffer[-1] = new_line
+        self.repl_input_cursor_pos -= 1
+    
+    async def _handle_repl_delete(self):
+        """Handle delete key in REPL input."""
+        if not self.repl_input_buffer:
+            return
+        
+        current_line = self.repl_input_buffer[-1]
+        cursor_pos = self.repl_input_cursor_pos
+        
+        if cursor_pos < len(current_line):
+            # Remove character at cursor
+            new_line = current_line[:cursor_pos] + current_line[cursor_pos+1:]
+            self.repl_input_buffer[-1] = new_line
+    
+    async def _scroll_repl_output(self, direction: int):
+        """Scroll REPL output up or down."""
+        if not self.repl_output_history:
+            return
+        
+        self.repl_scroll_offset += direction
+        
+        # Calculate terminal height for output area
+        rows, cols = self.terminal.get_terminal_size()
+        output_height = rows - 9  # Header(2) + input(3) + footer(2) + status(2)
+        
+        # Clamp scroll offset to valid range
+        max_scroll = max(0, len(self.repl_output_history) - output_height)
+        self.repl_scroll_offset = max(0, min(self.repl_scroll_offset, max_scroll))
+        
+        if direction < 0:
+            self.status_message = "Scrolled up"
+        else:
+            self.status_message = "Scrolled down"
+    
+    async def _handle_repl_output_drill_down(self):
+        """Handle drill-down into REPL output with drill_down flag."""
+        # Find the most recent output entry that supports drill-down
+        drill_down_entries = [e for e in reversed(self.repl_output_history) 
+                             if e.get("drill_down") and e.get("raw_result")]
+        
+        if not drill_down_entries:
+            self.status_message = "No drill-down data available"
+            return
+        
+        # Use the most recent drill-down entry
+        entry = drill_down_entries[0]
+        raw_result = entry.get("raw_result", {})
+        output_metadata = raw_result.get("output_metadata", {})
+        
+        if not output_metadata.get("has_json"):
+            self.status_message = "No structured data to explore"
+            return
+        
+        json_data = output_metadata.get("json_data")
+        if not json_data:
+            self.status_message = "No data to display"
+            return
+        
+        try:
+            # Build tree from the JSON data
+            exec_count = entry.get("execution_count", 0)
+            tree_name = f"REPL Output [{exec_count}]"
+            
+            # Check if this looks like inspect.getmembers output
+            is_getmembers = self._is_getmembers_output(json_data, raw_result)
+            
+            # Create tree root
+            self.tree_root = TreeNode(
+                id=f"repl_output_{exec_count}",
+                label=tree_name,
+                data=json_data
+            )
+            
+            if is_getmembers:
+                # Build special tree for getmembers output
+                await self._build_getmembers_tree(self.tree_root, json_data, raw_result)
+            else:
+                # Build regular tree structure from JSON data
+                await self._build_json_tree(self.tree_root, json_data)
+            
+            # Stay in REPL mode but set drill-down state
+            # Use detail tree properties for drill-down rendering
+            self._detail_tree_root = self.tree_root
+            # Set current node to first child so it's visible in the tree traversal
+            first_child = self.tree_root.children[0] if self.tree_root.children else self.tree_root
+            self._detail_current_node = first_child
+            self.current_tree_node = first_child
+            self.repl_drill_down_mode = True
+            self.scroll_offset = 0
+            self._reset_pagination_state()
+            
+            self.status_message = f"Exploring {tree_name} • B: Back • Enter: Inspect 🔍 objects or view 📄 text"
+            
+        except Exception as e:
+            self.status_message = f"Error building drill-down view: {str(e)}"
+    
+    def _is_getmembers_output(self, json_data, raw_result) -> bool:
+        """Check if the data looks like inspect.getmembers output."""
+        # Check if original code contained getmembers - any getmembers call gets enhanced tree
+        output_metadata = raw_result.get("output_metadata", {})
+        original_code = output_metadata.get("original_code", "")
+        if "getmembers" in original_code:
+            return True
+            
+        # Check if data structure looks like getmembers (list of 2-element tuples/lists)
+        if isinstance(json_data, list) and len(json_data) > 0:
+            # Check if most items are 2-element arrays (name, value pairs)
+            tuple_count = 0
+            for item in json_data[:10]:  # Check first 10 items
+                if isinstance(item, list) and len(item) == 2:
+                    tuple_count += 1
+            return tuple_count > len(json_data[:10]) * 0.8  # 80% are tuples
+            
+        return False
+    
+    async def _build_getmembers_tree(self, parent: TreeNode, members_data, raw_result):
+        """Build a special tree structure for inspect.getmembers output."""
+        
+        # Extract object name from the original code
+        output_metadata = raw_result.get("output_metadata", {})
+        original_code = output_metadata.get("original_code", "")
+        object_name = self._extract_object_name_from_getmembers(original_code)
+        
+        # Create a separate header node under the parent
+        header = TreeNode(
+            id=f"{parent.id}_header",
+            label=f"Members of {object_name}:",
+            data=None
+        )
+        header.is_expanded = True  # Start expanded to show the members
+        parent.children.append(header)
+        
+        if isinstance(members_data, list):
+            for i, member in enumerate(members_data):
+                if isinstance(member, list) and len(member) >= 2:
+                    member_name, member_value = member[0], member[1]
+                    
+                    # Create display label
+                    value_str = str(member_value) if member_value is not None else "None"
+                    if len(value_str) > 80:
+                        value_str = value_str[:77] + "..."
+                    
+                    # Check if this is an inspectable object FIRST (priority over text)
+                    is_inspectable = self._is_value_inspectable(member_value)
+                    
+                    # Only check for large text if it's not an inspectable object
+                    # This ensures objects with long representations get 🔍 not 📄
+                    is_large_text = (not is_inspectable and 
+                                   isinstance(member_value, str) and 
+                                   len(member_value) > 100)
+                    
+                    # Create display label with inspection indicator
+                    label = f"{member_name}: {value_str}"
+                    if is_inspectable:
+                        label += " 🔍"
+                    elif is_large_text:
+                        label += " 📄"  # Text viewing indicator
+                    
+                    # Create member node
+                    member_node = TreeNode(
+                        id=f"{parent.id}_member_{i}",
+                        label=label,
+                        data={
+                            "name": member_name,
+                            "value": member_value,
+                            "object_name": object_name,
+                            "is_inspectable": is_inspectable,
+                            "is_large_text": is_large_text
+                        }
+                    )
+                    
+                    
+                    # If the value is a complex structure (actual dict/list, not string representation), make it expandable
+                    if isinstance(member_value, (dict, list)):
+                        if member_value:  # If not empty, build sub-tree
+                            await self._build_json_tree(member_node, member_value, max_depth=5, current_depth=0)
+                        else:
+                            # Even empty containers should show as expandable but with no children
+                            # This will show as "▶ name: {}" or "▶ name: []"
+                            pass
+                    
+                    header.children.append(member_node)
+    
+    def _extract_object_name_from_getmembers(self, code: str) -> str:
+        """Extract object name from inspect.getmembers(object_name) call."""
+        import re
+        
+        # Look for inspect.getmembers( and extract the parameter
+        match = re.search(r'inspect\.getmembers\s*\(\s*([^)]+)\s*\)', code)
+        if match:
+            return match.group(1).strip()
+        return "object"
+    
+    def _is_value_inspectable(self, value) -> bool:
+        """Check if a value looks like an inspectable object."""
+        if not isinstance(value, str):
+            return False
+        # Look for object representations like "<class 'SomeClass' at 0x...>"
+        return '<' in value and ('at 0x' in value or 'object at' in value)
+    
+    async def _handle_drill_down_inspect(self):
+        """Handle Enter key in drill-down mode - inspect current member if possible."""
+        current_node = self._detail_current_node
+        if not current_node or not current_node.data:
+            self.status_message = "No inspectable item selected"
+            return
+            
+        node_data = current_node.data
+        if not isinstance(node_data, dict):
+            self.status_message = "No action available for selected item"
+            return
+            
+        is_inspectable = node_data.get("is_inspectable", False)
+        is_large_text = node_data.get("is_large_text", False)
+        
+        if is_large_text:
+            # Handle large text viewing with readonly editor
+            await self._view_large_text(node_data)
+            return
+        elif is_inspectable:
+            # Handle object inspection
+            await self._inspect_member(node_data)
+            return
+        else:
+            self.status_message = "Selected item has no drill-down action"
+            return
+    
+    async def _view_large_text(self, node_data: dict):
+        """View large text content in readonly editor."""
+        import tempfile
+        import subprocess
+        import os
+        
+        member_name = node_data.get("name", "unknown")
+        member_value = node_data.get("value", "")
+        
+        try:
+            # Create temporary file with the full text content
+            with tempfile.NamedTemporaryFile(mode='w+', suffix='.txt', delete=False) as tmp_file:
+                tmp_file.write(f"# {member_name}\n")
+                tmp_file.write(f"# Length: {len(member_value)} characters\n\n")
+                tmp_file.write(str(member_value))
+                tmp_file_path = tmp_file.name
+            
+            # Get editor from environment, default to nano
+            editor = os.environ.get('EDITOR', 'nano')
+            
+            # Clear screen and show viewing message
+            print("\033[2J\033[H", end='')
+            print(f"Viewing {member_name} in readonly mode...")
+            print(f"Editor: {editor}")
+            print(f"Temporary file: {tmp_file_path}")
+            print("Close the editor to return to REPL drill-down.")
+            print()
+            
+            # Add readonly flags for common editors
+            editor_args = [editor]
+            if 'nano' in editor.lower():
+                editor_args.extend(['-R'])  # Readonly mode
+            elif 'vim' in editor.lower() or 'nvim' in editor.lower():
+                editor_args.extend(['-R'])  # Readonly mode
+            elif 'emacs' in editor.lower():
+                editor_args.extend(['--eval', '(setq buffer-read-only t)'])
+            
+            editor_args.append(tmp_file_path)
+            
+            # Launch editor and wait for it to close
+            subprocess.run(editor_args)
+            
+            # Clean up
+            os.unlink(tmp_file_path)
+            
+            self.status_message = f"Finished viewing {member_name}"
+            
+        except Exception as e:
+            self.status_message = f"Error viewing text: {str(e)}"
+    
+    async def _inspect_member(self, node_data: dict):
+        """Inspect a member object with getmembers."""
+        # Build the inspection path
+        object_name = node_data.get("object_name", "")
+        member_name = node_data.get("name", "")
+        
+        # Create proper inspection path (handle complex expressions)
+        if self._needs_parentheses(object_name):
+            inspection_path = f"({object_name}).{member_name}"
+        else:
+            inspection_path = f"{object_name}.{member_name}"
+        
+        # Execute inspect.getmembers on this member
+        inspection_code = f"inspect.getmembers({inspection_path})"
+        
+        # Exit drill-down mode and execute the inspection
+        self.repl_drill_down_mode = False
+        self._detail_tree_root = None
+        self._detail_current_node = None
+        self.current_tree_node = None
+        self.tree_root = None
+        
+        # Set the code as input and execute it
+        self.repl_input_buffer = [inspection_code]
+        self.repl_input_cursor_pos = len(inspection_code)
+        
+        self.status_message = f"🔍 Inspecting {inspection_path}..."
+        await self._execute_repl_code()
+        
+        # Automatically drill down into the results after execution
+        await self._handle_repl_output_drill_down()
+    
+    def _needs_parentheses(self, object_name: str) -> bool:
+        """Check if object name needs parentheses when accessing attributes."""
+        # Simple heuristic - if it contains operators, spaces, or brackets, it probably needs parentheses
+        operators = ['+', '-', '*', '/', '%', '=', '[', ']', '(', ')', ' ']
+        return any(op in object_name for op in operators)
+    
+    async def _build_json_tree(self, parent: TreeNode, data: Any, max_depth: int = 10, current_depth: int = 0):
+        """Build tree structure from JSON data."""
+        if current_depth >= max_depth:
+            return
+        
+        if isinstance(data, dict):
+            for key, value in data.items():
+                child_id = f"{parent.id}_{key}"
+                
+                # Create display label based on value type
+                if isinstance(value, dict):
+                    label = f"{key}: dict({len(value)} keys)"
+                elif isinstance(value, list):
+                    label = f"{key}: list({len(value)} items)"
+                elif isinstance(value, str) and len(value) > 50:
+                    label = f"{key}: \"{value[:47]}...\""
+                else:
+                    label = f"{key}: {repr(value)}"
+                
+                child_node = TreeNode(
+                    id=child_id,
+                    label=label,
+                    data=value,
+                    parent=parent
+                )
+                parent.children.append(child_node)
+                
+                # Recursively build subtree for complex types
+                if isinstance(value, (dict, list)):
+                    await self._build_json_tree(child_node, value, max_depth, current_depth + 1)
+        
+        elif isinstance(data, list):
+            for i, item in enumerate(data):
+                if i >= 100:  # Limit very large lists
+                    break
+                    
+                child_id = f"{parent.id}_{i}"
+                
+                # Create display label based on item type  
+                if isinstance(item, dict):
+                    label = f"[{i}]: dict({len(item)} keys)"
+                elif isinstance(item, list):
+                    label = f"[{i}]: list({len(item)} items)"
+                elif isinstance(item, str) and len(item) > 50:
+                    label = f"[{i}]: \"{item[:47]}...\""
+                else:
+                    label = f"[{i}]: {repr(item)}"
+                
+                child_node = TreeNode(
+                    id=child_id,
+                    label=label,
+                    data=item,
+                    parent=parent
+                )
+                parent.children.append(child_node)
+                
+                # Recursively build subtree for complex types
+                if isinstance(item, (dict, list)):
+                    await self._build_json_tree(child_node, item, max_depth, current_depth + 1)
 
 
 async def main_ipc_tui(socket_path: str = None, timeout: float = 30.0):

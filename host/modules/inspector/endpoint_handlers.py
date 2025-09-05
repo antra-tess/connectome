@@ -63,7 +63,12 @@ class InspectorEndpointHandlers:
                 "/events/{event_id}": "Detailed information about specific event by globally unique ID",
                 "/health": "Simple health check",
                 "PUT/PATCH /events/{event_id}": "Update timeline event by globally unique event ID",
-                "PUT/PATCH /veil/{space_id}/facets/{facet_id}": "Update VEIL facet"
+                "PUT/PATCH /veil/{space_id}/facets/{facet_id}": "Update VEIL facet",
+                "/repl/sessions": "List active REPL sessions",
+                "POST /repl/sessions": "Create new REPL session",
+                "POST /repl/execute": "Execute code in REPL session",
+                "POST /repl/complete": "Get code completions for REPL session",
+                "POST /repl/inspect": "Inspect object in REPL session"
             }
         }
         return api_info
@@ -237,8 +242,13 @@ class InspectorEndpointHandlers:
                     "timestamp": time.time()
                 }
             
-            # Clamp limit between 1 and 1000
-            limit = min(max(limit, 1), 1000)
+            # Clamp limit between -1000 and 1000 (allow negative for reverse direction)
+            if limit > 1000:
+                limit = 1000
+            elif limit < -1000:
+                limit = -1000
+            elif limit == 0:
+                limit = 100
             
             veil_facets_data = await self.data_collector.collect_veil_facets_data(
                 space_id, facet_type, owner_id, limit, after_facet_id
@@ -367,6 +377,242 @@ class InspectorEndpointHandlers:
             logger.error(f"Error collecting event details: {e}", exc_info=True)
             return {
                 "error": "Failed to collect event details", 
+                "details": str(e),
+                "timestamp": time.time()
+            }
+
+    async def handle_repl_sessions(self) -> Dict[str, Any]:
+        """Handle REPL sessions list endpoint."""
+        self.request_count += 1
+        
+        try:
+            sessions_data = self.data_collector.collect_repl_sessions()
+            return sessions_data
+        except Exception as e:
+            logger.error(f"Error collecting REPL sessions: {e}", exc_info=True)
+            return {
+                "error": "Failed to collect REPL sessions",
+                "details": str(e),
+                "timestamp": time.time()
+            }
+
+    async def handle_repl_create(self, context_type: str, context_id: str, target_path: str = None) -> Dict[str, Any]:
+        """Handle REPL session creation endpoint."""
+        self.request_count += 1
+        
+        try:
+            if not context_type or not context_id:
+                return {
+                    "error": "context_type and context_id are required",
+                    "timestamp": time.time()
+                }
+            
+            # Resolve target object if path provided
+            target_object = None
+            if target_path:
+                target_object = self.data_collector.get_object_by_path(target_path)
+                if target_object is None:
+                    return {
+                        "error": f"Failed to resolve target path: {target_path}",
+                        "timestamp": time.time()
+                    }
+            
+            # Create REPL context
+            session = self.data_collector.repl_manager.create_context(
+                context_type, context_id, target_object
+            )
+            
+            # Return session info (without full namespace for brevity)
+            return {
+                "success": True,
+                "session": {
+                    "id": session["id"],
+                    "type": session["type"],
+                    "context_id": session["context_id"],
+                    "created_at": session["created_at"],
+                    "last_accessed": session["last_accessed"],
+                    "history_length": len(session["history"]),
+                    "namespace_keys": list(session["namespace"].keys())
+                },
+                "timestamp": time.time()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error creating REPL session: {e}", exc_info=True)
+            return {
+                "error": "Failed to create REPL session",
+                "details": str(e),
+                "timestamp": time.time()
+            }
+
+    async def handle_repl_session_history(self, session_id: str, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
+        """Handle REPL session history endpoint."""
+        self.request_count += 1
+        
+        try:
+            if not session_id:
+                return {
+                    "error": "session_id is required",
+                    "timestamp": time.time()
+                }
+            
+            # Get session history
+            history_data = self.data_collector.repl_manager.get_session_history(
+                session_id, limit, offset
+            )
+            
+            if history_data is None:
+                return {
+                    "error": f"Session not found: {session_id}",
+                    "timestamp": time.time()
+                }
+            
+            return {
+                "success": True,
+                **history_data,
+                "timestamp": time.time()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting REPL session history: {e}", exc_info=True)
+            return {
+                "error": "Failed to get REPL session history",
+                "details": str(e),
+                "timestamp": time.time()
+            }
+
+    async def handle_repl_execute(self, session_id: str, code: str, timeout: float = 5.0) -> Dict[str, Any]:
+        """Handle REPL code execution endpoint."""
+        self.request_count += 1
+        
+        try:
+            if not session_id or not code:
+                return {
+                    "error": "session_id and code are required",
+                    "timestamp": time.time()
+                }
+            
+            # Execute code in the specified session
+            result = self.data_collector.repl_manager.execute_in_context(
+                session_id, code, timeout
+            )
+            
+            return {
+                "success": result["success"],
+                "output": result["output"],
+                "error": result["error"],
+                "execution_time_ms": result["execution_time_ms"],
+                "execution_count": result.get("execution_count", 0),
+                "rich_output": result.get("rich_output", []),
+                "namespace_changes": result["namespace_changes"],
+                "output_metadata": result.get("output_metadata", {}),
+                "session_id": session_id,
+                "timestamp": time.time()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error executing REPL code: {e}", exc_info=True)
+            return {
+                "error": "Failed to execute REPL code",
+                "details": str(e),
+                "timestamp": time.time()
+            }
+    
+    async def handle_repl_complete(self, session_id: str, code: str, cursor_pos: int) -> Dict[str, Any]:
+        """Handle REPL code completion endpoint."""
+        self.request_count += 1
+        
+        try:
+            if not session_id or code is None:
+                return {
+                    "error": "session_id and code are required",
+                    "timestamp": time.time()
+                }
+            
+            # Get completions for the specified session
+            result = self.data_collector.repl_manager.get_completions(
+                session_id, code, cursor_pos
+            )
+            
+            return {
+                "success": "error" not in result,
+                "completions": result.get("completions", []),
+                "cursor_start": result.get("cursor_start", cursor_pos),
+                "cursor_end": result.get("cursor_end", cursor_pos),
+                "metadata": result.get("metadata", {}),
+                "error": result.get("error", ""),
+                "session_id": session_id,
+                "timestamp": time.time()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting REPL completions: {e}", exc_info=True)
+            return {
+                "error": "Failed to get REPL completions",
+                "details": str(e),
+                "timestamp": time.time()
+            }
+    
+    async def handle_repl_inspect(self, session_id: str, obj_name: str) -> Dict[str, Any]:
+        """Handle REPL object inspection endpoint."""
+        self.request_count += 1
+        
+        try:
+            if not session_id or not obj_name:
+                return {
+                    "error": "session_id and obj_name are required",
+                    "timestamp": time.time()
+                }
+            
+            # Inspect object in the specified session
+            result = self.data_collector.repl_manager.inspect_object(
+                session_id, obj_name
+            )
+            
+            return {
+                "success": "error" not in result,
+                "inspection": result,
+                "session_id": session_id,
+                "timestamp": time.time()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error inspecting REPL object: {e}", exc_info=True)
+            return {
+                "error": "Failed to inspect REPL object",
+                "details": str(e),
+                "timestamp": time.time()
+            }
+    
+    async def handle_space_render(self, space_id: str, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Handle space text rendering endpoint.
+        
+        Args:
+            space_id: The ID of the space to render
+            options: Rendering options (format, include_tools, etc.)
+            
+        Returns:
+            Dictionary containing rendered text and metadata
+        """
+        self.request_count += 1
+        
+        try:
+            if not space_id:
+                return {
+                    "error": "space_id is required",
+                    "timestamp": time.time()
+                }
+            
+            # Call the data collector's render method
+            result = await self.data_collector.render_space_as_text(space_id, options)
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error rendering space {space_id}: {e}", exc_info=True)
+            return {
+                "error": "Failed to render space",
                 "details": str(e),
                 "timestamp": time.time()
             }

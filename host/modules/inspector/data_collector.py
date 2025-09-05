@@ -20,6 +20,7 @@ from elements.elements.base import BaseElement
 from elements.elements.space import Space
 from elements.elements.inner_space import InnerSpace
 from elements.elements.components.base_component import Component
+from .repl_context import REPLContextManager
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ class InspectorDataCollector:
         """
         self.host_instance = host_instance
         self.space_registry = SpaceRegistry.get_instance()
+        self.repl_manager = REPLContextManager(host_instance)
         
     async def collect_system_status(self) -> Dict[str, Any]:
         """
@@ -1008,8 +1010,8 @@ class InspectorDataCollector:
             space_id: The ID of the space to inspect
             facet_type: Optional filter by facet type (event, status, ambient)
             owner_id: Optional filter by owner element ID
-            limit: Maximum number of facets to return
-            after_facet_id: Optional cursor for pagination - return facets after this ID
+            limit: Maximum number of facets to return (negative for reverse direction)
+            after_facet_id: Optional cursor for pagination - return facets after/before this ID based on limit sign
             
         Returns:
             Dictionary containing filtered facet data
@@ -1059,22 +1061,38 @@ class InspectorDataCollector:
             
             # Apply filters
             filtered_facets = []
-            skip_until_found = after_facet_id is not None
             
             # Debug pagination
             import logging
             logger = logging.getLogger(__name__)
-            logger.debug(f"Veil facets pagination: after_facet_id={after_facet_id}, skip_until_found={skip_until_found}, total_facets={len(all_facets)}")
+            logger.debug(f"Veil facets pagination: after_facet_id={after_facet_id}, limit={limit}, total_facets={len(all_facets)}")
             
-            for facet in all_facets:
-                # Handle pagination cursor
-                if skip_until_found:
+            # Handle cursor-based filtering based on limit direction
+            if after_facet_id:
+                # Find the cursor facet position
+                cursor_index = None
+                for i, facet in enumerate(all_facets):
                     if facet.facet_id == after_facet_id:
-                        logger.debug(f"Found cursor facet: {facet.facet_id}, stopping skip")
-                        skip_until_found = False
-                        # Continue to skip this exact facet (we want items AFTER it)
-                    continue
+                        cursor_index = i
+                        break
                 
+                if cursor_index is not None:
+                    if limit >= 0:
+                        # Positive limit: get facets AFTER the cursor in pagination order (older facets)
+                        # Since facets are sorted newest first, "after" in pagination means higher indices
+                        all_facets = all_facets[cursor_index + 1:] if cursor_index < len(all_facets) - 1 else []
+                    else:
+                        # Negative limit: get facets BEFORE the cursor in pagination order (newer facets)
+                        # Since facets are sorted newest first, "before" in pagination means lower indices
+                        all_facets = all_facets[:cursor_index] if cursor_index > 0 else []
+                    logger.debug(f"After cursor filtering: {len(all_facets)} facets remaining")
+                else:
+                    # Cursor not found, return empty result
+                    logger.debug(f"Cursor facet {after_facet_id} not found")
+                    all_facets = []
+            
+            # Apply type and owner filters
+            for facet in all_facets:
                 # Filter by facet type
                 if facet_type and facet.facet_type.value != facet_type:
                     continue
@@ -1090,13 +1108,14 @@ class InspectorDataCollector:
                 logger.debug(f"Added facet {len(filtered_facets)}: {facet.facet_id}")
             
             # Apply limit and set pagination info
+            abs_limit = abs(limit) if limit != 0 else 100
             facets_data["summary"]["total_matching"] = len(filtered_facets)
-            limited_facets = filtered_facets[:limit]
+            limited_facets = filtered_facets[:abs_limit]
             facets_data["summary"]["returned"] = len(limited_facets)
-            facets_data["summary"]["limited"] = len(filtered_facets) > limit
+            facets_data["summary"]["limited"] = len(filtered_facets) > abs_limit
             
             # Set next cursor if there are more results
-            if len(filtered_facets) > limit:
+            if len(filtered_facets) > abs_limit:
                 facets_data["summary"]["next_cursor"] = limited_facets[-1].facet_id
                 logger.debug(f"Set next_cursor to: {facets_data['summary']['next_cursor']}")
             else:
@@ -1809,7 +1828,7 @@ class InspectorDataCollector:
                 try:
                     # Check if space has timeline storage component
                     timeline_storage = None
-                    for component in space.components.values():
+                    for component in space.get_components().values():
                         if hasattr(component, 'get_all_timelines'):
                             timeline_storage = component
                             break
@@ -1863,6 +1882,254 @@ class InspectorDataCollector:
             logger.error(f"Error collecting event details for {event_id}: {e}", exc_info=True)
             return {
                 "error": "Failed to collect event details",
+                "details": str(e),
+                "timestamp": time.time()
+            }
+
+    async def render_space_as_text(self, space_id: str, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Render a space (Hub) in its textual representation as it would appear to an LLM or human.
+        
+        Args:
+            space_id: The ID of the space to render
+            options: Rendering options including:
+                - format: "text" (default), "markdown", "json_messages"
+                - include_tools: Include tool/ambient facets (default: True)
+                - include_system: Include system messages (default: True)
+                - max_turns: Limit number of turns to render
+                - from_timestamp: Start rendering from specific timestamp
+                
+        Returns:
+            Dictionary containing the rendered text and metadata
+        """
+        try:
+            if not self.space_registry:
+                return {
+                    "error": "Space registry not available",
+                    "timestamp": time.time()
+                }
+            
+            # Get the space
+            spaces_dict = self.space_registry.get_spaces()
+            space = spaces_dict.get(space_id)
+            
+            if not space:
+                return {
+                    "error": f"Space '{space_id}' not found",
+                    "timestamp": time.time()
+                }
+            
+            # Get the SpaceVeilProducer component
+            space_veil_producer = None
+            for component in space.get_components().values():
+                if component.__class__.__name__ == "SpaceVeilProducer":
+                    space_veil_producer = component
+                    break
+            
+            if not space_veil_producer:
+                return {
+                    "error": f"Space '{space_id}' does not have a SpaceVeilProducer component",
+                    "timestamp": time.time()
+                }
+            
+            # Get the VEILFacetCache
+            facet_cache = space_veil_producer.get_facet_cache()
+            if not facet_cache:
+                return {
+                    "error": f"Could not retrieve facet cache for space '{space_id}'",
+                    "timestamp": time.time()
+                }
+            
+            # Get the FacetAwareHUDComponent
+            hud_component = None
+            for component in space.get_components().values():
+                if component.__class__.__name__ == "FacetAwareHUDComponent":
+                    hud_component = component
+                    break
+            
+            if not hud_component:
+                return {
+                    "error": f"Space '{space_id}' does not have a FacetAwareHUDComponent",
+                    "timestamp": time.time()
+                }
+            
+            # Parse options
+            render_format = options.get("format", "text") if options else "text"
+            include_tools = options.get("include_tools", True) if options else True
+            include_system = options.get("include_system", True) if options else True
+            max_turns = options.get("max_turns") if options else None
+            from_timestamp = options.get("from_timestamp") if options else None
+            
+            # Prepare rendering options for HUD component
+            hud_options = {
+                "exclude_ambient": not include_tools,
+                "include_system_messages": include_system,
+                "render_mode": "normal"
+            }
+            
+            # Process facets into turns using the HUD component
+            turn_messages = await hud_component._process_facets_into_turns(
+                facet_cache,
+                hud_options,
+                tools=None
+            )
+            
+            # Filter by timestamp if specified
+            if from_timestamp:
+                turn_messages = [
+                    msg for msg in turn_messages 
+                    if msg.get("turn_metadata", {}).get("timestamp", 0) >= from_timestamp
+                ]
+            
+            # Limit turns if specified
+            if max_turns and len(turn_messages) > max_turns:
+                turn_messages = turn_messages[-max_turns:]
+            
+            # Format the output based on requested format
+            if render_format == "json_messages":
+                # Return the raw message list
+                rendered_content = turn_messages
+                content_type = "application/json"
+            elif render_format == "markdown":
+                # Format as markdown
+                lines = []
+                space_name = getattr(space, 'name', space_id)
+                agent_name = getattr(space, 'agent_name', 'Agent')
+                
+                lines.append(f"# {space_name} - {agent_name}\n")
+                
+                for msg in turn_messages:
+                    role = msg.get("role", "unknown")
+                    content = msg.get("content", "")
+                    
+                    if role == "user":
+                        lines.append(f"## User\n\n{content}\n")
+                    elif role == "assistant":
+                        lines.append(f"## {agent_name}\n\n{content}\n")
+                    elif role == "system":
+                        if include_system:
+                            lines.append(f"## System\n\n{content}\n")
+                
+                rendered_content = "\n".join(lines)
+                content_type = "text/markdown"
+            else:
+                # Default plain text format
+                lines = []
+                space_name = getattr(space, 'name', space_id)
+                agent_name = getattr(space, 'agent_name', 'Agent')
+                
+                lines.append(f"[{space_name} - {agent_name}]")
+                lines.append("=" * 50)
+                
+                for msg in turn_messages:
+                    role = msg.get("role", "unknown")
+                    content = msg.get("content", "")
+                    
+                    if role == "user":
+                        lines.append(f"\nUser: {content}")
+                    elif role == "assistant":
+                        lines.append(f"\n{agent_name}: {content}")
+                    elif role == "system" and include_system:
+                        lines.append(f"\n[System]: {content}")
+                
+                rendered_content = "\n".join(lines)
+                content_type = "text/plain"
+            
+            # Return the rendered content with metadata
+            return {
+                "content": rendered_content,
+                "metadata": {
+                    "space_id": space_id,
+                    "space_name": getattr(space, 'name', space_id),
+                    "space_type": type(space).__name__,
+                    "agent_name": getattr(space, 'agent_name', 'Unknown'),
+                    "turn_count": len(turn_messages),
+                    "facet_count": len(facet_cache.facets) if hasattr(facet_cache, 'facets') else 0,
+                    "format": render_format,
+                    "content_type": content_type,
+                    "options": options or {}
+                },
+                "timestamp": time.time()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error rendering space {space_id} as text: {e}", exc_info=True)
+            return {
+                "error": "Failed to render space as text",
+                "details": str(e),
+                "timestamp": time.time()
+            }
+    
+    def get_object_by_path(self, path: str) -> Optional[Any]:
+        """
+        Resolve an object by its path identifier.
+        
+        Args:
+            path: Path in format "type:id" (e.g., "space:demo_space", "element:elem_id")
+            
+        Returns:
+            The resolved object or None if not found
+        """
+        try:
+            if ':' not in path:
+                logger.warning(f"Invalid path format: {path}. Expected 'type:id'")
+                return None
+                
+            path_type, path_id = path.split(':', 1)
+            
+            if path_type == 'space':
+                # Resolve space by ID
+                return self.space_registry.get_space(path_id)
+            
+            elif path_type == 'element':
+                # Search for element across all spaces
+                spaces_dict = self.space_registry.get_all_spaces()
+                for space in spaces_dict.values():
+                    if hasattr(space, 'elements') and path_id in space.elements:
+                        return space.elements[path_id]
+                return None
+                
+            elif path_type == 'component':
+                # Search for component across all elements in all spaces
+                spaces_dict = self.space_registry.get_all_spaces()
+                for space in spaces_dict.values():
+                    if hasattr(space, 'elements'):
+                        for element in space.elements.values():
+                            if hasattr(element, 'components'):
+                                for component in element.components:
+                                    if hasattr(component, 'component_id') and component.component_id == path_id:
+                                        return component
+                return None
+                
+            else:
+                logger.warning(f"Unknown path type: {path_type}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error resolving path '{path}': {e}", exc_info=True)
+            return None
+    
+    def collect_repl_sessions(self) -> Dict[str, Any]:
+        """
+        Collect information about active REPL sessions.
+        
+        Returns:
+            Dictionary containing REPL sessions info
+        """
+        try:
+            sessions_info = self.repl_manager.list_sessions()
+            
+            # Return simplified session info (without full namespaces)
+            return {
+                "sessions": sessions_info,
+                "total_sessions": len(sessions_info),
+                "timestamp": time.time()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error collecting REPL sessions: {e}", exc_info=True)
+            return {
+                "error": "Failed to collect REPL sessions",
                 "details": str(e),
                 "timestamp": time.time()
             }
