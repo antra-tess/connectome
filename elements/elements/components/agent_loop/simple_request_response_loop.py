@@ -54,7 +54,7 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
         try:
             # NEW: Get enhanced tool definitions from VEIL for Phase 2 integration
             enhanced_tools_from_veil = self._extract_enhanced_tools_from_veil()
-            
+
             pipeline_options = {
                 'focus_context': focus_context,
                 'include_memory': True,
@@ -74,7 +74,7 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
             # --- NEW: Process Turn-Based Context from HUD ---
             self._log_context_format(context_data)
             messages = self._process_context_to_messages(context_data)
-            
+
             # Log message details
             if self._is_turn_based_context(context_data):
                 logger.info(f"Built {len(messages)} turn-based messages for LLM")
@@ -200,4 +200,4 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
         except Exception as e:
             logger.error(f"{self.agent_loop_name} ({self.id}): Error during simple cycle: {e}", exc_info=True)
         finally:
-            logger.info(f"{self.agent_loop_name} ({self.id}): Simple cycle with memory completed.") 
+            logger.info(f"{self.agent_loop_name} ({self.id}): Simple cycle with memory completed.")

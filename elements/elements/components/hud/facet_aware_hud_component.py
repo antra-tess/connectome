@@ -12,11 +12,13 @@ import time
 import copy
 from typing import Dict, Any, Optional, List, Union
 from dataclasses import dataclass
+import asyncio
+import os
 
 from ..base_component import Component
 from elements.component_registry import register_component
 from ..veil import (
-    VEILFacetCache, VEILFacet, VEILFacetType,
+    VEILFacetCache, VEILFacet, VEILFacetType, ConnectomeEpoch,
     EventFacet, StatusFacet, AmbientFacet,
 )
 from ..veil.facet_cache import TemporalConsistencyValidator
@@ -26,7 +28,6 @@ logger = logging.getLogger(__name__)
 
 # NEW: Define minor status types that don't trigger ambient facets
 MINOR_STATUS_TYPES = {
-    "focus_changed",           # UI state change, not structural
     "message_count_updated",   # Count changes, same capabilities
     "connection_status_updated", # Network state, same functionality
     "read_status_updated",     # Read/unread markers, same context
@@ -34,6 +35,61 @@ MINOR_STATUS_TYPES = {
     "user_presence_updated",   # Online/offline status, not structural
     "notification_received"    # Notifications, not capabilities
 }
+
+@dataclass
+class SnapshotEntry:
+    data: Dict[str, Any]
+    timestamp_ms: int
+    access_count: int = 0
+
+
+class SnapshotCache:
+    def __init__(self, ttl_ms: int = 5000):
+        self._cache: Dict[str, SnapshotEntry] = {}
+        self._ttl_ms = ttl_ms
+        self._metrics = {
+            "hits": 0,
+            "misses": 0,
+            "evictions": 0,
+            "refreshes": 0
+        }
+        
+    def get(self, key: str, max_age_ms: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        now = int(time.time() * 1000)
+        max_age = max_age_ms or self._ttl_ms
+        
+        if key in self._cache:
+            entry = self._cache[key]
+            age = now - entry.timestamp_ms
+            if age <= max_age:
+                entry.access_count += 1
+                self._metrics["hits"] += 1
+                logger.debug(f"Snapshot cache hit: {key}, age={age}ms")
+                return entry.data
+            else:
+                del self._cache[key]
+                self._metrics["evictions"] += 1
+                
+        self._metrics["misses"] += 1
+        return None
+        
+    def put(self, key: str, data: Dict[str, Any]) -> None:
+        self._cache[key] = SnapshotEntry(
+            data=data,
+            timestamp_ms=int(time.time() * 1000)
+        )
+        self._metrics["refreshes"] += 1
+        
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return cache metrics with hit rate calculation."""
+        total = self._metrics["hits"] + self._metrics["misses"]
+        hit_rate = self._metrics["hits"] / total if total > 0 else 0
+        return {
+            **self._metrics,
+            "hit_rate": hit_rate,
+            "cache_size": len(self._cache)
+        }
+
 
 @dataclass
 class RenderingOptions:
@@ -109,8 +165,107 @@ class FacetAwareHUDComponent(Component):
             "memory_context_renders": 0
         }
         self._agent_name = "Agent"
+        self._focus_change_history = []
+        self._current_focus = None
+        # NEW: Enhanced snapshot cache with TTL and metrics
+        ttl_ms = kwargs.get('snapshot_ttl_ms', 5000)
+        self._snapshot_cache = SnapshotCache(ttl_ms=ttl_ms)
+        # Start metrics logging task
+        self._metrics_task = asyncio.create_task(self._log_metrics_periodically())
         logger.debug(f"FacetAwareHUDComponent initialized for Element {self.owner.id}")
         logger.info("Turn-based rendering with sophisticated status repetition and ambient threshold rules is active")
+
+    async def _log_metrics_periodically(self):
+        """Log snapshot cache metrics periodically."""
+        while True:
+            try:
+                await asyncio.sleep(60)  # Every minute
+                metrics = self._snapshot_cache.get_metrics()
+                logger.info(f"[HUD Snapshot Cache] Metrics: {metrics}")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"Metrics logging error: {e}")
+
+    def cleanup(self) -> bool:
+        """Clean up the component including stopping metrics task."""
+        try:
+            if hasattr(self, '_metrics_task'):
+                self._metrics_task.cancel()
+        except Exception as e:
+            logger.debug(f"Error cancelling metrics task: {e}")
+        return super().cleanup()
+
+    def _extract_element_type_from_id(self, element_id: str) -> str:
+        """Extract element type from element ID."""
+        try:
+            # Element IDs typically contain adapter type information
+            # Format examples: "discord_conversation_...", "terminal_...", etc.
+            if not element_id:
+                return "unknown"
+                
+            # Try to extract from common patterns
+            if "conversation" in element_id.lower():
+                return "conversation"
+            elif "terminal" in element_id.lower():
+                return "terminal"
+            elif "scratchpad" in element_id.lower():
+                return "scratchpad"
+            elif "file" in element_id.lower():
+                return "file"
+            else:
+                # Extract first part before underscore as type
+                parts = element_id.split('_')
+                return parts[0] if parts else "unknown"
+        except Exception as e:
+            logger.debug(f"Error extracting element type from ID {element_id}: {e}")
+            return "unknown"
+
+    def _extract_element_name_from_id(self, element_id: str) -> str:
+        """Extract element name from element ID."""
+        try:
+            if not element_id:
+                return "Unknown Element"
+                
+            # For conversation elements, try to extract conversation name
+            if "conversation" in element_id.lower():
+                # Element IDs might contain conversation names after certain patterns
+                # This is a simplified extraction - could be enhanced based on actual ID format
+                parts = element_id.split('_')
+                if len(parts) > 2:
+                    # Try to find a meaningful name part
+                    for part in parts:
+                        if part and part not in ['conversation', 'discord', 'slack', 'terminal']:
+                            return part.replace('-', ' ').title()
+                return "Conversation"
+            else:
+                # For non-conversation elements, use a generic name
+                element_type = self._extract_element_type_from_id(element_id)
+                return f"{element_type.title()} Element"
+        except Exception as e:
+            logger.debug(f"Error extracting element name from ID {element_id}: {e}")
+            return "Unknown Element"
+
+    def record_focus_change(self, focus_info: Dict[str, Any]) -> None:
+        """Record focus change history for debugging."""
+        focus_element_id = focus_info.get('focus_element_id')
+        if not focus_element_id:
+            logger.debug("Cannot record focus change: no focus_element_id provided")
+            return
+            
+        # Extract element type and name from element_id if not provided
+        focus_element_type = focus_info.get('focus_element_type', self._extract_element_type_from_id(focus_element_id))
+        focus_element_name = focus_info.get('focus_element_name', self._extract_element_name_from_id(focus_element_id))
+        
+        self._focus_change_history.append({
+            "veil_timestamp": ConnectomeEpoch.get_veil_timestamp(),
+            "owner_element_id": focus_element_id,
+            "current_state": {
+                "focused_element_id": focus_element_id,
+                "focused_element_type": focus_element_type,
+                "focused_element_name": focus_element_name
+            }
+        })
 
     def _get_space_veil_producer(self) -> Optional[SpaceVeilProducer]:
         """Get the SpaceVeilProducer from the owning InnerSpace."""
@@ -144,8 +299,8 @@ class FacetAwareHUDComponent(Component):
                 return "Error: VEILFacetCache not available"
 
             facet_cache = veil_producer.get_facet_cache()  # NEW: Get VEILFacetCache
-            # NEW: Extract current focus information at HUD level
-            focus_info = self._extract_current_focus_info(facet_cache, options)
+            
+            self._extract_current_focus_info(options) # NEW: Extract current focus at HUD level
 
             # Get VEILFacetCompressionEngine
             compression_engine = self.get_sibling_component("VEILFacetCompressionEngine")
@@ -156,14 +311,13 @@ class FacetAwareHUDComponent(Component):
             # NEW: Pass extracted focus info to CompressionEngine
             processed_facets = await compression_engine.process_facet_cache_with_compression(
                 facet_cache=facet_cache,
-                focus_info=focus_info  # Pass structured focus info instead of focus_context
+                focus_info=self._current_focus  # Pass structured focus info instead of focus_context
             )
-
             # NEW: Process facets into turn-based messages
             turn_based_messages = await self._process_facets_into_turns(processed_facets, options, tools)
 
             # Check for multimodal content if focus element provided
-            focus_element_id = focus_info.get('focus_element_id') if focus_info else None
+            focus_element_id = self._current_focus.get('focus_element_id') if self._current_focus else None
             if focus_element_id and self._has_multimodal_content(processed_facets, focus_element_id):
                 return {
                     "messages": turn_based_messages,
@@ -493,12 +647,19 @@ class FacetAwareHUDComponent(Component):
         """
         try:
             # Get chronological temporal stream
-            temporal_stream = facet_cache.get_chronological_stream(include_ambient=True)
+            temporal_stream = facet_cache.get_chronological_stream(
+                include_ambient=True,
+                only_synthetic_agent_responses_in_history=True
+            )
             if not temporal_stream:
-                return [{"role": "user", "content": "[AGENT WORKSPACE]\nNo content available", "turn_metadata": {"turn_index": 0, "facet_count": 0}}]
+                return [{
+                    "role": "user",
+                    "content": "[AGENT WORKSPACE]\nNo content available",
+                    "turn_metadata": {"turn_index": 0, "facet_count": 0}
+                }]
 
             # NEW: Build historical focus map from StatusFacets
-            historical_focus_map = self._build_historical_focus_map(temporal_stream)
+            historical_focus_map = self._build_historical_focus_map()
 
             # Initialize system state for processing
             system_state = self._initialize_system_state(temporal_stream, options)
@@ -572,6 +733,7 @@ class FacetAwareHUDComponent(Component):
             "events": [],
             "turn_index": 0
         }
+
         for facet in temporal_stream:
             # Check if this facet triggers agent turn logic
             is_agent_response = (
@@ -770,10 +932,10 @@ class FacetAwareHUDComponent(Component):
             logger.error(f"Error collecting scene status message: {e}", exc_info=True)
 
     async def _render_turn_structure_to_messages(self,
-                                               processed_turns: List[Dict[str, Any]],
-                                               system_state: Dict[str, Any],
-                                               options: Dict[str, Any],
-                                               tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+                                                 processed_turns: List[Dict[str, Any]],
+                                                 system_state: Dict[str, Any],
+                                                 options: Dict[str, Any],
+                                                 tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
         """
         PHASE 3: Render processed turn structure to final messages.
 
@@ -1163,7 +1325,6 @@ class FacetAwareHUDComponent(Component):
 
         return "\n\n".join(info_sections)
 
-
     async def _render_ambient_section_from_facets(self,
                                                 ambient_facets: List[VEILFacet],
                                                 system_state: Dict[str, Any],
@@ -1318,20 +1479,17 @@ class FacetAwareHUDComponent(Component):
 
         return families
 
-    def _build_historical_focus_map(self, temporal_stream: List[VEILFacet]) -> Dict[float, str]:
-        """NEW: Build map of timestamp -> focused_element_id from StatusFacets"""
+    def _build_historical_focus_map(self) -> Dict[float, str]:
+        """NEW: Build map of timestamp -> focused_element_id from stored history of focus states"""
 
         focus_map = {}
 
-        for facet in temporal_stream:
-            if (facet.facet_type == VEILFacetType.STATUS and
-                facet.get_property("status_type") == "focus_changed"):
+        for focus_state in self._focus_change_history:
+            timestamp = focus_state["veil_timestamp"]
+            focused_element_id = focus_state["current_state"]["focused_element_id"]
 
-                timestamp = facet.veil_timestamp
-                focused_element_id = facet.get_property("current_state", {}).get("focused_element_id")
-
-                if focused_element_id:
-                    focus_map[timestamp] = focused_element_id
+            if focused_element_id:
+                focus_map[timestamp] = focused_element_id
 
         logger.debug(f"Built historical focus map with {len(focus_map)} focus changes")
         return focus_map
@@ -1654,9 +1812,6 @@ class FacetAwareHUDComponent(Component):
         elif status_type == "chat_joined":
             chat_name = current_state.get("conversation_name", "Unknown")
             return f"<system>Joined conversation: {chat_name}</system>"
-        elif status_type == "focus_changed":
-            focused_element_name = current_state.get("focused_element_name", "Unknown")
-            return f"<system>Currently focused on: {focused_element_name}</system>"
         return ""
 
     def _render_event_facet_with_system_context(self, facet: EventFacet, system_state: Dict[str, Any], options: RenderingOptions) -> str:
@@ -1680,6 +1835,7 @@ class FacetAwareHUDComponent(Component):
 
                 # Determine conversation from links or owner
                 conversation_name = self._determine_conversation_for_event(facet, system_state)
+                focus_content = f'<system>Currently focused on: {conversation_name}</system>'
 
                 # Build message with conversation context
                 msg_attrs = []
@@ -1705,8 +1861,18 @@ class FacetAwareHUDComponent(Component):
                 # Add status indicators
                 if message_status == "pending_send":
                     message_content += " [PENDING CONFIRMATION]"
+                elif message_status == "retrying":
+                    retry_count = facet.get_property("retry_count", 0)
+                    message_content += f" [RETRYING (attempt {retry_count})]"
                 elif message_status == "failed_to_send":
-                    message_content += " [SEND FAILED]"
+                    retry_count = facet.get_property("retry_count", 0)
+                    if retry_count > 0:
+                        message_content += f" [SEND FAILED - {retry_count} retries]"
+                    else:
+                        message_content += " [SEND FAILED]"
+
+                if self._focus_required(facet.facet_id):
+                    return f"{focus_content}\n\n{msg_tag}{message_content}</msg>"
 
                 return f"{msg_tag}{message_content}</msg>"
 
@@ -1891,6 +2057,9 @@ class FacetAwareHUDComponent(Component):
                 # Add status indicators
                 if message_status == "pending_send":
                     message_content += " [PENDING CONFIRMATION]"
+                elif message_status == "retrying":
+                    # Note: retry_count not available in this method context, using generic message
+                    message_content += " [RETRYING]"
                 elif message_status == "failed_to_send":
                     message_content += " [SEND FAILED]"
 
@@ -2248,26 +2417,19 @@ class FacetAwareHUDComponent(Component):
         return """TOOL CALL FORMAT: Use XML format for all tool calls. Do NOT use JSON format.
 
 To call tools, use this ultra-concise XML format to send messages:
-<tool_calls>
+
 <msg source="element_name">message</msg>
-</tool_calls>
 
 and this format to use any other tool:
-<tool_calls>
 <tool_name param1="value1" param2="value2" source="element_name">
-</tool_calls>
 
 Examples:
-<tool_calls>
 <msg source="discord_chat">Hello, world!</msg>
-</tool_calls>
 
-<tool_calls>
 <execute_command command="ls -la" source="Terminal">
 <msg source="zulip_chat">Command executed!</msg>
-</tool_calls>
 
-Use the actual tool name as the XML element name. You can make multiple tool calls in one <tool_calls> block. The source parameter specifies which conversation or element to use - choose from the sources listed for each tool type."""
+Use the actual tool name as the XML element name. You can make multiple tool calls in one response. The source parameter specifies which conversation or element to use - choose from the sources listed for each tool type."""
 
     def _should_render_agent_message(self, message_facet: VEILFacet, system_state: Dict[str, Any]) -> bool:
         """
@@ -2391,7 +2553,7 @@ Use the actual tool name as the XML element name. You can make multiple tool cal
                 logger.debug(f"Turn {turn_index}: Adding all {len(triggered_facets)} ambient facets (first turn)")
                 return triggered_facets
 
-            # NEW: Check for scene-changing status facets (ignore minor ones like focus_changed)
+            # NEW: Check for scene-changing status facets (ignore minor ones)
             scene_changing_status_facets = [
                 facet for facet in turn_data.get("status", [])
                 if self._is_scene_changing_status(facet)
@@ -2412,7 +2574,7 @@ Use the actual tool name as the XML element name. You can make multiple tool cal
                 logger.debug(f"Turn {turn_index}: Adding all {len(triggered_facets)} ambient facets (content threshold {system_state['content_length_total']} >= {content_threshold})")
                 return triggered_facets
 
-            # No significant triggers - focus_changed and other minor status updates won't trigger ambient facets
+            # No significant triggers - minor status updates won't trigger ambient facets
             return []
 
         except Exception as e:
@@ -2466,79 +2628,98 @@ Use the actual tool name as the XML element name. You can make multiple tool cal
         except Exception as e:
             logger.error(f"Error in simple retroactive deduplication: {e}", exc_info=True)
 
-    def _extract_current_focus_info(self, facet_cache: VEILFacetCache, options: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _extract_current_focus_info(self, options: Dict[str, Any]) -> None:
         """
-        Extract current focus information from latest focus_changed StatusFacet.
+        Extract current focus information.
 
         This implements the new focus flow where HUD extracts focus info and passes it
         to CompressionEngine for decision-making.
 
         Args:
-            facet_cache: VEILFacetCache to examine for focus StatusFacets
             options: Rendering options (may contain explicit focus override)
+        """
+        # Check for explicit focus override in options first
+        focus_context = options.get('focus_context', {})
+        explicit_focus = focus_context.get('focus_element_id')
+
+        if explicit_focus:
+            # Check if this is actually a focus change
+            current_focus_id = self._current_focus.get('focus_element_id') if self._current_focus else None
+            if current_focus_id != explicit_focus:
+                # This is a focus change - record it
+                self.record_focus_change(focus_context)
+            
+            self._current_focus = {
+                "focus_element_id": explicit_focus,
+                "focus_source": "explicit_override",
+                "focus_timestamp": ConnectomeEpoch.get_veil_timestamp(),
+                "focus_context": focus_context
+            }
+            logger.debug(f"Focus set to: {explicit_focus}")
+        else:
+            # No explicit focus provided - keep current focus if any
+            if not self._current_focus:
+                logger.debug("No focus information available - no current focus set")
+            else:
+                logger.debug(f"Using existing focus: {self._current_focus.get('focus_element_id')}")
+
+    def _focus_required(self, facet_id: str) -> bool:
+        """
+        Determine if focus is required for the current turn.
+
+        Args:
+            facet_id: The ID of the facet to check
 
         Returns:
-            Structured focus info dict with focus_element_id, timestamp, etc.
-            None if no focus information found
+            True if focus is required, False otherwise
         """
+        if not self._current_focus or not facet_id:
+            return False
+
+        return self._current_focus.get('focus_context', {}).get('focus_element_id', None) in facet_id
+
+    # --- Snapshot Cache APIs ---
+    def get_snapshot(self, focus_element_id: str, max_age_ms: Optional[int] = None, generate_if_missing: bool = False) -> Optional[Dict[str, Any]]:
         try:
-            # Check for explicit focus override in options first
-            explicit_focus = options.get('focus_context', {}).get('focus_element_id')
-            if explicit_focus:
-                logger.debug(f"Using explicit focus override: {explicit_focus}")
-                return {
-                    "focus_element_id": explicit_focus,
-                    "focus_source": "explicit_override",
-                    "focus_timestamp": None,
-                    "focus_context": options.get('focus_context', {})
-                }
-
-            # Find all focus_changed StatusFacets
-            focus_facets = []
-            for facet in facet_cache.facets.values():
-                if (facet.facet_type == VEILFacetType.STATUS and
-                    facet.get_property("status_type") == "focus_changed"):
-                    focus_facets.append(facet)
-
-            if not focus_facets:
-                logger.debug("No focus_changed StatusFacets found")
+            entry = self._snapshot_cache.get(focus_element_id, max_age_ms)
+            if entry:
+                return entry
+            if generate_if_missing:
+                # Caller should await refresh_snapshot then re-fetch
                 return None
-
-            # Sort by timestamp to get the most recent focus change
-            focus_facets.sort(key=lambda f: f.veil_timestamp, reverse=True)
-            latest_focus_facet = focus_facets[0]
-
-            # Extract focus information from current_state
-            current_state = latest_focus_facet.get_property("current_state", {})
-            focused_element_id = current_state.get("focused_element_id")
-
-            if not focused_element_id:
-                logger.warning(f"Focus StatusFacet found but no focused_element_id in current_state: {current_state}")
-                return None
-
-            # Build structured focus info
-            focus_info = {
-                "focus_element_id": focused_element_id,
-                "focus_source": "status_facet",
-                "focus_timestamp": latest_focus_facet.veil_timestamp,
-                "focus_facet_id": latest_focus_facet.facet_id,
-                "focused_element_name": current_state.get("focused_element_name", "Unknown"),
-                "previous_focus_element_id": current_state.get("previous_focus_element_id"),
-                "focus_context": current_state
-            }
-
-            logger.debug(f"Extracted focus info: {focused_element_id} from StatusFacet {latest_focus_facet.facet_id}")
-            return focus_info
-
+            return None
         except Exception as e:
-            logger.error(f"Error extracting current focus info: {e}", exc_info=True)
+            logger.debug(f"HUD get_snapshot error: {e}")
             return None
 
-    def _is_minor_status_change(self, status_facet: StatusFacet) -> bool:
-        """Determine if this is a minor status change that shouldn't trigger ambient facets"""
-        status_type = status_facet.get_property("status_type")
-        return status_type in MINOR_STATUS_TYPES
+    async def refresh_snapshot(self, focus_element_id: str) -> Optional[Dict[str, Any]]:
+        try:
+            options = {
+                'focus_context': { 'focus_element_id': focus_element_id },
+                'include_memory': True,
+                'render_mode': 'normal',
+                'include_time_markers': True,
+                'include_system_messages': True
+            }
+            # Use VEIL-enhanced tools if needed; pass None to keep interface simple here
+            snapshot = await self.get_agent_context_via_compression_engine(options=options, tools=None)
+            # Store with timestamp and metadata
+            wrapped = {
+                "messages": snapshot if isinstance(snapshot, list) or isinstance(snapshot, dict) else snapshot,
+                "_snapshot_timestamp": time.time(),
+                "_focus_element_id": focus_element_id
+            }
+            self._snapshot_cache.put(focus_element_id, wrapped)
+            # Optional: emit internal event here (skipped)
+            return wrapped
+        except Exception as e:
+            logger.error(f"HUD refresh_snapshot error: {e}", exc_info=True)
+            return None
 
-    def _is_scene_changing_status(self, status_facet: StatusFacet) -> bool:
-        """Determine if this is a major scene change that should trigger ambient facets"""
-        return not self._is_minor_status_change(status_facet)
+    async def refresh_snapshots(self, focus_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        results: Dict[str, Dict[str, Any]] = {}
+        for fid in focus_ids or []:
+            snap = await self.refresh_snapshot(fid)
+            if snap:
+                results[fid] = snap
+        return results

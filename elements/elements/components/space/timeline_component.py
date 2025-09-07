@@ -25,17 +25,17 @@ class TimelineComponent(Component):
     """
     Manages the Loom DAG (event history) for the owning Space element.
     Handles adding new events, maintaining parent links, and tracking the primary timeline.
-    
+
     NOTE: This is a simplified implementation focusing on a single primary timeline.
           Full Loom features (forking, merging, complex DAG traversal) are not yet implemented.
-          
+
     NEW: Integrates with pluggable storage system to persist timeline events and DAG structure.
     """
     COMPONENT_TYPE = "TimelineComponent"
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        
+
         # NEW: Storage integration
         self._storage: Optional[StorageInterface] = None
         self._storage_initialized = False
@@ -44,7 +44,7 @@ class TimelineComponent(Component):
     def initialize(self, **kwargs) -> None:
         """Initializes the component state, creating a default primary timeline."""
         super().initialize(**kwargs)
-        # _timelines: { timeline_id: { "is_primary": bool, "head_event_ids": set[str] } } 
+        # _timelines: { timeline_id: { "is_primary": bool, "head_event_ids": set[str] } }
         self._state.setdefault('_timelines', {})
         # _all_events: { event_id: { "id": str, "timestamp": float, "parent_ids": list[str], "timeline_id": str, "payload": dict } }
         self._state.setdefault('_all_events', {})
@@ -60,7 +60,7 @@ class TimelineComponent(Component):
             logger.info(f"TimelineComponent initialized for Element {self.owner.id}. Created default timeline '{DEFAULT_TIMELINE_ID}'.")
         else:
             logger.debug(f"TimelineComponent initialized for Element {self.owner.id}. Existing state loaded.")
-        
+
         # NEW: Schedule async storage initialization
         try:
             loop = asyncio.get_running_loop()
@@ -68,31 +68,31 @@ class TimelineComponent(Component):
             logger.debug(f"Scheduled async storage initialization for TimelineComponent {self.id}")
         except RuntimeError:
             logger.debug(f"No event loop running, will initialize storage on first use for TimelineComponent {self.id}")
-        
+
         return True
 
     async def _initialize_storage_async(self) -> bool:
         """Initialize storage backend asynchronously."""
         try:
             logger.debug(f"Initializing storage backend for TimelineComponent {self.id}")
-            
+
             # Create storage from environment configuration
             self._storage = create_storage_from_env()
-            
+
             # Initialize the storage backend
             success = await self._storage.initialize()
             if not success:
                 logger.error(f"Failed to initialize storage backend for TimelineComponent")
                 return False
-            
+
             self._storage_initialized = True
             logger.info(f"Storage backend successfully initialized for TimelineComponent {self.id}")
-            
+
             # Load existing timeline data from storage
             await self._load_timeline_from_storage()
-            
+
             return True
-            
+
         except Exception as e:
             logger.error(f"Error initializing storage backend for TimelineComponent: {e}", exc_info=True)
             return False
@@ -101,22 +101,22 @@ class TimelineComponent(Component):
         """Ensure storage backend is initialized before use."""
         if self._storage_initialized:
             return True
-        
+
         if self._storage is None:
             logger.debug(f"Storage not yet initialized for TimelineComponent {self.id}, initializing now...")
             success = await self._initialize_storage_async()
             return success
-        
+
         return self._storage_initialized
 
     async def _load_timeline_from_storage(self) -> bool:
         """Load existing timeline data from storage."""
         if not self._storage_initialized or not self._space_id:
             return False
-        
+
         try:
             logger.debug(f"Loading timeline data for space {self._space_id}")
-            
+
             # Load timeline state from system state storage
             timeline_state = await self._storage.load_system_state(f"timeline_state_{self._space_id}")
             if timeline_state:
@@ -132,17 +132,17 @@ class TimelineComponent(Component):
                         timeline_info['head_event_ids'] = {head_event_ids}
                     elif not isinstance(head_event_ids, set):
                         timeline_info['head_event_ids'] = set()
-                
+
                 self._state['_timelines'] = timelines
                 self._state['_primary_timeline_id'] = timeline_state.get('_primary_timeline_id')
                 logger.info(f"Loaded timeline state with {len(self._state['_timelines'])} timelines")
-            
+
             # Load all timeline events from storage
             timeline_events = await self._storage.load_system_state(f"timeline_events_{self._space_id}")
             if timeline_events:
                 self._state['_all_events'] = timeline_events.get('_all_events', {})
                 logger.info(f"Loaded {len(self._state['_all_events'])} timeline events")
-            
+
             # NEW: Only trigger event replay if there are events to replay AND replay is enabled
             has_events_to_replay = len(self._state.get('_all_events', {})) > 0
             if has_events_to_replay and hasattr(self.owner, 'replay_events_from_timeline') and callable(self.owner.replay_events_from_timeline):
@@ -156,9 +156,9 @@ class TimelineComponent(Component):
                 logger.info(f"Event replay disabled for space {self._space_id} ({len(self._state['_all_events'])} events found but not replaying)")
             else:
                 logger.info(f"No events found for space {self._space_id}, skipping replay (fresh agent)")
-            
+
             return True
-            
+
         except Exception as e:
             logger.error(f"Error loading timeline data from storage: {e}", exc_info=True)
             return False
@@ -167,7 +167,7 @@ class TimelineComponent(Component):
         """Persist current timeline state to storage."""
         if not await self._ensure_storage_ready() or not self._space_id:
             return False
-        
+
         try:
             # Store timeline state (metadata about timelines)
             # Convert sets to lists for JSON serialization
@@ -178,24 +178,24 @@ class TimelineComponent(Component):
                 if isinstance(timeline_copy.get('head_event_ids'), set):
                     timeline_copy['head_event_ids'] = list(timeline_copy['head_event_ids'])
                 timelines_serializable[timeline_id] = timeline_copy
-            
+
             timeline_state = {
                 '_timelines': timelines_serializable,
                 '_primary_timeline_id': self._state['_primary_timeline_id'],
                 'last_updated': time.time()
             }
             await self._storage.store_system_state(f"timeline_state_{self._space_id}", timeline_state)
-            
+
             # Store all events (the actual event data)
             timeline_events = {
                 '_all_events': self._state['_all_events'],
                 'last_updated': time.time()
             }
             await self._storage.store_system_state(f"timeline_events_{self._space_id}", timeline_events)
-            
+
             logger.debug(f"Persisted timeline state with {len(self._state['_all_events'])} events")
             return True
-            
+
         except Exception as e:
             logger.error(f"Error persisting timeline state: {e}", exc_info=True)
             return False
@@ -241,17 +241,16 @@ class TimelineComponent(Component):
             'is_primary': False, # Set explicitly later if needed
             'head_event_ids': {root_event_id} # Start with the root event as head
         }
-        
+
         if is_primary:
             self.designate_primary_timeline(timeline_id)
-
 
     def add_event_to_primary_timeline(self, event_payload: Dict[str, Any]) -> Optional[str]:
         """
         Adds an event to the primary timeline.
         """
         event_id = self.add_event_to_timeline(event_payload, timeline_context={'timeline_id': self._state['_primary_timeline_id']})
-        
+
         # NEW: Schedule async persistence (non-blocking)
         if event_id and self._storage_initialized:
             try:
@@ -259,7 +258,7 @@ class TimelineComponent(Component):
                 loop.create_task(self._persist_timeline_state())
             except RuntimeError:
                 pass  # No event loop running, persistence will happen on shutdown
-        
+
         return event_id
 
     def add_event_to_timeline(self, event_payload: Dict[str, Any], timeline_context: Dict[str, Any]) -> Optional[str]:
@@ -314,13 +313,13 @@ class TimelineComponent(Component):
         }
 
         self._state['_all_events'][new_event_id] = new_event_node
-        
+
         # Update head events for this timeline: the new event becomes the sole head.
         # For merges, this logic would be more complex.
         timeline_info['head_event_ids'] = {new_event_id}
-        
+
         logger.debug(f"[{self.owner.id}] Event '{new_event_id}' added to timeline '{target_timeline_id}' (Parents: {parent_ids}). Payload type: {event_payload.get('event_type')}")
-        
+
         # NEW: Schedule async persistence for the new event (non-blocking)
         if self._storage_initialized:
             try:
@@ -328,7 +327,7 @@ class TimelineComponent(Component):
                 loop.create_task(self._persist_timeline_state())
             except RuntimeError:
                 pass  # No event loop running, persistence will happen on shutdown
-        
+
         return new_event_id
 
     def get_primary_timeline(self) -> Optional[str]:
@@ -352,7 +351,7 @@ class TimelineComponent(Component):
         old_primary = self._state['_primary_timeline_id']
         if old_primary and old_primary in self._state['_timelines']:
             self._state['_timelines'][old_primary]['is_primary'] = False
-        
+
         self._state['_timelines'][timeline_id]['is_primary'] = True
         self._state['_primary_timeline_id'] = timeline_id
         logger.info(f"[{self.owner.id}] Timeline '{timeline_id}' designated as primary.")
@@ -388,7 +387,7 @@ class TimelineComponent(Component):
         else:
             # Start from current head(s) if no start_event_id
             queue.extend(list(timeline_info.get('head_event_ids', [])))
-        
+
         queue.sort(key=lambda eid: self._state['_all_events'].get(eid, {}).get('timestamp', 0), reverse=True)
 
         while queue:
@@ -420,8 +419,8 @@ class TimelineComponent(Component):
         return events
 
     def get_last_relevant_event(
-        self, 
-        timeline_id: Optional[str] = None, 
+        self,
+        timeline_id: Optional[str] = None,
         filter_criteria: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict[str, Any]]:
         """
@@ -432,7 +431,7 @@ class TimelineComponent(Component):
             timeline_id: The ID of the timeline to search. Defaults to the primary timeline.
             filter_criteria: A dictionary specifying conditions the event must meet.
                              Supports filtering by 'event_type' in payload, and keys within payload['data'].
-                             Example: 
+                             Example:
                                  {'payload.event_type': 'tool_result_received'}
                                  {'payload.data.loop_component_id': 'abc-123'}
                                  {'payload.event_type__in': ['type1', 'type2']}
@@ -444,12 +443,12 @@ class TimelineComponent(Component):
         if not target_timeline_id:
             logger.warning(f"[{self.owner.id}] Cannot get last relevant event: No timeline specified and no primary found.")
             return None
-            
+
         timeline_info = self._state['_timelines'].get(target_timeline_id)
         if not timeline_info:
             logger.warning(f"[{self.owner.id}] Cannot get last relevant event: Timeline '{target_timeline_id}' not found.")
             return None
-            
+
         if not filter_criteria:
              logger.warning(f"[{self.owner.id}] get_last_relevant_event called without filter_criteria.")
              # Optionally return the absolute last event? For now, return None.
@@ -458,7 +457,7 @@ class TimelineComponent(Component):
         # Use a similar backward traversal logic as get_timeline_events, but stop at first match
         queue: List[str] = []
         visited: Set[str] = set()
-        
+
         # Start from current head(s)
         queue.extend(list(timeline_info.get('head_event_ids', [])))
         # Process newest heads first
@@ -489,7 +488,7 @@ class TimelineComponent(Component):
                     if isinstance(expected_value, list) and actual_value in expected_value:
                         is_match = True
                     # else: is_match remains False
-                
+
                 # Handle standard equality check
                 else:
                     actual_value = self._get_nested_value(event_node, key)
@@ -501,7 +500,7 @@ class TimelineComponent(Component):
                 if not is_match:
                     match = False
                     break
-            
+
             if match:
                 logger.debug(f"Found matching event '{current_event_id}' for criteria: {filter_criteria}")
                 return event_node # Found the most recent match
@@ -513,7 +512,7 @@ class TimelineComponent(Component):
             for p_id in parent_ids:
                  if p_id not in visited and p_id in self._state['_all_events']:
                       parents_to_add.append((self._state['_all_events'][p_id].get('timestamp', 0), p_id))
-            
+
             # Sort parents by timestamp descending to check newer branches first
             parents_to_add.sort(key=lambda item: item[0], reverse=True)
             # Insert parents at the beginning of the queue to continue depth-first search backwards
@@ -565,7 +564,7 @@ class TimelineComponent(Component):
         if source_timeline_id not in self._state['_timelines']:
             logger.error(f"[{self.owner.id}] Cannot fork: Source timeline '{source_timeline_id}' not found.")
             return None
-        
+
         # Validate fork point event exists
         if fork_point_event_id not in self._state['_all_events']:
             logger.error(f"[{self.owner.id}] Cannot fork: Fork point event '{fork_point_event_id}' not found.")
@@ -576,14 +575,14 @@ class TimelineComponent(Component):
         if final_new_timeline_id in self._state['_timelines']:
             logger.error(f"[{self.owner.id}] Cannot fork: New timeline ID '{final_new_timeline_id}' already exists.")
             return None
-            
+
         fork_info = {
             'source_timeline_id': source_timeline_id,
             'source_event_id': fork_point_event_id
         }
-        
+
         self._create_timeline(final_new_timeline_id, is_primary=is_primary, fork_from=fork_info)
-        
+
         # Check if creation was successful (timeline should now exist)
         if final_new_timeline_id in self._state['_timelines']:
             logger.info(f"[{self.owner.id}] Successfully created timeline fork '{final_new_timeline_id}' from event '{fork_point_event_id}' on timeline '{source_timeline_id}'.")
@@ -592,10 +591,10 @@ class TimelineComponent(Component):
             # _create_timeline should log errors if it fails internally
             logger.error(f"[{self.owner.id}] Failed to create timeline fork '{final_new_timeline_id}'.")
             return None
-            
+
     def merge_timeline_simple(
-        self, 
-        source_timeline_id: str, 
+        self,
+        source_timeline_id: str,
         target_timeline_id: str,
         merge_event_payload: Optional[Dict[str, Any]] = None
     ) -> Optional[str]:
@@ -622,10 +621,10 @@ class TimelineComponent(Component):
         if not target_timeline_info:
             logger.error(f"[{self.owner.id}] Cannot merge: Target timeline '{target_timeline_id}' not found.")
             return None
-            
+
         source_head_ids = list(source_timeline_info.get('head_event_ids', []))
         target_head_ids = list(target_timeline_info.get('head_event_ids', []))
-        
+
         if not source_head_ids:
             logger.warning(f"[{self.owner.id}] Source timeline '{source_timeline_id}' has no head events to merge from.")
             # Depending on desired semantics, could allow merging an empty timeline?
@@ -634,10 +633,10 @@ class TimelineComponent(Component):
         if not target_head_ids:
              logger.error(f"[{self.owner.id}] Cannot merge into timeline '{target_timeline_id}': No head events found.")
              return None
-             
+
         # Combine parents from both heads, ensuring uniqueness
         all_parent_ids = list(set(source_head_ids + target_head_ids))
-        
+
         # Create the payload for the merge event
         final_merge_payload = {
             'event_type': 'timelines_merged_simple',
@@ -648,15 +647,15 @@ class TimelineComponent(Component):
                 **(merge_event_payload or {})
             }
         }
-        
+
         # Add the merge event to the target timeline
         timeline_context = {
             'timeline_id': target_timeline_id,
             'parent_event_ids': all_parent_ids # Explicitly set parents
         }
-        
+
         merge_event_id = self.add_event_to_timeline(final_merge_payload, timeline_context)
-        
+
         if merge_event_id:
             logger.info(f"[{self.owner.id}] Successfully created simple merge event '{merge_event_id}' in timeline '{target_timeline_id}', merging from '{source_timeline_id}'.")
             # The target timeline's head is now automatically the merge event ID due to add_event_to_timeline logic.

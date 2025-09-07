@@ -6,6 +6,7 @@ Initializes infrastructure modules, SpaceRegistry, and InnerSpace instances for 
 import logging
 import asyncio
 import sys
+import time
 from typing import Dict, Any, Optional # Added Optional
 import os
 
@@ -23,6 +24,11 @@ from host.modules.routing.host_router import HostRouter
 # Removed ActivityListener as ActivityClient handles incoming on its connections
 # from host.modules.activities.activity_listener import ActivityListener
 from host.modules.activities.activity_client import ActivityClient
+
+# Inspector modules
+from host.modules.inspector.inspector_server import InspectorServer
+from host.modules.inspector.cli_handler import register_cli_commands
+from host.modules.inspector.ipc_server import IPCServer, create_socket_info_file
 
 # Agent/InnerSpace
 from elements.elements.inner_space import InnerSpace
@@ -253,6 +259,61 @@ async def amain():
     logger.info("Starting Activity Client connections...")
     await activity_client.connect_to_all_adapters()
 
+    # Initialize Inspector components (if enabled)
+    inspector_server = None
+    cli_handler = None
+    ipc_server = None
+    
+    if settings.inspector_enabled:
+        logger.info(f"Starting Inspector Server on port {settings.inspector_port}...")
+        try:
+            # Create a host instance reference for the inspector
+            host_instance = type('HostInstance', (), {
+                'space_registry': space_registry,
+                'activity_client': activity_client,
+                'event_loop': event_loop,
+                'external_event_router': external_event_router,
+                'settings': settings
+            })()
+            
+            # Start web inspector server
+            inspector_server = InspectorServer(host_instance, port=settings.inspector_port)
+            await inspector_server.start()
+            
+            # Start CLI plugin (if enabled)
+            if settings.inspector_cli_enabled:
+                logger.info("Starting Inspector CLI plugin...")
+                try:
+                    # Register CLI command handler
+                    cli_handler = register_cli_commands(host_instance)
+                    
+                    # Start IPC server for external CLI clients
+                    ipc_server = IPCServer(cli_handler, socket_path=settings.inspector_ipc_socket_path)
+                    await ipc_server.start()
+                    
+                    # Create socket info file for client discovery
+                    socket_info_file = create_socket_info_file(
+                        ipc_server.get_socket_path(),
+                        {
+                            "inspector_port": settings.inspector_port,
+                            "started_at": time.time(),
+                            "host_id": f"connectome_{os.getpid()}"
+                        }
+                    )
+                    
+                    logger.info(f"Inspector CLI plugin started - IPC socket: {ipc_server.get_socket_path()}")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to start Inspector CLI plugin: {e}", exc_info=True)
+                    cli_handler = None
+                    ipc_server = None
+            else:
+                logger.info("Inspector CLI plugin disabled by configuration")
+                
+        except Exception as e:
+            logger.error(f"Failed to start Inspector Server: {e}", exc_info=True)
+            inspector_server = None
+
     try:
         logger.info("Starting Host Event Loop...")
         await event_loop.run() # Run the main async loop
@@ -274,6 +335,12 @@ async def amain():
              event_loop.stop() 
          if activity_client:
              await activity_client.shutdown()
+         if inspector_server:
+             await inspector_server.stop()
+         if ipc_server:
+             await ipc_server.stop()
+         if cli_handler:
+             cli_handler.stop()
          logger.info("Shutdown sequence complete.")
 
 async def shutdown_all_spaces_gracefully(space_registry):

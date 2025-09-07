@@ -291,7 +291,40 @@ class Component:
                 logger.error(f"Missing dependency {dependency} for component {self.COMPONENT_TYPE}")
                 return False
                 
-        return True 
+        return True
+    
+    def _on_element_ready(self) -> None:
+        """
+        Called when the owning element becomes ready.
+        
+        This is part of the Godot-inspired ready cascade system.
+        Override in subclasses to implement element-ready behavior.
+        """
+        pass 
+    
+    def emit_component_processed_ack(self, original_event_id: str, handled: bool = True, derived_context: Optional[Dict[str, Any]] = None) -> None:
+        """Helper to emit standardized component_processed acknowledgment."""
+        if not self.owner:
+            return
+        parent_space = self.owner.get_parent_object()
+        if not parent_space or not hasattr(parent_space, 'receive_event'):
+            return
+        
+        ack_event = {
+            "event_type": "component_processed",
+            "is_replayable": False,
+            "payload": {
+                "original_event_id": original_event_id,
+                "element_id": self.owner.id,
+                "component_id": self.id,
+                "component_type": self.COMPONENT_TYPE,
+                "handled": handled,
+                "derived_context": derived_context or {},
+                "timestamp": time.time()
+            }
+        }
+        timeline_context = {"timeline_id": parent_space.get_primary_timeline()}
+        parent_space.receive_event(ack_event, timeline_context)
     
 class VeilProducer(Component):
     """
@@ -299,11 +332,22 @@ class VeilProducer(Component):
     """
     COMPONENT_TYPE = "VeilProducer"
     
+    def _on_element_ready(self) -> None:
+        """
+        VeilProducer implementation - emit initial VEIL state when element is ready.
+        
+        This replaces the deferred emission system with the Godot-inspired ready cascade.
+        Parent lookup is now guaranteed to work since ready cascade ensures parent chain is ready.
+        """
+        logger.debug(f"[{self.owner.id if self.owner else 'Unknown'}] VeilProducer element ready, emitting initial VEIL")
+        self.emit_delta()
+    
     def emit_delta(self) -> None:
         """
         Emits the calculated delta to the owning element's timeline.
         """
         delta_operations = self.calculate_delta()
+        
         if delta_operations:
             self.owner.receive_delta(delta_operations)
 

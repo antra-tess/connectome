@@ -13,6 +13,7 @@ import json
 import re
 from typing import Dict, Any, Optional, List, Union
 from dataclasses import dataclass
+import time
 
 from elements.component_registry import register_component
 from .base_agent_loop_component import BaseAgentLoopComponent
@@ -78,6 +79,16 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
         if not compression_engine:
             logger.warning(f"{self.agent_loop_name} ({self.id}): CompressionEngine not available. Proceeding without memory.")
 
+        # Streaming lifecycle: mark start
+        try:
+            await self._emit_stream_lifecycle_event("agent_response_started", {
+                "response_id": f"resp_{int(time.time()*1000)}",
+                "loop_component_id": self.id,
+                "timestamp": time.time()
+            })
+        except Exception:
+            pass
+
         try:
             # 1. Aggregate tools and build element name mapping
             aggregated_tools = await self.aggregate_tools()
@@ -94,10 +105,32 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
                 'render_style': 'chronological_flat',
                 'tool_rendering_mode': 'full'  # Use full mode for text parsing
             }
-            context_data = await hud.get_agent_context_via_compression_engine(
-                options=pipeline_options,
-                tools=enhanced_tools_from_veil
-            )
+            context_data = None
+            # Prefer HUD snapshot if focus provided
+            try:
+                focus_element_id = (focus_context or {}).get('focus_element_id') if isinstance(focus_context, dict) else None
+                if focus_element_id and hasattr(hud, 'get_snapshot'):
+                    snap = hud.get_snapshot(focus_element_id, max_age_ms=5000, generate_if_missing=False)
+                    if not snap and hasattr(hud, 'refresh_snapshot'):
+                        try:
+                            await hud.refresh_snapshot(focus_element_id)
+                            snap = hud.get_snapshot(focus_element_id, max_age_ms=5000, generate_if_missing=False)
+                        except Exception:
+                            pass
+                    # Unwrap snapshot wrapper to messages if present
+                    if isinstance(snap, dict) and 'messages' in snap:
+                        context_data = snap.get('messages')
+                    elif snap is not None:
+                        context_data = snap
+            except Exception:
+                pass
+
+            # Fallback to live rendering if no snapshot available
+            if context_data is None:
+                context_data = await hud.get_agent_context_via_compression_engine(
+                    options=pipeline_options,
+                    tools=enhanced_tools_from_veil
+                )
             logger.info(f"Using full tool rendering mode for ultra-concise XML text parsing")
 
             if not context_data:
@@ -130,7 +163,11 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
             # 3. Send rendered context to LLM (no separate tool definitions - they're in the context)
             # NOTE: We don't pass tools parameter to LLM since they're already rendered in the context
             # Metadata now travels with LLMMessage objects, no need for original_context_data
+            if self._is_cancelled():
+                raise Exception("Agent loop preempted before LLM call")
             llm_response_obj = llm_provider.complete(messages=messages, tools=[])
+            if self._is_cancelled():
+                raise Exception("Agent loop preempted after LLM call")
 
             if not llm_response_obj:
                 logger.warning(f"{self.agent_loop_name} ({self.id}): LLM returned no response. Aborting cycle.")
@@ -138,6 +175,18 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
 
             agent_response_text = llm_response_obj.content or ""
             logger.info(f"LLM response: {len(agent_response_text)} chars")
+
+            # Emit finalization lifecycle event
+            try:
+                await self._emit_stream_lifecycle_event("agent_response_finalized", {
+                    "response_id": f"resp_{int(time.time()*1000)}",
+                    "final_text": agent_response_text,
+                    "total_chars": len(agent_response_text),
+                    "loop_component_id": self.id,
+                    "timestamp": time.time()
+                })
+            except Exception:
+                pass
 
             # 4. Parse tool calls from text response
             parsed_tool_calls = self._parse_tool_calls_from_response(agent_response_text)
@@ -171,6 +220,20 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
             if non_tool_text.strip() and focus_context:
                 await self._send_conversational_response(non_tool_text, focus_context)
         except Exception as e:
+            # Emit interruption lifecycle if cancellation was requested
+            if self._is_cancelled():
+                try:
+                    await self._emit_stream_lifecycle_event("agent_response_interrupted", {
+                        "response_id": f"resp_{int(time.time()*1000)}",
+                        "final_text": "",
+                        "total_chars": 0,
+                        "interrupted_by_event_id": None,
+                        "loop_component_id": self.id,
+                        "timestamp": time.time()
+                    })
+                except Exception:
+                    pass
+                self._reset_cancel()
             logger.error(f"{self.agent_loop_name} ({self.id}): Error during text-parsing cycle: {e}", exc_info=True)
         finally:
             logger.info(f"{self.agent_loop_name} ({self.id}): Text-parsing cycle completed.")
@@ -298,59 +361,52 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
         try:
             parsed_calls = []
 
-            # Find <tool_calls> blocks
-            tool_calls_pattern = r'<tool_calls>(.*?)</tool_calls>'
-            tool_calls_matches = re.findall(tool_calls_pattern, response_text, re.DOTALL)
+            element_pattern = r'<([a-zA-Z_][a-zA-Z0-9_]*)\s*([^>]*)>(.*?)</\1>'
+            element_matches = re.findall(element_pattern, response_text, re.DOTALL)
 
-            for tool_calls_block in tool_calls_matches:
-                # Find all XML elements with their attributes AND content
-                # This pattern captures: tag name, attributes string, and inner content
-                element_pattern = r'<([a-zA-Z_][a-zA-Z0-9_]*)\s*([^>]*)>(.*?)</\1>'
-                element_matches = re.findall(element_pattern, tool_calls_block, re.DOTALL)
+            for tool_name, attributes_str, inner_content in element_matches:
+                try:
+                    # Parse attributes from the attributes string
+                    parameters = {}
 
-                for tool_name, attributes_str, inner_content in element_matches:
-                    try:
-                        # Parse attributes from the attributes string
-                        parameters = {}
+                    # Add the inner content to the parameters (if not empty)
+                    inner_content = inner_content.strip()
+                    if inner_content:
+                        parameters["inner_content"] = inner_content
 
-                        # Add the inner content to the parameters (if not empty)
-                        inner_content = inner_content.strip()
-                        if inner_content:
-                            parameters["inner_content"] = inner_content
+                    # Extract all attribute="value" pairs
+                    attr_pattern = r'(\w+)="([^"]*)"'
+                    attr_matches = re.findall(attr_pattern, attributes_str)
 
-                        # Extract all attribute="value" pairs
-                        attr_pattern = r'(\w+)="([^"]*)"'
-                        attr_matches = re.findall(attr_pattern, attributes_str)
-
-                        for attr_name, attr_value in attr_matches:
-                            # Try to parse as JSON/number, fall back to string
-                            try:
-                                # Try parsing as number first
-                                if attr_value.isdigit():
-                                    parameters[attr_name] = int(attr_value)
-                                elif attr_value.replace('.', '').replace('-', '').isdigit():
-                                    parameters[attr_name] = float(attr_value)
-                                # Try parsing as JSON for complex types
-                                elif attr_value.startswith(('[', '{')):
-                                    parameters[attr_name] = json.loads(attr_value)
-                                else:
-                                    parameters[attr_name] = attr_value
-                            except:
+                    for attr_name, attr_value in attr_matches:
+                        # Try to parse as JSON/number, fall back to string
+                        try:
+                            # Try parsing as number first
+                            if attr_value.isdigit():
+                                parameters[attr_name] = int(attr_value)
+                            elif attr_value.replace('.', '').replace('-', '').isdigit():
+                                parameters[attr_name] = float(attr_value)
+                            # Try parsing as JSON for complex types
+                            elif attr_value.startswith(('[', '{')):
+                                parameters[attr_name] = json.loads(attr_value)
+                            else:
                                 parameters[attr_name] = attr_value
+                        except:
+                            parameters[attr_name] = attr_value
 
-                        if tool_name:
-                            parsed_call = ParsedToolCall(
-                                tool_name=tool_name,
-                                parameters=parameters,
-                                target_element_name=parameters.get("source"),
-                                raw_text=f'<{tool_name} {attributes_str}>'
-                            )
-                            parsed_calls.append(parsed_call)
-                            logger.info(f"Parsed ultra-concise XML tool call: {tool_name} with params: {list(parameters.keys())}")
+                    if tool_name:
+                        parsed_call = ParsedToolCall(
+                            tool_name=tool_name,
+                            parameters=parameters,
+                            target_element_name=parameters.get("source"),
+                            raw_text=f'<{tool_name} {attributes_str}>'
+                        )
+                        parsed_calls.append(parsed_call)
+                        logger.info(f"Parsed ultra-concise XML tool call: {tool_name} with params: {list(parameters.keys())}")
 
-                    except Exception as e:
-                        logger.warning(f"Failed to parse ultra-concise XML tool call '{tool_name}': {e}")
-                        continue
+                except Exception as e:
+                    logger.warning(f"Failed to parse ultra-concise XML tool call '{tool_name}': {e}")
+                    continue
 
             return parsed_calls
 
@@ -464,11 +520,10 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
         try:
             cleaned_text = response_text
 
-            # Remove <tool_calls> XML blocks (ultra-concise format)
-            cleaned_text = re.sub(r'<tool_calls>.*?</tool_calls>', '', cleaned_text, flags=re.DOTALL)
-
-            # Remove old-style <tool_call> XML blocks (backward compatibility)
-            cleaned_text = re.sub(r'<tool_call\s+[^>]*>.*?</tool_call>', '', cleaned_text, flags=re.DOTALL)
+            # Remove individual tool XML elements using the same pattern as parsing
+            # This matches the same format as _parse_xml_tool_calls: <tool_name attributes>content</tool_name>
+            element_pattern = r'<([a-zA-Z_][a-zA-Z0-9_]*)\s*([^>]*)>(.*?)</\1>'
+            cleaned_text = re.sub(element_pattern, '', cleaned_text, flags=re.DOTALL)
 
             # Clean up extra whitespace
             cleaned_text = re.sub(r'\n\s*\n', '\n\n', cleaned_text)

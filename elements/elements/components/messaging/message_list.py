@@ -31,7 +31,7 @@ class MessageListComponent(Component):
     HANDLED_EVENT_TYPES = [
         "message_received",                   # Unified handler for DMs/Channel messages
         "historical_message_received",        # NEW: For conversation history without activation
-        "bulk_history_received",             # NEW: For bulk history processing from ChatManagerComponent
+        "bulk_history_received",              # NEW: For bulk history processing from ChatManagerComponent
         "agent_message_confirmed",            # NEW: For confirmed agent outgoing messages (replay)
         "connectome_message_deleted",         # Use Connectome-defined types for delete/edit
         "connectome_message_updated",         # Use Connectome-defined types for delete/edit
@@ -39,7 +39,7 @@ class MessageListComponent(Component):
         "connectome_reaction_removed",        # For handling removed reactions
         "attachment_content_available",       # NEW: For when fetched attachment content arrives
         "connectome_action_success",          # NEW: Generic action success (replaces specific events)
-        "connectome_action_failure",           # NEW: Generic action failure (replaces specific events)
+        "connectome_action_failure",          # NEW: Generic action failure (replaces specific events)
     ]
 
     def initialize(self, max_messages: Optional[int] = None, **kwargs) -> None:
@@ -66,9 +66,13 @@ class MessageListComponent(Component):
         event_payload = event_node.get('payload', {})  # This is what Space provides
         event_type = event_payload.get('event_type')    # Space puts event_type inside payload
 
+        # Checking, if incoming event is for the correct conversation
+        if event_payload.get("external_conversation_id", None) != self.owner.external_conversation_id:
+            return False
+
         # Check if this is a replay event to avoid activation during startup
         is_replay_mode = timeline_context.get('replay_mode', False)
-
+        
         if event_type in self.HANDLED_EVENT_TYPES:
             logger.debug(f"[{self.owner.id}] MessageListComponent handling event: {event_type} (replay: {is_replay_mode})")
 
@@ -105,16 +109,40 @@ class MessageListComponent(Component):
                 return False # Event type not handled by this component
 
             # Emit VEIL delta after handling the event (only during normal operation, not replay)
-            if event_type == "message_received":
-                self._activation_check(event_type, actual_content_payload, event_node, timeline_context, is_replay_mode)
             veil_producer = self.get_sibling_component("MessageListVeilProducer")
+            activation_reason = self._get_activation_reason(event_type, actual_content_payload)
+
             if veil_producer:
                 veil_producer.emit_delta()
+                # Post-refactor: Activation is handled by Decider; do not emit here
+
+            # Emit component_processed ack for decider post-processing
+            try:
+                original_event_id = event_node.get('id')
+                
+                parent_space = self.owner.get_parent_object() if hasattr(self.owner, 'get_parent_object') else None
+                if parent_space and hasattr(parent_space, 'receive_event'):
+                    ack_event = {
+                        "event_type": "component_processed",
+                        "is_replayable": False,
+                        "payload": {
+                            "original_event_id": original_event_id,
+                            "element_id": self.owner.id,
+                            "component_id": self.id,
+                            "handled": True,
+                            "timestamp": time.time()
+                        }
+                    }
+                    timeline_context_for_ack = {"timeline_id": parent_space.get_primary_timeline() if hasattr(parent_space, 'get_primary_timeline') else None}
+                    parent_space.receive_event(ack_event, timeline_context_for_ack)
+            except Exception as e:
+                logger.error(f"[{self.owner.id}] Failed to emit component_processed ack: {e}", exc_info=True)
+
             return True
 
         return False # Event type not in HANDLED_EVENT_TYPES
 
-    def _activation_check(self, event_type: str, content_payload: Dict[str, Any], event_node: Dict[str, Any], timeline_context: Dict[str, Any], is_replay_mode: bool) -> None:
+    def _get_activation_reason(self, event_type: str, content_payload: Dict[str, Any]) -> str:
         """
         Decides if agent activation is needed after processing an event.
         If needed, emits an "activation_call" event to the timeline.
@@ -122,29 +150,27 @@ class MessageListComponent(Component):
         Args:
             event_type: The type of event that was processed
             content_payload: The content payload that was processed
-            event_node: The original event node from timeline
-            timeline_context: The timeline context for the event
+
+        Returns:
+            The reason for activation, or None if no activation is needed
         """
-        activation_needed = False
         activation_reason = None
 
         if event_type == "message_received":
             # Check for direct messages first
             is_dm = content_payload.get('is_dm', False)
             if is_dm:
-                activation_needed = True
                 activation_reason = "direct_message_received"
                 logger.debug(f"[{self.owner.id}] Activation check: DM received, triggering agent activation")
 
             # NEW: Check for mentions if not already activated by DM
-            if not activation_needed:
+            if not activation_reason:
                 mentions = content_payload.get('mentions', [])
                 if mentions:
                     # Check if any mention is for our agent
                     parent_space = self.owner.get_parent_object() if hasattr(self.owner, 'get_parent_object') else None
                     if parent_space and hasattr(parent_space, 'is_mention_for_agent'):
                         if parent_space.is_mention_for_agent(mentions):
-                            activation_needed = True
                             activation_reason = "agent_mentioned"
                             logger.debug(f"[{self.owner.id}] Activation check: Agent mentioned in {mentions}, triggering agent activation")
                         else:
@@ -152,18 +178,13 @@ class MessageListComponent(Component):
                     else:
                         logger.debug(f"[{self.owner.id}] Mentions detected {mentions} but cannot check if for our agent (no parent space or method)")
 
-        # Future expansion: could check other conditions like specific keywords, etc.
-        # elif event_type == "message_received":
-        #     # Check for keywords, urgent flags, etc.
-        if activation_needed:
-            self._signal_focus_change_to_veil_producer()
-            if not is_replay_mode:
-                self._emit_activation_call(activation_reason, event_type, content_payload)
+        return activation_reason
 
+    # Post-refactor: Activation emission removed; Decider handles activation
     def _emit_activation_call(self, reason: str, triggering_event_type: str, triggering_payload: Dict[str, Any]) -> None:
         """
         Enhanced to signal focus change to VeilProducer for historical focus tracking.
-        
+
         Emits an "activation_call" event to the parent space's timeline.
         This is a non-replayable event that signals AgentLoop to consider running a cycle.
 
@@ -207,7 +228,7 @@ class MessageListComponent(Component):
             "activation_reason": reason,
             "triggering_event_type": triggering_event_type,
             "timestamp": time.time(),
-            "is_replayable": False,  # Explicit flag: activation calls are runtime-only
+            "is_replayable": True,
             "focus_context": focus_context,  # NEW: Context for focused rendering
             "payload": {
                 "reason": reason,
@@ -222,52 +243,8 @@ class MessageListComponent(Component):
             }
         }
 
-        # Use basic timeline context (let parent space handle specifics)
-        timeline_context = {"timeline_id": self.owner.get_parent_object().get_primary_timeline()}  # Default timeline
-
-        try:
-            parent_space.receive_event(activation_event, timeline_context)
-            logger.info(f"[{self.owner.id}] Emitted focused activation_call event to parent space. Reason: {reason}, Focus: {self.owner.id}")
-        except Exception as e:
-            logger.error(f"[{self.owner.id}] Error emitting activation_call event: {e}", exc_info=True)
-
-    def _signal_focus_change_to_veil_producer(self) -> None:
-        """
-        NEW: Signal focus change to sibling VeilProducer for StatusFacet creation.
-        
-        This method is enhanced to work during both replay and live operation,
-        allowing historical focus context reconstruction.
-        """
-        if not self.owner:
-            return
-            
-        # Check if we're in replay mode
-        parent_space = self.owner.get_parent_object()
-        is_replay = (parent_space and 
-                    hasattr(parent_space, '_replay_in_progress') and 
-                    parent_space._replay_in_progress)
-        
-        # Get the sibling VeilProducer
-        veil_producer = self.get_sibling_component("MessageListVeilProducer")
-        if not veil_producer:
-            logger.warning(f"[{self.owner.id}] MessageListVeilProducer not found for focus signal")
-            return
-        
-        # Signal focus change with element details
-        focus_details = {
-            "focused_element_id": self.owner.id,
-            "focused_element_type": self.owner.__class__.__name__,
-            "focused_element_name": getattr(self.owner, 'name', 'Unknown'),
-            "conversation_name": getattr(self.owner, 'conversation_name', 'Unknown'),
-            "adapter_type": getattr(self.owner, 'adapter_type', 'Unknown'),
-            "timestamp": time.time(),
-            "replay_mode": is_replay  # Include replay context
-        }
-        
-        # Signal the VeilProducer to create focus StatusFacet
-        veil_producer.signal_focus_changed(focus_details)
-        
-        logger.debug(f"[{self.owner.id}] Signaled focus change to VeilProducer (replay: {is_replay})")
+        # Post-refactor: Do not emit activation events here.
+        return
 
     def _handle_new_message(self, message_content: Dict[str, Any]) -> bool:
         """Adds a new message to the list. message_content is the actual message data (e.g., adapter_data)."""
@@ -390,40 +367,32 @@ class MessageListComponent(Component):
 
         current_status = message_to_update.get('status', 'received')
 
-        if current_status == "pending_delete":
-            # Scenario 2: This is confirmation of our agent's pending deletion
-            pending_agent_id = message_to_update.get('pending_delete_by_agent_id')
-            logger.info(f"[{self.owner.id}] Confirmed deletion of message '{original_external_id}' that was pending delete by agent '{pending_agent_id}'")
+        # if current_status == "pending_delete":
+        #     # Scenario 2: This is confirmation of our agent's pending deletion
+        #     pending_agent_id = message_to_update.get('pending_delete_by_agent_id')
+        #     logger.info(f"[{self.owner.id}] Confirmed deletion of message '{original_external_id}' that was pending delete by agent '{pending_agent_id}'")
 
-            # Update to confirmed deleted state (keep as tombstone for context)
-            message_to_update['text'] = "[🗑️ Message deleted]"
-            message_to_update['status'] = "deleted"
-            message_to_update['deleted_timestamp'] = delete_content.get('timestamp', time.time())
-            message_to_update['confirmed_deleted'] = True
+        #     # Update to confirmed deleted state (keep as tombstone for context)
+        #     message_to_update['text'] = "[🗑️ Message deleted]"
+        #     message_to_update['status'] = "deleted"
+        #     message_to_update['deleted_timestamp'] = delete_content.get('timestamp', time.time())
+        #     message_to_update['confirmed_deleted'] = True
 
-            # Clean up pending state
-            message_to_update.pop('original_text_before_pending_delete', None)
-            message_to_update.pop('pending_delete_by_agent_id', None)
-            message_to_update.pop('pending_delete_timestamp', None)
+        #     # Clean up pending state
+        #     message_to_update.pop('original_text_before_pending_delete', None)
+        #     message_to_update.pop('pending_delete_by_agent_id', None)
+        #     message_to_update.pop('pending_delete_timestamp', None)
 
-        else:
+        # else:
             # Scenario 1: External deletion (another user deleted the message)
-            logger.info(f"[{self.owner.id}] External deletion of message '{original_external_id}' (was status: {current_status})")
+        logger.debug(f"[{self.owner.id}] External deletion of message '{original_external_id}' (was status: {current_status})")
 
-            # Keep message as tombstone but mark as externally deleted
-            message_to_update['text'] = "[🗑️ Message was deleted]"
-            message_to_update['status'] = "deleted"
-            message_to_update['deleted_timestamp'] = delete_content.get('timestamp', time.time())
-            message_to_update['externally_deleted'] = True
-
-            # Store original text for potential debugging/recovery
-            if 'original_text_before_delete' not in message_to_update:
-                original_text = message_to_update.get('original_text_before_pending_delete') or message_to_update.get('text')
-                message_to_update['original_text_before_delete'] = original_text
+        self._state['_message_map'].pop(message_to_update['internal_id'])
+        self._state['_messages'].pop(message_index)
 
         # IMPORTANT: Keep message in list as tombstone for conversation context
         # Agents need to see that messages existed but were deleted
-        logger.info(f"[{self.owner.id}] Message '{original_external_id}' marked as deleted (tombstone preserved)")
+        logger.info(f"[{self.owner.id}] Message '{original_external_id}' removed from list")
         return True
 
     def _handle_edit_message(self, edit_content: Dict[str, Any]) -> bool:
@@ -940,7 +909,14 @@ class MessageListComponent(Component):
             'internal_request_id': internal_request_id, # For matching confirmation
             'error_details': None,
             'is_from_current_agent': is_from_current_agent,  # FIXED: Store agent flag for deduplication
-            'is_internal_origin': is_internal_origin  # NEW: Track if message originated from internal tool calls
+            'is_internal_origin': is_internal_origin,  # NEW: Track if message originated from internal tool calls
+            # NEW: Initialize retry tracking fields
+            'retry_count': 0,
+            'original_attempt_id': None,
+            'retry_reason': None,
+            'last_retry_timestamp': None,
+            'is_retry_attempt': False,
+            'pending_cleanup_after_retry': None
         }
         self._state['_messages'].append(new_message)
         self._state['_message_map'][internal_message_id] = len(self._state['_messages']) - 1
@@ -962,6 +938,7 @@ class MessageListComponent(Component):
         """
         Updates a pending message to 'sent' status upon confirmation from adapter.
         Now handles generic action success payload structure.
+        NEW: Also checks for cleanup triggers from retry operations.
         """
 
         internal_req_id = confirm_content.get('internal_request_id')
@@ -995,6 +972,14 @@ class MessageListComponent(Component):
             # self._state['_messages'][idx_to_update] = message_to_update # Not strictly needed if dict is mutated in place
 
             logger.info(f"[{self.owner.id}] Pending message (req_id: {internal_req_id}) confirmed as sent. External ID: {external_ids[0]}.")
+
+            # NEW: Check if this confirmation should trigger cleanup of original failed message
+            cleanup_candidate = self._find_message_pending_cleanup_for_retry(internal_req_id)
+            if cleanup_candidate:
+                # Schedule cleanup asynchronously
+                import asyncio
+                asyncio.create_task(self._cleanup_original_after_retry_success(cleanup_candidate, internal_req_id))
+                logger.info(f"[{self.owner.id}] Scheduled cleanup of original message {cleanup_candidate} after retry {internal_req_id} confirmed")
 
             # NEW: Emit replayable timeline event for agent outgoing message
             self._emit_agent_message_confirmed_event(message_to_update, confirm_content)
@@ -1038,9 +1023,7 @@ class MessageListComponent(Component):
 
             logger.error(f"[{self.owner.id}] Agent message failed to send (req_id: {internal_req_id}). Error: {error_msg}")
 
-            # NEW: Trigger agent activation for message send failure
-            # This allows the agent to respond to the failure, potentially retry, or take alternative action
-            self._emit_send_failure_activation_call(message_to_update, failure_content)
+            # Post-refactor: Decider handles activation decisions for send failures
 
             return True
         else:
@@ -1228,6 +1211,7 @@ class MessageListComponent(Component):
 
         return True
 
+    # Post-refactor: Activation emission removed; Decider handles send-failure activation
     def _emit_send_failure_activation_call(self, failed_message: MessageType, failure_content: Dict[str, Any]) -> None:
         """
         Emits an "activation_call" event when an agent's message fails to send.
@@ -1306,82 +1290,78 @@ class MessageListComponent(Component):
         # Use basic timeline context (let parent space handle specifics)
         timeline_context = {"timeline_id": parent_space.get_primary_timeline() if hasattr(parent_space, 'get_primary_timeline') else None}
 
-        try:
-            parent_space.receive_event(activation_event, timeline_context)
-            logger.warning(f"[{self.owner.id}] Emitted activation_call for message send failure. Reason: message_send_failed, Error: {failure_content.get('error_message', 'Unknown')}")
-        except Exception as e:
-            logger.error(f"[{self.owner.id}] Error emitting send failure activation: {e}", exc_info=True)
+        return
 
-    # --- NEW: Methods for immediate local state updates (called by tools before external confirmation) ---
-    def mark_message_pending_delete(self, external_message_id: str, requesting_agent_id: str) -> bool:
-        """
-        Immediately marks a message as pending deletion in local state.
-        Called by delete_message tool before external confirmation.
+    # # --- NEW: Methods for immediate local state updates (called by tools before external confirmation) ---
+    # def mark_message_pending_delete(self, external_message_id: str, requesting_agent_id: str) -> bool:
+    #     """
+    #     Immediately marks a message as pending deletion in local state.
+    #     Called by delete_message tool before external confirmation.
 
-        Args:
-            external_message_id: External ID of message to mark as pending delete
-            requesting_agent_id: ID of agent requesting the deletion
+    #     Args:
+    #         external_message_id: External ID of message to mark as pending delete
+    #         requesting_agent_id: ID of agent requesting the deletion
 
-        Returns:
-            True if message found and marked, False otherwise
-        """
-        message_to_update = None
-        for msg in self._state['_messages']:
-            if msg.get('original_external_id') == external_message_id:
-                message_to_update = msg
-                break
+    #     Returns:
+    #         True if message found and marked, False otherwise
+    #     """
+    #     message_to_update = None
+    #     for msg in self._state['_messages']:
+    #         if msg.get('original_external_id') == external_message_id:
+    #             message_to_update = msg
+    #             break
 
-        if message_to_update:
-            # Store original text for potential restore if deletion fails
-            if 'original_text_before_pending_delete' not in message_to_update:
-                message_to_update['original_text_before_pending_delete'] = message_to_update.get('text')
+    #     if message_to_update:
+    #         # Store original text for potential restore if deletion fails
+    #         if 'original_text_before_pending_delete' not in message_to_update:
+    #             message_to_update['original_text_before_pending_delete'] = message_to_update.get('text')
 
-            message_to_update['text'] = "[🗑️ Deleting message...]"
-            message_to_update['status'] = "pending_delete"
-            message_to_update['pending_delete_by_agent_id'] = requesting_agent_id
-            message_to_update['pending_delete_timestamp'] = time.time()
+    #         message_to_update['text'] = "[🗑️ Deleting message...]"
+    #         message_to_update['status'] = "pending_delete"
+    #         message_to_update['pending_delete_by_agent_id'] = requesting_agent_id
+    #         message_to_update['pending_delete_timestamp'] = time.time()
 
-            logger.info(f"[{self.owner.id}] Marked message '{external_message_id}' as pending deletion by agent '{requesting_agent_id}'")
-            return True
-        else:
-            logger.warning(f"[{self.owner.id}] Cannot mark message '{external_message_id}' as pending delete: Message not found")
-            return False
+    #         logger.info(f"[{self.owner.id}] Marked message '{external_message_id}' as pending deletion by agent '{requesting_agent_id}'")
+    #         return True
+    #     else:
+    #         logger.warning(f"[{self.owner.id}] Cannot mark message '{external_message_id}' as pending delete: Message not found")
+    #         return False
 
-    def mark_message_pending_edit(self, external_message_id: str, new_text: str, requesting_agent_id: str) -> bool:
-        """
-        Immediately shows edited text with pending status in local state.
-        Called by edit_message tool before external confirmation.
+    # def mark_message_pending_edit(self, external_message_id: str, new_text: str, requesting_agent_id: str) -> bool:
+    #     """
+    #     Immediately shows edited text with pending status in local state.
+    #     Called by edit_message tool before external confirmation.
 
-        Args:
-            external_message_id: External ID of message to edit
-            new_text: New text content to show
-            requesting_agent_id: ID of agent requesting the edit
+    #     Args:
+    #         external_message_id: External ID of message to edit
+    #         new_text: New text content to show
+    #         requesting_agent_id: ID of agent requesting the edit
 
-        Returns:
-            True if message found and updated, False otherwise
-        """
-        message_to_update = None
-        for msg in self._state['_messages']:
-            if msg.get('original_external_id') == external_message_id:
-                message_to_update = msg
-                break
+    #     Returns:
+    #         True if message found and updated, False otherwise
+    #     """
+    #     message_to_update = None
+    #     for msg in self._state['_messages']:
+    #         if msg.get('original_external_id') == external_message_id:
+    #             message_to_update = msg
+    #             break
 
-        if message_to_update:
-            # Store original text for potential restore if edit fails
-            if 'original_text_before_pending_edit' not in message_to_update:
-                message_to_update['original_text_before_pending_edit'] = message_to_update.get('text')
+    #     if message_to_update:
+    #         # Store original text for potential restore if edit fails
+    #         if 'original_text_before_pending_edit' not in message_to_update:
+    #             message_to_update['original_text_before_pending_edit'] = message_to_update.get('text')
 
-            message_to_update['text'] = f"{new_text} ✏️"  # Show new text with edit indicator
-            message_to_update['status'] = "pending_edit"
-            message_to_update['pending_edit_by_agent_id'] = requesting_agent_id
-            message_to_update['pending_edit_timestamp'] = time.time()
-            message_to_update['pending_new_text'] = new_text  # Store clean version
+    #         message_to_update['text'] = f"{new_text} ✏️"  # Show new text with edit indicator
+    #         message_to_update['status'] = "pending_edit"
+    #         message_to_update['pending_edit_by_agent_id'] = requesting_agent_id
+    #         message_to_update['pending_edit_timestamp'] = time.time()
+    #         message_to_update['pending_new_text'] = new_text  # Store clean version
 
-            logger.info(f"[{self.owner.id}] Marked message '{external_message_id}' as pending edit by agent '{requesting_agent_id}'")
-            return True
-        else:
-            logger.warning(f"[{self.owner.id}] Cannot mark message '{external_message_id}' as pending edit: Message not found")
-            return False
+    #         logger.info(f"[{self.owner.id}] Marked message '{external_message_id}' as pending edit by agent '{requesting_agent_id}'")
+    #         return True
+    #     else:
+    #         logger.warning(f"[{self.owner.id}] Cannot mark message '{external_message_id}' as pending edit: Message not found")
+    #         return False
 
     def add_pending_reaction(self, external_message_id: str, emoji: str, requesting_agent_id: str) -> bool:
         """
@@ -1672,6 +1652,8 @@ class MessageListComponent(Component):
             logger.info(f"  - Added: {reconciliation_results['added_count']} new messages")
             logger.info(f"  - Edited: {reconciliation_results['edited_count']} messages")
             logger.info(f"  - Deleted: {reconciliation_results['deleted_count']} messages")
+            logger.info(f"  - Retried stuck messages: {reconciliation_results['retried_count']}")
+            logger.info(f"  - Permanently failed: {reconciliation_results['permanent_failures']}")
             logger.info(f"  - Gap markers added: {reconciliation_results['gap_messages_added']}")
             logger.info(f"  - Gap markers removed: {reconciliation_results['gap_messages_removed']}")
             logger.info(f"  - Total messages now: {len(self._state.get('_messages', []))}")
@@ -1920,6 +1902,8 @@ class MessageListComponent(Component):
             'added_count': 0,
             'edited_count': 0,
             'deleted_count': 0,
+            'retried_count': 0,  # NEW: Count of stuck messages retried
+            'permanent_failures': 0,  # NEW: Count of messages marked as permanently failed
             'gap_messages_added': 0,
             'gap_messages_removed': 0,
             'errors': []
@@ -2018,35 +2002,62 @@ class MessageListComponent(Component):
 
                 results['processed_count'] += 1
 
-            # Step 2d: Find messages to delete (in MessageList but not in history, within overlap range)
+            # Step 2d: Handle stuck pending operations and deletions
+            # NEW: First, handle stuck pending operations before applying deletions
+            # Use fire-and-forget async task to avoid blocking reconciliation
+            import asyncio
+            asyncio.create_task(self._handle_stuck_pending_operations_during_reconciliation_async(
+                list(self._state['_messages']),  # Pass copy to avoid concurrent modification
+                dict(history_messages_by_external_id),  # Pass copy
+                results  # Pass results dict to update asynchronously
+            ))
+            
+            # For now, assume no immediate retries for synchronous flow
+            # The async task will handle actual retries and update statistics
+            logger.info(f"[{self.owner.id}] Scheduled async stuck message handling during reconciliation")
+            
+            # Then find messages to delete (in MessageList but not in history, within overlap range)
+            # But exclude messages that were just retried or marked as failed
             for msg in list(self._state['_messages']):  # Copy list to allow modification
                 external_id = msg.get('original_external_id')
+                current_status = msg.get('status', 'received')
+                
+                # Skip messages that are currently being retried or just failed
+                if current_status in ['retrying', 'pending_send']:
+                    continue
+                    
                 if not external_id:
-                    if self._apply_history_deletion(msg):
-                        results['deleted_count'] += 1
-                    else:
-                        results['errors'].append(f"Failed to delete message: {external_id}")
+                    # Messages without external IDs that aren't pending should be deleted
+                    if current_status not in ['pending_send', 'retrying']:
+                        if self._apply_history_deletion(msg):
+                            results['deleted_count'] += 1
+                        else:
+                            results['errors'].append(f"Failed to delete message: {msg.get('internal_id')}")
                     continue
 
                 msg_timestamp = msg.get('timestamp')
                 if not msg_timestamp:
                     continue
+                    
                 # Check if this message is within the history range but not in history
                 if (history_range['min'] <= msg_timestamp <= history_range['max'] and
                     external_id not in history_messages_by_external_id):
 
                     # This message should be deleted (exists in MessageList but not in history)
-                    if self._apply_history_deletion(msg):
-                        results['deleted_count'] += 1
-                    else:
-                        results['errors'].append(f"Failed to delete message: {external_id}")
+                    # But only if it's not a pending operation that we just handled
+                    if current_status not in ['retrying', 'failed_to_send']:
+                        if self._apply_history_deletion(msg):
+                            results['deleted_count'] += 1
+                        else:
+                            results['errors'].append(f"Failed to delete message: {external_id}")
 
         # Step 3: Sort messages by timestamp to maintain chronological order
         self._sort_messages_by_timestamp()
 
         logger.info(f"[{self.owner.id}] History reconciliation complete: "
                    f"{results['added_count']} added, {results['edited_count']} edited, "
-                   f"{results['deleted_count']} deleted, {results['gap_messages_added']} gaps added, "
+                   f"{results['deleted_count']} deleted, {results['retried_count']} retried, "
+                   f"{results['permanent_failures']} permanently failed, {results['gap_messages_added']} gaps added, "
                    f"{results['gap_messages_removed']} gaps removed, {len(results['errors'])} errors")
 
         return results
@@ -2181,25 +2192,25 @@ class MessageListComponent(Component):
         """Record operation for VEIL generation."""
         self._state['_pending_veil_operations'].append(operation_data)
         logger.debug(f"[{self.owner.id}] Recorded VEIL operation: {operation_data.get('operation_type')} for {operation_data.get('veil_id')}")
-        
+
     def get_pending_veil_operations(self) -> List[Dict[str, Any]]:
         """Get and clear pending VEIL operations."""
         operations = list(self._state.get('_pending_veil_operations', []))
         self._state['_pending_veil_operations'].clear()
         return operations
-        
+
     def _create_text_preview(self, text: str, max_length: int) -> Dict[str, Any]:
         """Create text preview with truncation info."""
         if not text:
             return {"preview": "", "truncated": False, "original_length": 0}
-            
+
         if len(text) <= max_length:
             return {"preview": text, "truncated": False, "original_length": len(text)}
         else:
             truncated_count = len(text) - max_length
             return {
-                "preview": text[:max_length], 
-                "truncated": True, 
+                "preview": text[:max_length],
+                "truncated": True,
                 "original_length": len(text),
                 "truncated_count": truncated_count
             }
@@ -2207,13 +2218,13 @@ class MessageListComponent(Component):
     def _is_message_from_current_agent(self, message_content: Dict[str, Any]) -> bool:
         """
         Determine if a message was sent by the current agent.
-        
+
         This is crucial for historical message processing to identify agent messages
         that need synthetic agent_response facets for proper turn structure.
-        
+
         Args:
             message_content: Message content from adapter/history
-            
+
         Returns:
             True if message was sent by current agent, False otherwise
         """
@@ -2223,43 +2234,43 @@ class MessageListComponent(Component):
             if not parent_space:
                 logger.debug(f"[{self.owner.id}] No parent space found - cannot determine agent identity")
                 return False
-            
+
             agent_name = getattr(parent_space, 'agent_name', None)
             agent_external_id = getattr(parent_space, 'agent_external_id', None)  # If available
             alias = getattr(self.owner, 'alias', None)
-            
+
             # Get sender information from message
             sender_name = message_content.get('sender_display_name', '')
             sender_id = message_content.get('sender_external_id', '')
-            
+
             # Method 1: Compare sender_id with agent_external_id (most reliable)
             if agent_external_id and sender_id:
                 if sender_id == agent_external_id:
                     logger.debug(f"[{self.owner.id}] Message from current agent (matched external ID: {sender_id})")
                     return True
-            
+
             # Method 2: Compare sender_name with agent_name (fallback)
             if agent_name and sender_name:
                 if sender_name == agent_name:
                     logger.debug(f"[{self.owner.id}] Message from current agent (matched name: {sender_name})")
                     return True
-            
+
             if alias and sender_name:
                 if sender_name == alias:
                     logger.debug(f"[{self.owner.id}] Message from current agent (matched alias: {sender_name})")
                     return True
-            
+
             # Method 3: Check for agent-specific markers in message metadata
             # Some adapters might include additional metadata about message source
             message_source = message_content.get('message_source')
             if message_source == "agent_outgoing":
                 logger.debug(f"[{self.owner.id}] Message from current agent (marked as agent_outgoing)")
                 return True
-            
+
             # Not from current agent
             logger.debug(f"[{self.owner.id}] Message NOT from current agent (sender: {sender_name}, agent: {agent_name})")
             return False
-            
+
         except Exception as e:
             logger.error(f"[{self.owner.id}] Error determining if message is from current agent: {e}", exc_info=True)
             # Safe default: assume not from agent to avoid false positives
@@ -2271,10 +2282,427 @@ class MessageListComponent(Component):
         if self.owner:
             metadata.update({
                 "adapter_type": getattr(self.owner, 'adapter_type', None),
-                "server_name": getattr(self.owner, 'server_name', None), 
+                "server_name": getattr(self.owner, 'server_name', None),
                 "conversation_name": getattr(self.owner, 'conversation_name', None),
                 "adapter_id": getattr(self.owner, 'adapter_id', None),
                 "external_conversation_id": getattr(self.owner, 'external_conversation_id', None),
                 "alias": getattr(self.owner, 'alias', None)
             })
         return metadata
+
+    # --- NEW: Retry Orchestration Methods (add after line 331) ---
+    
+    async def retry_stuck_message(self, internal_id: str, retry_reason: str) -> Dict[str, Any]:
+        """
+        Coordinate message retry with proper cleanup scheduling.
+        
+        This method orchestrates the complete retry flow:
+        1. Update original message to track retry attempt
+        2. Dispatch retry via MessageActionHandler  
+        3. Set up cleanup trigger for when retry confirms
+        4. Emit VEIL operations for status change
+        
+        Args:
+            internal_id: Internal ID of the stuck message to retry
+            retry_reason: Reason for retry ('stuck_pending', 'send_failed', 'history_reconciliation')
+            
+        Returns:
+            Dictionary with retry result information
+        """
+        try:
+            # Find the original message
+            original_message = self.get_message_by_internal_id(internal_id)
+            if not original_message:
+                error_msg = f"Cannot retry: Message with internal_id '{internal_id}' not found"
+                logger.error(f"[{self.owner.id}] {error_msg}")
+                return {"success": False, "error": error_msg}
+            
+            # Check retry eligibility
+            retry_assessment = self._assess_retry_eligibility(original_message)
+            if not retry_assessment['should_retry']:
+                # Mark as permanently failed instead of retrying
+                original_message['status'] = 'failed_to_send'
+                original_message['error_details'] = retry_assessment['failure_reason']
+                logger.info(f"[{self.owner.id}] Message {internal_id} marked as permanently failed: {retry_assessment['failure_reason']}")
+                return {"success": False, "error": retry_assessment['failure_reason'], "permanently_failed": True}
+            
+            # Update retry tracking on original message
+            retry_count = original_message.get('retry_count', 0) + 1
+            original_message.update({
+                'retry_count': retry_count,
+                'retry_reason': retry_reason,
+                'last_retry_timestamp': time.time(),
+                'status': 'retrying'  # Temporary status during retry dispatch
+            })
+            
+            logger.info(f"[{self.owner.id}] Initiating retry {retry_count} for message {internal_id} (reason: {retry_reason})")
+            
+            # Get MessageActionHandler for retry dispatch
+            message_action_handler = self.get_sibling_component("MessageActionHandler")
+            if not message_action_handler:
+                error_msg = "MessageActionHandler not available for retry dispatch"
+                logger.error(f"[{self.owner.id}] {error_msg}")
+                original_message['status'] = 'failed_to_send'
+                original_message['error_details'] = error_msg
+                return {"success": False, "error": error_msg}
+            
+            # Dispatch retry with original message content
+            retry_result = await message_action_handler.msg_tool(
+                inner_content=original_message.get('text', ''),
+                calling_context={
+                    'retry_context': {
+                        'is_retry': True,
+                        'original_message_id': internal_id,
+                        'retry_count': retry_count,
+                        'retry_reason': retry_reason
+                    }
+                }
+            )
+            
+            if retry_result.get('success'):
+                # Set up cleanup trigger - when retry confirms, cleanup original
+                retry_internal_request_id = retry_result.get('internal_request_id')
+                if retry_internal_request_id:
+                    original_message['pending_cleanup_after_retry'] = retry_internal_request_id
+                    logger.info(f"[{self.owner.id}] Retry dispatched successfully. Will cleanup {internal_id} when {retry_internal_request_id} confirms")
+                    return {"success": True, "retry_request_id": retry_internal_request_id, "original_id": internal_id}
+                else:
+                    logger.warning(f"[{self.owner.id}] Retry dispatch succeeded but no internal_request_id returned")
+                    original_message['status'] = 'failed_to_send'
+                    return {"success": False, "error": "Retry dispatch succeeded but tracking failed"}
+            else:
+                # Retry dispatch failed
+                error_msg = retry_result.get('error', 'Unknown retry dispatch error')
+                logger.error(f"[{self.owner.id}] Retry dispatch failed for {internal_id}: {error_msg}")
+                original_message['status'] = 'failed_to_send'
+                original_message['error_details'] = f"Retry failed: {error_msg}"
+                return {"success": False, "error": error_msg}
+                
+        except Exception as e:
+            error_msg = f"Exception during retry orchestration: {e}"
+            logger.exception(f"[{self.owner.id}] {error_msg}")
+            if 'original_message' in locals() and original_message:
+                original_message['status'] = 'failed_to_send'
+                original_message['error_details'] = error_msg
+            return {"success": False, "error": error_msg}
+    
+    async def _cleanup_original_after_retry_success(self, original_id: str, successful_retry_id: str) -> bool:
+        """
+        Remove original failed message after retry confirms successful.
+        Called automatically when retry gets confirmed.
+        
+        Args:
+            original_id: Internal ID of original message to remove
+            successful_retry_id: Internal ID of successful retry message
+            
+        Returns:
+            True if cleanup was successful, False otherwise
+        """
+        try:
+            logger.info(f"[{self.owner.id}] Cleaning up original message {original_id} after retry {successful_retry_id} succeeded")
+            
+            # Find and remove original message
+            original_message = self.get_message_by_internal_id(original_id)
+            if not original_message:
+                logger.warning(f"[{self.owner.id}] Original message {original_id} not found for cleanup")
+                return False
+            
+            # Remove from messages list
+            message_index = None
+            for idx, msg in enumerate(self._state['_messages']):
+                if msg.get('internal_id') == original_id:
+                    message_index = idx
+                    break
+            
+            if message_index is not None:
+                removed_message = self._state['_messages'].pop(message_index)
+                # Remove from message map
+                if original_id in self._state.get('_message_map', {}):
+                    del self._state['_message_map'][original_id]
+                # Rebuild message map (inefficient but ensures consistency)
+                self._rebuild_message_map()
+                
+                logger.info(f"[{self.owner.id}] Successfully cleaned up original message {original_id}")
+                
+                # VEIL operations will be automatically handled by next emit_delta call
+                # The message removal will be detected and a remove_facet operation generated
+                
+                return True
+            else:
+                logger.warning(f"[{self.owner.id}] Original message {original_id} not found in messages list for cleanup")
+                return False
+                
+        except Exception as e:
+            logger.error(f"[{self.owner.id}] Error during original message cleanup: {e}", exc_info=True)
+            return False
+    
+    def _assess_retry_eligibility(self, msg: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Determine if and why a message should be retried.
+        
+        Simplified rules:
+        - pending_send + age < 1 hour + retry_count < 3 → retry
+        - failed_to_send + retry_count < 1 → retry once  
+        - Otherwise → permanent failure
+        
+        Args:
+            msg: Message dictionary to assess
+            
+        Returns:
+            Dictionary with retry decision:
+            - should_retry: bool
+            - reason: str (if should_retry=True)  
+            - failure_reason: str (if should_retry=False)
+        """
+        try:
+            current_time = time.time()
+            msg_timestamp = msg.get('timestamp', current_time)
+            age_hours = (current_time - msg_timestamp) / 3600
+            retry_count = msg.get('retry_count', 0)
+            current_status = msg.get('status', 'received')
+            
+            if current_status == 'pending_send':
+                if age_hours < 1 and retry_count < 3:
+                    return {
+                        "should_retry": True, 
+                        "reason": f"stuck_pending_attempt_{retry_count + 1}"
+                    }
+                elif age_hours >= 1:
+                    return {
+                        "should_retry": False, 
+                        "failure_reason": f"message_too_old_{age_hours:.1f}h"
+                    }
+                else:
+                    return {
+                        "should_retry": False, 
+                        "failure_reason": f"max_retries_exceeded_{retry_count}"
+                    }
+                    
+            elif current_status == 'failed_to_send':
+                if retry_count < 1:
+                    return {
+                        "should_retry": True, 
+                        "reason": "single_retry_after_failure"
+                    }
+                else:
+                    return {
+                        "should_retry": False, 
+                        "failure_reason": f"already_retried_{retry_count}_times"
+                    }
+                    
+            else:
+                return {
+                    "should_retry": False, 
+                    "failure_reason": f"invalid_status_{current_status}"
+                }
+                
+        except Exception as e:
+            logger.error(f"[{self.owner.id}] Error assessing retry eligibility: {e}", exc_info=True)
+            return {
+                "should_retry": False, 
+                "failure_reason": f"assessment_error_{e}"
+            }
+
+    # --- Modified Confirmation Handlers (update existing methods) ---
+
+    def _find_message_pending_cleanup_for_retry(self, retry_internal_request_id: str) -> Optional[str]:
+        """
+        Find a message that's waiting for cleanup after this retry confirms.
+        
+        Args:
+            retry_internal_request_id: Internal request ID of the retry that just confirmed
+            
+        Returns:
+            Internal ID of message that should be cleaned up, or None if not found
+        """
+        try:
+            for msg in self._state['_messages']:
+                if msg.get('pending_cleanup_after_retry') == retry_internal_request_id:
+                    return msg.get('internal_id')
+            return None
+        except Exception as e:
+            logger.error(f"[{self.owner.id}] Error finding message pending cleanup: {e}", exc_info=True)
+            return None
+
+    # --- Integration with History Reconciliation (add after _reconcile_history_with_existing_messages method) ---
+    
+    async def _handle_stuck_pending_operations_during_reconciliation_async(self, 
+                                                                           existing_messages_copy: List[Dict[str, Any]], 
+                                                                           history_messages_by_external_id_copy: Dict[str, Any],
+                                                                           results_dict: Dict[str, Any]) -> None:
+        """
+        Async wrapper for stuck message handling that can be fire-and-forget during reconciliation.
+        
+        Args:
+            existing_messages_copy: Copy of existing messages at reconciliation time
+            history_messages_by_external_id_copy: Copy of history messages map
+            results_dict: Results dictionary to update with retry statistics
+        """
+        try:
+            # Call the main stuck operations handler
+            stuck_results = await self._handle_stuck_pending_operations_during_reconciliation(
+                existing_messages_copy, 
+                history_messages_by_external_id_copy
+            )
+            
+            # Update the results dictionary (passed by reference)
+            results_dict['retried_count'] = stuck_results['retried_count']
+            results_dict['permanent_failures'] = stuck_results['permanent_failures']
+            results_dict['errors'].extend(stuck_results['errors'])
+            
+            if stuck_results['retried_count'] > 0 or stuck_results['permanent_failures'] > 0:
+                logger.info(f"[{self.owner.id}] Async stuck message reconciliation complete: "
+                           f"{stuck_results['retried_count']} retried, {stuck_results['permanent_failures']} permanently failed")
+                           
+        except Exception as e:
+            logger.error(f"[{self.owner.id}] Error in async stuck message handling: {e}", exc_info=True)
+            results_dict['errors'].append(f"Async stuck message handling error: {e}")
+    
+    async def _handle_stuck_pending_operations_during_reconciliation(self, 
+                                                                    existing_messages: List[Dict[str, Any]], 
+                                                                    history_messages_by_external_id: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Handle stuck pending operations discovered during history reconciliation.
+        
+        This method is called during bulk history reconciliation to detect and retry
+        messages that exist locally but not in the adapter's history.
+        
+        Args:
+            existing_messages: List of current local messages
+            history_messages_by_external_id: Map of external_id -> history_message for quick lookup
+            
+        Returns:
+            Dictionary with reconciliation results for stuck operations
+        """
+        try:
+            results = {
+                'retried_count': 0,
+                'permanent_failures': 0,
+                'errors': []
+            }
+            
+            logger.info(f"[{self.owner.id}] Checking for stuck pending operations during history reconciliation")
+            
+            # Find messages that are in local state but not in history
+            for msg in existing_messages:
+                external_id = msg.get('original_external_id')
+                current_status = msg.get('status', 'received')
+                
+                # Skip messages that don't have external IDs (they haven't been sent yet)
+                if not external_id:
+                    continue
+                    
+                # Skip messages that are in history (they were successfully sent)
+                if external_id in history_messages_by_external_id:
+                    continue
+                    
+                # This message exists locally but not in history - it might be stuck
+                if current_status in ['pending_send', 'failed_to_send', 'retrying']:
+                    logger.info(f"[{self.owner.id}] Found stuck message {msg.get('internal_id')} with status '{current_status}' (external_id: {external_id})")
+                    
+                    # Attempt retry via our retry orchestration system
+                    retry_result = await self.retry_stuck_message(
+                        msg.get('internal_id'), 
+                        'history_reconciliation'
+                    )
+                    
+                    if retry_result.get('success'):
+                        results['retried_count'] += 1
+                        logger.info(f"[{self.owner.id}] Successfully initiated retry for stuck message {msg.get('internal_id')}")
+                    elif retry_result.get('permanently_failed'):
+                        results['permanent_failures'] += 1
+                        logger.info(f"[{self.owner.id}] Marked stuck message {msg.get('internal_id')} as permanently failed: {retry_result.get('error')}")
+                    else:
+                        results['errors'].append(f"Failed to retry message {msg.get('internal_id')}: {retry_result.get('error')}")
+                        logger.error(f"[{self.owner.id}] Failed to retry stuck message {msg.get('internal_id')}: {retry_result.get('error')}")
+            
+            if results['retried_count'] > 0 or results['permanent_failures'] > 0:
+                logger.info(f"[{self.owner.id}] Stuck message reconciliation complete: "
+                           f"{results['retried_count']} retried, {results['permanent_failures']} permanently failed, "
+                           f"{len(results['errors'])} errors")
+            
+            return results
+            
+        except Exception as e:
+            error_msg = f"Error handling stuck pending operations: {e}"
+            logger.error(f"[{self.owner.id}] {error_msg}", exc_info=True)
+            return {
+                'retried_count': 0,
+                'permanent_failures': 0, 
+                'errors': [error_msg]
+            }
+
+    # --- Testing and Debugging Helpers ---
+    
+    def get_pending_and_failed_messages(self) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Get messages that are in pending or failed states for debugging.
+        
+        Returns:
+            Dictionary with lists of messages by status
+        """
+        try:
+            pending_messages = []
+            failed_messages = []
+            retrying_messages = []
+            
+            for msg in self._state.get('_messages', []):
+                status = msg.get('status', 'received')
+                if status == 'pending_send':
+                    pending_messages.append({
+                        'internal_id': msg.get('internal_id'),
+                        'text_preview': msg.get('text', '')[:50],
+                        'timestamp': msg.get('timestamp'),
+                        'retry_count': msg.get('retry_count', 0),
+                        'age_minutes': (time.time() - msg.get('timestamp', time.time())) / 60
+                    })
+                elif status == 'failed_to_send':
+                    failed_messages.append({
+                        'internal_id': msg.get('internal_id'),
+                        'text_preview': msg.get('text', '')[:50],
+                        'error_details': msg.get('error_details'),
+                        'retry_count': msg.get('retry_count', 0),
+                        'age_minutes': (time.time() - msg.get('timestamp', time.time())) / 60
+                    })
+                elif status == 'retrying':
+                    retrying_messages.append({
+                        'internal_id': msg.get('internal_id'),
+                        'text_preview': msg.get('text', '')[:50],
+                        'retry_count': msg.get('retry_count', 0),
+                        'retry_reason': msg.get('retry_reason'),
+                        'pending_cleanup_after_retry': msg.get('pending_cleanup_after_retry')
+                    })
+            
+            return {
+                'pending_send': pending_messages,
+                'failed_to_send': failed_messages,
+                'retrying': retrying_messages,
+                'summary': {
+                    'total_pending': len(pending_messages),
+                    'total_failed': len(failed_messages),
+                    'total_retrying': len(retrying_messages)
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"[{self.owner.id}] Error getting pending/failed messages: {e}", exc_info=True)
+            return {'error': str(e)}
+    
+    async def manually_retry_message(self, internal_id: str, reason: str = "manual_retry") -> Dict[str, Any]:
+        """
+        Manually trigger retry for a specific message (for testing/debugging).
+        
+        Args:
+            internal_id: Internal ID of message to retry
+            reason: Reason for manual retry
+            
+        Returns:
+            Result of retry operation
+        """
+        try:
+            logger.info(f"[{self.owner.id}] Manual retry triggered for message {internal_id} (reason: {reason})")
+            return await self.retry_stuck_message(internal_id, reason)
+        except Exception as e:
+            error_msg = f"Manual retry failed: {e}"
+            logger.error(f"[{self.owner.id}] {error_msg}", exc_info=True)
+            return {"success": False, "error": error_msg}

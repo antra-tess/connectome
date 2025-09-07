@@ -28,6 +28,9 @@ from .components.space.space_veil_producer import SpaceVeilProducer
 
 # Import agent loop components
 from .components.agent_loop import BaseAgentLoopComponent, SimpleRequestResponseLoopComponent
+from .components.agent_loop.heartbeat_component import HeartbeatComponent
+from .components.agent_loop.decider_component import ActivationDeciderComponent
+from .components.agent_loop.interrupt_decider_component import InterruptDeciderComponent
 
 # Type checking imports
 from typing import TYPE_CHECKING
@@ -177,6 +180,25 @@ class InnerSpace(Space):
             logger.error(f"Failed to add FacetAwareHUDComponent to InnerSpace {self.id}")
         else:
             logger.info(f"FacetAwareHUDComponent successfully added to InnerSpace {self.id}")
+        
+        # NEW: Add Decider and Heartbeat components
+        self._activation_decider = self.add_component(ActivationDeciderComponent)
+        if not self._activation_decider:
+            logger.error(f"Failed to add ActivationDeciderComponent to InnerSpace {self.id}")
+        else:
+            logger.info(f"ActivationDeciderComponent successfully added to InnerSpace {self.id}")
+        
+        self._interrupt_decider = self.add_component(InterruptDeciderComponent)
+        if not self._interrupt_decider:
+            logger.error(f"Failed to add InterruptDeciderComponent to InnerSpace {self.id}")
+        else:
+            logger.info(f"InterruptDeciderComponent successfully added to InnerSpace {self.id}")
+        
+        self._heartbeat = self.add_component(HeartbeatComponent)
+        if not self._heartbeat:
+            logger.error(f"Failed to add HeartbeatComponent to InnerSpace {self.id}")
+        else:
+            logger.info(f"HeartbeatComponent successfully added to InnerSpace {self.id}")
         
         # Add any additional requested components
         if additional_components:

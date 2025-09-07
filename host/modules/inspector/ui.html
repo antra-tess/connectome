@@ -1,0 +1,4497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Connectome Inspector UI</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    
+    <!-- No external scripts needed for iframe approach -->
+    
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .header {
+            background: #16213e;
+            padding: 1rem;
+            border-bottom: 1px solid #0f3460;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            flex-shrink: 0;
+        }
+        
+        .header h1 {
+            color: #00d4aa;
+            font-size: 1.5rem;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+        
+        select, button {
+            background: #0f3460;
+            color: #eee;
+            border: 1px solid #00d4aa;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            font-size: 0.9rem;
+        }
+        
+        button {
+            background: #00d4aa;
+            color: #1a1a2e;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        
+        button:hover {
+            background: #00b894;
+        }
+        
+        button:disabled {
+            background: #555;
+            color: #999;
+            cursor: not-allowed;
+        }
+        
+        .loading {
+            color: #00d4aa;
+            font-style: italic;
+        }
+        
+        .content {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+            height: 100%;
+        }
+        
+        .sidebar {
+            width: 300px;
+            background: #16213e;
+            border-right: 1px solid #0f3460;
+            padding: 1rem;
+            overflow-y: auto;
+            flex-shrink: 0;
+        }
+        
+        .sidebar h3 {
+            color: #00d4aa;
+            margin-bottom: 0.5rem;
+            font-size: 1rem;
+        }
+        
+        .endpoint-list {
+            list-style: none;
+        }
+        
+        .endpoint-list li {
+            margin-bottom: 0.5rem;
+        }
+        
+        .endpoint-list a {
+            color: #74b9ff;
+            text-decoration: none;
+            font-size: 0.9rem;
+            display: block;
+            padding: 0.25rem 0;
+        }
+        
+        .endpoint-list a:hover {
+            color: #00d4aa;
+        }
+        
+        .endpoint-list a.active {
+            color: #00d4aa;
+            font-weight: 600;
+        }
+        
+        .main-content {
+            flex: 1;
+            overflow: hidden;
+            position: relative;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        #content {
+            flex: 1;
+            overflow: hidden;
+        }
+        
+        #jsoncrack-container {
+            width: 100%;
+            height: 100%;
+            background: #1a1a2e;
+            border: none;
+        }
+        
+        .error {
+            color: #ff6b6b;
+            background: #2d1b1b;
+            padding: 1rem;
+            margin: 1rem;
+            border-radius: 4px;
+            border-left: 4px solid #ff6b6b;
+        }
+        
+        .info {
+            color: #999;
+            text-align: center;
+            padding: 2rem;
+            font-size: 1.1rem;
+        }
+        
+        .stats {
+            font-size: 0.8rem;
+            color: #999;
+            margin-top: 0.5rem;
+        }
+        
+        .toolbar {
+            background: #16213e;
+            border-bottom: 1px solid #0f3460;
+            padding: 0.5rem 1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .toolbar-info {
+            color: #999;
+            font-size: 0.85rem;
+        }
+        
+        .toolbar-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+        
+        .toolbar button {
+            padding: 0.25rem 0.5rem;
+            font-size: 0.8rem;
+        }
+        
+        /* Edit functionality styles */
+        .edit-btn {
+            background: #00d4aa !important;
+            color: #1a1a2e !important;
+            border: none !important;
+            padding: 2px 6px !important;
+            margin-left: 8px !important;
+            font-size: 0.7rem !important;
+            border-radius: 3px !important;
+            cursor: pointer !important;
+            opacity: 0.7;
+            transition: opacity 0.2s;
+        }
+        
+        .edit-btn:hover {
+            opacity: 1;
+            background: #00b894 !important;
+        }
+        
+        .edit-input {
+            background: #16213e !important;
+            color: #eee !important;
+            border: 1px solid #00d4aa !important;
+            padding: 2px 4px !important;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace !important;
+            font-size: 0.85rem !important;
+            border-radius: 3px !important;
+            margin-left: 4px !important;
+            min-width: 100px !important;
+        }
+        
+        .edit-input:focus {
+            outline: none !important;
+            border-color: #00b894 !important;
+            box-shadow: 0 0 0 2px rgba(0, 212, 170, 0.3) !important;
+        }
+        
+        .edit-actions {
+            margin-left: 8px !important;
+            display: inline-flex !important;
+            gap: 4px !important;
+        }
+        
+        .edit-save, .edit-cancel {
+            background: #00d4aa !important;
+            color: #1a1a2e !important;
+            border: none !important;
+            padding: 2px 6px !important;
+            font-size: 0.7rem !important;
+            border-radius: 3px !important;
+            cursor: pointer !important;
+        }
+        
+        .edit-cancel {
+            background: #ff6b6b !important;
+            color: white !important;
+        }
+        
+        .edit-save:hover {
+            background: #00b894 !important;
+        }
+        
+        .edit-cancel:hover {
+            background: #e55656 !important;
+        }
+        
+        .editable-node {
+            position: relative;
+        }
+        
+        .editable-node:hover .edit-btn {
+            opacity: 1;
+        }
+        
+        .edit-status {
+            margin-left: 8px !important;
+            font-size: 0.7rem !important;
+            color: #999 !important;
+            font-style: italic;
+        }
+        
+        .edit-success {
+            color: #00d4aa !important;
+        }
+        
+        .edit-error {
+            color: #ff6b6b !important;
+        }
+        
+        /* Pagination controls */
+        .pagination-controls {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 1rem;
+            margin: 1rem 0;
+            padding: 1rem;
+            background: #16213e;
+            border-radius: 6px;
+            border: 1px solid #0f3460;
+        }
+        
+        .pagination-controls button {
+            padding: 0.5rem 1rem;
+            font-size: 0.85rem;
+        }
+        
+        .pagination-info {
+            color: #999;
+            font-size: 0.85rem;
+            min-width: 120px;
+            text-align: center;
+        }
+        
+        .pagination-controls button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        /* Drill-down functionality styles */
+        .drill-down-btn {
+            background: #74b9ff !important;
+            color: #1a1a2e !important;
+            border: none !important;
+            padding: 2px 6px !important;
+            margin-left: 8px !important;
+            font-size: 0.7rem !important;
+            border-radius: 3px !important;
+            cursor: pointer !important;
+            opacity: 0.7;
+            transition: opacity 0.2s, background-color 0.2s;
+        }
+        
+        .drill-down-btn:hover {
+            opacity: 1;
+            background: #5a9df7 !important;
+        }
+        
+        .drillable-node:hover .drill-down-btn {
+            opacity: 1;
+        }
+        
+        /* HUD View functionality styles */
+        .hud-view-btn {
+            background: #00d4aa !important;
+            color: #1a1a2e !important;
+            border: none !important;
+            padding: 2px 6px !important;
+            margin-left: 4px !important;
+            font-size: 0.7rem !important;
+            border-radius: 3px !important;
+            cursor: pointer !important;
+            opacity: 0.8;
+            transition: opacity 0.2s, background-color 0.2s;
+            font-weight: 600 !important;
+        }
+        
+        .hud-view-btn:hover {
+            opacity: 1;
+            background: #00b894 !important;
+        }
+        
+        /* HUD Content Display Styles */
+        .hud-content-container {
+            padding: 1rem;
+            background: #16213e;
+            border-radius: 8px;
+            margin: 1rem;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            line-height: 1.6;
+            color: #eee;
+            white-space: pre-wrap;
+            overflow-x: auto;
+            max-width: 100%;
+        }
+        
+        .hud-content-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.5rem 0 1rem 0;
+            border-bottom: 1px solid #0f3460;
+            margin-bottom: 1rem;
+        }
+        
+        .hud-format-controls {
+            display: flex;
+            gap: 0.5rem;
+        }
+        
+        .hud-format-btn {
+            background: #0f3460;
+            color: #eee;
+            border: 1px solid #00d4aa;
+            padding: 0.3rem 0.8rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            cursor: pointer;
+        }
+        
+        .hud-format-btn.active {
+            background: #00d4aa;
+            color: #1a1a2e;
+        }
+        
+        .hud-format-btn:hover {
+            background: #00b894;
+            color: #1a1a2e;
+        }
+        
+        /* HUD Modal Styles */
+        .hud-modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .hud-modal-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            backdrop-filter: blur(3px);
+        }
+        
+        .hud-modal-content {
+            position: relative;
+            background: #16213e;
+            border-radius: 12px;
+            border: 2px solid #0f3460;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+            max-width: 90vw;
+            max-height: 90vh;
+            width: 1000px;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .hud-modal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid #0f3460;
+            flex-shrink: 0;
+        }
+        
+        .hud-modal-header h2 {
+            color: #00d4aa;
+            font-size: 1.2rem;
+            font-weight: 600;
+            margin: 0;
+        }
+        
+        .hud-modal-actions {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .hud-modal-refresh {
+            background: none;
+            border: 1px solid #0f3460;
+            color: #00d4aa;
+            font-size: 1rem;
+            cursor: pointer;
+            padding: 0.5rem;
+            line-height: 1;
+            border-radius: 4px;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .hud-modal-refresh:hover {
+            background: #0f3460;
+            color: #fff;
+            transform: rotate(180deg);
+        }
+        
+        .hud-modal-refresh:active {
+            transform: rotate(360deg);
+        }
+        
+        .hud-modal-close {
+            background: none;
+            border: none;
+            color: #999;
+            font-size: 1.5rem;
+            cursor: pointer;
+            padding: 0.5rem;
+            line-height: 1;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+        
+        .hud-modal-close:hover {
+            background: #0f3460;
+            color: #fff;
+        }
+        
+        .hud-modal-body {
+            padding: 1.5rem;
+            overflow: auto;
+            flex: 1;
+            min-height: 0;
+        }
+        
+        /* Console Styles */
+        .console-container {
+            display: none;
+            height: 100%;
+            background: #1a1a2e;
+            flex-direction: column;
+        }
+        
+        .console-container.active {
+            display: flex;
+        }
+        
+        .console-header {
+            background: #16213e;
+            border-bottom: 1px solid #0f3460;
+            padding: 0.75rem 1rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-shrink: 0;
+        }
+        
+        .console-title {
+            color: #00d4aa;
+            font-size: 1rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .console-status {
+            font-size: 0.85rem;
+            color: #999;
+        }
+        
+        .console-status.connected {
+            color: #00d4aa;
+        }
+        
+        .console-status.error {
+            color: #ff6b6b;
+        }
+        
+        .console-output {
+            flex: 1;
+            background: #0f0f23;
+            color: #e0e0e0;
+            font-family: 'Courier New', 'Consolas', 'Monaco', monospace;
+            font-size: 14px;
+            padding: 1rem;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            line-height: 1.4;
+        }
+        
+        .console-input-container {
+            background: #16213e;
+            border-top: 1px solid #0f3460;
+            padding: 0.75rem 1rem;
+            display: flex;
+            align-items: flex-start;
+            gap: 0.5rem;
+            flex-shrink: 0;
+        }
+        
+        .console-prompt {
+            color: #00d4aa;
+            font-family: 'Courier New', 'Consolas', 'Monaco', monospace;
+            font-size: 14px;
+            font-weight: bold;
+            white-space: nowrap;
+            padding-top: 2px;
+        }
+        
+        .console-input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: #e0e0e0;
+            font-family: 'Courier New', 'Consolas', 'Monaco', monospace;
+            font-size: 14px;
+            outline: none;
+            resize: none;
+            min-height: 20px;
+            max-height: 200px;
+            padding: 0;
+            margin: 0;
+            line-height: 1.4;
+        }
+        
+        .console-input:focus {
+            outline: none;
+        }
+        
+        .console-line {
+            margin-bottom: 0.25rem;
+        }
+        
+        .console-line.input {
+            color: #e0e0e0;
+        }
+        
+        .console-line.output {
+            color: #b0b0b0;
+        }
+        
+        .console-line.error {
+            color: #ff6b6b;
+        }
+        
+        .console-line.success {
+            color: #00d4aa;
+        }
+        
+        .console-line.info {
+            color: #74b9ff;
+        }
+        
+        .console-line.example {
+            color: #00b894;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            background: rgba(0, 184, 148, 0.1);
+            padding: 2px 6px;
+            border-radius: 3px;
+            margin: 1px 0;
+        }
+        
+        .console-line.rich-output {
+            margin: 4px 0;
+            padding: 4px;
+            border: 1px solid #0f3460;
+            border-radius: 4px;
+            background: rgba(15, 52, 96, 0.2);
+        }
+        
+        .console-line.rich-output pre {
+            margin: 0;
+            font-size: 0.9em;
+            overflow-x: auto;
+        }
+        
+        .console-line.rich-output img {
+            display: block;
+            margin: 4px 0;
+            border-radius: 4px;
+        }
+        
+        /* Tree output styles */
+        .tree-output {
+            background: rgba(42, 42, 42, 0.8);
+            border: 1px solid #444;
+            border-radius: 4px;
+            padding: 8px;
+            margin: 4px 0;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 0.9em;
+            overflow-x: auto;
+        }
+        
+        .tree-output pre {
+            margin: 0;
+            white-space: pre-wrap;
+        }
+        
+        .tree-view {
+            cursor: pointer;
+            user-select: none;
+        }
+        
+        /* Inspection button styles */
+        .inspection-buttons {
+            display: inline-block;
+            margin-left: 8px;
+            vertical-align: top;
+        }
+        
+        .inspect-btn {
+            background: #0f3460;
+            border: 1px solid #00d4aa;
+            color: #00d4aa;
+            padding: 2px 6px;
+            margin: 0 2px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s ease;
+        }
+        
+        .inspect-btn:hover {
+            background: #00d4aa;
+            color: #0f3460;
+        }
+        
+        .inspect-btn:active {
+            transform: scale(0.95);
+        }
+        
+        /* Tab completion dropdown styles */
+        .completion-dropdown {
+            background: #16213e;
+            border: 1px solid #00d4aa;
+            border-radius: 4px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            z-index: 1000;
+            max-height: 200px;
+            overflow-y: auto;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 0.9rem;
+        }
+        
+        .completion-item {
+            padding: 6px 12px;
+            cursor: pointer;
+            border-bottom: 1px solid #0f3460;
+            color: #eee;
+        }
+        
+        .completion-item:last-child {
+            border-bottom: none;
+        }
+        
+        .completion-item:hover,
+        .completion-item.selected {
+            background: #00d4aa;
+            color: #1a1a2e;
+        }
+        
+        .completion-item.selected {
+            font-weight: 600;
+        }
+        
+        .console-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+        
+        .console-action-btn {
+            background: #0f3460;
+            color: #74b9ff;
+            border: 1px solid #74b9ff;
+            padding: 0.25rem 0.5rem;
+            border-radius: 3px;
+            font-size: 0.75rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .console-action-btn:hover {
+            background: #74b9ff;
+            color: #1a1a2e;
+        }
+
+        /* Veil Facet Styles */
+        .veil-facet {
+            margin-bottom: 0.5rem;
+            padding: 0.75rem;
+            background: #16213e;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .veil-facet:hover {
+            background: #1a2540;
+        }
+
+        .veil-facet--expanded {
+            background: #1a2f4a;
+        }
+
+        .veil-facet--event {
+            border-left: 4px solid #a29bfe;
+        }
+
+        .veil-facet--status {
+            border-left: 4px solid #00d4aa;
+        }
+
+        .veil-facet--ambient {
+            border-left: 4px solid #fd79a8;
+        }
+
+        .veil-facet__header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.25rem;
+        }
+
+        .veil-facet__type-id {
+            color: #74b9ff;
+            font-weight: 600;
+            font-size: 0.9rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            flex: 1;
+            margin-right: 1rem;
+        }
+
+        .veil-facet__timestamp {
+            color: #999;
+            font-size: 0.8rem;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+
+        .veil-facet__summary {
+            color: #eee;
+            font-size: 0.85rem;
+            line-height: 1.4;
+            overflow: hidden;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+        }
+
+        .veil-facet__expanded-content {
+            margin-top: 0.5rem;
+            padding-top: 0.5rem;
+            border-top: 1px solid #555;
+        }
+
+        /* Timeline Event Styles */
+        .timeline-event {
+            margin-bottom: 0.5rem;
+            padding: 0.75rem;
+            background: #16213e;
+            border-left: 4px solid #6c5ce7;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .timeline-event:hover {
+            background: #1a2540;
+        }
+
+        .timeline-event--expanded {
+            background: #1a2f4a;
+        }
+
+        .timeline-event__header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.25rem;
+        }
+
+        .timeline-event__type {
+            color: #a29bfe;
+            font-weight: 600;
+            font-size: 0.9rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            flex: 1;
+            margin-right: 1rem;
+        }
+
+        .timeline-event__timestamp {
+            color: #999;
+            font-size: 0.8rem;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+
+        .timeline-event__summary {
+            color: #eee;
+            font-size: 0.85rem;
+            line-height: 1.4;
+            overflow: hidden;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+        }
+
+        .timeline-event__expanded-content {
+            margin-top: 0.5rem;
+            padding-top: 0.5rem;
+            border-top: 1px solid #555;
+        }
+
+        .stream-container {
+            padding: 1rem;
+            background: #0f3460;
+            border-radius: 4px;
+            height: 100%;
+            overflow: auto;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .stream-container__header {
+            margin-bottom: 1rem;
+            color: #00d4aa;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid #555;
+        }
+
+        .stream-container__title {
+            font-weight: bold;
+        }
+
+        .stream-container__hint {
+            color: #999;
+            font-size: 0.9rem;
+        }
+
+        .stream-container__content {
+            flex: 1;
+        }
+
+        .loading-indicator {
+            display: none;
+            padding: 1rem;
+            text-align: center;
+            color: #00d4aa;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Connectome Inspector</h1>
+        <div class="controls">
+            <span id="status" class="loading" style="display: none;">Loading...</span>
+        </div>
+    </div>
+    
+    <div class="content">
+        <div class="sidebar">
+            <h3>Available Endpoints</h3>
+            <ul class="endpoint-list">
+                <li><a href="#" onclick="openConsole()">🔧 Interactive Console</a></li>
+                <li style="border-top: 1px solid #0f3460; margin-top: 0.5rem; padding-top: 0.5rem;"><a href="#" onclick="loadEndpoint('/status')">System Status</a></li>
+                <li><a href="#" onclick="loadEndpoint('/spaces')">Spaces Overview</a></li>
+                <li><a href="#" onclick="loadEndpoint('/agents')">Agents</a></li>
+                <li><a href="#" onclick="loadEndpoint('/adapters')">Adapters</a></li>
+                <li><a href="#" onclick="loadEndpoint('/metrics')">Metrics</a></li>
+                <li><a href="#" onclick="loadEndpoint('/timelines')">Timelines Overview</a></li>
+                <li><a href="#" onclick="loadEndpoint('/veil')">VEIL Overview</a></li>
+                <li><a href="#" onclick="loadEndpoint('/health')">Health Check</a></li>
+            </ul>
+            
+            
+            <div style="margin-top: 2rem; border-top: 1px solid #0f3460; padding-top: 1rem;">
+                <h3>Visualization Info</h3>
+                <p style="font-size: 0.8rem; color: #999; line-height: 1.4;">
+                    This interface uses an interactive tree view by default to visualize Connectome debugging data.
+                    JSONCrack visualization is available via the toggle button. Select an endpoint to start exploring.
+                </p>
+            </div>
+        </div>
+        
+        <div class="main-content">
+            <div class="toolbar" id="toolbar" style="display: none;">
+                <div class="toolbar-info">
+                    <div id="breadcrumb" style="margin-bottom: 0.25rem; font-size: 0.8rem; color: #74b9ff;"></div>
+                    <span id="data-info"></span>
+                    <span id="stream-progress" style="display: none; margin-left: 1rem; color: #00d4aa; font-weight: 600;"></span>
+                </div>
+                <div class="toolbar-actions">
+                    <button id="backBtn" onclick="goBack()" style="display: none;">← Back</button>
+                    <button onclick="refreshData()">Refresh</button>
+                    <button onclick="resetVisualization()">Reset View</button>
+                    <button id="realtimeToggle" onclick="toggleRealtime()" style="display: none;" title="Toggle realtime streaming">🔴 Realtime</button>
+                    <button id="viewToggle" onclick="toggleView()">JSONCrack View</button>
+                </div>
+            </div>
+            
+            <div id="content">
+                <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; padding: 2rem; text-align: center; background: #0f3460;">
+                    <div style="margin-bottom: 2rem;">
+                        <pre style="color: #00d4aa; font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace; font-size: 0.7rem; line-height: 1; margin: 0; text-align: center;">  ██████╗ ██████╗ ███╗   ██╗███╗   ██╗███████╗ ██████╗████████╗ ██████╗ ███╗   ███╗███████╗
+ ██╔════╝██╔═══██╗████╗  ██║████╗  ██║██╔════╝██╔════╝╚══██╔══╝██╔═══██╗████╗ ████║██╔════╝
+ ██║     ██║   ██║██╔██╗ ██║██╔██╗ ██║█████╗  ██║        ██║   ██║   ██║██╔████╔██║█████╗  
+ ██║     ██║   ██║██║╚██╗██║██║╚██╗██║██╔══╝  ██║        ██║   ██║   ██║██║╚██╔╝██║██╔══╝  
+ ╚██████╗╚██████╔╝██║ ╚████║██║ ╚████║███████╗╚██████╗   ██║   ╚██████╔╝██║ ╚═╝ ██║███████╗
+  ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝ ╚═════╝   ╚═╝    ╚═════╝ ╚═╝     ╚═╝╚══════╝
+
+                              ██╗███╗   ██╗███████╗██████╗ ███████╗ ██████╗████████╗ ██████╗ ██████╗ 
+                              ██║████╗  ██║██╔════╝██╔══██╗██╔════╝██╔════╝╚══██╔══╝██╔═══██╗██╔══██╗
+                              ██║██╔██╗ ██║███████╗██████╔╝█████╗  ██║        ██║   ██║   ██║██████╔╝
+                              ██║██║╚██╗██║╚════██║██╔═══╝ ██╔══╝  ██║        ██║   ██║   ██║██╔══██╗
+                              ██║██║ ╚████║███████║██║     ███████╗╚██████╗   ██║   ╚██████╔╝██║  ██║
+                              ╚═╝╚═╝  ╚═══╝╚══════╝╚═╝     ╚══════╝ ╚═════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝</pre>
+                    </div>
+                    
+                    <div style="color: #74b9ff; font-size: 1.2rem; font-weight: 600; margin-bottom: 1rem;">
+                        🔍 Connectome Inspector Web UI
+                    </div>
+                    
+                    <div style="color: #999; font-size: 0.9rem; line-height: 1.6; max-width: 600px;">
+                        <p>Welcome to the Connectome Inspector! This interface provides real-time debugging and exploration capabilities for your Connectome host system.</p>
+                        
+                        <p style="margin-top: 1.5rem;">
+                            <strong style="color: #00d4aa;">Getting Started:</strong><br>
+                            Select an endpoint from the sidebar to start exploring your system's state. The tree view provides an interactive way to navigate through spaces, agents, timelines, and VEIL data.
+                        </p>
+                        
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-top: 2rem; text-align: left;">
+                            <div style="background: #16213e; padding: 1rem; border-radius: 6px; border-left: 4px solid #74b9ff;">
+                                <strong style="color: #74b9ff;">System Overview</strong><br>
+                                <small>Status, spaces, agents, and metrics</small>
+                            </div>
+                            <div style="background: #16213e; padding: 1rem; border-radius: 6px; border-left: 4px solid #00d4aa;">
+                                <strong style="color: #00d4aa;">Interactive Browsing</strong><br>
+                                <small>Space-specific timeline events and VEIL data</small>
+                            </div>
+                            <div style="background: #16213e; padding: 1rem; border-radius: 6px; border-left: 4px solid #fd79a8;">
+                                <strong style="color: #fd79a8;">Tree Visualization</strong><br>
+                                <small>Expandable tree view with editing capabilities</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Interactive Console -->
+            <div class="console-container" id="console">
+                <div class="console-header">
+                    <div class="console-title">
+                        <span>🔧</span>
+                        <span>Interactive Python Console</span>
+                    </div>
+                    <div class="console-actions">
+                        <span class="console-status" id="console-status">Disconnected</span>
+                        <button class="console-action-btn" onclick="clearConsole()">Clear</button>
+                        <button class="console-action-btn" onclick="closeConsole()">Close</button>
+                    </div>
+                </div>
+                
+                <div class="console-output" id="console-output">
+                    <div class="console-line info">Connectome Interactive Console</div>
+                    <div class="console-line info">Initializing REPL session...</div>
+                    <div class="console-line info">Quick start example:</div>
+                    <div class="console-line example">import inspect</div>
+                    <div class="console-line example">print(inspect.getmembers(host))</div>
+                </div>
+                
+                <div class="console-input-container">
+                    <div class="console-prompt" id="console-prompt">...</div>
+                    <textarea class="console-input" id="console-input" placeholder="Enter Python code..." rows="1"></textarea>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentData = null;
+        let currentEndpoint = null;
+        let jsoncrackInstance = null;
+        let currentView = 'tree'; // 'tree' or 'jsoncrack' - tree is now default
+        let navigationStack = []; // For back navigation
+        let realtimeState = {
+            enabled: false,
+            intervalId: null,
+            pollInterval: 3000, // 3 seconds
+            lastPollTimestamp: null,
+            newestEventId: null,
+            newestFacetId: null
+        };
+        let paginationState = {
+            hasMore: false,
+            nextCursor: null,
+            currentSpaceId: null,
+            currentBrowserType: null,
+            isLoading: false,
+            allFacets: [],  // Store all loaded facets
+            allEvents: [],  // Store all loaded events
+            nextOffset: null, // For timeline events
+            afterFacetId: null // For veil facets
+        }; // For pagination
+        
+        async function loadEndpoint(endpoint) {
+            // Close console if it's currently active
+            const console = document.getElementById('console');
+            if (console.classList.contains('active')) {
+                console.classList.remove('active');
+            }
+            
+            // Update active link
+            document.querySelectorAll('.endpoint-list a').forEach(a => a.classList.remove('active'));
+            event.target.classList.add('active');
+            
+            const statusEl = document.getElementById('status');
+            const contentEl = document.getElementById('content');
+            const toolbar = document.getElementById('toolbar');
+            
+            // Ensure content and toolbar are visible
+            contentEl.style.display = 'block';
+            toolbar.style.display = 'flex';
+            
+            // Reset pagination state for new endpoint load
+            paginationState = {
+                hasMore: false,
+                nextCursor: null,
+                currentSpaceId: null,
+                currentBrowserType: null,
+                isLoading: false,
+                allFacets: [],
+                allEvents: [],
+                nextOffset: null,
+                afterFacetId: null,
+                totalFacets: null,
+                totalEvents: null
+            };
+            
+            // Stop any active realtime polling when loading new endpoint
+            if (realtimeState.intervalId) {
+                clearInterval(realtimeState.intervalId);
+                realtimeState.intervalId = null;
+                realtimeState.enabled = false;
+                const realtimeBtn = document.getElementById('realtimeToggle');
+                if (realtimeBtn) {
+                    realtimeBtn.textContent = '🔴 Realtime';
+                    realtimeBtn.style.backgroundColor = '';
+                    realtimeBtn.style.color = '';
+                }
+            }
+            
+            // Handle special "browsing" endpoints that need space selection
+            if (['spaces_detailed', 'timeline_events', 'veil_facets'].includes(endpoint)) {
+                await showSpaceBrowser(endpoint);
+                return;
+            }
+            
+            statusEl.style.display = 'inline';
+            
+            try {
+                statusEl.textContent = 'Loading data...';
+                
+                const response = await fetch(endpoint, {
+                    headers: {
+                        'Accept': 'application/json'
+                    }
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                currentData = data;
+                currentEndpoint = endpoint;
+                
+                statusEl.textContent = 'Initializing visualization...';
+                
+                // Show toolbar and update info
+                toolbar.style.display = 'flex';
+                updateBreadcrumb(`Inspector → ${endpoint}`);
+                updateDataInfo(data, endpoint);
+                
+                // Reset view mode to Tree View as default when loading new endpoint
+                currentView = 'tree';
+                const toggleBtn = document.getElementById('viewToggle');
+                if (toggleBtn) {
+                    toggleBtn.textContent = 'JSONCrack View';
+                    toggleBtn.style.display = 'inline-block'; // Reset visibility, will be adjusted by showTreeView
+                }
+                
+                // Clear content and create tree container
+                contentEl.innerHTML = '<div id="jsoncrack-container"></div>';
+                
+                // Initialize Tree visualization as default
+                showTreeView(data);
+                
+            } catch (error) {
+                console.error('Error loading data:', error);
+                contentEl.innerHTML = `
+                    <div class="error">
+                        <strong>Error loading data from ${endpoint}:</strong><br>
+                        ${escapeHtml(error.message)}
+                    </div>
+                `;
+                currentData = null;
+                currentEndpoint = null;
+                toolbar.style.display = 'none';
+                hideStreamProgress();
+                // Stop realtime polling on error
+                if (realtimeState.intervalId) {
+                    clearInterval(realtimeState.intervalId);
+                    realtimeState.intervalId = null;
+                    realtimeState.enabled = false;
+                    const realtimeBtn = document.getElementById('realtimeToggle');
+                    if (realtimeBtn) {
+                        realtimeBtn.textContent = '🔴 Realtime';
+                        realtimeBtn.style.backgroundColor = '';
+                    }
+                }
+            } finally {
+                statusEl.style.display = 'none';
+            }
+        }
+        
+        async function initializeJsonCrack(data) {
+            try {
+                const container = document.getElementById('jsoncrack-container');
+                if (!container) {
+                    throw new Error('JSONCrack container not found');
+                }
+                
+                const jsonString = JSON.stringify(data, null, 2);
+                
+                // Clear container
+                container.innerHTML = '';
+                container.style.position = 'relative';
+                
+                console.log('Initializing JSONCrack with postMessage approach');
+                
+                // Create iframe for JSONCrack widget
+                const iframe = document.createElement('iframe');
+                iframe.style.width = '100%';
+                iframe.style.height = '100%';
+                iframe.style.border = 'none';
+                iframe.style.backgroundColor = '#1a1a2e';
+                iframe.src = 'https://jsoncrack.com/widget';
+                
+                container.appendChild(iframe);
+                
+                // Set up postMessage communication
+                let widgetReady = false;
+                let fallbackTriggered = false;
+                
+                // Handle iframe load errors (but not content errors like Sentry)
+                iframe.addEventListener('error', (event) => {
+                    console.error('JSONCrack iframe failed to load:', event);
+                    if (!fallbackTriggered) {
+                        fallbackTriggered = true;
+                        showFallbackVisualization(data);
+                    }
+                });
+                
+                // Listen for messages from the iframe
+                const messageHandler = (event) => {
+                    if (event.origin !== 'https://jsoncrack.com') {
+                        console.log('Ignoring message from non-JSONCrack origin:', event.origin);
+                        return;
+                    }
+                    
+                    // Log the complete message object to see all fields
+                    console.log('Received JSONCrack message - Full event object:', event);
+                    console.log('Event.data:', event.data);
+                    console.log('Event.type:', event.type);
+                    console.log('Event.source:', event.source);
+                    console.log('Event.ports:', event.ports);
+                    
+                    // Treat ANY message from JSONCrack as ready signal (but only once)
+                    if (!widgetReady) {
+                        console.log('JSONCrack widget ready (any message), attempting to send data');
+                        widgetReady = true;
+                        sendDataToWidget();
+                    } else {
+                        console.log('Additional message from JSONCrack (widget already ready)');
+                    }
+                };
+                
+                const sendDataToWidget = () => {
+                    if (!widgetReady) {
+                        console.log('Widget not ready yet, waiting...');
+                        return;
+                    }
+                    
+                    console.log('Attempting to send data to JSONCrack widget...');
+                    console.log('iframe.contentWindow exists:', !!iframe.contentWindow);
+                    
+                    try {
+                        // Try multiple message formats based on JSONCrack docs
+                        const messages = [
+                            // Format from docs - basic
+                            {
+                                json: jsonString,
+                                options: {
+                                    theme: 'dark',
+                                    direction: 'RIGHT'
+                                }
+                            },
+                            // Alternative format - maybe they expect different structure
+                            {
+                                type: 'data',
+                                payload: {
+                                    json: jsonString,
+                                    options: {
+                                        theme: 'dark',
+                                        direction: 'RIGHT'
+                                    }
+                                }
+                            },
+                            // Simple format - just the JSON
+                            {
+                                json: jsonString
+                            }
+                        ];
+                        
+                        // Try each message format with a small delay
+                        messages.forEach((message, index) => {
+                            setTimeout(() => {
+                                console.log(`Sending message format ${index + 1}:`, message);
+                                iframe.contentWindow.postMessage(message, 'https://jsoncrack.com');
+                            }, index * 500);
+                        });
+                        
+                    } catch (error) {
+                        console.error('Error sending data to widget:', error);
+                        // Only fallback for actual postMessage errors, not Sentry/tracking errors
+                        if (error.name === 'DataCloneError' || error.message.includes('postMessage')) {
+                            if (!fallbackTriggered) {
+                                fallbackTriggered = true;
+                                showFallbackVisualization(data);
+                            }
+                        }
+                    }
+                };
+                
+                window.addEventListener('message', messageHandler);
+                
+                // Clean up event listener when resetting
+                if (jsoncrackInstance) {
+                    jsoncrackInstance.cleanup = () => {
+                        window.removeEventListener('message', messageHandler);
+                    };
+                }
+                
+                jsoncrackInstance = {
+                    iframe: iframe,
+                    cleanup: () => {
+                        window.removeEventListener('message', messageHandler);
+                    },
+                    sendData: sendDataToWidget
+                };
+                
+                // Manual trigger no longer needed since auto-detection works!
+                
+                // Fallback timeout - if widget doesn't respond in 15 seconds, show fallback
+                setTimeout(() => {
+                    if (!widgetReady && !fallbackTriggered) {
+                        console.log('JSONCrack widget timeout, showing fallback');
+                        fallbackTriggered = true;
+                        showFallbackVisualization(data);
+                    }
+                }, 15000); // Increased timeout to allow for debugging
+                
+            } catch (error) {
+                console.error('JSONCrack initialization error:', error);
+                // Only fallback for critical initialization errors, not third-party script errors
+                if (error.message.includes('container not found') || 
+                    error.message.includes('iframe') ||
+                    error.name === 'TypeError' && error.message.includes('appendChild')) {
+                    showFallbackVisualization(data);
+                } else {
+                    // Log but don't fallback for non-critical errors (like Sentry loading)
+                    console.warn('Non-critical JSONCrack error ignored:', error);
+                }
+            }
+        }
+        
+        function showFallbackVisualization(data) {
+            const container = document.getElementById('jsoncrack-container') || document.getElementById('content');
+            const jsonString = JSON.stringify(data, null, 2);
+            
+            container.innerHTML = `
+                <div style="padding: 1rem; background: #0f3460; border-radius: 4px; height: 100%; overflow: auto; display: flex; flex-direction: column;">
+                    <div style="margin-bottom: 1rem; color: #00d4aa; display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.5rem; border-bottom: 1px solid #555;">
+                        <strong>📊 Formatted JSON View</strong>
+                        <small style="color: #999;">JSONCrack unavailable</small>
+                    </div>
+                    <div style="flex: 1; overflow: auto;">
+                        <pre style="color: #eee; font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace; font-size: 0.85rem; line-height: 1.4; white-space: pre-wrap; margin: 0;">${escapeHtml(jsonString)}</pre>
+                    </div>
+                </div>
+            `;
+        }
+        
+        function updateDataInfo(data, endpoint) {
+            const dataInfo = document.getElementById('data-info');
+            const jsonString = JSON.stringify(data);
+            const size = formatBytes(jsonString.length);
+            const keys = typeof data === 'object' && data !== null ? Object.keys(data).length : 0;
+            
+            dataInfo.textContent = `${endpoint} • ${size} • ${keys} top-level keys`;
+        }
+        
+        async function refreshData() {
+            if (currentEndpoint) {
+                await loadEndpoint(currentEndpoint);
+            }
+        }
+        
+        function resetVisualization() {
+            if (jsoncrackInstance && jsoncrackInstance.cleanup) {
+                jsoncrackInstance.cleanup();
+            }
+            if (currentData) {
+                if (currentView === 'jsoncrack') {
+                    initializeJsonCrack(currentData);
+                } else {
+                    showTreeView(currentData);
+                }
+            }
+        }
+        
+        function toggleView() {
+            if (!currentData) return;
+            
+            const toggleBtn = document.getElementById('viewToggle');
+            
+            if (currentView === 'jsoncrack') {
+                currentView = 'tree';
+                toggleBtn.textContent = 'JSONCrack View';
+                showTreeView(currentData);
+            } else {
+                currentView = 'jsoncrack';
+                toggleBtn.textContent = 'Tree View';
+                initializeJsonCrack(currentData);
+            }
+        }
+        
+        function showTreeView(data, append = false) {
+            const container = document.getElementById('jsoncrack-container') || document.getElementById('content');
+            
+            // Only clean up and rebuild if not appending
+            if (!append) {
+                // Clean up any existing JSONCrack instance
+                if (jsoncrackInstance && jsoncrackInstance.cleanup) {
+                    jsoncrackInstance.cleanup();
+                }
+                
+                // Check if this data has pagination metadata
+                const hasPagination = data.has_more !== undefined || 
+                                    data.next_cursor !== undefined ||
+                                    data.summary?.next_cursor !== undefined ||
+                                    data.pagination?.has_more !== undefined;
+                
+                // Determine view type and header text
+                let viewIcon = '🌳';
+                let viewTitle = 'Interactive Tree View';
+                let viewHint = 'Click to expand/collapse';
+                let isStreamView = false;
+                
+                if (data.facets && typeof data.facets === 'object') {
+                    viewIcon = '🎭';
+                    viewTitle = 'VEIL Facets Stream';
+                    viewHint = 'Scroll down to load more facets';
+                    isStreamView = true;
+                } else if (data.events && typeof data.events === 'object') {
+                    viewIcon = '⏱️';
+                    viewTitle = 'Timeline Events Stream';
+                    viewHint = 'Scroll down to load more events';
+                    isStreamView = true;
+                }
+                
+                // Hide/show buttons based on view type
+                const toggleBtn = document.getElementById('viewToggle');
+                const realtimeBtn = document.getElementById('realtimeToggle');
+                if (toggleBtn) {
+                    toggleBtn.style.display = isStreamView ? 'none' : 'inline-block';
+                }
+                if (realtimeBtn) {
+                    realtimeBtn.style.display = isStreamView ? 'inline-block' : 'none';
+                }
+                
+                container.innerHTML = `
+                    <div id="scroll-container" class="stream-container">
+                        <div class="stream-container__header">
+                            <div class="stream-container__title">${viewIcon} ${viewTitle}</div>
+                            <div class="stream-container__hint">${viewHint}</div>
+                        </div>
+                        <div id="tree-container" class="stream-container__content">
+                        </div>
+                        <div id="loading-indicator" class="loading-indicator">
+                            Loading more...
+                        </div>
+                    </div>
+                `;
+                
+                // Set up infinite scrolling
+                if (hasPagination) {
+                    setupInfiniteScroll(data);
+                }
+            }
+            
+            // Build interactive tree or stream view
+            const treeContainer = document.getElementById('tree-container');
+            
+            // Check if this is facets or events data and render as stream
+            if (data.facets && typeof data.facets === 'object') {
+                // VEIL facets stream view
+                renderFacetsStream(treeContainer, data.facets, append);
+                
+                // Update progress counter for facets (runs for both initial load and pagination)
+                const totalFacets = paginationState.totalFacets || data.summary?.total_matching || data.summary?.total_facets;
+                let loadedFacets;
+                if (append && paginationState.allFacets) {
+                    // For appended data, show cumulative count
+                    loadedFacets = paginationState.allFacets.length;
+                } else {
+                    // For initial load, use current batch count
+                    loadedFacets = data.facets ? Object.keys(data.facets).length : (data.summary?.returned || 0);
+                }
+                updateStreamProgress(loadedFacets, totalFacets, 'facets');
+            } else if (data.events && typeof data.events === 'object') {
+                // Timeline events stream view  
+                renderEventsStream(treeContainer, data.events, append);
+                
+                // Update progress counter for events (runs for both initial load and pagination)
+                const totalEvents = paginationState.totalEvents || data.timeline_info?.total_events || currentData?.timeline_info?.total_events;
+                let loadedEvents;
+                if (append && paginationState.allEvents) {
+                    // For appended data, show cumulative count
+                    loadedEvents = paginationState.allEvents.length;
+                } else {
+                    // For initial load, use current batch count
+                    loadedEvents = Array.isArray(data.events) ? data.events.length : (data.events_returned || 0);
+                }
+                updateStreamProgress(loadedEvents, totalEvents, 'events');
+            } else if (!append) {
+                // Regular tree view (only if not appending)
+                treeContainer.appendChild(createTreeNode('root', data, 0, true));
+                // Hide progress counter for non-stream views
+                hideStreamProgress();
+            }
+        }
+        
+        function addPaginationControls(data) {
+            const hasMore = data.has_more || false;
+            const nextCursor = data.next_cursor || null;
+            const totalItems = data.total_items || '?';
+            
+            // Count items based on data structure
+            let currentItems = 0;
+            if (data.events && Array.isArray(data.events)) {
+                currentItems = data.events.length;
+            } else if (data.facets && typeof data.facets === 'object') {
+                currentItems = Object.keys(data.facets).length;
+            } else if (data.timelines && typeof data.timelines === 'object') {
+                currentItems = Object.keys(data.timelines).length;
+            }
+            
+            const paginationHtml = `
+                <div class="pagination-controls">
+                    <button onclick="loadPreviousPage()" id="prevBtn" ${!paginationState.nextCursor ? 'disabled' : ''}>
+                        ← Previous
+                    </button>
+                    <div class="pagination-info">
+                        Showing ${currentItems} items
+                        ${totalItems !== '?' ? ` of ${totalItems}` : ''}
+                    </div>
+                    <button onclick="loadNextPage()" id="nextBtn" ${!hasMore ? 'disabled' : ''}>
+                        Next →
+                    </button>
+                </div>
+            `;
+            
+            document.getElementById('pagination-top').innerHTML = paginationHtml;
+            document.getElementById('pagination-bottom').innerHTML = paginationHtml;
+            
+            // Update pagination state
+            paginationState.hasMore = hasMore;
+            paginationState.nextCursor = nextCursor;
+        }
+        
+        async function loadNextPage() {
+            if (!paginationState.hasMore || !paginationState.nextCursor) return;
+            
+            const statusEl = document.getElementById('status');
+            statusEl.style.display = 'inline';
+            statusEl.textContent = 'Loading next page...';
+            
+            try {
+                let url = currentEndpoint;
+                
+                // Add pagination parameters
+                const separator = url.includes('?') ? '&' : '?';
+                if (paginationState.currentBrowserType === 'timeline_events') {
+                    url += `${separator}offset=${paginationState.nextCursor}&limit=20`;
+                } else if (paginationState.currentBrowserType === 'veil_facets') {
+                    url += `${separator}after_facet_id=${paginationState.nextCursor}&limit=20`;
+                }
+                
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                currentData = data;
+                
+                // Show the updated data
+                showTreeView(data);
+                
+            } catch (error) {
+                console.error('Error loading next page:', error);
+                alert(`Error loading next page: ${error.message}`);
+            } finally {
+                statusEl.style.display = 'none';
+            }
+        }
+        
+        async function loadPreviousPage() {
+            // For simplicity, just go back in navigation stack
+            // A full implementation would require tracking previous cursors
+            goBack();
+        }
+        
+        function createTreeNode(key, value, depth, isExpanded = false, path = []) {
+            const nodeDiv = document.createElement('div');
+            nodeDiv.style.marginLeft = (depth * 20) + 'px';
+            
+            const isObject = typeof value === 'object' && value !== null;
+            const isArray = Array.isArray(value);
+            const hasChildren = isObject && Object.keys(value).length > 0;
+            const currentPath = [...path, key];
+            
+            // Determine if this node is editable
+            const isEditable = !hasChildren && isEditableField(currentPath, value);
+            
+            // Determine if this node is drillable
+            const drillInfo = isDrillableNode(currentPath, value);
+            const isDrillable = drillInfo !== null;
+            
+            // Determine if this node has HUD view capability
+            const hudInfo = isHUDViewableNode(currentPath, value);
+            const isHUDViewable = hudInfo !== null;
+            
+            // Create node header
+            const headerDiv = document.createElement('div');
+            headerDiv.className = isEditable ? 'editable-node' : (isDrillable ? 'drillable-node' : '');
+            headerDiv.style.cssText = `
+                display: flex;
+                align-items: center;
+                padding: 2px 0;
+                cursor: ${hasChildren ? 'pointer' : 'default'};
+                color: #eee;
+                font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+                font-size: 0.85rem;
+                line-height: 1.4;
+            `;
+            
+            // Expand/collapse indicator
+            if (hasChildren) {
+                const indicator = document.createElement('span');
+                indicator.textContent = isExpanded ? '▼ ' : '▶ ';
+                indicator.style.color = '#00d4aa';
+                indicator.style.marginRight = '4px';
+                indicator.style.width = '12px';
+                headerDiv.appendChild(indicator);
+            } else {
+                const spacer = document.createElement('span');
+                spacer.style.marginRight = '16px';
+                headerDiv.appendChild(spacer);
+            }
+            
+            // Key name
+            const keySpan = document.createElement('span');
+            keySpan.textContent = key;
+            keySpan.style.color = '#74b9ff';
+            keySpan.style.fontWeight = '600';
+            headerDiv.appendChild(keySpan);
+            
+            // Type and value preview
+            const valueSpan = document.createElement('span');
+            valueSpan.setAttribute('data-path', JSON.stringify(currentPath));
+            
+            if (isArray) {
+                valueSpan.textContent = `: Array(${value.length})`;
+                valueSpan.style.color = '#a29bfe';
+            } else if (isObject) {
+                valueSpan.textContent = `: Object(${Object.keys(value).length})`;
+                valueSpan.style.color = '#fd79a8';
+            } else {
+                const preview = String(value);
+                const truncated = preview.length > 100 ? preview.substring(0, 100) + '...' : preview;
+                valueSpan.textContent = `: ${JSON.stringify(truncated)}`;
+                valueSpan.style.color = getValueColor(typeof value);
+            }
+            headerDiv.appendChild(valueSpan);
+            
+            // Add edit button for editable fields
+            if (isEditable) {
+                const editBtn = document.createElement('button');
+                editBtn.textContent = '✏️';
+                editBtn.className = 'edit-btn';
+                editBtn.title = 'Edit this field';
+                editBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    startEdit(headerDiv, currentPath, value);
+                };
+                headerDiv.appendChild(editBtn);
+            }
+            
+            // Add drill-down button for drillable fields
+            if (isDrillable) {
+                const drillBtn = document.createElement('button');
+                drillBtn.textContent = '🔍';
+                drillBtn.className = 'drill-down-btn';
+                
+                // Set user-friendly tooltip based on drill-down type
+                let tooltip = 'Drill down';
+                if (drillInfo.type === 'veil_facets') {
+                    tooltip = 'Show facets';
+                } else if (drillInfo.type === 'timeline_events') {
+                    tooltip = 'Show events';
+                }
+                drillBtn.title = tooltip;
+                
+                drillBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    drillDown(drillInfo, currentPath);
+                };
+                headerDiv.appendChild(drillBtn);
+            }
+            
+            // Add HUD view button for HUD-viewable nodes  
+            if (isHUDViewable) {
+                const hudBtn = document.createElement('button');
+                hudBtn.textContent = '👁️';
+                hudBtn.className = 'hud-view-btn';
+                hudBtn.title = 'View HUD';
+                
+                hudBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    showHUDView(hudInfo, currentPath);
+                };
+                headerDiv.appendChild(hudBtn);
+            }
+            
+            nodeDiv.appendChild(headerDiv);
+            
+            // Children container
+            if (hasChildren) {
+                const childrenDiv = document.createElement('div');
+                childrenDiv.style.display = isExpanded ? 'block' : 'none';
+                
+                // Add children
+                if (isArray) {
+                    value.forEach((item, index) => {
+                        childrenDiv.appendChild(createTreeNode(`[${index}]`, item, depth + 1, false, currentPath));
+                    });
+                } else {
+                    Object.keys(value).forEach(childKey => {
+                        childrenDiv.appendChild(createTreeNode(childKey, value[childKey], depth + 1, false, currentPath));
+                    });
+                }
+                
+                nodeDiv.appendChild(childrenDiv);
+                
+                // Click handler for expand/collapse (only for containers, not editable items)
+                if (!isEditable && !isDrillable) {
+                    headerDiv.addEventListener('click', () => {
+                        const indicator = headerDiv.querySelector('span');
+                        const isCurrentlyExpanded = childrenDiv.style.display === 'block';
+                        
+                        if (isCurrentlyExpanded) {
+                            childrenDiv.style.display = 'none';
+                            indicator.textContent = '▶ ';
+                        } else {
+                            childrenDiv.style.display = 'block';
+                            indicator.textContent = '▼ ';
+                        }
+                    });
+                } else if (hasChildren && isDrillable) {
+                    // For drillable containers, only expand/collapse when clicking the indicator, not the whole header
+                    const indicator = headerDiv.querySelector('span');
+                    if (indicator) {
+                        indicator.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            const isCurrentlyExpanded = childrenDiv.style.display === 'block';
+                            
+                            if (isCurrentlyExpanded) {
+                                childrenDiv.style.display = 'none';
+                                indicator.textContent = '▶ ';
+                            } else {
+                                childrenDiv.style.display = 'block';
+                                indicator.textContent = '▼ ';
+                            }
+                        });
+                        indicator.style.cursor = 'pointer';
+                    }
+                }
+            }
+            
+            return nodeDiv;
+        }
+        
+        function getValueColor(type) {
+            const colors = {
+                string: '#00d4aa',
+                number: '#a29bfe',
+                boolean: '#6c5ce7',
+                undefined: '#999',
+                null: '#ff6b6b'
+            };
+            return colors[type] || '#eee';
+        }
+        
+        function setupInfiniteScroll(data) {
+            const scrollContainer = document.getElementById('scroll-container');
+            if (!scrollContainer) return;
+            
+            // Update pagination state based on data structure
+            if (data.facets) {
+                paginationState.currentBrowserType = 'veil_facets';
+                paginationState.hasMore = data.summary?.next_cursor !== null && data.summary?.next_cursor !== undefined;
+                paginationState.afterFacetId = data.summary?.next_cursor || null;
+                // Initialize with current facets and store total count
+                paginationState.allFacets = Object.values(data.facets);
+                paginationState.totalFacets = data.summary?.total_matching || data.summary?.total_facets;
+                
+                // Initialize realtime tracking with newest facet
+                if (paginationState.allFacets.length > 0) {
+                    // Sort by timestamp to find newest
+                    const sortedFacets = paginationState.allFacets.sort((a, b) => b.veil_timestamp - a.veil_timestamp);
+                    realtimeState.newestFacetId = sortedFacets[0].facet_id;
+                }
+            } else if (data.events) {
+                paginationState.currentBrowserType = 'timeline_events';
+                paginationState.hasMore = data.pagination?.has_more || false;
+                // For negative limit, use prev_offset; for positive limit, use next_offset
+                const isNegativeLimit = data.pagination?.limit < 0;
+                paginationState.nextOffset = isNegativeLimit ? 
+                    data.pagination?.prev_offset : 
+                    data.pagination?.next_offset || null;
+                // Initialize with current events and store total count
+                paginationState.allEvents = Array.isArray(data.events) ? [...data.events] : [];
+                paginationState.totalEvents = data.timeline_info?.total_events;
+                
+                // Initialize realtime tracking with newest event
+                if (paginationState.allEvents.length > 0) {
+                    // Sort by timestamp to find newest
+                    const sortedEvents = paginationState.allEvents.sort((a, b) => b.timestamp - a.timestamp);
+                    realtimeState.newestEventId = sortedEvents[0].id;
+                }
+            }
+            
+            // Remove any existing scroll listener
+            scrollContainer.onscroll = null;
+            
+            // Add scroll listener for infinite loading
+            scrollContainer.onscroll = async function() {
+                // Check if scrolled near bottom (within 200px)
+                const scrolledToBottom = this.scrollHeight - this.scrollTop <= this.clientHeight + 200;
+                
+                if (scrolledToBottom && !paginationState.isLoading && paginationState.hasMore) {
+                    await loadMoreData();
+                }
+            };
+        }
+        
+        async function loadMoreData() {
+            if (paginationState.isLoading || !paginationState.hasMore) return;
+            
+            paginationState.isLoading = true;
+            const loadingIndicator = document.getElementById('loading-indicator');
+            if (loadingIndicator) {
+                loadingIndicator.style.display = 'block';
+            }
+            
+            try {
+                let url = currentEndpoint;
+                
+                // Add pagination parameters based on type
+                const separator = url.includes('?') ? '&' : '?';
+                if (paginationState.currentBrowserType === 'timeline_events' && paginationState.nextOffset) {
+                    // Use negative limit to get older events (reverse chronological order)
+                    url += `${separator}offset=${paginationState.nextOffset}&limit=-20`;
+                } else if (paginationState.currentBrowserType === 'veil_facets' && paginationState.afterFacetId) {
+                    url += `${separator}after_facet_id=${paginationState.afterFacetId}&limit=20`;
+                } else {
+                    // No cursor available, can't load more
+                    paginationState.hasMore = false;
+                    return;
+                }
+                
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const newData = await response.json();
+                
+                // Merge new data with existing
+                if (newData.facets) {
+                    // Merge facets
+                    const newFacets = Object.values(newData.facets);
+                    if (newFacets.length > 0) {
+                        Object.assign(currentData.facets, newData.facets);
+                        paginationState.allFacets.push(...newFacets);
+                        
+                        // Update cursor - use the last facet's ID from the new batch
+                        // The summary.next_cursor should already be set correctly by the server
+                        // but if not, we use the last facet's ID
+                        if (newData.summary?.next_cursor) {
+                            paginationState.afterFacetId = newData.summary.next_cursor;
+                            paginationState.hasMore = true;
+                        } else if (newFacets.length > 0) {
+                            // Fallback: use the last facet's ID as cursor
+                            const sortedFacets = newFacets.sort((a, b) => b.veil_timestamp - a.veil_timestamp);
+                            paginationState.afterFacetId = sortedFacets[sortedFacets.length - 1].facet_id;
+                            // If we got fewer items than requested, assume no more data
+                            paginationState.hasMore = newFacets.length >= 20;
+                        } else {
+                            paginationState.hasMore = false;
+                            paginationState.afterFacetId = null;
+                        }
+                    } else {
+                        // No new facets returned, we've reached the end
+                        paginationState.hasMore = false;
+                    }
+                } else if (newData.events) {
+                    // Merge events
+                    if (!currentData.events) currentData.events = [];
+                    if (newData.events.length > 0) {
+                        currentData.events.push(...newData.events);
+                        paginationState.allEvents.push(...newData.events);
+                        
+                        // Update offset - for negative limit, use prev_offset (points to older events)
+                        // For positive limit, use next_offset (points to newer events)
+                        const isNegativeLimit = newData.pagination?.limit < 0;
+                        const offsetToUse = isNegativeLimit ? 
+                            newData.pagination?.prev_offset : 
+                            newData.pagination?.next_offset;
+                        
+                        if (offsetToUse !== null && offsetToUse !== undefined) {
+                            paginationState.nextOffset = offsetToUse;
+                            paginationState.hasMore = newData.pagination?.has_more || false;
+                        } else if (newData.events.length > 0) {
+                            // Fallback: use the last event's timestamp as offset
+                            const lastEvent = newData.events[newData.events.length - 1];
+                            paginationState.nextOffset = lastEvent.timestamp;
+                            // If we got fewer items than requested, assume no more data
+                            paginationState.hasMore = newData.events.length >= 20;
+                        } else {
+                            paginationState.hasMore = false;
+                            paginationState.nextOffset = null;
+                        }
+                    } else {
+                        // No new events returned, we've reached the end
+                        paginationState.hasMore = false;
+                    }
+                }
+                
+                // Append the new data to the view
+                showTreeView(newData, true);
+                
+            } catch (error) {
+                console.error('Error loading more data:', error);
+                // Don't show alert for pagination errors, just log them
+            } finally {
+                paginationState.isLoading = false;
+                if (loadingIndicator) {
+                    loadingIndicator.style.display = 'none';
+                }
+            }
+        }
+        
+        function renderFacetsStream(container, facets, append = false) {
+            // Convert facets object to array and sort by timestamp (newest first)
+            const facetArray = Object.values(facets).sort((a, b) => b.veil_timestamp - a.veil_timestamp);
+            
+            // If appending, create a fragment to add new facets
+            const fragment = append ? document.createDocumentFragment() : null;
+            const targetContainer = append ? fragment : container;
+            
+            // Clear container if not appending
+            if (!append) {
+                container.innerHTML = '';
+            }
+            
+            facetArray.forEach(facet => {
+                const facetDiv = document.createElement('div');
+                facetDiv.className = `veil-facet veil-facet--${facet.facet_type.toLowerCase()}`;
+                facetDiv.setAttribute('data-facet-id', facet.facet_id);
+                facetDiv.setAttribute('data-facet-type', facet.facet_type);
+                facetDiv.setAttribute('data-owner-element-id', facet.owner_element_id);
+                facetDiv.setAttribute('data-timestamp', facet.veil_timestamp);
+                
+                // Format timestamp
+                const timeStr = formatTimestamp(facet.veil_timestamp);
+                
+                // Get full summary without truncation - let CSS handle overflow
+                const summary = facet.content_summary || 'No summary available';
+                
+                facetDiv.innerHTML = `
+                    <div class="veil-facet__header">
+                        <div class="veil-facet__type-id">
+                            ${facet.facet_type.toUpperCase()} • ${facet.facet_id}
+                        </div>
+                        <div class="veil-facet__timestamp">${timeStr}</div>
+                    </div>
+                    <div class="veil-facet__summary">
+                        ${summary}
+                    </div>
+                `;
+                
+                // Add click handler to expand
+                facetDiv.addEventListener('click', () => {
+                    const expanded = facetDiv.querySelector('.veil-facet__expanded-content');
+                    if (expanded) {
+                        expanded.remove();
+                        facetDiv.classList.remove('veil-facet--expanded');
+                    } else {
+                        const expandedDiv = document.createElement('div');
+                        expandedDiv.className = 'veil-facet__expanded-content';
+                        
+                        // Stop click propagation to prevent collapsing when interacting with tree
+                        expandedDiv.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                        });
+                        
+                        expandedDiv.appendChild(createTreeNode(facet.facet_id, facet, 0, true, ['facets', facet.facet_id]));
+                        facetDiv.appendChild(expandedDiv);
+                        facetDiv.classList.add('veil-facet--expanded');
+                    }
+                });
+                
+                // Append to the appropriate container
+                if (append) {
+                    fragment.appendChild(facetDiv);
+                } else {
+                    container.appendChild(facetDiv);
+                }
+            });
+            
+            // If appending, add the fragment to the container
+            if (append && fragment) {
+                container.appendChild(fragment);
+            }
+        }
+        
+        function renderEventsStream(container, events, append = false) {
+            // Convert events object to array and sort by timestamp (newest first)
+            const eventArray = Array.isArray(events) ? events : Object.values(events);
+            eventArray.sort((a, b) => b.timestamp - a.timestamp);
+            
+            // If appending, create a fragment to add new events
+            const fragment = append ? document.createDocumentFragment() : null;
+            
+            // Clear container if not appending
+            if (!append) {
+                container.innerHTML = '';
+            }
+            
+            eventArray.forEach(event => {
+                const eventDiv = document.createElement('div');
+                eventDiv.className = 'timeline-event';
+                eventDiv.setAttribute('data-event-id', event.id);
+                eventDiv.setAttribute('data-timeline-id', event.timeline_id);
+                eventDiv.setAttribute('data-timestamp', event.timestamp);
+                if (event.payload && event.payload.event_type) {
+                    eventDiv.setAttribute('data-event-type', event.payload.event_type);
+                }
+                
+                // Format timestamp 
+                const timeStr = formatTimestamp(event.timestamp);
+                
+                // Get event type from payload
+                const eventType = event.payload?.event_type || 'unknown';
+                
+                // Create summary without truncation - let CSS handle overflow
+                let summary = `Event ${event.id}`;
+                if (event.payload?.payload) {
+                    if (typeof event.payload.payload === 'string') {
+                        summary = event.payload.payload;
+                    } else if (event.payload.payload.message) {
+                        summary = event.payload.payload.message;
+                    }
+                }
+                
+                eventDiv.innerHTML = `
+                    <div class="timeline-event__header">
+                        <div class="timeline-event__type">
+                            ${eventType.toUpperCase()} • ${event.id}
+                        </div>
+                        <div class="timeline-event__timestamp">${timeStr}</div>
+                    </div>
+                    <div class="timeline-event__summary">
+                        ${summary}
+                    </div>
+                `;
+                
+                // Add click handler to expand
+                eventDiv.addEventListener('click', () => {
+                    const expanded = eventDiv.querySelector('.timeline-event__expanded-content');
+                    if (expanded) {
+                        expanded.remove();
+                        eventDiv.classList.remove('timeline-event--expanded');
+                    } else {
+                        const expandedDiv = document.createElement('div');
+                        expandedDiv.className = 'timeline-event__expanded-content';
+                        
+                        // Stop click propagation to prevent collapsing when interacting with tree
+                        expandedDiv.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                        });
+                        
+                        expandedDiv.appendChild(createTreeNode(event.id, event, 0, true, ['events', event.id]));
+                        eventDiv.appendChild(expandedDiv);
+                        eventDiv.classList.add('timeline-event--expanded');
+                    }
+                });
+                
+                // Append to the appropriate container
+                if (append) {
+                    fragment.appendChild(eventDiv);
+                } else {
+                    container.appendChild(eventDiv);
+                }
+            });
+            
+            // If appending, add the fragment to the container
+            if (append && fragment) {
+                container.appendChild(fragment);
+            }
+        }
+        
+        function getFacetTypeColor(facetType) {
+            const colors = {
+                'event': '#a29bfe',
+                'status': '#00d4aa', 
+                'ambient': '#fd79a8'
+            };
+            return colors[facetType] || '#74b9ff';
+        }
+        
+        function formatTimestamp(timestamp) {
+            // For very small timestamps (like veil_timestamp), treat as relative
+            if (timestamp < 1000000) {
+                return `+${timestamp.toFixed(3)}s`;
+            }
+            
+            // For unix timestamps, format as readable time
+            const date = new Date(timestamp * 1000);
+            return date.toLocaleTimeString('en-US', { 
+                hour12: false, 
+                hour: '2-digit', 
+                minute: '2-digit', 
+                second: '2-digit' 
+            });
+        }
+        
+        async function updateDisplayWithFreshData() {
+            // Get the current tree container
+            const treeContainer = document.getElementById('tree-container');
+            if (!treeContainer) return;
+            
+            // Store which items are currently expanded
+            const expandedItems = new Set();
+            const expandedElements = treeContainer.querySelectorAll('.expanded-content');
+            expandedElements.forEach(el => {
+                const parent = el.parentElement;
+                const idElement = parent.querySelector('[style*="color: #74b9ff"]');
+                if (idElement && idElement.textContent) {
+                    // Extract the ID from the header (format: "TYPE • ID...")
+                    const match = idElement.textContent.match(/•\s*([^.]+)/);
+                    if (match) {
+                        expandedItems.add(match[1]);
+                    }
+                }
+            });
+            
+            // Clear and rebuild the container with fresh data
+            treeContainer.innerHTML = '';
+            
+            // Rebuild the view based on data type
+            if (currentData.facets && typeof currentData.facets === 'object') {
+                renderFacetsStream(treeContainer, currentData.facets);
+            } else if (currentData.events && typeof currentData.events === 'object') {
+                renderEventsStream(treeContainer, currentData.events);
+            } else {
+                treeContainer.appendChild(createTreeNode('root', currentData, 0, true));
+                return; // No need to restore expanded state for regular tree
+            }
+            
+            // Restore expanded state for stream views
+            setTimeout(() => {
+                const newCards = treeContainer.querySelectorAll('[style*="background: #16213e"]');
+                newCards.forEach(card => {
+                    const idElement = card.querySelector('[style*="color: #74b9ff"]');
+                    if (idElement && idElement.textContent) {
+                        const match = idElement.textContent.match(/•\s*([^.]+)/);
+                        if (match && expandedItems.has(match[1])) {
+                            // Click to expand this item
+                            card.click();
+                        }
+                    }
+                });
+            }, 50); // Small delay to allow DOM to settle
+        }
+        
+        async function updateSpecificItem(context, freshItem) {
+            // Find the specific expanded item in the UI and update its content
+            const treeContainer = document.getElementById('tree-container');
+            if (!treeContainer) return;
+            
+            // Look for expanded content that matches this item ID
+            const expandedElements = treeContainer.querySelectorAll('.expanded-content');
+            for (const expandedEl of expandedElements) {
+                const parent = expandedEl.parentElement;
+                const idElement = parent.querySelector('[style*="color: #74b9ff"]');
+                
+                if (idElement && idElement.textContent) {
+                    // Extract the ID from the header (format: "TYPE • ID...")
+                    const match = idElement.textContent.match(/•\s*([^.]+)/);
+                    if (match) {
+                        const displayedId = match[1];
+                        const targetId = context.type === 'veil_facet' ? context.facetId : context.eventId;
+                        
+                        // Check if this matches our updated item (compare first 8 chars)
+                        if (targetId.startsWith(displayedId)) {
+                            // This is the item we need to update!
+                            // First, capture the current tree expansion state
+                            const treeState = captureTreeState(expandedEl);
+                            
+                            // Clear the expanded content and rebuild it with fresh data
+                            expandedEl.innerHTML = '';
+                            
+                            const itemData = context.type === 'veil_facet' ? freshItem.facet : freshItem.event;
+                            const pathPrefix = context.type === 'veil_facet' ? ['facets', context.facetId] : ['events', context.eventId];
+                            
+                            const newTreeNode = createTreeNode(targetId, itemData, 0, true, pathPrefix);
+                            expandedEl.appendChild(newTreeNode);
+                            
+                            // Restore the tree expansion state
+                            setTimeout(() => {
+                                restoreTreeState(expandedEl, treeState);
+                            }, 100); // Increased delay to ensure DOM is fully settled
+                            
+                            return; // Found and updated the item
+                        }
+                    }
+                }
+            }
+            
+        }
+        
+        function captureTreeState(containerElement) {
+            // Capture which tree nodes are currently expanded
+            const expandedPaths = new Set();
+            
+            
+            function walkTree(element, currentPath = []) {
+                
+                // Look for direct children div (the children container)
+                if (element.children.length >= 2) {
+                    const childrenDiv = element.children[1]; // Second child after headerDiv
+                    
+                    if (childrenDiv && childrenDiv.style.display === 'block') {
+                        // This node is expanded, record its path
+                        const pathStr = currentPath.join('.');
+                        expandedPaths.add(pathStr);
+                        
+                        // Walk through all direct child nodes
+                        Array.from(childrenDiv.children).forEach((childNode, index) => {
+                            // Extract the key from the header div
+                            const headerDiv = childNode.children[0];
+                            if (headerDiv) {
+                                // Extract key from the second span (first span is empty spacing, second has the key)
+                                const spans = headerDiv.querySelectorAll('span');
+                                
+                                if (spans.length >= 2) {
+                                    // The key is in the second span
+                                    const keySpan = spans[1];
+                                    const key = keySpan.textContent.trim();
+                                    
+                                    if (key) {
+                                        walkTree(childNode, [...currentPath, key]);
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+            
+            // Start from the actual tree node (first child of the container)
+            if (containerElement.children.length > 0) {
+                const rootTreeNode = containerElement.children[0];
+                walkTree(rootTreeNode);
+            }
+            
+            return expandedPaths;
+        }
+        
+        function restoreTreeState(containerElement, expandedPaths) {
+            // Restore the expanded state for tree nodes
+            if (!expandedPaths || expandedPaths.size === 0) return;
+            
+            function walkTree(element, currentPath = []) {
+                const currentPathStr = currentPath.join('.');
+                
+                // Check if this node should be expanded
+                if (expandedPaths.has(currentPathStr)) {
+                    // Find the expand indicator in the header div
+                    const headerDiv = element.children[0];
+                    if (headerDiv) {
+                        const indicator = headerDiv.querySelector('span');
+                        if (indicator && indicator.textContent.includes('▶')) {
+                            // Simulate click to expand
+                            indicator.click();
+                        }
+                    }
+                    
+                    // After expanding, walk through children
+                    setTimeout(() => {
+                        const childrenDiv = element.children[1];
+                        if (childrenDiv) {
+                            Array.from(childrenDiv.children).forEach((childNode) => {
+                                const childHeaderDiv = childNode.children[0];
+                                if (childHeaderDiv) {
+                                    // Extract key from the second span (same logic as capture)
+                                    const spans = childHeaderDiv.querySelectorAll('span');
+                                    if (spans.length >= 2) {
+                                        const keySpan = spans[1];
+                                        const key = keySpan.textContent.trim();
+                                        if (key) {
+                                            walkTree(childNode, [...currentPath, key]);
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    }, 50); // Small delay to let expansion animation complete
+                }
+            }
+            
+            // Start from the actual tree node (first child of the container)
+            if (containerElement.children.length > 0) {
+                const rootTreeNode = containerElement.children[0];
+                walkTree(rootTreeNode);
+            }
+        }
+        
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        // Edit functionality
+        function isEditableField(path, value) {
+            // Only allow editing of simple values (not objects or arrays)
+            if (typeof value === 'object' && value !== null) {
+                return false;
+            }
+            
+            // Determine what type of data we're dealing with based on path
+            const pathStr = path.join('.');
+            
+            // Timeline event fields (events are identifiable by having an 'id' field)
+            if (pathStr.includes('events') && (
+                pathStr.endsWith('timestamp') ||
+                pathStr.includes('payload.') ||
+                pathStr.endsWith('parent_ids') ||
+                pathStr.endsWith('timeline_id')
+            )) {
+                return true;
+            }
+            
+            // VEIL facet fields (facets are identifiable by having 'facet_id' field)
+            if (pathStr.includes('facets') && (
+                pathStr.endsWith('veil_timestamp') ||
+                pathStr.endsWith('owner_element_id') ||
+                pathStr.endsWith('links_to') ||
+                pathStr.includes('properties.')
+            )) {
+                return true;
+            }
+            
+            return false;
+        }
+        
+        function findEditableContext(path) {
+            const pathStr = path.join('.');
+            
+            // Look for timeline event context
+            const eventMatch = pathStr.match(/.*events\.([^.]+)/);
+            if (eventMatch) {
+                const eventId = eventMatch[1];
+                // Find the event data to get space_id and timeline_id
+                const eventData = getValueAtPath(currentData, path.slice(0, -1));
+                
+                // For stream views, get space ID from current data or endpoint
+                let spaceId = getSpaceIdFromPath(path);
+                if (!spaceId && currentData.space_id) {
+                    spaceId = currentData.space_id;
+                } else if (!spaceId && currentEndpoint) {
+                    // Extract from endpoint like /timelines/space_id/timeline_id
+                    const endpointMatch = currentEndpoint.match(/\/timelines\/([^\/]+)/);
+                    if (endpointMatch) spaceId = endpointMatch[1];
+                }
+                
+                return {
+                    type: 'timeline_event',
+                    eventId: eventId,
+                    spaceId: spaceId,
+                    timelineId: eventData?.timeline_id || currentData.timeline_id
+                };
+            }
+            
+            // Look for VEIL facet context
+            const facetMatch = pathStr.match(/.*facets\.([^.]+)/);
+            if (facetMatch) {
+                const facetId = facetMatch[1];
+                
+                // For stream views, get space ID from current data or endpoint
+                let spaceId = getSpaceIdFromPath(path);
+                if (!spaceId && currentData.space_id) {
+                    spaceId = currentData.space_id;
+                } else if (!spaceId && currentEndpoint) {
+                    // Extract from endpoint like /veil/space_id/facets
+                    const endpointMatch = currentEndpoint.match(/\/veil\/([^\/]+)/);
+                    if (endpointMatch) spaceId = endpointMatch[1];
+                }
+                
+                return {
+                    type: 'veil_facet',
+                    facetId: facetId,
+                    spaceId: spaceId
+                };
+            }
+            
+            return null;
+        }
+        
+        function getSpaceIdFromPath(path) {
+            // Look for space ID patterns in the path
+            const pathStr = path.join('.');
+            const spaceMatch = pathStr.match(/spaces\.([^.]+)/);
+            return spaceMatch ? spaceMatch[1] : null;
+        }
+        
+        function getValueAtPath(obj, path) {
+            return path.reduce((current, key) => {
+                if (current === null || current === undefined) return undefined;
+                return current[key];
+            }, obj);
+        }
+        
+        function startEdit(headerDiv, path, currentValue) {
+            // Don't start edit if already editing
+            if (headerDiv.querySelector('.edit-input')) {
+                return;
+            }
+            
+            const context = findEditableContext(path);
+            if (!context) {
+                console.warn('Could not determine edit context for path:', path);
+                return;
+            }
+            
+            const valueSpan = headerDiv.querySelector('span[data-path]');
+            if (!valueSpan) return;
+            
+            // Create input field
+            const input = document.createElement('input');
+            input.className = 'edit-input';
+            input.type = typeof currentValue === 'number' ? 'number' : 'text';
+            input.value = typeof currentValue === 'string' ? currentValue : JSON.stringify(currentValue);
+            
+            // Create action buttons
+            const actionsDiv = document.createElement('div');
+            actionsDiv.className = 'edit-actions';
+            
+            const saveBtn = document.createElement('button');
+            saveBtn.textContent = '✓';
+            saveBtn.className = 'edit-save';
+            saveBtn.title = 'Save (Enter)';
+            
+            const cancelBtn = document.createElement('button');
+            cancelBtn.textContent = '✗';
+            cancelBtn.className = 'edit-cancel';
+            cancelBtn.title = 'Cancel (Esc)';
+            
+            actionsDiv.appendChild(saveBtn);
+            actionsDiv.appendChild(cancelBtn);
+            
+            // Replace value span with input
+            const originalDisplay = valueSpan.style.display;
+            valueSpan.style.display = 'none';
+            valueSpan.parentNode.insertBefore(input, valueSpan.nextSibling);
+            valueSpan.parentNode.insertBefore(actionsDiv, input.nextSibling);
+            
+            // Focus input and select text
+            input.focus();
+            input.select();
+            
+            // Save function
+            const saveEdit = async () => {
+                const newValue = input.type === 'number' ? parseFloat(input.value) : 
+                                input.value.startsWith('{') || input.value.startsWith('[') ? 
+                                JSON.parse(input.value) : input.value;
+                
+                await commitEdit(context, path, newValue, headerDiv);
+                cleanupEdit();
+            };
+            
+            // Cancel function
+            const cancelEdit = () => {
+                cleanupEdit();
+            };
+            
+            // Cleanup function
+            const cleanupEdit = () => {
+                input.remove();
+                actionsDiv.remove();
+                valueSpan.style.display = originalDisplay;
+            };
+            
+            // Event handlers
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    saveEdit();
+                } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    cancelEdit();
+                }
+                e.stopPropagation();
+            });
+            
+            saveBtn.onclick = (e) => {
+                e.stopPropagation();
+                saveEdit();
+            };
+            
+            cancelBtn.onclick = (e) => {
+                e.stopPropagation();
+                cancelEdit();
+            };
+            
+            // Click outside to cancel
+            const clickOutsideHandler = (e) => {
+                if (!headerDiv.contains(e.target)) {
+                    cancelEdit();
+                    document.removeEventListener('click', clickOutsideHandler);
+                }
+            };
+            setTimeout(() => {
+                document.addEventListener('click', clickOutsideHandler);
+            }, 100);
+        }
+        
+        async function commitEdit(context, path, newValue, headerDiv) {
+            // Show status
+            const statusSpan = document.createElement('span');
+            statusSpan.className = 'edit-status';
+            statusSpan.textContent = 'Saving...';
+            headerDiv.appendChild(statusSpan);
+            
+            try {
+                let response;
+                const fieldName = path[path.length - 1];
+                
+                if (context.type === 'timeline_event') {
+                    // Update timeline event
+                    const updateData = {};
+                    
+                    // Handle nested payload fields
+                    if (path.includes('payload') && path.length > 2) {
+                        const payloadField = path[path.length - 1];
+                        updateData.payload = { [payloadField]: newValue };
+                    } else {
+                        updateData[fieldName] = newValue;
+                    }
+                    
+                    console.log('Updating timeline event:', context.eventId, updateData);
+                    
+                    const url = `/events/${context.eventId}`;
+                    response = await fetch(url, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(updateData)
+                    });
+                    
+                } else if (context.type === 'veil_facet') {
+                    // Update VEIL facet
+                    const updateData = {};
+                    
+                    // Handle nested properties fields
+                    if (path.includes('properties') && path.length > 2) {
+                        const propertyField = path[path.length - 1];
+                        updateData.properties = { [propertyField]: newValue };
+                    } else {
+                        updateData[fieldName] = newValue;
+                    }
+                    
+                    console.log('Updating VEIL facet:', context.spaceId, context.facetId, updateData);
+                    
+                    const url = `/veil/${context.spaceId}/facets/${context.facetId}`;
+                    response = await fetch(url, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(updateData)
+                    });
+                }
+                
+                if (response && response.ok) {
+                    const result = await response.json();
+                    console.log('Edit successful:', result);
+                    
+                    statusSpan.textContent = 'Saved ✓';
+                    statusSpan.className = 'edit-status edit-success';
+                    
+                    // Seamlessly fetch updated individual item instead of full refresh
+                    try {
+                        let itemEndpoint = null;
+                        let itemKey = null;
+                        
+                        if (context.type === 'veil_facet') {
+                            itemEndpoint = `/veil/${context.spaceId}/facets/${context.facetId}`;
+                            itemKey = context.facetId;
+                        } else if (context.type === 'timeline_event') {
+                            itemEndpoint = `/events/${context.eventId}`;
+                            itemKey = context.eventId;
+                        }
+                        
+                        if (itemEndpoint) {
+                            const freshResponse = await fetch(itemEndpoint);
+                            if (freshResponse.ok) {
+                                const freshItem = await freshResponse.json();
+                                
+                                // Update the specific item in currentData
+                                if (context.type === 'veil_facet' && currentData.facets) {
+                                    currentData.facets[itemKey] = freshItem.facet;
+                                } else if (context.type === 'timeline_event' && currentData.events) {
+                                    currentData.events[itemKey] = freshItem.event;
+                                }
+                                
+                                // Update just the specific expanded item in the UI
+                                await updateSpecificItem(context, freshItem);
+                            } else {
+                                throw new Error(`Individual item fetch failed: ${freshResponse.status}`);
+                            }
+                        } else {
+                            throw new Error('No individual endpoint available for this item type');
+                        }
+                    } catch (fetchError) {
+                        console.warn('Failed to fetch individual item after edit, falling back to full refresh:', fetchError);
+                        // Fallback to full refresh
+                        setTimeout(async () => {
+                            await refreshData();
+                        }, 500);
+                    }
+                    
+                    // Remove status indicator
+                    setTimeout(() => {
+                        statusSpan.remove();
+                    }, 1000);
+                    
+                } else {
+                    throw new Error(`HTTP ${response?.status}: ${response?.statusText || 'Unknown error'}`);
+                }
+                
+            } catch (error) {
+                console.error('Edit failed:', error);
+                statusSpan.textContent = `Error: ${error.message}`;
+                statusSpan.className = 'edit-status edit-error';
+                
+                // Remove error message after 3 seconds
+                setTimeout(() => {
+                    statusSpan.remove();
+                }, 3000);
+            }
+        }
+        
+        // Drill-down functionality for tree navigation
+        function isDrillableNode(path, value) {
+            const pathStr = path.join('.');
+            const key = path[path.length - 1];
+            
+            // 1. VEIL overview drill-down to space facets (from /veil endpoint)
+            if (currentEndpoint === '/veil' && pathStr.match(/^root\.spaces\.[^.]+$/) && typeof value === 'object' && Object.keys(value).length > 0) {
+                const spaceId = key; // The key is the space ID in this case
+                return { type: 'veil_facets', spaceId: spaceId };
+            }
+            
+            // 2. Individual timeline drill-down to timeline events (from timelines overview)
+            if (pathStr.match(/^root\.spaces\.[^.]+\.timelines\.[^.]+$/) && typeof value === 'object' && value.timeline_id) {
+                const timelineId = value.timeline_id;
+                const spaceId = getSpaceIdFromPath(path);
+                return { type: 'timeline_events', spaceId: spaceId, timelineId: timelineId };
+            }
+            
+            return null;
+        }
+        
+        function isHUDViewableNode(path, value) {
+            const key = path[path.length - 1];
+            
+            // Helper function to check if a node is space-like
+            function isSpaceLike(obj) {
+                if (typeof obj !== 'object' || obj === null) return false;
+                return obj.type || obj.id || obj.name || obj.elements || 
+                       obj.agent_id || obj.space_info || obj.agent_loop ||
+                       obj.components || obj.hud;
+            }
+            
+            // Helper function to check if components contain facet-aware HUD component
+            function hasFacetAwareHUDComponent(components) {
+                if (typeof components !== 'object' || components === null) return false;
+                for (const [compId, comp] of Object.entries(components)) {
+                    if (typeof comp === 'object' && comp !== null) {
+                        // Check if component ID contains facet-aware patterns
+                        if (compId.toLowerCase().includes('facetawarehudcomponent') ||
+                            compId.toLowerCase().includes('facet_aware_hud') ||
+                            compId.toLowerCase().includes('hud')) {
+                            return true;
+                        }
+                        // Check component type
+                        if (comp.component_type && 
+                            (comp.component_type.toLowerCase().includes('facetawarehud') ||
+                             comp.component_type.toLowerCase().includes('hud'))) {
+                            return true;
+                        }
+                        // Check if it has COMPONENT_TYPE property
+                        if (comp.COMPONENT_TYPE && 
+                            comp.COMPONENT_TYPE.toLowerCase().includes('hud')) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+            
+            // Main logic: Show eye icon for any space-like tree that has either:
+            // 1. A 'hud' child, OR
+            // 2. A 'components' child which has a facet-aware HUD component
+            if (isSpaceLike(value)) {
+                // Check if it has a direct 'hud' child
+                if (value.hud) {
+                    const spaceId = key || getSpaceIdFromPath(path);
+                    if (spaceId) {
+                        return { type: 'space_hud', spaceId: spaceId };
+                    }
+                }
+                
+                // Check if it has a 'components' child with facet-aware HUD component
+                if (value.components && hasFacetAwareHUDComponent(value.components)) {
+                    const spaceId = key || getSpaceIdFromPath(path);
+                    if (spaceId) {
+                        return { type: 'space_hud', spaceId: spaceId };
+                    }
+                }
+            }
+            
+            return null;
+        }
+        
+        async function drillDown(drillInfo, originalPath) {
+            // Push current state to navigation stack
+            pushNavigation();
+            
+            // Reset pagination state for new drill-down load
+            paginationState = {
+                hasMore: false,
+                nextCursor: null,
+                currentSpaceId: drillInfo.spaceId || null,
+                currentBrowserType: null,
+                isLoading: false,
+                allFacets: [],
+                allEvents: [],
+                nextOffset: null,
+                afterFacetId: null
+            };
+            
+            const statusEl = document.getElementById('status');
+            statusEl.style.display = 'inline';
+            statusEl.textContent = 'Loading drill-down data...';
+            
+            try {
+                let endpoint = '';
+                let title = '';
+                let breadcrumb = '';
+                
+                switch(drillInfo.type) {
+                    case 'timeline_events':
+                        endpoint = `/timelines/${drillInfo.spaceId}/${drillInfo.timelineId}?limit=-20`;
+                        title = `⏱️ Timeline Events: ${drillInfo.timelineId}`;
+                        breadcrumb = `Inspector → Timeline Events → ${drillInfo.spaceId} → ${drillInfo.timelineId}`;
+                        paginationState.currentBrowserType = 'timeline_events';
+                        break;
+                        
+                    case 'space_timelines':
+                        endpoint = `/timelines/${drillInfo.spaceId}?limit=-20`;
+                        title = `⏱️ Timeline Overview: ${drillInfo.spaceId}`;
+                        breadcrumb = `Inspector → Timelines → ${drillInfo.spaceId}`;
+                        paginationState.currentBrowserType = 'timeline_events';
+                        break;
+                        
+                    case 'all_timeline_events':
+                        endpoint = `/timelines?limit=-20`;
+                        title = `⏱️ All Timeline Events`;
+                        breadcrumb = `Inspector → Timeline Events → All Spaces`;
+                        paginationState.currentBrowserType = 'timeline_events';
+                        break;
+                        
+                    case 'veil_facets':
+                        endpoint = `/veil/${drillInfo.spaceId}/facets?limit=20`;
+                        title = `🎭 VEIL Facets: ${drillInfo.spaceId}`;
+                        breadcrumb = `Inspector → VEIL Facets → ${drillInfo.spaceId}`;
+                        paginationState.currentBrowserType = 'veil_facets';
+                        break;
+                        
+                    case 'veil_facet_details':
+                        endpoint = `/veil/${drillInfo.spaceId}/facets/${drillInfo.facetId}`;
+                        title = `🎭 VEIL Facet Details: ${drillInfo.facetId}`;
+                        breadcrumb = `Inspector → VEIL Facets → ${drillInfo.spaceId} → ${drillInfo.facetId}`;
+                        paginationState.currentBrowserType = 'veil_facets';
+                        break;
+                        
+                    case 'space_elements':
+                        // For elements, we drill down to a filtered view of the spaces endpoint
+                        endpoint = `/spaces`;
+                        title = `🏗️ Space Elements: ${drillInfo.spaceId}`;
+                        breadcrumb = `Inspector → Elements → ${drillInfo.spaceId}`;
+                        paginationState.currentBrowserType = 'spaces_detailed';
+                        break;
+                        
+                    case 'agents_detailed':
+                        endpoint = `/agents`;
+                        title = `🤖 Agent Details`;
+                        breadcrumb = `Inspector → Agents → Detailed View`;
+                        paginationState.currentBrowserType = 'agents';
+                        break;
+                        
+                    default:
+                        throw new Error(`Unknown drill-down type: ${drillInfo.type}`);
+                }
+                
+                const response = await fetch(endpoint);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                
+                // Filter data if needed for specific drill-downs
+                if (drillInfo.type === 'space_elements' && data.spaces && drillInfo.spaceId) {
+                    // Filter to show only the specific space's elements
+                    const filteredData = {
+                        ...data,
+                        spaces: {
+                            [drillInfo.spaceId]: data.spaces[drillInfo.spaceId]
+                        }
+                    };
+                    currentData = filteredData;
+                } else {
+                    currentData = data;
+                }
+                
+                currentEndpoint = endpoint;
+                
+                // Update pagination state
+                paginationState.currentSpaceId = drillInfo.spaceId;
+                
+                // Update UI
+                updateBreadcrumb(breadcrumb);
+                document.getElementById('data-info').textContent = `${title} • ${formatBytes(JSON.stringify(currentData).length)}`;
+                
+                // Show the drilled-down data
+                showTreeView(currentData);
+                
+            } catch (error) {
+                console.error('Error during drill-down:', error);
+                alert(`Error loading drill-down data: ${error.message}`);
+                // Don't pop navigation on error, let user use back button
+            } finally {
+                statusEl.style.display = 'none';
+            }
+        }
+        
+        async function showHUDView(hudInfo, originalPath) {
+            const statusEl = document.getElementById('status');
+            statusEl.style.display = 'inline';
+            statusEl.textContent = 'Loading HUD view...';
+            
+            try {
+                let endpoint = '';
+                let title = '';
+                let breadcrumb = '';
+                
+                switch(hudInfo.type) {
+                    case 'space_hud':
+                        // Use the inspector's render endpoint
+                        endpoint = `/spaces/${hudInfo.spaceId}/render?format=markdown`;
+                        title = `👁️ HUD View: ${hudInfo.spaceId}`;
+                        breadcrumb = `Inspector → HUD View → ${hudInfo.spaceId}`;
+                        break;
+                        
+                    default:
+                        throw new Error(`Unknown HUD view type: ${hudInfo.type}`);
+                }
+                
+                const response = await fetch(endpoint);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                // Check if response is JSON (error) or text (rendered HUD)
+                const contentType = response.headers.get('content-type');
+                if (contentType && contentType.includes('application/json')) {
+                    // Error response
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Unknown error from HUD endpoint');
+                } else {
+                    // Success - rendered HUD content
+                    const hudContent = await response.text();
+                    
+                    // Show HUD content in modal
+                    showHUDContent(hudContent, hudInfo);
+                }
+                
+            } catch (error) {
+                console.error('Error during HUD view:', error);
+                alert(`Error loading HUD view: ${error.message}`);
+                // Don't pop navigation on error, let user use back button
+            } finally {
+                statusEl.style.display = 'none';
+            }
+        }
+        
+        function showHUDContent(hudContent, hudInfo) {
+            // Show the modal
+            const modal = document.getElementById('hud-modal');
+            const modalTitle = document.getElementById('hud-modal-title');
+            const modalBody = document.getElementById('hud-modal-body');
+            
+            // Set modal title
+            modalTitle.textContent = `HUD View: ${hudInfo.spaceId}`;
+            
+            // Clear and populate modal body
+            modalBody.innerHTML = '';
+            
+            // Create HUD content container
+            const hudContainer = document.createElement('div');
+            hudContainer.className = 'hud-content-container';
+            hudContainer.style.margin = '0'; // Remove margin for modal
+            hudContainer.style.borderRadius = '0'; // Remove border radius for modal
+            hudContainer.style.background = 'transparent'; // Transparent background in modal
+            
+            // Create header with format controls
+            const headerDiv = document.createElement('div');
+            headerDiv.className = 'hud-content-header';
+            headerDiv.style.paddingTop = '0'; // Reduce padding since modal has its own header
+            
+            // Format controls
+            const controlsDiv = document.createElement('div');
+            controlsDiv.className = 'hud-format-controls';
+            
+            const formats = [
+                { key: 'text', label: 'Text' },
+                { key: 'markdown', label: 'Markdown' }
+            ];
+            
+            let currentFormat = 'markdown'; // Start with markdown
+            
+            formats.forEach(format => {
+                const btn = document.createElement('button');
+                btn.className = `hud-format-btn ${format.key === currentFormat ? 'active' : ''}`;
+                btn.textContent = format.label;
+                btn.onclick = () => switchHUDFormat(format.key, hudInfo, controlsDiv);
+                controlsDiv.appendChild(btn);
+            });
+            
+            headerDiv.appendChild(controlsDiv);
+            hudContainer.appendChild(headerDiv);
+            
+            // Content area
+            const contentDiv = document.createElement('div');
+            contentDiv.id = 'hud-content-display';
+            contentDiv.textContent = hudContent;
+            hudContainer.appendChild(contentDiv);
+            
+            modalBody.appendChild(hudContainer);
+            
+            // Show the modal
+            modal.style.display = 'flex';
+            
+            // Store hudInfo globally for format switching
+            window.currentHudInfo = hudInfo;
+        }
+        
+        function closeHUDModal() {
+            const modal = document.getElementById('hud-modal');
+            modal.style.display = 'none';
+            
+            // Clean up global state
+            window.currentHudInfo = null;
+        }
+        
+        async function refreshHUDModal() {
+            if (!window.currentHudInfo) {
+                console.error('No HUD info available for refresh');
+                return;
+            }
+            
+            const refreshBtn = document.querySelector('.hud-modal-refresh');
+            const originalContent = refreshBtn.innerHTML;
+            
+            try {
+                // Show loading state
+                refreshBtn.innerHTML = '⏳';
+                refreshBtn.disabled = true;
+                refreshBtn.style.transform = 'rotate(180deg)';
+                
+                // Get current format from active button
+                const activeFormatBtn = document.querySelector('.hud-format-btn.active');
+                const currentFormat = activeFormatBtn ? activeFormatBtn.textContent.toLowerCase() : 'markdown';
+                
+                // Fetch fresh content
+                const endpoint = `/spaces/${window.currentHudInfo.spaceId}/render?format=${currentFormat}`;
+                const response = await fetch(endpoint);
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const contentType = response.headers.get('content-type');
+                if (contentType && contentType.includes('application/json')) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Unknown error from HUD endpoint');
+                }
+                
+                // Get the fresh content
+                const freshContent = await response.text();
+                
+                // Update the content display
+                const contentDisplay = document.getElementById('hud-content-display');
+                if (contentDisplay) {
+                    contentDisplay.textContent = freshContent;
+                }
+                
+                // Brief success animation
+                refreshBtn.innerHTML = '✅';
+                refreshBtn.style.transform = 'rotate(360deg)';
+                
+                setTimeout(() => {
+                    refreshBtn.innerHTML = originalContent;
+                    refreshBtn.style.transform = 'rotate(0deg)';
+                }, 1000);
+                
+            } catch (error) {
+                console.error('Error refreshing HUD content:', error);
+                
+                // Show error state
+                refreshBtn.innerHTML = '❌';
+                refreshBtn.style.transform = 'rotate(0deg)';
+                
+                setTimeout(() => {
+                    refreshBtn.innerHTML = originalContent;
+                }, 2000);
+                
+                alert(`Error refreshing HUD: ${error.message}`);
+            } finally {
+                refreshBtn.disabled = false;
+            }
+        }
+        
+        // Add keyboard navigation for the modal
+        document.addEventListener('keydown', function(event) {
+            const modal = document.getElementById('hud-modal');
+            if (modal.style.display === 'flex') {
+                if (event.key === 'Escape') {
+                    closeHUDModal();
+                    event.preventDefault();
+                } else if (event.key === 'F5' || (event.ctrlKey && event.key === 'r')) {
+                    // Refresh HUD content with F5 or Ctrl+R
+                    event.preventDefault();
+                    refreshHUDModal();
+                }
+            }
+        });
+        
+        async function switchHUDFormat(format, hudInfo, controlsContainer) {
+            const statusEl = document.getElementById('status');
+            statusEl.style.display = 'inline';
+            statusEl.textContent = `Switching to ${format} format...`;
+            
+            try {
+                const endpoint = `/spaces/${hudInfo.spaceId}/render?format=${format}`;
+                const response = await fetch(endpoint);
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const contentType = response.headers.get('content-type');
+                if (contentType && contentType.includes('application/json')) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Unknown error from HUD endpoint');
+                } else {
+                    const hudContent = await response.text();
+                    
+                    // Update content display
+                    const contentDiv = document.getElementById('hud-content-display');
+                    contentDiv.textContent = hudContent;
+                    
+                    // Update active button
+                    const buttons = controlsContainer.querySelectorAll('.hud-format-btn');
+                    buttons.forEach(btn => {
+                        btn.classList.toggle('active', btn.textContent.toLowerCase() === format);
+                    });
+                }
+                
+            } catch (error) {
+                console.error('Error switching HUD format:', error);
+                alert(`Error switching format: ${error.message}`);
+            } finally {
+                statusEl.style.display = 'none';
+            }
+        }
+        
+        // Navigation via sidebar links - no keyboard handlers needed since we removed dropdown
+        
+        // Navigation helpers
+        function updateBreadcrumb(path) {
+            const breadcrumbEl = document.getElementById('breadcrumb');
+            breadcrumbEl.textContent = path;
+        }
+        
+        function updateStreamProgress(loaded, total, streamType) {
+            const progressEl = document.getElementById('stream-progress');
+            if (total && loaded !== undefined) {
+                const percentage = Math.round((loaded / total) * 100);
+                progressEl.textContent = `${streamType}: ${loaded.toLocaleString()} / ${total.toLocaleString()} (${percentage}%)`;
+                progressEl.style.display = 'inline';
+            } else {
+                progressEl.style.display = 'none';
+            }
+        }
+        
+        function hideStreamProgress() {
+            document.getElementById('stream-progress').style.display = 'none';
+        }
+        
+        function toggleRealtime() {
+            const toggleBtn = document.getElementById('realtimeToggle');
+            
+            if (realtimeState.enabled) {
+                // Disable realtime
+                realtimeState.enabled = false;
+                if (realtimeState.intervalId) {
+                    clearInterval(realtimeState.intervalId);
+                    realtimeState.intervalId = null;
+                }
+                toggleBtn.textContent = '🔴 Realtime';
+                toggleBtn.style.backgroundColor = '';
+                console.log('Realtime streaming disabled');
+            } else {
+                // Enable realtime
+                realtimeState.enabled = true;
+                toggleBtn.textContent = '🟢 Realtime';
+                toggleBtn.style.backgroundColor = '#00d4aa';
+                toggleBtn.style.color = '#000';
+                startRealtimePolling();
+                console.log('Realtime streaming enabled');
+            }
+        }
+        
+        function startRealtimePolling() {
+            if (!realtimeState.enabled) return;
+            
+            // Clear any existing interval
+            if (realtimeState.intervalId) {
+                clearInterval(realtimeState.intervalId);
+            }
+            
+            // Start polling for new data
+            realtimeState.intervalId = setInterval(async () => {
+                if (!realtimeState.enabled) return;
+                
+                try {
+                    await pollForNewData();
+                } catch (error) {
+                    console.error('Realtime polling error:', error);
+                }
+            }, realtimeState.pollInterval);
+            
+            // Initial poll
+            setTimeout(pollForNewData, 100);
+        }
+        
+        async function pollForNewData() {
+            if (!currentEndpoint || !realtimeState.enabled) return;
+            
+            // Only poll for stream views
+            if (paginationState.currentBrowserType !== 'veil_facets' && 
+                paginationState.currentBrowserType !== 'timeline_events') {
+                return;
+            }
+            
+            try {
+                // Strip existing query parameters from currentEndpoint to avoid duplication
+                let baseUrl = currentEndpoint;
+                const queryIndex = baseUrl.indexOf('?');
+                if (queryIndex !== -1) {
+                    baseUrl = baseUrl.substring(0, queryIndex);
+                }
+                
+                // Build realtime polling URL to get items newer than what we have
+                let url = baseUrl;
+                if (paginationState.currentBrowserType === 'timeline_events') {
+                    if (paginationState.allEvents.length > 0) {
+                        // Get events newer than our newest timestamp using positive limit
+                        const newestTimestamp = Math.max(...paginationState.allEvents.map(e => e.timestamp));
+                        url += `?offset=${newestTimestamp}&limit=20`;
+                    } else {
+                        // No events loaded yet, get latest events
+                        url += `?limit=-20`;
+                    }
+                } else if (paginationState.currentBrowserType === 'veil_facets') {
+                    if (paginationState.allFacets.length > 0 && realtimeState.newestFacetId) {
+                        // Get facets newer than our newest facet using cursor
+                        url += `?after_facet_id=${realtimeState.newestFacetId}&limit=-20`;
+                    } else {
+                        // No facets loaded yet, get latest facets  
+                        url += `?limit=20`;
+                    }
+                }
+                
+                const response = await fetch(url);
+                if (!response.ok) return; // Silently fail for realtime polls
+                
+                const newData = await response.json();
+                
+                // Check if we got new data
+                let hasNewData = false;
+                
+                // Debug logging
+                console.log(`Realtime poll request: ${url}`);
+                console.log(`Realtime poll response:`, {
+                    events: newData.events ? `${Array.isArray(newData.events) ? newData.events.length : 'not array'}` : 'none',
+                    facets: newData.facets ? `${Object.keys(newData.facets).length} facets` : 'none',
+                    currentlyLoaded: {
+                        events: paginationState.allEvents.length,
+                        facets: paginationState.allFacets.length
+                    },
+                    cursors: {
+                        newestEventId: realtimeState.newestEventId,
+                        newestFacetId: realtimeState.newestFacetId
+                    }
+                });
+                
+                if (newData.events && Array.isArray(newData.events) && newData.events.length > 0) {
+                    // Filter out events we already have (by ID) and events that are not actually newer
+                    const existingEventIds = new Set(paginationState.allEvents.map(e => e.id));
+                    const newestTimestamp = paginationState.allEvents.length > 0 ? 
+                        Math.max(...paginationState.allEvents.map(e => e.timestamp)) : 0;
+                    
+                    const actuallyNewEvents = newData.events.filter(e => 
+                        !existingEventIds.has(e.id) && e.timestamp > newestTimestamp
+                    );
+                    
+                    console.log(`Events: ${newData.events.length} received, ${existingEventIds.size} already loaded, ${actuallyNewEvents.length} actually new (timestamp > ${newestTimestamp})`);
+                    
+                    if (actuallyNewEvents.length > 0) {
+                        // Sort by timestamp (newest first) before prepending
+                        actuallyNewEvents.sort((a, b) => b.timestamp - a.timestamp);
+                        
+                        // Prepend new events to the beginning of the array
+                        paginationState.allEvents.unshift(...actuallyNewEvents);
+                        currentData.events.unshift(...actuallyNewEvents);
+                        
+                        // Update newest event tracking with the newest event
+                        realtimeState.newestEventId = actuallyNewEvents[0].id;
+                        
+                        hasNewData = true;
+                        console.log(`Realtime: ${actuallyNewEvents.length} new events received, newest: ${actuallyNewEvents[0].id}`);
+                    }
+                } else if (newData.facets && Object.keys(newData.facets).length > 0) {
+                    // Filter out facets we already have (by facet_id) and facets that are not actually newer
+                    const existingFacetIds = new Set(paginationState.allFacets.map(f => f.facet_id));
+                    const newestTimestamp = paginationState.allFacets.length > 0 ? 
+                        Math.max(...paginationState.allFacets.map(f => f.veil_timestamp)) : 0;
+                    
+                    const newFacetValues = Object.values(newData.facets);
+                    const actuallyNewFacets = newFacetValues.filter(f => 
+                        !existingFacetIds.has(f.facet_id) && f.veil_timestamp > newestTimestamp
+                    );
+                    
+                    console.log(`Facets: ${newFacetValues.length} received, ${existingFacetIds.size} already loaded, ${actuallyNewFacets.length} actually new (timestamp > ${newestTimestamp})`);
+                    
+                    if (actuallyNewFacets.length > 0) {
+                        // Sort by timestamp (newest first) before prepending
+                        actuallyNewFacets.sort((a, b) => b.veil_timestamp - a.veil_timestamp);
+                        
+                        // Prepend new facets to the beginning of the array
+                        paginationState.allFacets.unshift(...actuallyNewFacets);
+                        
+                        // Add to currentData.facets object
+                        actuallyNewFacets.forEach(facet => {
+                            currentData.facets[facet.facet_id] = facet;
+                        });
+                        
+                        // Update newest facet tracking with the newest facet
+                        realtimeState.newestFacetId = actuallyNewFacets[0].facet_id;
+                        
+                        hasNewData = true;
+                        console.log(`Realtime: ${actuallyNewFacets.length} new facets received, newest: ${actuallyNewFacets[0].facet_id}`);
+                    }
+                }
+                
+                if (hasNewData) {
+                    // Refresh the view with prepended data
+                    refreshStreamView();
+                    
+                    // Update progress counter
+                    updateProgressAfterRealtimeUpdate();
+                }
+                
+            } catch (error) {
+                console.error('Error polling for new data:', error);
+            }
+        }
+        
+        function refreshStreamView() {
+            const treeContainer = document.getElementById('tree-container');
+            if (!treeContainer || !currentData) return;
+            
+            // Clear and rebuild the stream view
+            treeContainer.innerHTML = '';
+            
+            if (currentData.facets) {
+                renderFacetsStream(treeContainer, currentData.facets, false);
+            } else if (currentData.events) {
+                renderEventsStream(treeContainer, currentData.events, false);
+            }
+        }
+        
+        function updateProgressAfterRealtimeUpdate() {
+            if (paginationState.currentBrowserType === 'veil_facets' && paginationState.allFacets) {
+                updateStreamProgress(paginationState.allFacets.length, paginationState.totalFacets, 'facets');
+            } else if (paginationState.currentBrowserType === 'timeline_events' && paginationState.allEvents) {
+                updateStreamProgress(paginationState.allEvents.length, paginationState.totalEvents, 'events');
+            }
+        }
+        
+        function pushNavigation(state) {
+            navigationStack.push({
+                data: currentData,
+                endpoint: currentEndpoint,
+                view: currentView,
+                breadcrumb: document.getElementById('breadcrumb').textContent
+            });
+            document.getElementById('backBtn').style.display = 'inline-block';
+        }
+        
+        function goBack() {
+            if (navigationStack.length === 0) return;
+            
+            const previousState = navigationStack.pop();
+            currentData = previousState.data;
+            currentEndpoint = previousState.endpoint;
+            currentView = previousState.view;
+            
+            // Update UI to reflect previous state
+            updateBreadcrumb(previousState.breadcrumb);
+            document.getElementById('data-info').textContent = `${previousState.endpoint} • ${formatBytes(JSON.stringify(currentData).length)}`;
+            
+            // Update view toggle button
+            const toggleBtn = document.getElementById('viewToggle');
+            toggleBtn.textContent = currentView === 'tree' ? 'JSONCrack View' : 'Tree View';
+            
+            // Show the previous data
+            if (currentView === 'tree') {
+                showTreeView(currentData);
+            } else {
+                initializeJsonCrack(currentData);
+            }
+            
+            // Hide back button if no more history
+            if (navigationStack.length === 0) {
+                document.getElementById('backBtn').style.display = 'none';
+            }
+        }
+        
+        // Space browser functionality for interactive data exploration
+        async function showSpaceBrowser(browserType) {
+            const contentEl = document.getElementById('content');
+            const toolbar = document.getElementById('toolbar');
+            
+            try {
+                // First load the spaces overview to get available spaces
+                const spacesResponse = await fetch('/spaces');
+                if (!spacesResponse.ok) {
+                    throw new Error('Failed to load spaces data');
+                }
+                
+                const spacesData = await spacesResponse.json();
+                const spaces = spacesData.spaces || {};
+                
+                // Show toolbar for consistent UI
+                toolbar.style.display = 'flex';
+                updateBreadcrumb('Inspector → Space Browser');
+                document.getElementById('data-info').textContent = `${browserType} Browser • Select a space to explore`;
+                
+                // Create the browser interface
+                let browserTitle = '';
+                let browserDescription = '';
+                
+                switch(browserType) {
+                    case 'spaces_detailed':
+                        browserTitle = '📊 Space Details Browser';
+                        browserDescription = 'Explore detailed information about spaces, elements, and components';
+                        break;
+                    case 'timeline_events':
+                        browserTitle = '⏱️ Timeline Events Browser';
+                        browserDescription = 'Browse timeline events with pagination and filtering';
+                        break;
+                    case 'veil_facets':
+                        browserTitle = '🎭 VEIL Facets Browser';
+                        browserDescription = 'Explore VEIL facets with detailed metadata';
+                        break;
+                }
+                
+                contentEl.innerHTML = `
+                    <div style="padding: 2rem; background: #0f3460; height: 100%; overflow-y: auto;">
+                        <div style="text-align: center; margin-bottom: 2rem;">
+                            <h2 style="color: #00d4aa; margin-bottom: 0.5rem;">${browserTitle}</h2>
+                            <p style="color: #999; font-size: 0.9rem; margin-bottom: 2rem;">${browserDescription}</p>
+                        </div>
+                        
+                        <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1rem;">
+                            ${Object.keys(spaces).map(spaceId => {
+                                const space = spaces[spaceId];
+                                const elementCount = space.elements ? Object.keys(space.elements).length : 0;
+                                const spaceType = space.space_type || 'Unknown';
+                                
+                                return `
+                                    <div class="space-card" onclick="loadSpaceData('${spaceId}', '${browserType}')" 
+                                         style="background: #16213e; border: 1px solid #555; border-radius: 8px; padding: 1.5rem; cursor: pointer; transition: all 0.2s;">
+                                        <h3 style="color: #74b9ff; margin: 0 0 0.5rem 0; font-size: 1.1rem;">${spaceId}</h3>
+                                        <div style="color: #999; font-size: 0.85rem; margin-bottom: 1rem;">
+                                            <div>Type: <span style="color: #eee;">${spaceType}</span></div>
+                                            <div>Elements: <span style="color: #eee;">${elementCount}</span></div>
+                                        </div>
+                                        <div style="color: #00d4aa; font-size: 0.8rem; font-weight: 600;">Click to explore →</div>
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                        
+                        ${Object.keys(spaces).length === 0 ? 
+                            '<div style="text-align: center; color: #999; margin-top: 2rem; font-style: italic;">No spaces available</div>' : 
+                            ''}
+                    </div>
+                `;
+                
+                // Add hover effects with CSS
+                const style = document.createElement('style');
+                style.textContent = `
+                    .space-card:hover {
+                        border-color: #00d4aa !important;
+                        background: #1a2f4a !important;
+                        transform: translateY(-2px) !important;
+                        box-shadow: 0 4px 12px rgba(0, 212, 170, 0.15) !important;
+                    }
+                `;
+                document.head.appendChild(style);
+                
+            } catch (error) {
+                console.error('Error loading space browser:', error);
+                contentEl.innerHTML = `
+                    <div class="error">
+                        <strong>Error loading space browser:</strong><br>
+                        ${escapeHtml(error.message)}
+                    </div>
+                `;
+                toolbar.style.display = 'none';
+            }
+        }
+        
+        async function loadSpaceData(spaceId, browserType) {
+            const contentEl = document.getElementById('content');
+            const statusEl = document.getElementById('status');
+            
+            // Push current state to navigation stack
+            pushNavigation();
+            
+            statusEl.style.display = 'inline';
+            statusEl.textContent = 'Loading space data...';
+            
+            try {
+                let endpoint = '';
+                let title = '';
+                
+                switch(browserType) {
+                    case 'spaces_detailed':
+                        // Load detailed space information (this would be from the spaces endpoint but filtered)
+                        endpoint = `/spaces`;
+                        title = `📊 Space Details: ${spaceId}`;
+                        break;
+                    case 'timeline_events':
+                        // Load timeline events for this space with pagination
+                        endpoint = `/timelines/${spaceId}?limit=-20`;
+                        title = `⏱️ Timeline Events: ${spaceId}`;
+                        break;
+                    case 'veil_facets':
+                        // Load VEIL facets for this space
+                        endpoint = `/veil/${spaceId}/facets?limit=20`;
+                        title = `🎭 VEIL Facets: ${spaceId}`;
+                        break;
+                }
+                
+                const response = await fetch(endpoint);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                
+                // If we're browsing spaces_detailed, filter to just the selected space
+                if (browserType === 'spaces_detailed' && data.spaces) {
+                    const filteredData = {
+                        ...data,
+                        spaces: {
+                            [spaceId]: data.spaces[spaceId]
+                        }
+                    };
+                    currentData = filteredData;
+                } else {
+                    currentData = data;
+                }
+                
+                currentEndpoint = endpoint;
+                
+                // Update pagination state
+                paginationState.currentSpaceId = spaceId;
+                paginationState.currentBrowserType = browserType;
+                
+                // Update breadcrumb for the specific space view
+                updateBreadcrumb(`Inspector → Space Browser → ${spaceId}`);
+                document.getElementById('data-info').textContent = `${title} • ${formatBytes(JSON.stringify(currentData).length)}`;
+                
+                // Show the tree view with the space data
+                showTreeView(currentData);
+                
+            } catch (error) {
+                console.error('Error loading space data:', error);
+                contentEl.innerHTML = `
+                    <div class="error">
+                        <strong>Error loading ${browserType} for space "${spaceId}":</strong><br>
+                        ${escapeHtml(error.message)}
+                    </div>
+                `;
+            } finally {
+                statusEl.style.display = 'none';
+            }
+        }
+        
+        // ========================================
+        // INTERACTIVE CONSOLE FUNCTIONALITY
+        // ========================================
+        
+        let consoleSession = {
+            sessionId: null,
+            isConnected: false,
+            codeBuffer: [],
+            commandHistory: [],
+            historyIndex: -1
+        };
+        
+        // Open the console
+        function openConsole() {
+            // Update active menu item
+            document.querySelectorAll('.endpoint-list a').forEach(a => a.classList.remove('active'));
+            event.target.classList.add('active');
+            
+            // Hide other content and show console
+            document.getElementById('content').style.display = 'none';
+            document.getElementById('toolbar').style.display = 'none';
+            document.getElementById('console').classList.add('active');
+            
+            // Initialize REPL session if not already connected
+            if (!consoleSession.isConnected) {
+                initializeConsoleSession();
+            }
+            
+            // Focus on input
+            setTimeout(() => {
+                document.getElementById('console-input').focus();
+            }, 100);
+        }
+        
+        // Close the console
+        function closeConsole() {
+            document.getElementById('console').classList.remove('active');
+            document.getElementById('content').style.display = 'block';
+            document.getElementById('toolbar').style.display = 'flex';
+            document.querySelectorAll('.endpoint-list a').forEach(a => a.classList.remove('active'));
+        }
+        
+        // Clear console output
+        function clearConsole() {
+            const output = document.getElementById('console-output');
+            output.innerHTML = '<div class="console-line info">Console cleared</div>';
+        }
+        
+        // Initialize REPL session
+        async function initializeConsoleSession() {
+            const statusEl = document.getElementById('console-status');
+            statusEl.textContent = 'Connecting...';
+            statusEl.className = 'console-status';
+            
+            try {
+                // Create REPL session with unique context ID
+                const contextId = `web_console_${Date.now()}`;
+                const response = await fetch('/repl/create', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        context_type: 'global',
+                        context_id: contextId
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const result = await response.json();
+                console.log('REPL creation result:', result); // Debug logging
+                
+                if (result.success) {
+                    // Store the full session ID returned by the server
+                    consoleSession.sessionId = result.session.id;
+                    consoleSession.isConnected = true;
+                    
+                    statusEl.textContent = `Connected (${consoleSession.sessionId})`;
+                    statusEl.className = 'console-status connected';
+                    
+                    // Clear initialization messages and show welcome
+                    const output = document.getElementById('console-output');
+                    output.innerHTML = '';
+                    addConsoleMessage('success', '✓ REPL session established');
+                    addConsoleMessage('info', `Session ID: ${consoleSession.sessionId}`);
+                    addConsoleMessage('info', `Available variables: ${result.session.namespace_keys.length} items`);
+                    addConsoleMessage('info', 'IPython-powered REPL with rich output support.');
+                    addConsoleMessage('info', 'Type Python code and press Enter to execute. Use Shift+Enter for multi-line input.');
+                    addConsoleMessage('info', 'Use ↑/↓ for history, Tab for completions. Rich outputs show tree views and inspection buttons.');
+                    addConsoleMessage('info', '');
+                    addConsoleMessage('info', 'Quick start example:');
+                    addConsoleMessage('example', 'import inspect');
+                    addConsoleMessage('example', 'print(inspect.getmembers(host))');
+                    
+                    // Update prompt
+                    document.getElementById('console-prompt').textContent = '>>>';
+                    
+                } else {
+                    throw new Error(result.error || 'Failed to create session');
+                }
+                
+            } catch (error) {
+                statusEl.textContent = `Error: ${error.message}`;
+                statusEl.className = 'console-status error';
+                
+                addConsoleMessage('error', `Failed to initialize console: ${error.message}`);
+                addConsoleMessage('info', 'Please ensure Connectome host is running with inspector enabled.');
+            }
+        }
+        
+        // Add message to console output
+        function addConsoleMessage(type, message, showPrompt = false) {
+            const output = document.getElementById('console-output');
+            const line = document.createElement('div');
+            line.className = `console-line ${type}`;
+            
+            if (showPrompt && type === 'input') {
+                const prompt = consoleSession.codeBuffer.length > 0 ? '... ' : '>>> ';
+                line.textContent = prompt + message;
+            } else {
+                line.textContent = message;
+            }
+            
+            output.appendChild(line);
+            output.scrollTop = output.scrollHeight;
+        }
+        
+        // Execute code in REPL
+        async function executeConsoleCode(code) {
+            if (!consoleSession.isConnected || !consoleSession.sessionId) {
+                addConsoleMessage('error', 'Not connected to REPL session');
+                return;
+            }
+            
+            try {
+                console.log('Executing code with session ID:', consoleSession.sessionId); // Debug logging
+                
+                const response = await fetch('/repl/execute', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        session_id: consoleSession.sessionId,
+                        code: code
+                    })
+                });
+                
+                const result = await response.json();
+                console.log('REPL execution result:', result); // Debug logging
+                
+                if (!response.ok && result.error) {
+                    throw new Error(`${result.error}`);
+                }
+                
+                // Show rich output first (HTML, images, etc.)
+                if (result.rich_output && result.rich_output.length > 0) {
+                    result.rich_output.forEach(richOutput => {
+                        displayRichOutput(richOutput);
+                    });
+                }
+                
+                // Show regular output with enhanced rendering for structured data and inspectable objects  
+                if (result.output && result.output.trim()) {
+                    displayEnhancedOutput(result.output.trim(), result.output_metadata);
+                }
+                
+                // Show errors (execution errors, not HTTP errors)
+                if (result.error && result.error.trim() && result.success === false) {
+                    addConsoleMessage('error', result.error.trim());
+                }
+                
+                // Show execution count and timing info
+                if (result.execution_count) {
+                    const timing = result.execution_time_ms ? ` (${result.execution_time_ms}ms)` : '';
+                    addConsoleMessage('info', `# Execution [${result.execution_count}]${timing}`);
+                }
+                
+                // Show new variables
+                if (result.namespace_changes && result.namespace_changes.length > 0) {
+                    const vars = result.namespace_changes.join(', ');
+                    addConsoleMessage('info', `# New variables: ${vars}`);
+                }
+                
+                // Handle case where there's an error message in the response
+                if (!result.success && result.error) {
+                    addConsoleMessage('error', result.error);
+                }
+                
+            } catch (error) {
+                addConsoleMessage('error', `Execution error: ${error.message}`);
+            }
+        }
+        
+        // Display rich output (HTML, images, JSON, etc.)
+        function displayRichOutput(richOutput) {
+            const output = document.getElementById('console-output');
+            const richLine = document.createElement('div');
+            richLine.className = 'console-line rich-output';
+            
+            if (richOutput.data) {
+                if (richOutput.data.html) {
+                    // HTML output
+                    richLine.innerHTML = richOutput.data.html;
+                } else if (richOutput.data.image_png) {
+                    // PNG image
+                    const img = document.createElement('img');
+                    img.src = 'data:image/png;base64,' + richOutput.data.image_png;
+                    img.style.maxWidth = '100%';
+                    richLine.appendChild(img);
+                } else if (richOutput.data.json) {
+                    // JSON data
+                    const pre = document.createElement('pre');
+                    pre.textContent = JSON.stringify(richOutput.data.json, null, 2);
+                    pre.style.background = '#2a2a2a';
+                    pre.style.padding = '0.5rem';
+                    pre.style.borderRadius = '4px';
+                    richLine.appendChild(pre);
+                } else if (richOutput.data.text) {
+                    // Plain text with formatting
+                    const pre = document.createElement('pre');
+                    pre.textContent = richOutput.data.text;
+                    richLine.appendChild(pre);
+                } else {
+                    // Fallback: display raw data
+                    richLine.textContent = JSON.stringify(richOutput.data);
+                }
+            }
+            
+            output.appendChild(richLine);
+            output.scrollTop = output.scrollHeight;
+        }
+        
+        // Display enhanced output with tree rendering and special inspect.getmembers handling
+        function displayEnhancedOutput(output, metadata) {
+            const outputDiv = document.getElementById('console-output');
+            const outputLine = document.createElement('div');
+            outputLine.className = 'console-line output';
+            
+            // Check if we should render as tree (structured data)
+            const hasStructuredData = metadata && (metadata.has_json || metadata.has_list || metadata.has_dict);
+            
+            // Check if this is inspect.getmembers output
+            const isInspectGetMembers = metadata && metadata.original_code && 
+                                      metadata.original_code.includes('inspect.getmembers');
+            
+            if (hasStructuredData) {
+                // Try to render as proper interactive tree view
+                try {
+                    const treeContainer = document.createElement('div');
+                    treeContainer.className = 'tree-output';
+                    treeContainer.style.cssText = `
+                        background: rgba(42, 42, 42, 0.8);
+                        border: 1px solid #444;
+                        border-radius: 4px;
+                        padding: 8px;
+                        margin: 4px 0;
+                        font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+                        font-size: 0.9em;
+                    `;
+                    
+                    // Check if we have properly serialized JSON data from the server
+                    if (metadata.json_data) {
+                        if (isInspectGetMembers) {
+                            // Special handling for inspect.getmembers output
+                            renderInspectGetMembersTree(treeContainer, metadata.json_data, metadata.original_code);
+                        } else {
+                            // Regular tree rendering (no inspection buttons)
+                            const treeNode = createTreeNode('result', metadata.json_data, 0, true);
+                            treeContainer.appendChild(treeNode);
+                        }
+                    } else {
+                        // Fallback: Parse the output string to extract data
+                        const dataMatch = output.match(/Out\[\d+\]:\s*(.*)/s);
+                        const dataStr = dataMatch ? dataMatch[1].trim() : output;
+                        
+                        // Try to convert Python representation to JavaScript object
+                        let parsedData = parsePythonDataForTree(dataStr);
+                        
+                        if (parsedData !== null) {
+                            if (isInspectGetMembers) {
+                                renderInspectGetMembersTree(treeContainer, parsedData, metadata.original_code);
+                            } else {
+                                treeContainer.appendChild(createTreeNode('result', parsedData, 0, true));
+                            }
+                        } else {
+                            // Last resort: simple formatted display
+                            treeContainer.innerHTML = `<pre class="tree-view">${escapeHtml(dataStr)}</pre>`;
+                        }
+                    }
+                    
+                    outputLine.appendChild(treeContainer);
+                } catch (error) {
+                    // Fallback to regular text output
+                    outputLine.innerHTML = `<pre>${escapeHtml(output)}</pre>`;
+                }
+            } else {
+                // Regular text output
+                outputLine.innerHTML = `<pre>${escapeHtml(output)}</pre>`;
+            }
+            
+            outputDiv.appendChild(outputLine);
+            outputDiv.scrollTop = outputDiv.scrollHeight;
+        }
+        
+        // Parse Python data representations into JavaScript objects for tree rendering
+        function parsePythonDataForTree(dataStr) {
+            try {
+                // First, try direct JSON parsing (works for simple cases)
+                return JSON.parse(dataStr.replace(/'/g, '"').replace(/True/g, 'true').replace(/False/g, 'false').replace(/None/g, 'null'));
+            } catch {
+                // For more complex Python structures, try a more sophisticated approach
+                try {
+                    // Handle Python tuples, lists, and dicts with basic conversion
+                    let jsStr = dataStr
+                        .replace(/'/g, '"')  // Single to double quotes
+                        .replace(/True/g, 'true')  // Python True -> JavaScript true
+                        .replace(/False/g, 'false')  // Python False -> JavaScript false
+                        .replace(/None/g, 'null')  // Python None -> JavaScript null
+                        .replace(/\(/g, '[')  // Convert tuples to arrays
+                        .replace(/\)/g, ']');
+                    
+                    return JSON.parse(jsStr);
+                } catch {
+                    // If still can't parse, check if it looks like a simple list/dict structure
+                    if (dataStr.match(/^\s*[\[\{]/)) {
+                        // It looks like structured data but we can't parse it properly
+                        // Return a simple representation that can be shown as expandable
+                        return {
+                            "__python_repr__": dataStr,
+                            "__type__": "complex_structure"
+                        };
+                    }
+                    return null;  // Can't parse as tree data
+                }
+            }
+        }
+        
+        
+        // Render inspect.getmembers output with inspection buttons for member values
+        function renderInspectGetMembersTree(container, membersData, originalCode) {
+            // Extract the object name from inspect.getmembers(object_name) call
+            // Handle nested parentheses properly
+            const objectName = extractObjectNameFromInspectCall(originalCode);
+            
+            // Create a custom tree for inspect.getmembers output
+            const membersTree = document.createElement('div');
+            membersTree.className = 'members-tree';
+            
+            // Add a header
+            const header = document.createElement('div');
+            header.className = 'tree-node';
+            header.innerHTML = `<span class="tree-key" style="color: #00d4aa; font-weight: bold;">Members of ${escapeHtml(objectName)}:</span>`;
+            membersTree.appendChild(header);
+            
+            // Process each member (should be list of [name, value] tuples)
+            if (Array.isArray(membersData)) {
+                membersData.forEach((member, index) => {
+                    if (Array.isArray(member) && member.length >= 2) {
+                        const [memberName, memberValue] = member;
+                        
+                        const memberNode = document.createElement('div');
+                        memberNode.className = 'tree-node';
+                        memberNode.style.marginLeft = '16px';
+                        
+                        const memberKey = document.createElement('span');
+                        memberKey.className = 'tree-key';
+                        memberKey.style.color = '#569cd6';
+                        memberKey.textContent = memberName;
+                        
+                        const colon = document.createElement('span');
+                        colon.textContent = ': ';
+                        colon.style.color = '#d4d4d4';
+                        
+                        const memberValueSpan = document.createElement('span');
+                        memberValueSpan.className = 'tree-value';
+                        memberValueSpan.textContent = typeof memberValue === 'string' ? memberValue : JSON.stringify(memberValue);
+                        
+                        memberNode.appendChild(memberKey);
+                        memberNode.appendChild(colon);
+                        memberNode.appendChild(memberValueSpan);
+                        
+                        // Add inspection button if the value looks like an object
+                        if (typeof memberValue === 'string' && memberValue.includes('<') && memberValue.includes('at 0x')) {
+                            const inspectBtn = document.createElement('button');
+                            inspectBtn.className = 'inspect-btn';
+                            inspectBtn.innerHTML = '🔍';
+                            inspectBtn.title = `Inspect ${objectName}.${memberName}`;
+                            inspectBtn.style.cssText = `
+                                background: #0f3460;
+                                border: 1px solid #00d4aa;
+                                color: #00d4aa;
+                                padding: 2px 6px;
+                                margin-left: 8px;
+                                border-radius: 3px;
+                                cursor: pointer;
+                                font-size: 12px;
+                            `;
+                            
+                            // Create the proper inspection path
+                            // For complex expressions, wrap in parentheses before adding the member
+                            const inspectionPath = needsParentheses(objectName) ? 
+                                `(${objectName}).${memberName}` : 
+                                `${objectName}.${memberName}`;
+                            inspectBtn.addEventListener('click', () => {
+                                executeInspection(inspectionPath);
+                            });
+                            
+                            memberNode.appendChild(inspectBtn);
+                        }
+                        
+                        membersTree.appendChild(memberNode);
+                    }
+                });
+            }
+            
+            container.appendChild(membersTree);
+        }
+        
+        // Extract object name from inspect.getmembers() call, handling nested parentheses
+        function extractObjectNameFromInspectCall(code) {
+            const pattern = /inspect\.getmembers\(/;
+            const match = code.match(pattern);
+            if (!match) return 'obj';
+            
+            const start = match.index + match[0].length;
+            let parenCount = 1;
+            let end = start;
+            
+            // Find the matching closing parenthesis
+            for (let i = start; i < code.length && parenCount > 0; i++) {
+                if (code[i] === '(') parenCount++;
+                else if (code[i] === ')') parenCount--;
+                end = i;
+            }
+            
+            return code.substring(start, end).trim() || 'obj';
+        }
+        
+        // Check if an object name needs parentheses when accessing attributes
+        function needsParentheses(objectName) {
+            // If the name contains function calls (parentheses), method calls, or complex expressions,
+            // we need to wrap it in parentheses before accessing attributes
+            return (
+                objectName.includes('(') ||  // Function calls like get_space('name')
+                objectName.includes('[') ||  // Array/dict access like arr[0] or dict['key']
+                objectName.includes(' ')     // Expressions with spaces
+            );
+        }
+        
+        // Execute inspection on an object by running inspect.getmembers() as console input
+        function executeInspection(variableName) {
+            // Simply execute the inspection command as if the user typed it
+            const inspectionCode = `inspect.getmembers(${variableName})`;
+            
+            // Show what we're executing
+            addConsoleMessage('input', inspectionCode);
+            
+            // Execute it through the normal console execution flow
+            executeConsoleCode(inspectionCode);
+        }
+        
+        // Utility function to escape HTML
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        // Get tab completions
+        async function getCompletions(code, cursorPos) {
+            if (!consoleSession.isConnected || !consoleSession.sessionId) {
+                return [];
+            }
+            
+            try {
+                const response = await fetch('/repl/complete', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        session_id: consoleSession.sessionId,
+                        code: code,
+                        cursor_pos: cursorPos
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success && result.completions) {
+                    return result.completions;
+                }
+                
+                return [];
+                
+            } catch (error) {
+                console.error('Error getting completions:', error);
+                return [];
+            }
+        }
+        
+        // Inspect object
+        async function inspectObject(objName) {
+            if (!consoleSession.isConnected || !consoleSession.sessionId) {
+                addConsoleMessage('error', 'Not connected to REPL session');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/repl/inspect', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        session_id: consoleSession.sessionId,
+                        obj_name: objName
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success && result.inspection) {
+                    const info = result.inspection;
+                    addConsoleMessage('info', `Object: ${info.name} (${info.type})`);
+                    if (info.docstring) {
+                        addConsoleMessage('info', `Docstring: ${info.docstring.substring(0, 200)}...`);
+                    }
+                    if (info.file) {
+                        addConsoleMessage('info', `File: ${info.file}`);
+                    }
+                } else {
+                    addConsoleMessage('error', result.inspection?.error || 'Inspection failed');
+                }
+                
+            } catch (error) {
+                addConsoleMessage('error', `Inspection error: ${error.message}`);
+            }
+        }
+        
+        // Tab completion handling
+        let completionDropdown = null;
+        let currentCompletions = [];
+        let completionStartPos = 0;
+        
+        async function handleTabCompletion(input) {
+            const cursorPos = input.selectionStart;
+            const code = input.value;
+            
+            try {
+                const completions = await getCompletions(code, cursorPos);
+                
+                if (completions.length === 0) {
+                    hideCompletionDropdown();
+                    return;
+                }
+                
+                if (completions.length === 1) {
+                    // Single completion - insert directly
+                    insertCompletion(input, completions[0], cursorPos);
+                    hideCompletionDropdown();
+                } else {
+                    // Multiple completions - show dropdown
+                    showCompletionDropdown(input, completions, cursorPos);
+                }
+            } catch (error) {
+                console.error('Tab completion error:', error);
+                hideCompletionDropdown();
+            }
+        }
+        
+        function insertCompletion(input, completion, cursorPos) {
+            // Find the start of the current word being completed
+            const code = input.value;
+            let wordStart = cursorPos;
+            
+            // Move backwards to find word boundary
+            while (wordStart > 0 && /\w/.test(code[wordStart - 1])) {
+                wordStart--;
+            }
+            
+            // Replace the partial word with the completion
+            const before = code.substring(0, wordStart);
+            const after = code.substring(cursorPos);
+            const newValue = before + completion + after;
+            
+            input.value = newValue;
+            input.setSelectionRange(wordStart + completion.length, wordStart + completion.length);
+            autoResizeTextarea();
+        }
+        
+        function showCompletionDropdown(input, completions, cursorPos) {
+            hideCompletionDropdown(); // Remove any existing dropdown
+            
+            currentCompletions = completions;
+            completionStartPos = cursorPos;
+            
+            // Create dropdown
+            completionDropdown = document.createElement('div');
+            completionDropdown.className = 'completion-dropdown';
+            
+            completions.forEach((completion, index) => {
+                const item = document.createElement('div');
+                item.className = 'completion-item';
+                if (index === 0) item.classList.add('selected');
+                item.textContent = completion;
+                
+                item.addEventListener('click', () => {
+                    insertCompletion(input, completion, completionStartPos);
+                    hideCompletionDropdown();
+                    input.focus();
+                });
+                
+                completionDropdown.appendChild(item);
+            });
+            
+            // Position dropdown near the input
+            const inputRect = input.getBoundingClientRect();
+            completionDropdown.style.position = 'absolute';
+            completionDropdown.style.left = inputRect.left + 'px';
+            completionDropdown.style.top = (inputRect.bottom + 2) + 'px';
+            completionDropdown.style.minWidth = '200px';
+            completionDropdown.style.maxWidth = '400px';
+            
+            document.body.appendChild(completionDropdown);
+            
+            // Add keyboard navigation for dropdown
+            setupDropdownNavigation(input);
+        }
+        
+        function hideCompletionDropdown() {
+            if (completionDropdown) {
+                completionDropdown.remove();
+                completionDropdown = null;
+                currentCompletions = [];
+            }
+        }
+        
+        function setupDropdownNavigation(input) {
+            // Add temporary keydown listener for dropdown navigation
+            function handleDropdownKeys(e) {
+                if (!completionDropdown) {
+                    input.removeEventListener('keydown', handleDropdownKeys);
+                    return;
+                }
+                
+                const items = completionDropdown.querySelectorAll('.completion-item');
+                const selected = completionDropdown.querySelector('.completion-item.selected');
+                let selectedIndex = Array.from(items).indexOf(selected);
+                
+                if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    selectedIndex = Math.min(selectedIndex + 1, items.length - 1);
+                    updateSelection(items, selectedIndex);
+                } else if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    selectedIndex = Math.max(selectedIndex - 1, 0);
+                    updateSelection(items, selectedIndex);
+                } else if (e.key === 'Enter' || e.key === 'Tab') {
+                    e.preventDefault();
+                    const selectedCompletion = currentCompletions[selectedIndex];
+                    insertCompletion(input, selectedCompletion, completionStartPos);
+                    hideCompletionDropdown();
+                } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    hideCompletionDropdown();
+                }
+            }
+            
+            input.addEventListener('keydown', handleDropdownKeys);
+        }
+        
+        function updateSelection(items, selectedIndex) {
+            items.forEach((item, index) => {
+                item.classList.toggle('selected', index === selectedIndex);
+            });
+        }
+        
+        // Object inspection handling
+        async function handleObjectInspection(input) {
+            const cursorPos = input.selectionStart;
+            const code = input.value;
+            
+            // Find the word at cursor position
+            let wordStart = cursorPos;
+            let wordEnd = cursorPos;
+            
+            // Expand to word boundaries
+            while (wordStart > 0 && /\w/.test(code[wordStart - 1])) {
+                wordStart--;
+            }
+            while (wordEnd < code.length && /\w/.test(code[wordEnd])) {
+                wordEnd++;
+            }
+            
+            const word = code.substring(wordStart, wordEnd);
+            
+            if (word) {
+                await inspectObject(word);
+            } else {
+                addConsoleMessage('info', 'No object at cursor to inspect');
+            }
+        }
+        
+        // Check if code is complete (simplified version)
+        function isCodeComplete(code) {
+            if (!code.trim()) return true;
+            
+            // Simple heuristic: check for incomplete statements
+            const lines = code.split('\n');
+            const lastLine = lines[lines.length - 1];
+            
+            // Check for incomplete structures
+            if (lastLine.trim().endsWith(':') || 
+                lastLine.trim().endsWith('\\') ||
+                code.trim().match(/^(if|for|while|def|class|try|with|elif|else|except|finally)\s/) && !code.includes('\n')) {
+                return false;
+            }
+            
+            // Try to compile (this is a simplified check)
+            try {
+                // Count open/close brackets, parens, braces
+                let parens = 0, brackets = 0, braces = 0;
+                let inString = false, stringChar = null;
+                
+                for (let i = 0; i < code.length; i++) {
+                    const char = code[i];
+                    
+                    if ((char === '"' || char === "'") && !inString) {
+                        inString = true;
+                        stringChar = char;
+                    } else if (char === stringChar && inString && code[i-1] !== '\\') {
+                        inString = false;
+                        stringChar = null;
+                    } else if (!inString) {
+                        if (char === '(') parens++;
+                        else if (char === ')') parens--;
+                        else if (char === '[') brackets++;
+                        else if (char === ']') brackets--;
+                        else if (char === '{') braces++;
+                        else if (char === '}') braces--;
+                    }
+                }
+                
+                return parens === 0 && brackets === 0 && braces === 0 && !inString;
+            } catch {
+                return true; // Assume complete if we can't parse
+            }
+        }
+        
+        // Handle console input
+        function setupConsoleInput() {
+            const input = document.getElementById('console-input');
+            const prompt = document.getElementById('console-prompt');
+            
+            input.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') {
+                    if (e.shiftKey) {
+                        // Shift+Enter: new line (let default behavior happen)
+                        return;
+                    } else {
+                        // Regular Enter: process input
+                        e.preventDefault();
+                        
+                        const code = input.value;
+                        if (!code.trim() && consoleSession.codeBuffer.length === 0) {
+                            return; // Empty input, do nothing
+                        }
+                        
+                        // Add to code buffer
+                        consoleSession.codeBuffer.push(code);
+                        
+                        // Show input in output
+                        const promptText = consoleSession.codeBuffer.length === 1 ? '>>> ' : '... ';
+                        addConsoleMessage('input', code, true);
+                        
+                        // Check if code is complete
+                        const fullCode = consoleSession.codeBuffer.join('\n');
+                        
+                        if (code.trim() === '' || isCodeComplete(fullCode)) {
+                            // Execute the code
+                            if (fullCode.trim()) {
+                                executeConsoleCode(fullCode);
+                                consoleSession.commandHistory.push(fullCode);
+                                consoleSession.historyIndex = consoleSession.commandHistory.length;
+                            }
+                            
+                            // Reset buffer and prompt
+                            consoleSession.codeBuffer = [];
+                            prompt.textContent = '>>>';
+                        } else {
+                            // Continue multi-line input
+                            prompt.textContent = '...';
+                        }
+                        
+                        // Clear input
+                        input.value = '';
+                        autoResizeTextarea();
+                    }
+                }
+                
+                // Command history navigation
+                else if (e.key === 'ArrowUp') {
+                    // Navigate history up if cursor is at the beginning of first line
+                    // or if Ctrl is held (always navigate)
+                    const cursorPos = input.selectionStart;
+                    const textBeforeCursor = input.value.substring(0, cursorPos);
+                    const isAtFirstLine = !textBeforeCursor.includes('\n');
+                    
+                    if (e.ctrlKey || (isAtFirstLine && cursorPos === 0)) {
+                        e.preventDefault();
+                        if (consoleSession.historyIndex > 0) {
+                            consoleSession.historyIndex--;
+                            input.value = consoleSession.commandHistory[consoleSession.historyIndex];
+                            // Place cursor at end
+                            setTimeout(() => {
+                                input.setSelectionRange(input.value.length, input.value.length);
+                            }, 0);
+                            autoResizeTextarea();
+                        }
+                    }
+                }
+                else if (e.key === 'ArrowDown') {
+                    // Navigate history down if cursor is at the end of last line
+                    // or if Ctrl is held (always navigate)
+                    const cursorPos = input.selectionStart;
+                    const textAfterCursor = input.value.substring(cursorPos);
+                    const isAtLastLine = !textAfterCursor.includes('\n');
+                    
+                    if (e.ctrlKey || (isAtLastLine && cursorPos === input.value.length)) {
+                        e.preventDefault();
+                        if (consoleSession.historyIndex < consoleSession.commandHistory.length - 1) {
+                            consoleSession.historyIndex++;
+                            input.value = consoleSession.commandHistory[consoleSession.historyIndex];
+                            // Place cursor at end
+                            setTimeout(() => {
+                                input.setSelectionRange(input.value.length, input.value.length);
+                            }, 0);
+                        } else {
+                            consoleSession.historyIndex = consoleSession.commandHistory.length;
+                            input.value = '';
+                        }
+                        autoResizeTextarea();
+                    }
+                }
+                
+                // Tab completion
+                else if (e.key === 'Tab') {
+                    e.preventDefault();
+                    handleTabCompletion(input);
+                }
+                
+                // Object inspection with Ctrl+I
+                else if (e.key === 'i' && e.ctrlKey) {
+                    e.preventDefault();
+                    handleObjectInspection(input);
+                }
+                
+                // Clear completion dropdown on escape
+                else if (e.key === 'Escape') {
+                    hideCompletionDropdown();
+                }
+            });
+            
+            // Auto-resize textarea
+            input.addEventListener('input', autoResizeTextarea);
+            
+            // Hide completion dropdown when clicking outside
+            document.addEventListener('click', (e) => {
+                if (completionDropdown && !completionDropdown.contains(e.target) && e.target !== input) {
+                    hideCompletionDropdown();
+                }
+            });
+            
+            // Hide completion dropdown when input loses focus (but not when clicking on dropdown)
+            input.addEventListener('blur', (e) => {
+                // Delay hiding to allow dropdown clicks to register
+                setTimeout(() => {
+                    if (!document.activeElement || !completionDropdown?.contains(document.activeElement)) {
+                        hideCompletionDropdown();
+                    }
+                }, 100);
+            });
+            
+            // Double-click for object inspection
+            input.addEventListener('dblclick', (e) => {
+                handleObjectInspection(input);
+            });
+        }
+        
+        // Auto-resize textarea to fit content
+        function autoResizeTextarea() {
+            const input = document.getElementById('console-input');
+            input.style.height = 'auto';
+            input.style.height = Math.min(input.scrollHeight, 200) + 'px';
+        }
+        
+        // Auto-load functionality (currently disabled)
+        window.addEventListener('load', function() {
+            setupConsoleInput();
+            // Optional: Auto-load status endpoint for demonstration
+            // loadEndpoint('/status');
+        });
+    </script>
+
+    <!-- HUD Modal -->
+    <div id="hud-modal" class="hud-modal" style="display: none;">
+        <div class="hud-modal-overlay" onclick="closeHUDModal()"></div>
+        <div class="hud-modal-content">
+            <div class="hud-modal-header">
+                <h2 id="hud-modal-title">HUD View</h2>
+                <div class="hud-modal-actions">
+                    <button class="hud-modal-refresh" onclick="refreshHUDModal()" title="Refresh HUD content">🔄</button>
+                    <button class="hud-modal-close" onclick="closeHUDModal()" title="Close">&times;</button>
+                </div>
+            </div>
+            <div class="hud-modal-body" id="hud-modal-body">
+                <!-- HUD content will be inserted here -->
+            </div>
+        </div>
+    </div>
+</body>
+</html>

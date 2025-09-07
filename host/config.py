@@ -85,6 +85,12 @@ class HostSettings(BaseSettings):
         description="JSON string representing a list of AgentConfig objects"
     )
 
+    # Inspector Settings
+    inspector_enabled: bool = Field(default=False, alias="CONNECTOME_INSPECTOR_ENABLED", description="Enable the web inspector server")
+    inspector_port: int = Field(default=8080, alias="CONNECTOME_INSPECTOR_PORT", description="Port for the inspector web server")
+    inspector_cli_enabled: bool = Field(default=True, alias="CONNECTOME_INSPECTOR_CLI_ENABLED", description="Enable CLI command handler plugin (requires inspector_enabled)")
+    inspector_ipc_socket_path: Optional[str] = Field(default=None, alias="CONNECTOME_INSPECTOR_IPC_SOCKET_PATH", description="Custom path for IPC socket (auto-generated if None)")
+
     # Parsed lists (populated after initialization)
     activity_client_adapter_configs: List[ActivityAdapterConfig] = []
     agents: List[AgentConfig] = []

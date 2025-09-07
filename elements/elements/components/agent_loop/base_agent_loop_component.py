@@ -53,6 +53,9 @@ class BaseAgentLoopComponent(Component):
     """
     COMPONENT_TYPE = "AgentLoopComponent"
 
+    # Cooperative cancellation for preemption
+    _cancel_requested: bool = False
+
     # Events this component reacts to
     HANDLED_EVENT_TYPES = [
         "activation_call",  # Signals that the agent should consider running a cycle
@@ -75,6 +78,9 @@ class BaseAgentLoopComponent(Component):
 
         # NEW: Registry mapping short prefixes to full element IDs
         self._prefix_to_element_id_registry: Dict[str, str] = {}
+
+        # NEW: Cooperative cancellation confirmation event
+        self._cancel_event: asyncio.Event = asyncio.Event()
 
         # Convenience accessors, assuming parent_inner_space is correctly typed and populated
         self._llm_provider: Optional['LLMProvider'] = self.parent_inner_space._llm_provider
@@ -108,21 +114,20 @@ class BaseAgentLoopComponent(Component):
             return False
 
         if event_type == "activation_call":
-            activation_reason = event_payload.get('activation_reason', 'unknown')
-            source_element_id = event_payload.get('source_element_id', 'unknown')
-
-            logger.info(f"[{self.agent_loop_name}] Received activation_call: reason='{activation_reason}', source='{source_element_id}'")
+            # Extract from nested payload structure
+            inner_payload = event_payload.get('payload', {})
+            activation_reason = inner_payload.get('activation_reason', 'unknown')
+            focus_context = inner_payload.get('focus_context', {})
+            source_element_id = focus_context.get('focus_element_id', 'unknown')
 
             # Check if we should actually trigger a cycle based on our own logic
             should_activate = self._should_activate_for_reason(activation_reason, event_payload)
 
             if should_activate:
-                logger.info(f"[{self.agent_loop_name}] Activating agent cycle due to: {activation_reason}")
-
                 # Run the cycle asynchronously
                 asyncio.create_task(self._run_activation_cycle(activation_reason, event_payload))
             else:
-                logger.debug(f"[{self.agent_loop_name}] Skipping activation for reason: {activation_reason}")
+                logger.critical(f"❌ [{self.agent_loop_name}] SKIPPING activation for reason: {activation_reason}")
 
             return True
 
@@ -155,12 +160,23 @@ class BaseAgentLoopComponent(Component):
         try:
             logger.debug(f"[{self.agent_loop_name}] Starting activation cycle for reason: {activation_reason}")
 
-            # NEW: Extract focus context for targeted rendering
-            focus_context = event_payload.get('focus_context', {})
+            # NEW: Extract focus context for targeted rendering (from nested payload)
+            inner_payload = event_payload.get('payload', {})
+            focus_context = inner_payload.get('focus_context', {})
             focus_element_id = focus_context.get('focus_element_id')
 
             if focus_element_id:
                 logger.info(f"[{self.agent_loop_name}] Activation with focused context on element: {focus_element_id}")
+
+                # Attempt to get a cached HUD snapshot for this focus (optional)
+                hud = self._get_hud()
+                if hud and hasattr(hud, 'get_snapshot'):
+                    snapshot = hud.get_snapshot(focus_element_id, max_age_ms=5000, generate_if_missing=False)
+                    if not snapshot and hasattr(hud, 'refresh_snapshot'):
+                        try:
+                            await hud.refresh_snapshot(focus_element_id)
+                        except Exception:
+                            pass
 
             # Run the actual agent cycle with focus context
             await self.trigger_cycle(focus_context=focus_context)
@@ -189,7 +205,7 @@ class BaseAgentLoopComponent(Component):
         if not self._hud_component:
             self._hud_component = self.parent_inner_space.get_hud()
             if not self._hud_component:
-                 logger.error(f"{self.agent_loop_name} ({self.id}): HUDComponent could not be retrieved on demand.")
+                logger.error(f"{self.agent_loop_name} ({self.id}): HUDComponent could not be retrieved on demand.")
         return self._hud_component
 
     def _get_llm_provider(self) -> Optional['LLMProvider']:
@@ -878,3 +894,45 @@ class BaseAgentLoopComponent(Component):
 
         except Exception as e:
             logger.error(f"Error persisting agent response to timeline: {e}", exc_info=True)
+
+    async def _emit_stream_lifecycle_event(self, event_type: str, payload: Dict[str, Any]) -> None:
+        """Emit agent response streaming lifecycle events to the parent space timeline."""
+        try:
+            timeline_context = {"timeline_id": self.parent_inner_space.get_primary_timeline()}
+            envelope = {
+                "event_type": event_type,
+                "target_element_id": self.parent_inner_space.id,
+                "is_replayable": True if event_type in ("agent_response_started", "agent_response_finalized") else False,
+                "payload": payload,
+            }
+            # If interruption, set confirmation event
+            if event_type == "agent_response_interrupted":
+                try:
+                    self._cancel_event.set()
+                except Exception:
+                    pass
+            self.parent_inner_space.receive_event(envelope, timeline_context)
+        except Exception as e:
+            logger.error(f"Error emitting stream lifecycle event '{event_type}': {e}", exc_info=True)
+
+    def get_cancel_event(self) -> asyncio.Event:
+        return self._cancel_event
+
+    def reset_cancel_event(self) -> None:
+        try:
+            self._cancel_event = asyncio.Event()
+        except Exception:
+            pass
+
+    def request_cancel(self) -> None:
+        """Signal cooperative cancellation to interrupt current cycle/stream."""
+        try:
+            self._cancel_requested = True
+        except Exception:
+            pass
+
+    def _reset_cancel(self) -> None:
+        self._cancel_requested = False
+
+    def _is_cancelled(self) -> bool:
+        return bool(getattr(self, '_cancel_requested', False))

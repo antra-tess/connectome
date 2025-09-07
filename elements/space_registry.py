@@ -280,6 +280,14 @@ class SpaceRegistry:
         self._elements[space.id] = space # Also register as a general element
         logger.info(f"Registered Space: {space.name} ({space.id})")
         
+        # NEW: Trigger ready cascade after registration
+        if hasattr(space, 'on_registered'):
+            try:
+                space.on_registered()
+                logger.debug(f"Triggered ready cascade for registered space: {space.id}")
+            except Exception as e:
+                logger.error(f"Error triggering ready cascade for space {space.id}: {e}", exc_info=True)
+        
         # NEW: Schedule async persistence of registry state (non-blocking)
         if self._storage_initialized:
             try:

@@ -792,10 +792,8 @@
             const responseInput = document.getElementById('response-input');
             responseInput.value = `I understand you want me to help with this task. Let me analyze the available tools and provide a response.
 
-<tool_calls>
 <msg source="Discord #general">Hello! I'm starting to work on your request.</msg>
 <execute_command command="ls -la" source="Terminal bash-1">
-</tool_calls>
 
 I've executed the appropriate tool calls above. The message has been sent and I've listed the directory contents. Is there anything else you'd like me to help you with?`;
         }
@@ -804,29 +802,24 @@ I've executed the appropriate tool calls above. The message has been sent and I'
             const helpText = `Ultra-Concise XML Tool Call Format Help:
 
 BASIC FORMAT:
-<tool_calls>
+
 <tool_name param1="value1" param2="value2" source="element_name">
-</tool_calls>
 
 EXAMPLES:
 
 1. Send Message:
-<tool_calls>
 <msg source="Discord #general">Hello world!</msg>
-</tool_calls>
 
 2. Multiple Tool Calls:
-<tool_calls>
 <msg source="Slack #updates">Starting task...</msg>
 <execute_command command="git status" source="Terminal main">
 <add_note content="Task started" source="Scratchpad notes">
-</tool_calls>
 
 KEY POINTS:
 • Use tool names directly as XML element names
 • All parameters are XML attributes
 • Always include source when specified
-• Multiple calls go in one <tool_calls> block
+• Multiple calls go in one response
 • No JSON format - pure XML only`;
 
             alert(helpText);
