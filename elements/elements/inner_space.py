@@ -32,6 +32,9 @@ from .components.agent_loop.heartbeat_component import HeartbeatComponent
 from .components.agent_loop.decider_component import ActivationDeciderComponent
 from .components.agent_loop.interrupt_decider_component import InterruptDeciderComponent
 
+# Import messaging components
+from .components.messaging.message_list import MessageListComponent
+
 # Type checking imports
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -200,6 +203,13 @@ class InnerSpace(Space):
         else:
             logger.info(f"HeartbeatComponent successfully added to InnerSpace {self.id}")
         
+        # Add MessageListComponent to handle message_received events
+        self._message_list = self.add_component(MessageListComponent)
+        if not self._message_list:
+            logger.error(f"Failed to add MessageListComponent to InnerSpace {self.id}")
+        else:
+            logger.info(f"MessageListComponent successfully added to InnerSpace {self.id}")
+        
         # Add any additional requested components
         if additional_components:
             for component_type in additional_components:
@@ -207,7 +217,9 @@ class InnerSpace(Space):
                                      UplinkManagerComponent, # NEWLY ADDED
                                      VEILFacetCompressionEngine, # NEW: Add VEILFacet compression engine to skip list
                                      # GlobalAttentionComponent, # REMOVED
-                                     FacetAwareHUDComponent # NEW: Add FacetAware HUD to skip list
+                                     FacetAwareHUDComponent, # NEW: Add FacetAware HUD to skip list
+                                     MessageListComponent, # Add MessageListComponent to skip list
+                                     ActivationDeciderComponent, InterruptDeciderComponent, HeartbeatComponent # Add decider components to skip list
                                      # ContextManagerComponent # REMOVED
                                      ]:
                     # Skip components that we already added

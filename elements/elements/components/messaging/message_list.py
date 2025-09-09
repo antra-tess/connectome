@@ -67,8 +67,11 @@ class MessageListComponent(Component):
         event_type = event_payload.get('event_type')    # Space puts event_type inside payload
 
         # Checking, if incoming event is for the correct conversation
-        if event_payload.get("external_conversation_id", None) != self.owner.external_conversation_id:
-            return False
+        # Skip conversation filtering for InnerSpaces (agents handle all conversations they're involved in)
+        owner_conversation_id = getattr(self.owner, 'external_conversation_id', None)
+        if owner_conversation_id is not None:
+            if event_payload.get("external_conversation_id", None) != owner_conversation_id:
+                return False
 
         # Check if this is a replay event to avoid activation during startup
         is_replay_mode = timeline_context.get('replay_mode', False)
@@ -120,8 +123,10 @@ class MessageListComponent(Component):
             try:
                 original_event_id = event_node.get('id')
                 
+                # For InnerSpace components, emit directly to the owner (the InnerSpace itself)
                 parent_space = self.owner.get_parent_object() if hasattr(self.owner, 'get_parent_object') else None
-                if parent_space and hasattr(parent_space, 'receive_event'):
+                target_space = parent_space if parent_space else self.owner
+                if target_space and hasattr(target_space, 'receive_event'):
                     ack_event = {
                         "event_type": "component_processed",
                         "is_replayable": False,
@@ -133,8 +138,8 @@ class MessageListComponent(Component):
                             "timestamp": time.time()
                         }
                     }
-                    timeline_context_for_ack = {"timeline_id": parent_space.get_primary_timeline() if hasattr(parent_space, 'get_primary_timeline') else None}
-                    parent_space.receive_event(ack_event, timeline_context_for_ack)
+                    timeline_context_for_ack = {"timeline_id": target_space.get_primary_timeline() if hasattr(target_space, 'get_primary_timeline') else None}
+                    target_space.receive_event(ack_event, timeline_context_for_ack)
             except Exception as e:
                 logger.error(f"[{self.owner.id}] Failed to emit component_processed ack: {e}", exc_info=True)
 
