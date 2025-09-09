@@ -89,7 +89,10 @@ class ActivityClient:
         # Protocol configuration
         self.protocol_enabled = PROTOCOL_AVAILABLE and self._should_use_protocol()
         self.protocol_persistence_type = "file"  # or "sqlite"
-        self.protocol_state_dir = "./connectome_protocol_state"
+        self.protocol_state_dir = "./storage_data/connectome_protocol_state"
+        
+        # Store protocol instances separately from connection state
+        self._protocol_instances: Dict[str, Any] = {}  # adapter_id -> PersistentFIXProtocol
 
         self._load_adapter_configs(adapter_api_configs)
         logger.info(f"ActivityClient initialized with {len(self.adapters)} adapter API configs.")
@@ -112,6 +115,10 @@ class ActivityClient:
                     "connected": False
                 }
                 logger.debug(f"Loaded adapter config: {adapter_id} -> {config.get('url')}")
+                
+                # Pre-initialize protocol for this adapter if enabled
+                if self.protocol_enabled:
+                    asyncio.create_task(self._ensure_protocol_for_adapter(adapter_id))
             else:
                 logger.warning(f"Invalid adapter config (missing 'id' or 'url'): {config}")
 
@@ -162,27 +169,19 @@ class ActivityClient:
             )
             self.adapters[adapter_id]["client"] = client
             self.adapters[adapter_id]["connected"] = False # Assume disconnected until confirmed
-            self.adapters[adapter_id]["protocol"] = None  # Will be initialized on connect
+            # Remove protocol initialization here - it's handled separately now
 
             # --- Define Event Handlers ---
             @client.event
             async def connect(*args):
                 logger.info(f"Successfully connected to adapter API '{adapter_id}' at {url}")
+                logger.debug(f"Connect event args: {args}")
+                logger.debug(f"Client namespaces at connect: {list(client.namespaces.keys())}")
+                logger.debug(f"Client connected: {client.connected}")
+                
                 self.adapters[adapter_id]["connected"] = True
                 
-                # Initialize protocol if enabled
-                if self.protocol_enabled:
-                    await self._init_protocol_for_adapter(adapter_id)
-                    
-                    # Send sequence sync
-                    protocol = self.adapters[adapter_id]["protocol"]
-                    if protocol:
-                        await client.emit('sequence_sync', {
-                            'my_outbound_seq': protocol.protocol.outbound_sequence,
-                            'expecting_inbound_seq': 1
-                        })
-                
-                # Record initial adapter signal
+                # Record initial adapter activity
                 self._record_activity(adapter_id)
                 # Start keepalive task for this adapter
                 self._start_keepalive(adapter_id)
@@ -208,23 +207,38 @@ class ActivityClient:
             if self.protocol_enabled:
                 @client.on("sequence_sync")
                 async def handle_sequence_sync(data):
-                    """Handle sequence synchronization"""
-                    protocol = self.adapters[adapter_id]["protocol"]
+                    """Handle sequence synchronization from adapter - respond with ack"""
+                    protocol = self._get_protocol_for_adapter(adapter_id)
                     if protocol:
+                        # Process the sync data and get our state
                         sync_response = await protocol.handle_sequence_sync(adapter_id, data)
-                        await client.emit('sequence_sync', sync_response)
+                        # Send acknowledgment with our state using fresh client
+                        current_client = self.adapters.get(adapter_id, {}).get("client")
+                        if current_client and self.adapters.get(adapter_id, {}).get("connected", False):
+                            try:
+                                await current_client.emit('sequence_sync_ack', sync_response)
+                            except Exception as e:
+                                logger.error(f"Failed to send sequence_sync_ack to {adapter_id}: {e}")
+                
+                @client.on("sequence_sync_ack")
+                async def handle_sequence_sync_ack(data):
+                    """Handle sequence sync acknowledgment from adapter"""
+                    protocol = self._get_protocol_for_adapter(adapter_id)
+                    if protocol:
+                        await protocol.handle_sequence_sync_ack(adapter_id, data)
 
                 @client.on("protocol_message")
                 async def handle_protocol_message(data):
                     """All messages now come through protocol layer"""
-                    protocol = self.adapters[adapter_id]["protocol"]
+                    protocol = self._get_protocol_for_adapter(adapter_id)
+                    logger.debug(f"Received protocol_message from '{adapter_id}': {data}")
                     if protocol:
                         await protocol.handle_incoming_message(adapter_id, data)
 
                 @client.on("resend_request")
                 async def handle_resend_request(data):
                     """Handle retransmission requests from adapter"""
-                    protocol = self.adapters[adapter_id]["protocol"]
+                    protocol = self._get_protocol_for_adapter(adapter_id)
                     if protocol:
                         await protocol.handle_resend_request(adapter_id, data)
 
@@ -442,6 +456,35 @@ class ActivityClient:
             auth_data = config.get("auth") # Expect auth dict if needed
             logger.info(f"Connecting to adapter API '{adapter_id}' at {url}...")
             await client.connect(url, auth=auth_data, namespaces=["/"])
+            
+            # Wait a moment to ensure connection is fully established
+            await asyncio.sleep(0.2)
+            
+            # Verify connection
+            if "/" not in client.namespaces:
+                logger.error(f"Failed to connect to namespace '/' for adapter {adapter_id}")
+                logger.debug(f"Available namespaces after connect: {list(client.namespaces.keys())}")
+                self.adapters[adapter_id]["connected"] = False
+                return False
+                
+            logger.info(f"Successfully verified connection to adapter {adapter_id}")
+            
+            # Initialize protocol after connection is established
+            if self.protocol_enabled and self.adapters[adapter_id]["connected"]:
+                await self._ensure_protocol_for_adapter(adapter_id)
+                
+                # Send initial sequence sync
+                protocol = self._get_protocol_for_adapter(adapter_id)
+                if protocol:
+                    try:
+                        await client.emit('sequence_sync', {
+                            'my_outbound_seq': protocol.protocol.outbound_sequence,
+                            'expecting_inbound_seq': 1
+                        })
+                        logger.info(f"Sent initial sequence_sync to {adapter_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to send initial sequence_sync after connection to {adapter_id}: {e}")
+                        
             # Note: Connection status set by async connect event handler
             return True # Indicates connection attempt initiated successfully
         except socketio.exceptions.ConnectionError as e:
@@ -466,10 +509,37 @@ class ActivityClient:
             
             # Create callbacks for this adapter
             async def send_callback(event_type: str, data: Dict[str, Any]):
-                await client.emit(event_type, data)
+                # Always get fresh client reference
+                adapter_info = self.adapters.get(adapter_id, {})
+                current_client = adapter_info.get("client")
+                logger.critical(f"Sending callback for message type: {event_type}, data: {data}")
+                
+                if not current_client:
+                    logger.error(f"No client found for adapter {adapter_id}")
+                    return
+                    
+                if not adapter_info.get("connected", False):
+                    logger.warning(f"Cannot send {event_type} to {adapter_id} - not connected")
+                    return
+                    
+                # Check if namespace is available
+                if "/" not in current_client.namespaces:
+                    logger.error(f"Namespace '/' not available for {adapter_id} when trying to send {event_type}")
+                    logger.debug(f"Available namespaces: {list(current_client.namespaces.keys())}")
+                    return
+                    
+                try:
+                    await current_client.emit(event_type, data)
+                except Exception as e:
+                    logger.error(f"Failed to emit {event_type} to {adapter_id}: {e}")
+                    # Mark as disconnected if emit fails
+                    if adapter_id in self.adapters:
+                        self.adapters[adapter_id]["connected"] = False
+                    raise
                 
             async def process_callback(message_type: str, body: Dict[str, Any]):
                 # Route based on message type
+                logger.critical(f"Processing callback for message type: {message_type}")
                 if message_type == "bot_request":
                     await self._process_bot_request(adapter_id, body)
                 elif message_type == "request_success":
@@ -497,12 +567,30 @@ class ActivityClient:
             protocol = PersistentFIXProtocol(base_protocol, persistence)
             await protocol.initialize()
             
-            self.adapters[adapter_id]["protocol"] = protocol
+            # Store in our singleton-like cache
+            self._protocol_instances[adapter_id] = protocol
             logger.info(f"Protocol initialized for adapter '{adapter_id}'")
             
         except Exception as e:
             logger.error(f"Failed to initialize protocol for adapter '{adapter_id}': {e}", exc_info=True)
             
+    async def _ensure_protocol_for_adapter(self, adapter_id: str):
+        """Ensure protocol exists for adapter (create if needed, reuse if exists)"""
+        if not self.protocol_enabled:
+            return
+            
+        # Check if we already have a protocol instance
+        if adapter_id in self._protocol_instances:
+            logger.debug(f"Reusing existing protocol instance for adapter '{adapter_id}'")
+            return
+            
+        # Create new protocol instance
+        await self._init_protocol_for_adapter(adapter_id)
+        
+    def _get_protocol_for_adapter(self, adapter_id: str) -> Optional[Any]:
+        """Get the protocol instance for an adapter"""
+        return self._protocol_instances.get(adapter_id)
+        
     async def _process_bot_request(self, adapter_id: str, raw_payload: Dict[str, Any]):
         """Process incoming bot request (extracted from protocol handling)"""
         # This is the start of a new trace for an unsolicited incoming event.
@@ -680,7 +768,7 @@ class ActivityClient:
                 return
 
             client = self.adapters[target_adapter_id]["client"]
-            protocol = self.adapters[target_adapter_id].get("protocol")
+            protocol = self._get_protocol_for_adapter(target_adapter_id)
 
             try:
                 # NEW: Check for idle connection and proactively refresh if needed
@@ -783,9 +871,9 @@ class ActivityClient:
                 # Dispatch to adapter using protocol or direct emit
                 if self.protocol_enabled and protocol:
                     # Send through protocol
-                    logger.debug(f"Emitting {internal_action_type} to adapter '{target_adapter_id}' via protocol")
+                    logger.critical(f"Emitting {internal_action_type} to adapter '{target_adapter_id}' via protocol")
                     await protocol.send_message(
-                        message_type=internal_action_type,
+                        message_type="bot_response",
                         body=adapter_payload,
                         requires_ack=True  # Important actions should be acknowledged
                     )
@@ -931,8 +1019,7 @@ class ActivityClient:
             
         # Shutdown protocols if enabled
         if self.protocol_enabled:
-            for adapter_id, adapter_info in self.adapters.items():
-                protocol = adapter_info.get("protocol")
+            for adapter_id, protocol in self._protocol_instances.items():
                 if protocol:
                     try:
                         await protocol.protocol.shutdown()
@@ -956,6 +1043,7 @@ class ActivityClient:
         self.adapters.clear()
         self._last_activity.clear()
         self._keepalive_tasks.clear()
+        self._protocol_instances.clear()  # Clear protocol instances
 
         # NEW: Clean up connection health tracking
         self._successful_operations.clear()

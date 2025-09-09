@@ -91,8 +91,12 @@ class FilePersistence(ProtocolPersistence):
                 with open(messages_path, 'r') as f:
                     messages = json.load(f)
             
+            self.logger.debug(f"Loaded {len(messages)} existing messages for {node_id}")
+            
             # Add new message
             messages[str(sequence)] = message.to_dict()
+            
+            self.logger.info(f"Saving message seq={sequence} for {node_id}, total messages: {len(messages)}")
             
             # Save back
             with open(messages_path, 'w') as f:
@@ -315,6 +319,7 @@ class PersistentFIXProtocol:
             'peer_states': peer_states_dict
         }
         
+        self.logger.info(f"Saving state: outbound_seq={self.protocol.outbound_sequence}, peers={list(peer_states_dict.keys())}")
         await self.persistence.save_state(self.protocol.node_id, state)
         
     async def send_message(self, *args, **kwargs) -> int:

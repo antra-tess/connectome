@@ -139,7 +139,9 @@ class FIXProtocol:
         Returns:
             Sequence number assigned to the message
         """
+        self.logger.info(f"BEFORE increment: outbound_sequence={self.outbound_sequence}")
         self.outbound_sequence += 1
+        self.logger.info(f"AFTER increment: outbound_sequence={self.outbound_sequence}")
         
         # Create protocol message
         message = ProtocolMessage(
@@ -258,6 +260,30 @@ class FIXProtocol:
             'my_outbound_seq': self.outbound_sequence,
             'expecting_inbound_seq': peer_state.last_received + 1
         }
+    
+    async def handle_sequence_sync_ack(self, peer_id: str, data: Dict[str, Any]) -> None:
+        """
+        Handle acknowledgment of sequence sync.
+        
+        Args:
+            peer_id: ID of the acknowledging peer
+            data: Ack data including peer's state
+        """
+        peer_outbound = data.get('my_outbound_seq', 0)
+        peer_expects = data.get('expecting_inbound_seq', 1)
+        
+        peer_state = self.get_or_create_peer_state(peer_id)
+        
+        # Check if we need to request missing messages based on ack
+        if peer_outbound > peer_state.last_received:
+            # We're missing messages
+            await self.send_callback('resend_request', {
+                'from_sequence': peer_state.last_received + 1,
+                'to_sequence': peer_outbound,
+                'requester': self.node_id
+            })
+            
+        self.logger.info(f"Sequence sync acknowledged by {peer_id}. They're at seq {peer_outbound}, expecting {peer_expects}")
         
     def _check_sequence_status(self, received_seq: int, last_received: int) -> SequenceStatus:
         """Check if a sequence number is valid"""
