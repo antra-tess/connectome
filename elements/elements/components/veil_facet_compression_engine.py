@@ -2326,7 +2326,7 @@ class VEILFacetCompressionEngine(Component):
                 "created_at": datetime.now(),
                 "is_complete": True,
                 "source_n_chunk_index": chunk_index,
-                "replaced_facet_count": len(n_chunk.get("facet_ids", []))
+                "replaced_facet_count": len(replaced_ids)
             }
 
             # Add to M-chunks
