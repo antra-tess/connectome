@@ -536,7 +536,7 @@ class MessageActionHandler(Component):
 
         # Enhanced dispatch with better error context
         try:
-            result = await self._dispatch_action("fetch_attachment_content", payload)
+            result = await self._dispatch_action("fetch_attachment", payload)
             
             # Add success logging
             if result.get("success"):

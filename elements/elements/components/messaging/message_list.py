@@ -1525,7 +1525,7 @@ class MessageListComponent(Component):
             return self._handle_edit_message_confirmed(success_content)
         elif action_type in ["add_reaction", "remove_reaction"]:
             return self._handle_reaction_action_confirmed(success_content)
-        elif action_type == "fetch_attachment_content":
+        elif action_type == "fetch_attachment":
             return self._handle_fetch_attachment_confirmed(success_content)
         else:
             logger.warning(f"[{self.owner.id}] Unknown action_type '{action_type}' in action success. Ignoring.")
@@ -1547,7 +1547,7 @@ class MessageListComponent(Component):
             return self._handle_message_send_failed(failure_content)
         elif action_type in ["delete_message", "edit_message", "add_reaction", "remove_reaction"]:
             return self._handle_message_action_failed(failure_content)
-        elif action_type == "fetch_attachment_content":
+        elif action_type == "fetch_attachment":
             return self._handle_fetch_attachment_failed(failure_content)
         else:
             logger.warning(f"[{self.owner.id}] Unknown action_type '{action_type}' in action failure. Ignoring.")
@@ -1598,7 +1598,7 @@ class MessageListComponent(Component):
 
     def _handle_fetch_attachment_confirmed(self, success_content: Dict[str, Any]) -> bool:
         """
-        Handles confirmation of fetch_attachment_content action success.
+        Handles confirmation of fetch_attachment action success.
         """
         internal_req_id = success_content.get('internal_request_id')
         adapter_response_data = success_content.get('adapter_response_data', {})
@@ -1608,7 +1608,7 @@ class MessageListComponent(Component):
 
     def _handle_fetch_attachment_failed(self, failure_content: Dict[str, Any]) -> bool:
         """
-        Handles failure of fetch_attachment_content action.
+        Handles failure of fetch_attachment action.
         """
         internal_req_id = failure_content.get('internal_request_id')
         error_msg = failure_content.get('error_message')
