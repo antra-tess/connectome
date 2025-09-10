@@ -96,7 +96,19 @@ class SimpleRequestResponseLoopComponent(BaseAgentLoopComponent):
 
             # Get aggregated tools and send to LLM
             aggregated_tools = await self.aggregate_tools()
-            # 3. Send rendered context + tools to LLM
+
+            # 3. Cache context for inspector before sending to LLM
+            try:
+                cache_key = hud.cache_llm_context(messages, {
+                    'agent_loop_type': 'SimpleRequestResponseLoop',
+                    'message_count': len(messages),
+                    'tool_count': len(aggregated_tools)
+                })
+                logger.debug(f"Cached LLM context for inspector with key: {cache_key}")
+            except Exception as cache_error:
+                logger.warning(f"Failed to cache LLM context: {cache_error}")
+
+            # 4. Send rendered context + tools to LLM
             # Metadata now travels with LLMMessage objects, no need for original_context_data
             llm_response_obj = llm_provider.complete(messages=messages, tools=aggregated_tools)
 

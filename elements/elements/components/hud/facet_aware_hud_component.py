@@ -170,6 +170,8 @@ class FacetAwareHUDComponent(Component):
         # NEW: Enhanced snapshot cache with TTL and metrics
         ttl_ms = kwargs.get('snapshot_ttl_ms', 5000)
         self._snapshot_cache = SnapshotCache(ttl_ms=ttl_ms)
+        # NEW: LLM context cache for inspector - stores actual context sent to LLM
+        self._llm_context_cache = SnapshotCache(ttl_ms=300000)  # 5 minute TTL for context cache
         # Start metrics logging task
         self._metrics_task = asyncio.create_task(self._log_metrics_periodically())
         logger.debug(f"FacetAwareHUDComponent initialized for Element {self.owner.id}")
@@ -2320,6 +2322,87 @@ class FacetAwareHUDComponent(Component):
             Dictionary with rendering statistics
         """
         return self._rendering_stats.copy()
+        
+    def cache_llm_context(self, messages: List[Any], context_metadata: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Cache the actual context being sent to LLM for inspector debugging.
+        
+        Args:
+            messages: The LLMMessage objects being sent to the LLM
+            context_metadata: Optional metadata about the context generation
+            
+        Returns:
+            Cache key for retrieval
+        """
+        import time
+        cache_key = f"llm_context_{self.owner.id}_{int(time.time())}"
+        
+        # Convert messages to serializable format for caching
+        serialized_messages = []
+        for msg in messages:
+            try:
+                # Handle both LLMMessage objects and dict messages
+                if hasattr(msg, 'to_dict'):
+                    serialized_messages.append(msg.to_dict())
+                elif hasattr(msg, 'role'):
+                    # Handle simple message objects
+                    msg_dict = {
+                        'role': msg.role,
+                        'content': getattr(msg, 'content', str(msg))
+                    }
+                    if hasattr(msg, 'is_multimodal') and msg.is_multimodal():
+                        msg_dict['is_multimodal'] = True
+                        if hasattr(msg, 'get_attachment_count'):
+                            msg_dict['attachment_count'] = msg.get_attachment_count()
+                    serialized_messages.append(msg_dict)
+                elif isinstance(msg, dict):
+                    serialized_messages.append(msg)
+                else:
+                    # Fallback for other formats
+                    serialized_messages.append({'role': 'unknown', 'content': str(msg)})
+            except Exception as e:
+                logger.warning(f"Error serializing message for cache: {e}")
+                serialized_messages.append({'role': 'error', 'content': f'Serialization error: {str(e)}'})
+        
+        cache_data = {
+            'messages': serialized_messages,
+            'timestamp': time.time(),
+            'space_id': self.owner.id if self.owner else 'unknown',
+            'context_metadata': context_metadata or {}
+        }
+        
+        self._llm_context_cache.put(cache_key, cache_data)
+        logger.debug(f"Cached LLM context with key: {cache_key}, {len(serialized_messages)} messages")
+        return cache_key
+        
+    def get_cached_llm_context(self, cache_key: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve cached LLM context for inspector debugging.
+        
+        Args:
+            cache_key: Specific cache key, or None to get most recent
+            
+        Returns:
+            Cached context data or None if not found
+        """
+        if cache_key:
+            return self._llm_context_cache.get(cache_key)
+        
+        # If no specific key, find most recent entry for this space
+        space_id = self.owner.id if self.owner else 'unknown'
+        most_recent_key = None
+        most_recent_time = 0
+        
+        for key, entry in self._llm_context_cache._cache.items():
+            if f"llm_context_{space_id}" in key:
+                if entry.data.get('timestamp', 0) > most_recent_time:
+                    most_recent_time = entry.data.get('timestamp', 0)
+                    most_recent_key = key
+        
+        if most_recent_key:
+            return self._llm_context_cache.get(most_recent_key)
+        
+        return None
 
     # --- MISSING HELPER METHODS IMPLEMENTATION ---
 

@@ -160,7 +160,18 @@ class ToolTextParsingLoopComponent(BaseAgentLoopComponent):
                 else:
                     logger.debug(f"Message {i} ({msg.role}): {len(msg.get_text_content())} chars")
 
-            # 3. Send rendered context to LLM (no separate tool definitions - they're in the context)
+            # 3. Cache context for inspector before sending to LLM
+            try:
+                cache_key = hud.cache_llm_context(messages, {
+                    'agent_loop_type': 'ToolTextParsingLoop',
+                    'message_count': len(messages),
+                    'has_tools': len(enhanced_tools_from_veil) > 0
+                })
+                logger.debug(f"Cached LLM context for inspector with key: {cache_key}")
+            except Exception as cache_error:
+                logger.warning(f"Failed to cache LLM context: {cache_error}")
+
+            # 4. Send rendered context to LLM (no separate tool definitions - they're in the context)
             # NOTE: We don't pass tools parameter to LLM since they're already rendered in the context
             # Metadata now travels with LLMMessage objects, no need for original_context_data
             if self._is_cancelled():
