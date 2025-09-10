@@ -2511,18 +2511,22 @@ class FacetAwareHUDComponent(Component):
         """
         return """TOOL CALL FORMAT: Use XML format for all tool calls. Do NOT use JSON format.
 
+IMPORTANT: All tool calls must have proper closing tags.
+
 To call tools, use this ultra-concise XML format to send messages:
 
 <msg source="element_name">message</msg>
 
 and this format to use any other tool:
-<tool_name param1="value1" param2="value2" source="element_name">
+<tool_name param1="value1" param2="value2" source="element_name"></tool_name>
 
 Examples:
 <msg source="discord_chat">Hello, world!</msg>
 
-<execute_command command="ls -la" source="Terminal">
+<execute_command command="ls -la" source="Terminal"></execute_command>
 <msg source="zulip_chat">Command executed!</msg>
+
+<get_attachment attachment_id="12345" source="DM_user"></get_attachment>
 
 Use the actual tool name as the XML element name. You can make multiple tool calls in one response. The source parameter specifies which conversation or element to use - choose from the sources listed for each tool type."""
 
