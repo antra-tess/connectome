@@ -320,8 +320,8 @@ class FacetAwareHUDComponent(Component):
             if self._has_multimodal_content(facet_cache):  # Use facet_cache instead of processed_facets
                 # Get the multimodal content formatted for LLM ingestion
                 multimodal_result = await self._detect_and_extract_multimodal_content(
-                    text_content="",  # Empty since we're just extracting attachments
-                    options={'facet_cache': facet_cache}
+                    "",  # Empty since we're just extracting attachments
+                    {'facet_cache': facet_cache}
                 )
                 
                 if isinstance(multimodal_result, dict) and multimodal_result.get('attachments'):
