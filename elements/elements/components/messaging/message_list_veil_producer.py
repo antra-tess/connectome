@@ -392,6 +392,7 @@ class MessageListVeilProducer(VeilProducer):
             pending_operations = message_list_comp.get_pending_veil_operations()
 
             for operation in pending_operations:
+                logger.critical(f"[{owner_id}/{self.COMPONENT_TYPE}] Recorded VEIL operation: {operation.get('operation_type')} for {operation.get('veil_id')}")
                 if operation["operation_type"] == "edit":
                     # DUAL OPERATION: Update original message facet + add edit audit event
                     original_message_id = operation["veil_id"]

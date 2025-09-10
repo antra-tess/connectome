@@ -539,7 +539,6 @@ class ActivityClient:
                 
             async def process_callback(message_type: str, body: Dict[str, Any]):
                 # Route based on message type
-                logger.critical(f"Processing callback for message type: {message_type}")
                 if message_type == "bot_request":
                     await self._process_bot_request(adapter_id, body)
                 elif message_type == "request_success":

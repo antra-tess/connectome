@@ -563,7 +563,7 @@ class ExternalEventRouter:
             return
 
         # Create properly routed connectome event with all necessary fields
-        connectome_event_type = "connectome_action_success"
+        connectome_event_type = "action_success"  # Consistent naming without "connectome_" prefix
 
         confirmation_payload = {
             "internal_request_id": internal_request_id,
@@ -573,12 +573,13 @@ class ExternalEventRouter:
             "raw_adapter_response": adapter_data.get("raw_adapter_response", {})
         }
 
-        # NEW: Create event with proper routing fields
+        # Use consistent event structure pattern like _handle_direct_message
         connectome_event = {
             "event_type": connectome_event_type,
+            "event_id": f"action_success_{internal_request_id}_{uuid.uuid4()}",  # Unique ID for timeline event
             "source_adapter_id": source_adapter_id_from_context,        # ✅ For ChatManagerComponent routing
             "external_conversation_id": external_conversation_id,       # ✅ For ChatManagerComponent routing
-            "target_element_id": target_element_id,
+            "target_element_id": target_element_id,  # Keep for element-targeting events
             "is_replayable": True,  # Action confirmations should be replayed for state consistency
             "payload": confirmation_payload
         }
@@ -643,7 +644,7 @@ class ExternalEventRouter:
             return
 
         # Create properly routed connectome event with all necessary fields
-        connectome_event_type = "connectome_action_failure"
+        connectome_event_type = "action_failure"  # Consistent naming without "connectome_" prefix
 
         failure_payload = {
             "internal_request_id": internal_request_id,
@@ -654,12 +655,13 @@ class ExternalEventRouter:
             "raw_adapter_response": adapter_data.get("raw_adapter_response", {})
         }
 
-        # NEW: Create event with proper routing fields
+        # Use consistent event structure pattern like _handle_direct_message
         connectome_event = {
             "event_type": connectome_event_type,
+            "event_id": f"action_failure_{internal_request_id}_{uuid.uuid4()}",  # Unique ID for timeline event
             "source_adapter_id": source_adapter_id_from_context,        # ✅ For ChatManagerComponent routing
             "external_conversation_id": external_conversation_id,       # ✅ For ChatManagerComponent routing
-            "target_element_id": target_element_id,
+            "target_element_id": target_element_id,  # Keep for element-targeting events
             "is_replayable": True,  # Action failures should be replayed for state consistency
             "payload": failure_payload
         }
@@ -687,20 +689,19 @@ class ExternalEventRouter:
         # Use unified InnerSpace routing
         target_inner_space = await self._find_target_inner_space_for_agent(adapter_data)
         if not target_inner_space:
-            logger.error(f"Cannot route message_updated: Target InnerSpace not found.")
+            logger.critical(f"Cannot route message_updated: Target InnerSpace not found.")
             return
 
         conversation_id = adapter_data.get("conversation_id")
         message_id = adapter_data.get("message_id")
         if not conversation_id or not message_id:
-            logger.error("message_updated event missing conversation_id or message_id.")
+            logger.critical("message_updated event missing conversation_id or message_id.")
             return
 
         # Determine if this is a DM for proper target element ID generation
         is_dm = adapter_data.get("is_direct_message", False)
-        target_element_id = self._generate_target_element_id(source_adapter_id, conversation_id, is_dm, target_inner_space)
-
-        # Construct event payload
+        
+        # Construct event payload (event-specific structure)
         event_payload = {
             "source_adapter_id": source_adapter_id,
             "original_message_id_external": message_id,
@@ -710,9 +711,12 @@ class ExternalEventRouter:
             "original_adapter_data": adapter_data
         }
 
+        # Use consistent event structure pattern like _handle_direct_message
         connectome_event = {
-            "event_type": "connectome_message_updated",
-            "target_element_id": target_element_id,
+            "event_type": "message_updated",  # Consistent naming without "connectome_" prefix
+            "event_id": message_id or f"msg_updated_{uuid.uuid4()}",  # Unique ID for timeline event
+            "source_adapter_id": source_adapter_id,  # Context for routing
+            "external_conversation_id": conversation_id,  # Context for routing
             "is_replayable": True,  # Message edits should be replayed for message state
             "payload": event_payload
         }
@@ -760,9 +764,13 @@ class ExternalEventRouter:
             "original_adapter_data": adapter_data
         }
 
+        # Use consistent event structure pattern like _handle_direct_message
         connectome_event = {
-            "event_type": "connectome_message_deleted",
-            "target_element_id": target_element_id,
+            "event_type": "message_deleted",  # Consistent naming without "connectome_" prefix
+            "event_id": message_id or f"msg_deleted_{uuid.uuid4()}",  # Unique ID for timeline event
+            "source_adapter_id": source_adapter_id,  # Context for routing
+            "external_conversation_id": conversation_id,  # Context for routing
+            "target_element_id": target_element_id,  # Keep for element-targeting events
             "is_replayable": True,  # Message deletions should be replayed for message state
             "payload": event_payload
         }
@@ -815,9 +823,13 @@ class ExternalEventRouter:
             "original_adapter_data": adapter_data
         }
 
+        # Use consistent event structure pattern like _handle_direct_message
         connectome_event = {
-            "event_type": "connectome_reaction_added",
-            "target_element_id": target_element_id,
+            "event_type": "reaction_added",  # Consistent naming without "connectome_" prefix
+            "event_id": f"reaction_added_{message_id}_{emoji}_{uuid.uuid4()}",  # Unique ID for timeline event
+            "source_adapter_id": source_adapter_id,  # Context for routing
+            "external_conversation_id": conversation_id,  # Context for routing
+            "target_element_id": target_element_id,  # Keep for element-targeting events
             "is_replayable": True,  # Reaction additions should be replayed for message state
             "payload": event_payload
         }
@@ -870,9 +882,13 @@ class ExternalEventRouter:
             "original_adapter_data": adapter_data
         }
 
+        # Use consistent event structure pattern like _handle_direct_message
         connectome_event = {
-            "event_type": "connectome_reaction_removed",
-            "target_element_id": target_element_id,
+            "event_type": "reaction_removed",  # Consistent naming without "connectome_" prefix
+            "event_id": f"reaction_removed_{message_id}_{emoji}_{uuid.uuid4()}",  # Unique ID for timeline event
+            "source_adapter_id": source_adapter_id,  # Context for routing
+            "external_conversation_id": conversation_id,  # Context for routing
+            "target_element_id": target_element_id,  # Keep for element-targeting events
             "is_replayable": True,  # Reaction removals should be replayed for message state
             "payload": event_payload
         }
@@ -1103,10 +1119,13 @@ class ExternalEventRouter:
         is_dm = adapter_data.get("is_direct_message", False)
         target_element_id = self._generate_target_element_id(source_adapter_id, conversation_id, is_dm, target_inner_space)
 
+        # Use consistent event structure pattern like _handle_direct_message
         connectome_attachment_event = {
-            "event_type": "connectome_attachment_received",
-            "source_adapter_id": source_adapter_id,
-            "target_element_id": target_element_id,
+            "event_type": "attachment_received",  # Consistent naming without "connectome_" prefix
+            "event_id": f"attachment_{attachment_id}_{uuid.uuid4()}",  # Unique ID for timeline event
+            "source_adapter_id": source_adapter_id,  # Context for routing
+            "external_conversation_id": conversation_id,  # Context for routing
+            "target_element_id": target_element_id,  # Keep for element-targeting events
             "is_replayable": True,  # Attachment events should be replayed for message state restoration
             "payload": attachment_event_payload
         }
@@ -1179,9 +1198,13 @@ class ExternalEventRouter:
         is_dm = routing_adapter_data.get("is_direct_message", False)
         target_element_id = self._generate_target_element_id(source_adapter_id, conversation_id, is_dm, target_inner_space)
 
+        # Use consistent event structure pattern like _handle_direct_message
         connectome_internal_event = {
             "event_type": "attachment_content_available",
-            "target_element_id": target_element_id,
+            "event_id": f"attachment_content_{attachment_id}_{uuid.uuid4()}",  # Unique ID for timeline event
+            "source_adapter_id": source_adapter_id,  # Context for routing
+            "external_conversation_id": conversation_id,  # Context for routing
+            "target_element_id": target_element_id,  # Keep for element-targeting events
             "is_replayable": True,  # Attachment content should be replayed for message state restoration
             "payload": internal_event_payload
         }

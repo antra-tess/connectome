@@ -33,13 +33,13 @@ class MessageListComponent(Component):
         "historical_message_received",        # NEW: For conversation history without activation
         "bulk_history_received",              # NEW: For bulk history processing from ChatManagerComponent
         "agent_message_confirmed",            # NEW: For confirmed agent outgoing messages (replay)
-        "connectome_message_deleted",         # Use Connectome-defined types for delete/edit
-        "connectome_message_updated",         # Use Connectome-defined types for delete/edit
-        "connectome_reaction_added",          # For handling added reactions
-        "connectome_reaction_removed",        # For handling removed reactions
+        "message_deleted",         # Use Connectome-defined types for delete/edit
+        "message_updated",         # Use Connectome-defined types for delete/edit
+        "reaction_added",          # For handling added reactions
+        "reaction_removed",        # For handling removed reactions
         "attachment_content_available",       # NEW: For when fetched attachment content arrives
-        "connectome_action_success",          # NEW: Generic action success (replaces specific events)
-        "connectome_action_failure",          # NEW: Generic action failure (replaces specific events)
+        "action_success",          # NEW: Generic action success (replaces specific events)
+        "action_failure",          # NEW: Generic action failure (replaces specific events)
     ]
 
     def initialize(self, max_messages: Optional[int] = None, **kwargs) -> None:
@@ -65,7 +65,6 @@ class MessageListComponent(Component):
         # FIXED: Get event_type from inside payload, where Space actually puts it
         event_payload = event_node.get('payload', {})  # This is what Space provides
         event_type = event_payload.get('event_type')    # Space puts event_type inside payload
-
         # Checking, if incoming event is for the correct conversation
         if event_payload.get("external_conversation_id", None) != self.owner.external_conversation_id:
             return False
@@ -88,19 +87,19 @@ class MessageListComponent(Component):
             elif event_type == "bulk_history_received":
                 # Handle bulk history processing
                 self._handle_bulk_history_received(event_payload, timeline_context)
-            elif event_type == "connectome_message_deleted":
+            elif event_type == "message_deleted":
                 self._handle_delete_message(actual_content_payload)
-            elif event_type == "connectome_message_updated":
+            elif event_type == "message_updated":
                 self._handle_edit_message(actual_content_payload)
-            elif event_type == "connectome_reaction_added":
+            elif event_type == "reaction_added":
                 self._handle_reaction_added(actual_content_payload)
-            elif event_type == "connectome_reaction_removed":
+            elif event_type == "reaction_removed":
                 self._handle_reaction_removed(actual_content_payload)
             elif event_type == "attachment_content_available":
                 self._handle_attachment_content_available(actual_content_payload)
-            elif event_type == "connectome_action_success":
+            elif event_type == "action_success":
                 self._handle_action_success(actual_content_payload)
-            elif event_type == "connectome_action_failure":
+            elif event_type == "action_failure":
                 self._handle_action_failure(actual_content_payload)
             elif event_type == "agent_message_confirmed":
                 self._handle_agent_message_confirmed(actual_content_payload)
