@@ -205,6 +205,10 @@ class ExternalEventRouter:
                 elif event_type_from_adapter == "adapter_send_failure_ack": # Legacy - redirect to generic handler
                     logger.warning(f"Received legacy 'adapter_send_failure_ack' event. Redirecting to generic handler.")
                     await self._handle_action_failure_ack(source_adapter_id, adapter_data)
+                elif event_type_from_adapter == "fetch_attachment_content":
+                    logger.info(f"Handling fetch_attachment_content event from adapter '{source_adapter_id}'")
+                    # This might be treated as an action response rather than an event
+                    # For now, just log it - actual attachment content should come via action success/failure
                 else:
                     logger.warning(f"ExternalEventRouter: Unhandled event type '{event_type_from_adapter}' from adapter '{source_adapter_id}'. Data: {adapter_data}")
                     span.set_attribute("routing.status", "unhandled_event_type")

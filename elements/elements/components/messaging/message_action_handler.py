@@ -209,6 +209,9 @@ class MessageActionHandler(Component):
             """
             logger.info(f"[{self.owner.id}] get_attachment tool called for attachment_id: {attachment_id}")
             
+            # Convert to string if needed and validate
+            attachment_id = str(attachment_id) if attachment_id is not None else ""
+            
             # Security validation
             if not attachment_id or len(attachment_id.strip()) == 0:
                 return {"success": False, "error": "attachment_id cannot be empty"}
