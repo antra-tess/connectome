@@ -1599,11 +1599,86 @@ class MessageListComponent(Component):
     def _handle_fetch_attachment_confirmed(self, success_content: Dict[str, Any]) -> bool:
         """
         Handles confirmation of fetch_attachment action success.
+        Creates a message-like entry with the fetched attachment content for HUD display.
         """
         internal_req_id = success_content.get('internal_request_id')
         adapter_response_data = success_content.get('adapter_response_data', {})
         logger.info(f"[{self.owner.id}] Fetch attachment confirmed for req_id: {internal_req_id}")
-        # The actual attachment content should be handled by the tool that requested it
+        
+        # Extract attachment content from adapter response
+        attachment_content = adapter_response_data.get('content')
+        attachment_metadata = adapter_response_data.get('metadata', {})
+        attachment_id = adapter_response_data.get('attachment_id')
+        
+        # If attachment_id is not in adapter_response_data, try to find it from recent messages
+        # Look for messages with attachments that might match this fetch request
+        if not attachment_id and internal_req_id:
+            # Search recent messages for attachments
+            recent_messages = self._state.get('_messages', [])[-20:]  # Check last 20 messages
+            for msg in reversed(recent_messages):  # Check most recent first
+                attachments = msg.get('attachments', [])
+                for att in attachments:
+                    potential_id = att.get('attachment_id')
+                    if potential_id:
+                        attachment_id = potential_id
+                        # Use metadata from the original message if available
+                        if not attachment_metadata and att.get('filename'):
+                            attachment_metadata = {
+                                'filename': att.get('filename', 'unknown_file'),
+                                'content_type': att.get('content_type', 'unknown'),
+                                'size': att.get('size', len(attachment_content) if isinstance(attachment_content, str) else 0)
+                            }
+                        break
+                if attachment_id:
+                    break
+        
+        if not attachment_content:
+            logger.warning(f"[{self.owner.id}] Fetch attachment success but missing content in response for req_id: {internal_req_id}")
+            return True
+            
+        if not attachment_id:
+            logger.warning(f"[{self.owner.id}] Fetch attachment success but missing attachment_id in response and unable to extract from req_id: {internal_req_id}")
+            return True
+            
+        # Create a system message entry to display the fetched attachment content
+        import time
+        current_timestamp = time.time()
+        
+        # Build attachment metadata for display
+        filename = attachment_metadata.get('filename', 'unknown_file')
+        content_type = attachment_metadata.get('content_type', 'unknown')
+        size = attachment_metadata.get('size', len(attachment_content) if isinstance(attachment_content, str) else 0)
+        
+        fetch_result_message = {
+            'internal_id': f"fetch_attachment_result_{internal_req_id}",
+            'external_id': f"fetch_attachment_result_{internal_req_id}",
+            'original_external_id': f"fetch_attachment_result_{internal_req_id}",
+            'timestamp': current_timestamp,
+            'sender_name': 'System',
+            'sender_id': 'system',
+            'text': f"📎 Fetched attachment: {filename}",
+            'is_from_current_agent': False,
+            'is_internal_origin': True,
+            'is_system_message': True,
+            'attachments': [{
+                'attachment_id': attachment_id,
+                'filename': filename,
+                'content_type': content_type,
+                'size': size,
+                'content': attachment_content,
+                'status': 'content_available'
+            }],
+            'fetch_attachment_result': True  # Flag to identify these special messages
+        }
+        
+        # Add to message list
+        self._state['_messages'].append(fetch_result_message)
+        
+        # Update message map
+        message_map = self._state.setdefault('_message_map', {})
+        message_map[fetch_result_message['internal_id']] = len(self._state['_messages']) - 1
+        
+        logger.info(f"[{self.owner.id}] Added fetch attachment result for attachment '{attachment_id}' ({filename}) to message list")
         return True
 
     def _handle_fetch_attachment_failed(self, failure_content: Dict[str, Any]) -> bool:

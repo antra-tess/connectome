@@ -316,16 +316,25 @@ class FacetAwareHUDComponent(Component):
             # NEW: Process facets into turn-based messages
             turn_based_messages = await self._process_facets_into_turns(processed_facets, options, tools)
 
-            # Check for multimodal content
-            if self._has_multimodal_content(processed_facets):
-                return {
-                    "messages": turn_based_messages,
-                    "multimodal_content": {
-                        "has_attachments": True,
-                        "attachment_count": self._count_multimodal_content(processed_facets),
-                        "supported_types": ["image", "document"]
-                    }
-                }
+            # Check for multimodal content and integrate it
+            if self._has_multimodal_content(facet_cache):  # Use facet_cache instead of processed_facets
+                # Get the multimodal content formatted for LLM ingestion
+                multimodal_result = await self._detect_and_extract_multimodal_content(
+                    text_content="",  # Empty since we're just extracting attachments
+                    options={'facet_cache': facet_cache}
+                )
+                
+                if isinstance(multimodal_result, dict) and multimodal_result.get('attachments'):
+                    # Find the most recent user message to attach multimodal content to
+                    if turn_based_messages and len(turn_based_messages) > 0:
+                        # Attach multimodal content to the last user message
+                        last_message = turn_based_messages[-1]
+                        if isinstance(last_message, dict) and last_message.get('role') == 'user':
+                            # Convert the message content to multimodal format
+                            last_message['content'] = {
+                                'text': last_message.get('content', ''),
+                                'attachments': multimodal_result['attachments']
+                            }
 
             return turn_based_messages
 
@@ -2197,36 +2206,97 @@ class FacetAwareHUDComponent(Component):
             if not self._has_multimodal_content(facet_cache):
                 return text_context
                 
-            # Extract attachment data from facets
+            # Extract attachment data from facets and message data
             attachments = []
             
-            # Extract from EventFacets (messages)
+            # First, get the MessageListComponent to access message data directly
+            message_list_components = []
+            
+            # Access mounted elements through the ContainerComponent
+            container_component = None
+            for component in self.owner.get_components().values():
+                if hasattr(component, 'COMPONENT_TYPE') and component.COMPONENT_TYPE == 'ContainerComponent':
+                    container_component = component
+                    break
+            
+            if container_component:
+                mounted_elements = container_component.get_mounted_elements()
+                for element in mounted_elements.values():
+                    for component in element.get_components().values():
+                        if hasattr(component, 'COMPONENT_TYPE') and component.COMPONENT_TYPE == 'MessageListComponent':
+                            message_list_components.append(component)
+            
+            # Check for attachments in system messages (like fetch_attachment results)
+            for message_list_component in message_list_components:
+                messages = message_list_component.get_messages()
+                for message in messages:
+                    # Check if this is a fetch_attachment result message with content
+                    if (message.get('is_system_message') and 
+                        message.get('fetch_attachment_result') and
+                        message.get('attachments')):
+                        
+                        for attachment in message['attachments']:
+                            if isinstance(attachment, dict) and attachment.get('content'):
+                                attachment_id = attachment.get('attachment_id')
+                                content_type = attachment.get('content_type', 'unknown')
+                                filename = attachment.get('filename', 'unknown')
+                                content = attachment.get('content')
+                                
+                                if content and content_type.startswith('image/'):
+                                    # Format image content for LLM (proper multimodal format)
+                                    image_format = content_type.split('/')[-1] if '/' in content_type else 'png'
+                                    attachment_info = {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/{image_format};base64,{content}"
+                                        }
+                                    }
+                                    logger.debug(f"[HUD] Formatted image attachment {attachment_id} ({filename}) from system message for LLM")
+                                elif content and content_type.startswith('text/'):
+                                    # Decode text content and present as text
+                                    try:
+                                        import base64
+                                        decoded_text = base64.b64decode(content).decode('utf-8')
+                                        attachment_info = {
+                                            "type": "text",
+                                            "text": f"Content of {filename}:\n{decoded_text}"
+                                        }
+                                        logger.debug(f"[HUD] Formatted text attachment {attachment_id} ({filename}) from system message for LLM")
+                                    except Exception as decode_error:
+                                        logger.warning(f"[HUD] Failed to decode text attachment {attachment_id}: {decode_error}")
+                                        # Fallback to raw content
+                                        attachment_info = {
+                                            "type": "text",
+                                            "text": f"Content of {filename} (raw):\n{content}"
+                                        }
+                                elif content:
+                                    # For other content types, provide full content as text
+                                    attachment_info = {
+                                        "type": "text", 
+                                        "text": f"Content of {filename} ({content_type}):\n{content}"
+                                    }
+                                    logger.debug(f"[HUD] Formatted {content_type} attachment {attachment_id} ({filename}) from system message for LLM")
+                                else:
+                                    continue  # Skip if no content
+                                
+                                attachments.append(attachment_info)
+            
+            # Also extract from EventFacets (regular messages with attachment metadata)
             for facet in facet_cache.get_facets_by_type(VEILFacetType.EVENT):
                 attachment_metadata = facet.properties.get('attachment_metadata', [])
+                
                 for att_meta in attachment_metadata:
                     if isinstance(att_meta, dict):
-                        # Convert attachment metadata to LLM format
+                        attachment_id = att_meta.get('attachment_id')
+                        content_type = att_meta.get('content_type', 'unknown')
+                        filename = att_meta.get('filename', 'unknown')
+                        
+                        # For regular attachment metadata (without content), show metadata only
                         attachment_info = {
-                            "type": "text",  # Base type, can be enhanced
-                            "text": f"[Attachment: {att_meta.get('filename', 'unknown')} ({att_meta.get('content_type', 'unknown')} - {att_meta.get('size', 0)} bytes)]"
+                            "type": "text",
+                            "text": f"[Attachment: {filename} ({content_type} - {att_meta.get('size', 0)} bytes) - ID: {attachment_id}]"
                         }
-                        # Add specific metadata for different attachment types
-                        if att_meta.get('content_type', '').startswith('image/'):
-                            attachment_info.update({
-                                "attachment_type": "image",
-                                "filename": att_meta.get('filename'),
-                                "content_type": att_meta.get('content_type'),
-                                "size": att_meta.get('size'),
-                                "attachment_id": att_meta.get('attachment_id')
-                            })
-                        else:
-                            attachment_info.update({
-                                "attachment_type": "document",
-                                "filename": att_meta.get('filename'),
-                                "content_type": att_meta.get('content_type'),
-                                "size": att_meta.get('size'),
-                                "attachment_id": att_meta.get('attachment_id')
-                            })
+                        logger.debug(f"[HUD] Added metadata-only attachment {attachment_id} ({filename}) to context")
                         attachments.append(attachment_info)
                             
             if attachments:
@@ -2309,6 +2379,28 @@ class FacetAwareHUDComponent(Component):
                 if attachment_metadata and len(attachment_metadata) > 0:
                     logger.debug(f"[HUD] Found {len(attachment_metadata)} attachments in facet {facet.facet_id}")
                     return True
+            
+            # Check for system messages with fetch_attachment_result content
+            container_component = None
+            for component in self.owner.get_components().values():
+                if hasattr(component, 'COMPONENT_TYPE') and component.COMPONENT_TYPE == 'ContainerComponent':
+                    container_component = component
+                    break
+            
+            if container_component:
+                mounted_elements = container_component.get_mounted_elements()
+                for element in mounted_elements.values():
+                    for component in element.get_components().values():
+                        if hasattr(component, 'COMPONENT_TYPE') and component.COMPONENT_TYPE == 'MessageListComponent':
+                            messages = component.get_messages()
+                            for message in messages:
+                                if (message.get('is_system_message') and 
+                                    message.get('fetch_attachment_result') and
+                                    message.get('attachments')):
+                                    for attachment in message['attachments']:
+                                        if isinstance(attachment, dict) and attachment.get('content'):
+                                            logger.debug(f"[HUD] Found fetch_attachment_result with content in system message")
+                                            return True
                         
             # Also check StatusFacets for any attachment information
             for facet in facet_cache.get_facets_by_type(VEILFacetType.STATUS):
