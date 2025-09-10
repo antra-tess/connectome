@@ -316,14 +316,13 @@ class FacetAwareHUDComponent(Component):
             # NEW: Process facets into turn-based messages
             turn_based_messages = await self._process_facets_into_turns(processed_facets, options, tools)
 
-            # Check for multimodal content if focus element provided
-            focus_element_id = self._current_focus.get('focus_element_id') if self._current_focus else None
-            if focus_element_id and self._has_multimodal_content(processed_facets, focus_element_id):
+            # Check for multimodal content
+            if self._has_multimodal_content(processed_facets):
                 return {
                     "messages": turn_based_messages,
                     "multimodal_content": {
                         "has_attachments": True,
-                        "attachment_count": self._count_multimodal_content(processed_facets, focus_element_id),
+                        "attachment_count": self._count_multimodal_content(processed_facets),
                         "supported_types": ["image", "document"]
                     }
                 }
@@ -1871,6 +1870,17 @@ class FacetAwareHUDComponent(Component):
                     else:
                         message_content += " [SEND FAILED]"
 
+                # Add attachment information if present
+                attachment_metadata = facet.get_property("attachment_metadata", [])
+                if attachment_metadata:
+                    for att in attachment_metadata:
+                        if isinstance(att, dict):
+                            filename = att.get('filename', 'unknown')
+                            content_type = att.get('content_type', 'unknown')
+                            size = att.get('size', 0)
+                            att_id = att.get('attachment_id', 'unknown')
+                            message_content += f"\n[Attachment: {filename} ({content_type} - {size} bytes) - ID: {att_id}]"
+
                 if self._focus_required(facet.facet_id):
                     return f"{focus_content}\n\n{msg_tag}{message_content}</msg>"
 
@@ -2172,17 +2182,61 @@ class FacetAwareHUDComponent(Component):
 
     async def _detect_and_extract_multimodal_content(self,
                                                    text_context: str,
-                                                   options: Dict[str, Any],
-                                                   focus_element_id: str) -> Union[str, Dict[str, Any]]:
+                                                   options: Dict[str, Any]) -> Union[str, Dict[str, Any]]:
         """
         Check for and extract multimodal content from facets.
 
         This maintains compatibility with existing multimodal handling.
         """
         try:
-            # For now, return text-only (multimodal support can be added later)
-            # This maintains interface compatibility
-            return text_context
+            # Check if we have multimodal content
+            facet_cache = options.get('facet_cache')
+            if not facet_cache:
+                return text_context
+                
+            if not self._has_multimodal_content(facet_cache):
+                return text_context
+                
+            # Extract attachment data from facets
+            attachments = []
+            
+            # Extract from EventFacets (messages)
+            for facet in facet_cache.get_facets_by_type(VEILFacetType.EVENT):
+                attachment_metadata = facet.properties.get('attachment_metadata', [])
+                for att_meta in attachment_metadata:
+                    if isinstance(att_meta, dict):
+                        # Convert attachment metadata to LLM format
+                        attachment_info = {
+                            "type": "text",  # Base type, can be enhanced
+                            "text": f"[Attachment: {att_meta.get('filename', 'unknown')} ({att_meta.get('content_type', 'unknown')} - {att_meta.get('size', 0)} bytes)]"
+                        }
+                        # Add specific metadata for different attachment types
+                        if att_meta.get('content_type', '').startswith('image/'):
+                            attachment_info.update({
+                                "attachment_type": "image",
+                                "filename": att_meta.get('filename'),
+                                "content_type": att_meta.get('content_type'),
+                                "size": att_meta.get('size'),
+                                "attachment_id": att_meta.get('attachment_id')
+                            })
+                        else:
+                            attachment_info.update({
+                                "attachment_type": "document",
+                                "filename": att_meta.get('filename'),
+                                "content_type": att_meta.get('content_type'),
+                                "size": att_meta.get('size'),
+                                "attachment_id": att_meta.get('attachment_id')
+                            })
+                        attachments.append(attachment_info)
+                            
+            if attachments:
+                logger.info(f"[HUD] Extracted {len(attachments)} attachments for multimodal content")
+                return {
+                    "text": text_context,
+                    "attachments": attachments
+                }
+            else:
+                return text_context
 
         except Exception as e:
             logger.error(f"Error in multimodal detection: {e}", exc_info=True)
@@ -2236,34 +2290,75 @@ class FacetAwareHUDComponent(Component):
             "status_message_history": []
         }
 
-    def _has_multimodal_content(self, facet_cache: VEILFacetCache, focus_element_id: str) -> bool:
+    def _has_multimodal_content(self, facet_cache: VEILFacetCache) -> bool:
         """
         Check if facets contain multimodal content.
 
         Args:
             facet_cache: VEILFacetCache to check
-            focus_element_id: Element ID to focus on
 
         Returns:
             True if multimodal content is present
         """
-        # For now, return False as multimodal support will be added later
-        # This can be enhanced to scan facets for attachment content
-        return False
+        try:
+            # Scan EventFacets for attachment_metadata
+            from elements.elements.components.veil.veil_facet import VEILFacetType
+            for facet in facet_cache.get_facets_by_type(VEILFacetType.EVENT):
+                # Look for attachment_metadata in facet properties
+                attachment_metadata = facet.properties.get('attachment_metadata', [])
+                if attachment_metadata and len(attachment_metadata) > 0:
+                    logger.debug(f"[HUD] Found {len(attachment_metadata)} attachments in facet {facet.facet_id}")
+                    return True
+                        
+            # Also check StatusFacets for any attachment information
+            for facet in facet_cache.get_facets_by_type(VEILFacetType.STATUS):
+                # Check current_state for attachment information
+                current_state = facet.properties.get('current_state', {})
+                if isinstance(current_state, dict):
+                    attachment_metadata = current_state.get('attachment_metadata', [])
+                    if attachment_metadata and len(attachment_metadata) > 0:
+                        logger.debug(f"[HUD] Found {len(attachment_metadata)} attachments in status facet {facet.facet_id}")
+                        return True
+                            
+            return False
+            
+        except Exception as e:
+            logger.error(f"[HUD] Error checking for multimodal content: {e}", exc_info=True)
+            return False
 
-    def _count_multimodal_content(self, facet_cache: VEILFacetCache, focus_element_id: str) -> int:
+    def _count_multimodal_content(self, facet_cache: VEILFacetCache) -> int:
         """
         Count multimodal attachments in facets.
 
         Args:
             facet_cache: VEILFacetCache to check
-            focus_element_id: Element ID to focus on
 
         Returns:
             Number of multimodal attachments
         """
-        # For now, return 0 as multimodal support will be added later
-        return 0
+        try:
+            total_attachments = 0
+            
+            # Count attachments in EventFacets
+            for facet in facet_cache.get_facets_by_type(VEILFacetType.EVENT):
+                attachment_metadata = facet.properties.get('attachment_metadata', [])
+                if attachment_metadata and isinstance(attachment_metadata, list):
+                    total_attachments += len(attachment_metadata)
+                        
+            # Count attachments in StatusFacets
+            for facet in facet_cache.get_facets_by_type(VEILFacetType.STATUS):
+                current_state = facet.properties.get('current_state', {})
+                if isinstance(current_state, dict):
+                    attachment_metadata = current_state.get('attachment_metadata', [])
+                    if attachment_metadata and isinstance(attachment_metadata, list):
+                        total_attachments += len(attachment_metadata)
+                            
+            logger.debug(f"[HUD] Counted {total_attachments} total attachments")
+            return total_attachments
+            
+        except Exception as e:
+            logger.error(f"[HUD] Error counting multimodal content: {e}", exc_info=True)
+            return 0
 
     def _update_system_state(self, system_state: Dict[str, Any], status_facet: VEILFacet, options: Dict[str, Any]) -> None:
         """
