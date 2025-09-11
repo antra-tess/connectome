@@ -321,41 +321,63 @@ class FacetAwareHUDComponent(Component):
             # Check for multimodal content and integrate it
             focus_element_id = self._current_focus.get('focus_element_id') if self._current_focus else None
             if self._has_multimodal_content(facet_cache, focus_element_id):  # Use facet_cache instead of processed_facets
-                # Get the multimodal content formatted for LLM ingestion
-                multimodal_result = await self._detect_and_extract_multimodal_content(
-                    "",  # Empty since we're just extracting attachments
-                    {'facet_cache': facet_cache},
-                    focus_element_id
-                )
+                # Process each user message individually to extract its specific attachments
+                attachment_pattern = r'\[Attachment: [^\]]+\]'
+                import re
 
-                if isinstance(multimodal_result, dict) and multimodal_result.get('attachments'):
-                    # Find user messages that contain attachment metadata and convert them to multimodal
-                    attachment_pattern = r'\[Attachment: [^\]]+\]'
-                    import re
+                # Process ALL user messages that contain attachments
+                for message in turn_based_messages:
+                    if isinstance(message, dict) and message.get('role') == 'user':
+                        content = message.get('content', '')
+                        if isinstance(content, str) and re.search(attachment_pattern, content):
+                            # Extract attachment IDs from this specific message
+                            attachment_ids = []
+                            for match in re.finditer(r'\[Attachment: [^\]]+ - ID: ([^\]]+)\]', content):
+                                attachment_ids.append(match.group(1))
 
-                    for message in turn_based_messages:
-                        if isinstance(message, dict) and message.get('role') == 'user':
-                            content = message.get('content', '')
-                            if isinstance(content, str) and re.search(attachment_pattern, content):
-                                # This message contains attachment metadata - convert to multimodal format
-                                # Create multimodal content list format
-                                multimodal_content = []
+                            if attachment_ids:
+                                # Create a filtered facet cache containing only facets with these attachment IDs
+                                message_specific_facets = []
+                                for facet in facet_cache.get_facets_by_type(VEILFacetType.EVENT):
+                                    attachment_metadata = facet.get_property("attachment_metadata", [])
+                                    if attachment_metadata:
+                                        for att_meta in attachment_metadata:
+                                            if att_meta.get("attachment_id") in attachment_ids:
+                                                message_specific_facets.append(facet)
+                                                break
 
-                                # Add text content (without attachment metadata lines)
-                                text_content = re.sub(attachment_pattern, '', content).strip()
-                                if text_content:
-                                    multimodal_content.append({
-                                        "type": "text",
-                                        "text": text_content
-                                    })
+                                if message_specific_facets:
+                                    # Create a temporary facet cache for this message's attachments
+                                    from elements.elements.components.veil.facet_cache import VEILFacetCache
+                                    temp_cache = VEILFacetCache()
+                                    for facet in message_specific_facets:
+                                        temp_cache.add_facet(facet)
 
-                                # Add all extracted attachments
-                                multimodal_content.extend(multimodal_result['attachments'])
+                                    # Extract multimodal content for this specific message
+                                    multimodal_result = await self._detect_and_extract_multimodal_content(
+                                        "",  # Empty since we're just extracting attachments
+                                        {'facet_cache': temp_cache},
+                                        focus_element_id
+                                    )
 
-                                # Update message content
-                                message['content'] = multimodal_content
-                                logger.debug(f"[HUD] Converted message to multimodal format with {len(multimodal_content)} content items")
-                                break  # Assume one attachment message for now
+                                    if isinstance(multimodal_result, dict) and multimodal_result.get('attachments'):
+                                        # Create multimodal content list format
+                                        multimodal_content = []
+
+                                        # Add text content (without attachment metadata lines)
+                                        text_content = re.sub(attachment_pattern, '', content).strip()
+                                        if text_content:
+                                            multimodal_content.append({
+                                                "type": "text",
+                                                "text": text_content
+                                            })
+
+                                        # Add the attachments for this message
+                                        multimodal_content.extend(multimodal_result['attachments'])
+
+                                        # Update message content
+                                        message['content'] = multimodal_content
+                                        logger.debug(f"[HUD] Converted message to multimodal format with {len(multimodal_content)} content items for attachment IDs: {attachment_ids}")
 
             return turn_based_messages
 
