@@ -153,10 +153,7 @@ class MessageListVeilProducer(VeilProducer):
                     "conversation_name": conversation_metadata.get("conversation_name"),
                     "error_details": msg_data.get('error_details', None),
                     "is_from_current_agent": msg_data.get('is_from_current_agent', False),  # For HUD rendering decisions
-                    VEIL_ATTACHMENT_METADATA_PROP: [
-                        {k: v for k, v in att.items() if k != 'content'}
-                        for att in processed_attachments_from_mlc
-                    ]
+                    VEIL_ATTACHMENT_METADATA_PROP: processed_attachments_from_mlc  # Include full attachment data including content
                 },
                 "children": [] # Initialize, may add attachment content nodes later
             }
@@ -371,10 +368,7 @@ class MessageListVeilProducer(VeilProducer):
                     "is_from_current_agent": msg_data.get('is_from_current_agent', False),  # For HUD rendering decisions
                     "is_internal_origin": msg_data.get('is_internal_origin', False),  # NEW: Track message origin for synthetic response logic
                     "error_details": msg_data.get('error_details', None),
-                    "attachment_metadata": [
-                        {k: v for k, v in att.items() if k != 'content'}
-                        for att in msg_data.get('attachments', [])
-                    ]
+                    "attachment_metadata": msg_data.get('attachments', [])  # Include full attachment data including content
                 })
 
                 facet_operations.append(FacetOperationBuilder.add_facet(message_facet))

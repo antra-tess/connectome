@@ -74,11 +74,7 @@ class MessageActionHandler(Component):
             {"name": "inner_content", "type": "string", "description": "The content of the message to send.", "required": True},
         ]
 
-        get_attachment_params: List[ToolParameter] = [
-            {"name": "attachment_id", "type": "string", "description": "The unique ID of the attachment to fetch.", "required": True},
-            {"name": "conversation_id", "type": "string", "description": "The conversation ID (optional - will use current context if not provided).", "required": False},
-            {"name": "message_external_id", "type": "string", "description": "The external ID of the message containing the attachment (optional).", "required": False}
-        ]
+        # Removed get_attachment_params - attachments flow directly through message_received
 
         # --- Register msg Tool ---
         @tool_provider.register_tool(
@@ -188,70 +184,7 @@ class MessageActionHandler(Component):
                 logger.exception(f"[{self.owner.id}] {error_msg} for req_id: {internal_request_id}")
                 return {"success": False, "error": error_msg, "message_id": None}
 
-        # --- Register get_attachment Tool ---
-        @tool_provider.register_tool(
-            name="get_attachment",
-            description="Retrieves the content of a specific attachment by its ID. Returns attachment content in base64 format along with metadata. Note: This feature is currently experimental - attachment content may be available directly in message data.",
-            parameters_schema=get_attachment_params
-        )
-        async def get_attachment_tool(attachment_id: str, 
-                                    conversation_id: Optional[str] = None,
-                                    message_external_id: Optional[str] = None,
-                                    calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-            """
-            Tool function to get attachment content with enhanced validation.
-            
-            Security and validation features:
-            - Input sanitization and length limits
-            - Context validation 
-            - Enhanced error handling
-            - Rate limiting considerations (attachment_id length check prevents abuse)
-            """
-            logger.info(f"[{self.owner.id}] get_attachment tool called for attachment_id: {attachment_id}")
-            
-            # Convert to string if needed and validate
-            attachment_id = str(attachment_id) if attachment_id is not None else ""
-            
-            # Security validation
-            if not attachment_id or len(attachment_id.strip()) == 0:
-                return {"success": False, "error": "attachment_id cannot be empty"}
-            
-            # Prevent potential abuse with extremely long IDs
-            if len(attachment_id) > 100:
-                return {"success": False, "error": "attachment_id too long (max 100 characters)"}
-            
-            # Basic format validation - attachment IDs should be alphanumeric with some special chars
-            import re
-            if not re.match(r'^[a-zA-Z0-9_\-\.]+$', attachment_id):
-                return {"success": False, "error": "attachment_id contains invalid characters (only alphanumeric, underscore, dash, and dot allowed)"}
-            
-            try:
-                # Use the existing handle_get_attachment method with improved error handling
-                result = await self.handle_get_attachment(
-                    attachment_id=attachment_id,
-                    conversation_id=conversation_id, 
-                    message_external_id=message_external_id,
-                    calling_context=calling_context
-                )
-                
-                # Add additional validation and context to results
-                if result.get("success", False):
-                    logger.info(f"[{self.owner.id}] get_attachment succeeded for {attachment_id}")
-                    # Add security note to successful results
-                    if "status" in result:
-                        result["security_note"] = "Attachment fetched successfully. Content should be validated before use."
-                else:
-                    logger.warning(f"[{self.owner.id}] get_attachment failed for {attachment_id}: {result.get('error', 'Unknown error')}")
-                    # Add helpful guidance for failures
-                    if "error" in result and "adapter" in result["error"].lower():
-                        result["suggestion"] = "Check if the Discord adapter is running and properly configured for attachment processing."
-                
-                return result
-                
-            except Exception as e:
-                error_msg = f"Unexpected error in get_attachment tool: {str(e)}"
-                logger.error(f"[{self.owner.id}] {error_msg}", exc_info=True)
-                return {"success": False, "error": error_msg, "suggestion": "This may be due to system configuration issues. Check logs for details."}
+        # Removed get_attachment tool - attachments flow directly through message_received
 
     def _get_message_context(self, use_external_conversation_id: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
         """

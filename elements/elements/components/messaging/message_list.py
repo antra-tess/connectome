@@ -37,7 +37,7 @@ class MessageListComponent(Component):
         "connectome_message_updated",         # Use Connectome-defined types for delete/edit
         "connectome_reaction_added",          # For handling added reactions
         "connectome_reaction_removed",        # For handling removed reactions
-        "attachment_content_available",       # NEW: For when fetched attachment content arrives
+        # Removed attachment_content_available - attachments flow directly through message_received
         "connectome_action_success",          # NEW: Generic action success (replaces specific events)
         "connectome_action_failure",          # NEW: Generic action failure (replaces specific events)
     ]
@@ -96,8 +96,7 @@ class MessageListComponent(Component):
                 self._handle_reaction_added(actual_content_payload)
             elif event_type == "connectome_reaction_removed":
                 self._handle_reaction_removed(actual_content_payload)
-            elif event_type == "attachment_content_available":
-                self._handle_attachment_content_available(actual_content_payload)
+            # Removed attachment_content_available handler - attachments flow directly
             elif event_type == "connectome_action_success":
                 self._handle_action_success(actual_content_payload)
             elif event_type == "connectome_action_failure":
@@ -817,45 +816,7 @@ class MessageListComponent(Component):
             "message_map_size": map_size
         }
 
-    def _handle_attachment_content_available(self, attachment_payload_content: Dict[str, Any]) -> bool:
-        """
-        Updates an existing message's attachment with fetched content.
-        Triggered by 'attachment_content_available' event.
-        attachment_payload_content is the actual data for this event (e.g., from event_payload['payload']).
-        """
-        original_message_external_id = attachment_payload_content.get('original_message_id_external')
-        attachment_id_to_update = attachment_payload_content.get('attachment_id')
-        content = attachment_payload_content.get('content')
-
-        if not all([original_message_external_id, attachment_id_to_update]):
-            logger.warning(f"[{self.owner.id}] 'attachment_content_available' event missing 'original_message_id_external' or 'attachment_id'. Payload: {attachment_payload_content}")
-            return False
-
-        message_to_update = None
-        for msg in self._state['_messages']:
-            if msg.get('original_external_id') == original_message_external_id:
-                message_to_update = msg
-                break
-
-        if not message_to_update:
-            logger.warning(f"[{self.owner.id}] Cannot update attachment content: Message with external ID '{original_message_external_id}' not found.")
-            return False
-
-        attachment_found = False
-        for att in message_to_update.get('attachments', []):
-            if att.get('attachment_id') == attachment_id_to_update:
-                att['content'] = content
-                # Optionally update other fields like 'status' or 'content_retrieved_timestamp'
-                att['status'] = 'content_available'
-                logger.info(f"[{self.owner.id}] Content for attachment '{attachment_id_to_update}' added to message '{original_message_external_id}'.")
-                attachment_found = True
-                break
-
-        if not attachment_found:
-            logger.warning(f"[{self.owner.id}] Cannot update attachment content: Attachment with ID '{attachment_id_to_update}' not found in message '{original_message_external_id}'.")
-            return False
-
-        return True
+    # Removed _handle_attachment_content_available - attachments flow directly through message_received
 
     # --- NEW: Method for adding a pending outgoing message ---
     def add_pending_message(self,
@@ -1525,8 +1486,7 @@ class MessageListComponent(Component):
             return self._handle_edit_message_confirmed(success_content)
         elif action_type in ["add_reaction", "remove_reaction"]:
             return self._handle_reaction_action_confirmed(success_content)
-        elif action_type == "fetch_attachment":
-            return self._handle_fetch_attachment_confirmed(success_content)
+        # Removed fetch_attachment handler - not needed with simplified flow
         else:
             logger.warning(f"[{self.owner.id}] Unknown action_type '{action_type}' in action success. Ignoring.")
             return False
@@ -1547,8 +1507,7 @@ class MessageListComponent(Component):
             return self._handle_message_send_failed(failure_content)
         elif action_type in ["delete_message", "edit_message", "add_reaction", "remove_reaction"]:
             return self._handle_message_action_failed(failure_content)
-        elif action_type == "fetch_attachment":
-            return self._handle_fetch_attachment_failed(failure_content)
+        # Removed fetch_attachment handler - not needed with simplified flow
         else:
             logger.warning(f"[{self.owner.id}] Unknown action_type '{action_type}' in action failure. Ignoring.")
             return False
@@ -1596,100 +1555,9 @@ class MessageListComponent(Component):
         # This confirmation just means the adapter successfully processed our request
         return True
 
-    def _handle_fetch_attachment_confirmed(self, success_content: Dict[str, Any]) -> bool:
-        """
-        Handles confirmation of fetch_attachment action success.
-        Creates a message-like entry with the fetched attachment content for HUD display.
-        """
-        internal_req_id = success_content.get('internal_request_id')
-        adapter_response_data = success_content.get('adapter_response_data', {})
-        logger.info(f"[{self.owner.id}] Fetch attachment confirmed for req_id: {internal_req_id}")
-        
-        # Extract attachment content from adapter response
-        attachment_content = adapter_response_data.get('content')
-        attachment_metadata = adapter_response_data.get('metadata', {})
-        attachment_id = adapter_response_data.get('attachment_id')
-        
-        # If attachment_id is not in adapter_response_data, try to find it from recent messages
-        # Look for messages with attachments that might match this fetch request
-        if not attachment_id and internal_req_id:
-            # Search recent messages for attachments
-            recent_messages = self._state.get('_messages', [])[-20:]  # Check last 20 messages
-            for msg in reversed(recent_messages):  # Check most recent first
-                attachments = msg.get('attachments', [])
-                for att in attachments:
-                    potential_id = att.get('attachment_id')
-                    if potential_id:
-                        attachment_id = potential_id
-                        # Use metadata from the original message if available
-                        if not attachment_metadata and att.get('filename'):
-                            attachment_metadata = {
-                                'filename': att.get('filename', 'unknown_file'),
-                                'content_type': att.get('content_type', 'unknown'),
-                                'size': att.get('size', len(attachment_content) if isinstance(attachment_content, str) else 0)
-                            }
-                        break
-                if attachment_id:
-                    break
-        
-        if not attachment_content:
-            logger.warning(f"[{self.owner.id}] Fetch attachment success but missing content in response for req_id: {internal_req_id}")
-            return True
-            
-        if not attachment_id:
-            logger.warning(f"[{self.owner.id}] Fetch attachment success but missing attachment_id in response and unable to extract from req_id: {internal_req_id}")
-            return True
-            
-        # Create a system message entry to display the fetched attachment content
-        import time
-        current_timestamp = time.time()
-        
-        # Build attachment metadata for display
-        filename = attachment_metadata.get('filename', 'unknown_file')
-        content_type = attachment_metadata.get('content_type', 'unknown')
-        size = attachment_metadata.get('size', len(attachment_content) if isinstance(attachment_content, str) else 0)
-        
-        fetch_result_message = {
-            'internal_id': f"fetch_attachment_result_{internal_req_id}",
-            'external_id': f"fetch_attachment_result_{internal_req_id}",
-            'original_external_id': f"fetch_attachment_result_{internal_req_id}",
-            'timestamp': current_timestamp,
-            'sender_name': 'System',
-            'sender_id': 'system',
-            'text': f"📎 Fetched attachment: {filename}",
-            'is_from_current_agent': False,
-            'is_internal_origin': True,
-            'is_system_message': True,
-            'attachments': [{
-                'attachment_id': attachment_id,
-                'filename': filename,
-                'content_type': content_type,
-                'size': size,
-                'content': attachment_content,
-                'status': 'content_available'
-            }],
-            'fetch_attachment_result': True  # Flag to identify these special messages
-        }
-        
-        # Add to message list
-        self._state['_messages'].append(fetch_result_message)
-        
-        # Update message map
-        message_map = self._state.setdefault('_message_map', {})
-        message_map[fetch_result_message['internal_id']] = len(self._state['_messages']) - 1
-        
-        logger.info(f"[{self.owner.id}] Added fetch attachment result for attachment '{attachment_id}' ({filename}) to message list")
-        return True
+    # Removed _handle_fetch_attachment_confirmed - attachments flow directly through message_received
 
-    def _handle_fetch_attachment_failed(self, failure_content: Dict[str, Any]) -> bool:
-        """
-        Handles failure of fetch_attachment action.
-        """
-        internal_req_id = failure_content.get('internal_request_id')
-        error_msg = failure_content.get('error_message')
-        logger.warning(f"[{self.owner.id}] Fetch attachment failed for req_id: {internal_req_id}. Error: {error_msg}")
-        # The tool that requested the attachment should handle the failure
-        return True
+    # Removed _handle_fetch_attachment_failed - attachments flow directly through message_received
 
     def _handle_message_action_failed(self, failure_content: Dict[str, Any]) -> bool:
         """
