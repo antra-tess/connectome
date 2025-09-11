@@ -327,16 +327,33 @@ class FacetAwareHUDComponent(Component):
                 )
                 
                 if isinstance(multimodal_result, dict) and multimodal_result.get('attachments'):
-                    # Find the most recent user message to attach multimodal content to
-                    if turn_based_messages and len(turn_based_messages) > 0:
-                        # Attach multimodal content to the last user message
-                        last_message = turn_based_messages[-1]
-                        if isinstance(last_message, dict) and last_message.get('role') == 'user':
-                            # Convert the message content to multimodal format
-                            last_message['content'] = {
-                                'text': last_message.get('content', ''),
-                                'attachments': multimodal_result['attachments']
-                            }
+                    # Find user messages that contain attachment metadata and convert them to multimodal
+                    attachment_pattern = r'\[Attachment: [^\]]+\]'
+                    import re
+                    
+                    for message in turn_based_messages:
+                        if isinstance(message, dict) and message.get('role') == 'user':
+                            content = message.get('content', '')
+                            if isinstance(content, str) and re.search(attachment_pattern, content):
+                                # This message contains attachment metadata - convert to multimodal format
+                                # Create multimodal content list format
+                                multimodal_content = []
+                                
+                                # Add text content (without attachment metadata lines)
+                                text_content = re.sub(attachment_pattern, '', content).strip()
+                                if text_content:
+                                    multimodal_content.append({
+                                        "type": "text",
+                                        "text": text_content
+                                    })
+                                
+                                # Add all extracted attachments
+                                multimodal_content.extend(multimodal_result['attachments'])
+                                
+                                # Update message content
+                                message['content'] = multimodal_content
+                                logger.debug(f"[HUD] Converted message to multimodal format with {len(multimodal_content)} content items")
+                                break  # Assume one attachment message for now
 
             return turn_based_messages
 
@@ -2239,14 +2256,36 @@ class FacetAwareHUDComponent(Component):
                         attachment_id = att_meta.get('attachment_id')
                         content_type = att_meta.get('content_type', 'unknown')
                         filename = att_meta.get('filename', 'unknown')
+                        content = att_meta.get('content')
                         
-                        # For regular attachment metadata (without content), show metadata only
-                        attachment_info = {
-                            "type": "text",
-                            "text": f"[Attachment: {filename} ({content_type} - {att_meta.get('size', 0)} bytes) - ID: {attachment_id}]"
-                        }
-                        logger.debug(f"[HUD] Added metadata-only attachment {attachment_id} ({filename}) to context")
-                        attachments.append(attachment_info)
+                        if content and content_type.startswith('image/'):
+                            # Create proper multimodal attachment for LLM processing
+                            attachment_info = {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": content_type,
+                                    "data": content
+                                }
+                            }
+                            logger.debug(f"[HUD] Added multimodal image {attachment_id} ({filename}) to context")
+                            attachments.append(attachment_info)
+                        elif content:
+                            # Handle other content types as text for now
+                            attachment_info = {
+                                "type": "text",
+                                "text": f"[Attachment: {filename} ({content_type} - {att_meta.get('size', 0)} bytes)]\nContent: {str(content)[:500]}{'...' if len(str(content)) > 500 else ''}"
+                            }
+                            logger.debug(f"[HUD] Added content attachment {attachment_id} ({filename}) to context")
+                            attachments.append(attachment_info)
+                        else:
+                            # Fallback to metadata-only for attachments without content
+                            attachment_info = {
+                                "type": "text",
+                                "text": f"[Attachment: {filename} ({content_type} - {att_meta.get('size', 0)} bytes) - ID: {attachment_id}]"
+                            }
+                            logger.debug(f"[HUD] Added metadata-only attachment {attachment_id} ({filename}) to context")
+                            attachments.append(attachment_info)
                             
             if attachments:
                 logger.info(f"[HUD] Extracted {len(attachments)} attachments for multimodal content")
