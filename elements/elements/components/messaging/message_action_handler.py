@@ -74,7 +74,6 @@ class MessageActionHandler(Component):
             {"name": "inner_content", "type": "string", "description": "The content of the message to send.", "required": True},
         ]
 
-        # Removed get_attachment_params - attachments flow directly through message_received
 
         # --- Register msg Tool ---
         @tool_provider.register_tool(
@@ -184,7 +183,6 @@ class MessageActionHandler(Component):
                 logger.exception(f"[{self.owner.id}] {error_msg} for req_id: {internal_request_id}")
                 return {"success": False, "error": error_msg, "message_id": None}
 
-        # Removed get_attachment tool - attachments flow directly through message_received
 
     def _get_message_context(self, use_external_conversation_id: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
         """

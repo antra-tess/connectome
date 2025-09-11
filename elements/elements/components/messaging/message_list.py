@@ -37,7 +37,7 @@ class MessageListComponent(Component):
         "connectome_message_updated",         # Use Connectome-defined types for delete/edit
         "connectome_reaction_added",          # For handling added reactions
         "connectome_reaction_removed",        # For handling removed reactions
-        # Removed attachment_content_available - attachments flow directly through message_received
+        # attachment_content_available removed - attachments now flow through message_received events
         "connectome_action_success",          # NEW: Generic action success (replaces specific events)
         "connectome_action_failure",          # NEW: Generic action failure (replaces specific events)
     ]
@@ -96,7 +96,7 @@ class MessageListComponent(Component):
                 self._handle_reaction_added(actual_content_payload)
             elif event_type == "connectome_reaction_removed":
                 self._handle_reaction_removed(actual_content_payload)
-            # Removed attachment_content_available handler - attachments flow directly
+            # attachment_content_available handler removed - attachments flow through message_received
             elif event_type == "connectome_action_success":
                 self._handle_action_success(actual_content_payload)
             elif event_type == "connectome_action_failure":
@@ -816,7 +816,7 @@ class MessageListComponent(Component):
             "message_map_size": map_size
         }
 
-    # Removed _handle_attachment_content_available - attachments flow directly through message_received
+    # _handle_attachment_content_available removed - attachments now flow through message_received events
 
     # --- NEW: Method for adding a pending outgoing message ---
     def add_pending_message(self,

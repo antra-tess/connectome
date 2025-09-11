@@ -191,7 +191,7 @@ class ExternalEventRouter:
                     await self._handle_history_fetched(source_adapter_id, adapter_data)
                 elif event_type_from_adapter == "connectome_attachment_received":
                     await self._handle_attachment_received(source_adapter_id, payload.get("conversation_id"), payload)
-                # Removed connectome_attachment_data_received handling - attachments flow directly through message_received
+                # connectome_attachment_data_received handling removed - attachments now flow through message_received
                 # --- NEW: Handle Generic Action Confirmations/Failures ---
                 elif event_type_from_adapter == "adapter_action_success": # Generic success for any action
                     await self._handle_action_success_ack(source_adapter_id, adapter_data)
@@ -204,7 +204,7 @@ class ExternalEventRouter:
                 elif event_type_from_adapter == "adapter_send_failure_ack": # Legacy - redirect to generic handler
                     logger.warning(f"Received legacy 'adapter_send_failure_ack' event. Redirecting to generic handler.")
                     await self._handle_action_failure_ack(source_adapter_id, adapter_data)
-                # Removed fetch_attachment event handling - not needed with simplified attachment flow
+                # fetch_attachment event handling removed - attachments use simplified flow through message_received
                 else:
                     logger.warning(f"ExternalEventRouter: Unhandled event type '{event_type_from_adapter}' from adapter '{source_adapter_id}'. Data: {adapter_data}")
                     span.set_attribute("routing.status", "unhandled_event_type")
@@ -1117,7 +1117,7 @@ class ExternalEventRouter:
         except Exception as e:
             logger.error(f"Error routing connectome_attachment_received event: {e}", exc_info=True)
 
-    # Removed _handle_attachment_data_received - attachments flow directly through message_received events
+    # _handle_attachment_data_received method removed - attachments now flow through message_received events
 
     def _generate_target_element_id(self, source_adapter_id: str, conversation_id: str, is_dm: bool, target_space: Optional[Space] = None) -> str:
         """
