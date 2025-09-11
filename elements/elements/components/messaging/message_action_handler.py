@@ -74,7 +74,6 @@ class MessageActionHandler(Component):
             {"name": "inner_content", "type": "string", "description": "The content of the message to send.", "required": True},
         ]
 
-
         # --- Register msg Tool ---
         @tool_provider.register_tool(
             name="msg",
@@ -182,7 +181,6 @@ class MessageActionHandler(Component):
                 error_msg = f"Exception during direct send_message dispatch: {e}"
                 logger.exception(f"[{self.owner.id}] {error_msg} for req_id: {internal_request_id}")
                 return {"success": False, "error": error_msg, "message_id": None}
-
 
     def _get_message_context(self, use_external_conversation_id: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
         """
@@ -397,11 +395,11 @@ class MessageActionHandler(Component):
         """
         # Enhanced input validation
         calling_context = calling_context or {}
-        
+
         if not attachment_id or not isinstance(attachment_id, str) or not attachment_id.strip():
             logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] Invalid attachment_id: {attachment_id}")
             return {"success": False, "error": "attachment_id is required and must be a non-empty string."}
-        
+
         # Sanitize attachment_id to prevent injection issues
         attachment_id = attachment_id.strip()
         if len(attachment_id) > 100:  # Reasonable limit
@@ -426,7 +424,7 @@ class MessageActionHandler(Component):
         if not adapter_id or not isinstance(adapter_id, str):
             logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] Invalid adapter_id: {adapter_id}")
             return {"success": False, "error": "Invalid adapter_id resolved from context."}
-            
+
         if not actual_conversation_id or not isinstance(actual_conversation_id, str):
             logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] Invalid conversation_id: {actual_conversation_id}")
             return {"success": False, "error": "Invalid conversation_id resolved from context."}
@@ -453,14 +451,14 @@ class MessageActionHandler(Component):
                 "calling_loop_id": calling_context.get('loop_component_id') if isinstance(calling_context, dict) else None,
                 "timestamp": time.time()  # Add timestamp for tracking
             }
-            
+
             # Validate payload doesn't have None values where strings are expected
             required_string_fields = ["internal_request_id", "adapter_id", "conversation_id", "attachment_id"]
             for field in required_string_fields:
                 if not payload.get(field) or not isinstance(payload[field], str):
                     logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] Invalid {field} in payload: {payload.get(field)}")
                     return {"success": False, "error": f"Invalid {field} for attachment request."}
-                    
+
         except Exception as e:
             logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] Error creating attachment payload: {e}", exc_info=True)
             return {"success": False, "error": f"Error preparing attachment request: {str(e)}"}
@@ -468,15 +466,15 @@ class MessageActionHandler(Component):
         # Enhanced dispatch with better error context
         try:
             result = await self._dispatch_action("fetch_attachment", payload)
-            
+
             # Add success logging
             if result.get("success"):
                 logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] Successfully initiated attachment fetch for {attachment_id}")
             else:
                 logger.warning(f"[{self.owner.id if self.owner else 'Unknown'}] Attachment fetch dispatch failed for {attachment_id}: {result.get('error', 'Unknown error')}")
-            
+
             return result
-            
+
         except Exception as e:
             logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] Unexpected error dispatching get_attachment_content: {e}", exc_info=True)
             return {"success": False, "error": f"Unexpected error during attachment request: {str(e)}"}
