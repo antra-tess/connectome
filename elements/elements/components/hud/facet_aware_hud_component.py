@@ -319,11 +319,13 @@ class FacetAwareHUDComponent(Component):
             turn_based_messages = await self._process_facets_into_turns(processed_facets, options, tools)
 
             # Check for multimodal content and integrate it
-            if self._has_multimodal_content(facet_cache):  # Use facet_cache instead of processed_facets
+            focus_element_id = self._current_focus.get('focus_element_id') if self._current_focus else None
+            if self._has_multimodal_content(facet_cache, focus_element_id):  # Use facet_cache instead of processed_facets
                 # Get the multimodal content formatted for LLM ingestion
                 multimodal_result = await self._detect_and_extract_multimodal_content(
                     "",  # Empty since we're just extracting attachments
-                    {'facet_cache': facet_cache}
+                    {'facet_cache': facet_cache},
+                    focus_element_id
                 )
 
                 if isinstance(multimodal_result, dict) and multimodal_result.get('attachments'):
@@ -2210,7 +2212,8 @@ class FacetAwareHUDComponent(Component):
 
     async def _detect_and_extract_multimodal_content(self,
                                                    text_context: str,
-                                                   options: Dict[str, Any]) -> Union[str, Dict[str, Any]]:
+                                                   options: Dict[str, Any],
+                                                   focus_element_id: Optional[str]) -> Union[str, Dict[str, Any]]:
         """
         Check for and extract multimodal content from facets.
 
@@ -2222,7 +2225,7 @@ class FacetAwareHUDComponent(Component):
             if not facet_cache:
                 return text_context
 
-            if not self._has_multimodal_content(facet_cache):
+            if not self._has_multimodal_content(facet_cache, focus_element_id):
                 return text_context
 
             # Extract attachment data from facets and message data
@@ -2427,12 +2430,13 @@ class FacetAwareHUDComponent(Component):
             "status_message_history": []
         }
 
-    def _has_multimodal_content(self, facet_cache: VEILFacetCache) -> bool:
+    def _has_multimodal_content(self, facet_cache: VEILFacetCache, focus_element_id: Optional[str]) -> bool:
         """
         Check if facets contain multimodal content.
 
         Args:
             facet_cache: VEILFacetCache to check
+            focus_element_id: Optional element ID to focus on
 
         Returns:
             True if multimodal content is present
@@ -2464,12 +2468,13 @@ class FacetAwareHUDComponent(Component):
             logger.error(f"[HUD] Error checking for multimodal content: {e}", exc_info=True)
             return False
 
-    def _count_multimodal_content(self, facet_cache: VEILFacetCache) -> int:
+    def _count_multimodal_content(self, facet_cache: VEILFacetCache, focus_element_id: Optional[str]) -> int:
         """
         Count multimodal attachments in facets.
 
         Args:
             facet_cache: VEILFacetCache to check
+            focus_element_id: Optional element ID to focus on
 
         Returns:
             Number of multimodal attachments
