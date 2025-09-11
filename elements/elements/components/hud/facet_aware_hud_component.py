@@ -2245,8 +2245,6 @@ class FacetAwareHUDComponent(Component):
                         if hasattr(component, 'COMPONENT_TYPE') and component.COMPONENT_TYPE == 'MessageListComponent':
                             message_list_components.append(component)
 
-            # Removed system message scanning for fetch_attachment_result - attachments flow through facets
-
             # Also extract from EventFacets (regular messages with attachment metadata)
             for facet in facet_cache.get_facets_by_type(VEILFacetType.EVENT):
                 attachment_metadata = facet.properties.get('attachment_metadata', [])
@@ -2449,7 +2447,6 @@ class FacetAwareHUDComponent(Component):
                     logger.debug(f"[HUD] Found {len(attachment_metadata)} attachments in facet {facet.facet_id}")
                     return True
 
-            # Removed system message scanning for fetch_attachment_result - attachments flow through facets
 
             # Also check StatusFacets for any attachment information
             for facet in facet_cache.get_facets_by_type(VEILFacetType.STATUS):

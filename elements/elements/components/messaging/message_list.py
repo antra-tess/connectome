@@ -37,7 +37,7 @@ class MessageListComponent(Component):
         "connectome_message_updated",         # Use Connectome-defined types for delete/edit
         "connectome_reaction_added",          # For handling added reactions
         "connectome_reaction_removed",        # For handling removed reactions
-        # attachment_content_available removed - attachments now flow through message_received events
+        "attachment_content_available",       # NEW: For when fetched attachment content arrives
         "connectome_action_success",          # NEW: Generic action success (replaces specific events)
         "connectome_action_failure",          # NEW: Generic action failure (replaces specific events)
     ]
@@ -96,7 +96,8 @@ class MessageListComponent(Component):
                 self._handle_reaction_added(actual_content_payload)
             elif event_type == "connectome_reaction_removed":
                 self._handle_reaction_removed(actual_content_payload)
-            # attachment_content_available handler removed - attachments flow through message_received
+            elif event_type == "attachment_content_available":
+                self._handle_attachment_content_available(actual_content_payload)
             elif event_type == "connectome_action_success":
                 self._handle_action_success(actual_content_payload)
             elif event_type == "connectome_action_failure":
@@ -816,7 +817,45 @@ class MessageListComponent(Component):
             "message_map_size": map_size
         }
 
-    # _handle_attachment_content_available removed - attachments now flow through message_received events
+    def _handle_attachment_content_available(self, attachment_payload_content: Dict[str, Any]) -> bool:
+        """
+        Updates an existing message's attachment with fetched content.
+        Triggered by 'attachment_content_available' event.
+        attachment_payload_content is the actual data for this event (e.g., from event_payload['payload']).
+        """
+        original_message_external_id = attachment_payload_content.get('original_message_id_external')
+        attachment_id_to_update = attachment_payload_content.get('attachment_id')
+        content = attachment_payload_content.get('content')
+
+        if not all([original_message_external_id, attachment_id_to_update]):
+            logger.warning(f"[{self.owner.id}] 'attachment_content_available' event missing 'original_message_id_external' or 'attachment_id'. Payload: {attachment_payload_content}")
+            return False
+
+        message_to_update = None
+        for msg in self._state['_messages']:
+            if msg.get('original_external_id') == original_message_external_id:
+                message_to_update = msg
+                break
+
+        if not message_to_update:
+            logger.warning(f"[{self.owner.id}] Cannot update attachment content: Message with external ID '{original_message_external_id}' not found.")
+            return False
+
+        attachment_found = False
+        for att in message_to_update.get('attachments', []):
+            if att.get('attachment_id') == attachment_id_to_update:
+                att['content'] = content
+                # Optionally update other fields like 'status' or 'content_retrieved_timestamp'
+                att['status'] = 'content_available'
+                logger.info(f"[{self.owner.id}] Content for attachment '{attachment_id_to_update}' added to message '{original_message_external_id}'.")
+                attachment_found = True
+                break
+
+        if not attachment_found:
+            logger.warning(f"[{self.owner.id}] Cannot update attachment content: Attachment with ID '{attachment_id_to_update}' not found in message '{original_message_external_id}'.")
+            return False
+
+        return True
 
     # --- NEW: Method for adding a pending outgoing message ---
     def add_pending_message(self,
@@ -1486,7 +1525,6 @@ class MessageListComponent(Component):
             return self._handle_edit_message_confirmed(success_content)
         elif action_type in ["add_reaction", "remove_reaction"]:
             return self._handle_reaction_action_confirmed(success_content)
-        # Removed fetch_attachment handler - not needed with simplified flow
         else:
             logger.warning(f"[{self.owner.id}] Unknown action_type '{action_type}' in action success. Ignoring.")
             return False
@@ -1507,7 +1545,6 @@ class MessageListComponent(Component):
             return self._handle_message_send_failed(failure_content)
         elif action_type in ["delete_message", "edit_message", "add_reaction", "remove_reaction"]:
             return self._handle_message_action_failed(failure_content)
-        # Removed fetch_attachment handler - not needed with simplified flow
         else:
             logger.warning(f"[{self.owner.id}] Unknown action_type '{action_type}' in action failure. Ignoring.")
             return False
@@ -1555,9 +1592,6 @@ class MessageListComponent(Component):
         # This confirmation just means the adapter successfully processed our request
         return True
 
-    # Removed _handle_fetch_attachment_confirmed - attachments flow directly through message_received
-
-    # Removed _handle_fetch_attachment_failed - attachments flow directly through message_received
 
     def _handle_message_action_failed(self, failure_content: Dict[str, Any]) -> bool:
         """
