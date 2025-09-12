@@ -86,7 +86,7 @@ class MessageListComponent(Component):
                 self._handle_new_message(actual_content_payload)
             elif event_type == "bulk_history_received":
                 # Handle bulk history processing
-                self._handle_bulk_history_received(event_payload, timeline_context)
+                self._handle_bulk_history_received(actual_content_payload, timeline_context)
             elif event_type == "message_deleted":
                 self._handle_delete_message(actual_content_payload)
             elif event_type == "message_updated":
@@ -1646,16 +1646,16 @@ class MessageListComponent(Component):
             reconciliation_results = self._reconcile_history_with_existing_messages(history_messages, source_adapter_id)
 
             # Log detailed reconciliation results
-            logger.info(f"[{self.owner.id}] Bulk history reconciliation complete:")
-            logger.info(f"  - Processed: {reconciliation_results['processed_count']} messages")
-            logger.info(f"  - Added: {reconciliation_results['added_count']} new messages")
-            logger.info(f"  - Edited: {reconciliation_results['edited_count']} messages")
-            logger.info(f"  - Deleted: {reconciliation_results['deleted_count']} messages")
-            logger.info(f"  - Retried stuck messages: {reconciliation_results['retried_count']}")
-            logger.info(f"  - Permanently failed: {reconciliation_results['permanent_failures']}")
-            logger.info(f"  - Gap markers added: {reconciliation_results['gap_messages_added']}")
-            logger.info(f"  - Gap markers removed: {reconciliation_results['gap_messages_removed']}")
-            logger.info(f"  - Total messages now: {len(self._state.get('_messages', []))}")
+            logger.debug(f"[{self.owner.id}] Bulk history reconciliation complete:")
+            logger.debug(f"  - Processed: {reconciliation_results['processed_count']} messages")
+            logger.debug(f"  - Added: {reconciliation_results['added_count']} new messages")
+            logger.debug(f"  - Edited: {reconciliation_results['edited_count']} messages")
+            logger.debug(f"  - Deleted: {reconciliation_results['deleted_count']} messages")
+            logger.debug(f"  - Retried stuck messages: {reconciliation_results['retried_count']}")
+            logger.debug(f"  - Permanently failed: {reconciliation_results['permanent_failures']}")
+            logger.debug(f"  - Gap markers added: {reconciliation_results['gap_messages_added']}")
+            logger.debug(f"  - Gap markers removed: {reconciliation_results['gap_messages_removed']}")
+            logger.debug(f"  - Total messages now: {len(self._state.get('_messages', []))}")
 
             # Log any errors that occurred during reconciliation
             if reconciliation_results['errors']:

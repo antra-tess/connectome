@@ -1064,25 +1064,22 @@ class ExternalEventRouter:
         # Create bulk history event for ChatManagerComponent to handle
         timeline_context = await self._construct_timeline_context_for_space(target_inner_space)
         bulk_history_event = {
-            "event_type": "bulk_history_fetched",
-            "event_id": f"bulk_history_{conversation_id}_{recipient_agent_id}_{int(time.time()*1000)}",
+            "event_type": "bulk_history_received",  # Different event type for MessageListComponent
+            "event_id": f"bulk_msg_list_{conversation_id}_{int(time.time()*1000)}",
             "source_adapter_id": source_adapter_id,
             "external_conversation_id": conversation_id,
-            "target_element_id": self._generate_target_element_id(source_adapter_id, conversation_id, is_dm, target_inner_space),
-            "is_replayable": True,  # Bulk history should be replayed for state restoration
+            "is_replayable": True,
             "payload": {
+                "event_type": "bulk_history_received",
                 "source_adapter_id": source_adapter_id,
                 "external_conversation_id": conversation_id,
                 "is_dm": is_dm,
-                "history_messages": history_messages,  # Full history list
-                "recipient_connectome_agent_id": recipient_agent_id,
+                "history_messages": history_messages,
                 "total_message_count": len(history_messages),
                 "timestamp": time.time(),
-                "original_adapter_data": original_adapter_data,  # Keep full adapter data for context
-                "source_event_type": source_event_type  # Track which event triggered this
+                "bulk_processing": True  # Flag to indicate bulk processing mode
             }
         }
-
         try:
             target_inner_space.receive_event(bulk_history_event, timeline_context)
             logger.info(f"Successfully routed bulk history with {len(history_messages)} messages from {source_event_type} to InnerSpace '{target_inner_space.id}'")

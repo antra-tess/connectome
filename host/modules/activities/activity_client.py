@@ -512,7 +512,6 @@ class ActivityClient:
                 # Always get fresh client reference
                 adapter_info = self.adapters.get(adapter_id, {})
                 current_client = adapter_info.get("client")
-                logger.critical(f"Sending callback for message type: {event_type}, data: {data}")
                 
                 if not current_client:
                     logger.error(f"No client found for adapter {adapter_id}")
@@ -870,7 +869,6 @@ class ActivityClient:
                 # Dispatch to adapter using protocol or direct emit
                 if self.protocol_enabled and protocol:
                     # Send through protocol
-                    logger.critical(f"Emitting {internal_action_type} to adapter '{target_adapter_id}' via protocol")
                     await protocol.send_message(
                         message_type="bot_response",
                         body=adapter_payload,

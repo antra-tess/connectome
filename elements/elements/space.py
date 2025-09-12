@@ -416,8 +416,6 @@ class Space(BaseElement):
         and potentially mounted child elements.
         """
         event_type = event_payload.get("event_type")
-        if event_type == "connectome_message_updated":
-            logger.critical(f"[{self.id}] Receiving connectome_message_updated event: {event_payload}")
 
         # NEW: Check if this is a replay mode to prevent double-recording
         is_replay_mode = timeline_context.get('replay_mode', False)
