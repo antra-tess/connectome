@@ -1893,7 +1893,7 @@ class InspectorDataCollector:
         Args:
             space_id: The ID of the space to render
             options: Rendering options including:
-                - format: "text" (default), "markdown", "json_messages"
+                - format: "text" (default), "markdown", "json_messages", "agent_context"
                 - include_tools: Include tool/ambient facets (default: True)
                 - include_system: Include system messages (default: True)
                 - max_turns: Limit number of turns to render
@@ -1989,6 +1989,19 @@ class InspectorDataCollector:
             if render_format == "json_messages":
                 # Return the raw message list
                 rendered_content = turn_messages
+                content_type = "application/json"
+            elif render_format == "agent_context":
+                # Return the actual agent context with multimodal integration as sent to LLM
+                # First try to get cached LLM context (the ground truth of what agent received)
+                cached_context = hud_component.get_cached_llm_context()
+                if cached_context and cached_context.get('messages'):
+                    logger.debug(f"Using cached LLM context from {cached_context.get('timestamp')} for inspector")
+                    rendered_content = cached_context['messages']
+                else:
+                    # Fallback to re-rendering if no cache available
+                    logger.debug("No cached LLM context available, falling back to re-rendering")
+                    agent_context = await hud_component.get_agent_context_via_compression_engine(hud_options)
+                    rendered_content = agent_context
                 content_type = "application/json"
             elif render_format == "markdown":
                 # Format as markdown

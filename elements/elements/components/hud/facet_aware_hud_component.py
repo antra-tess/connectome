@@ -53,11 +53,11 @@ class SnapshotCache:
             "evictions": 0,
             "refreshes": 0
         }
-        
+
     def get(self, key: str, max_age_ms: Optional[int] = None) -> Optional[Dict[str, Any]]:
         now = int(time.time() * 1000)
         max_age = max_age_ms or self._ttl_ms
-        
+
         if key in self._cache:
             entry = self._cache[key]
             age = now - entry.timestamp_ms
@@ -69,17 +69,17 @@ class SnapshotCache:
             else:
                 del self._cache[key]
                 self._metrics["evictions"] += 1
-                
+
         self._metrics["misses"] += 1
         return None
-        
+
     def put(self, key: str, data: Dict[str, Any]) -> None:
         self._cache[key] = SnapshotEntry(
             data=data,
             timestamp_ms=int(time.time() * 1000)
         )
         self._metrics["refreshes"] += 1
-        
+
     def get_metrics(self) -> Dict[str, Any]:
         """Return cache metrics with hit rate calculation."""
         total = self._metrics["hits"] + self._metrics["misses"]
@@ -170,6 +170,8 @@ class FacetAwareHUDComponent(Component):
         # NEW: Enhanced snapshot cache with TTL and metrics
         ttl_ms = kwargs.get('snapshot_ttl_ms', 5000)
         self._snapshot_cache = SnapshotCache(ttl_ms=ttl_ms)
+        # NEW: LLM context cache for inspector - stores actual context sent to LLM
+        self._llm_context_cache = SnapshotCache(ttl_ms=300000)  # 5 minute TTL for context cache
         # Start metrics logging task
         self._metrics_task = asyncio.create_task(self._log_metrics_periodically())
         logger.debug(f"FacetAwareHUDComponent initialized for Element {self.owner.id}")
@@ -203,7 +205,7 @@ class FacetAwareHUDComponent(Component):
             # Format examples: "discord_conversation_...", "terminal_...", etc.
             if not element_id:
                 return "unknown"
-                
+
             # Try to extract from common patterns
             if "conversation" in element_id.lower():
                 return "conversation"
@@ -226,7 +228,7 @@ class FacetAwareHUDComponent(Component):
         try:
             if not element_id:
                 return "Unknown Element"
-                
+
             # For conversation elements, try to extract conversation name
             if "conversation" in element_id.lower():
                 # Element IDs might contain conversation names after certain patterns
@@ -252,11 +254,11 @@ class FacetAwareHUDComponent(Component):
         if not focus_element_id:
             logger.debug("Cannot record focus change: no focus_element_id provided")
             return
-            
+
         # Extract element type and name from element_id if not provided
         focus_element_type = focus_info.get('focus_element_type', self._extract_element_type_from_id(focus_element_id))
         focus_element_name = focus_info.get('focus_element_name', self._extract_element_name_from_id(focus_element_id))
-        
+
         self._focus_change_history.append({
             "veil_timestamp": ConnectomeEpoch.get_veil_timestamp(),
             "owner_element_id": focus_element_id,
@@ -299,7 +301,7 @@ class FacetAwareHUDComponent(Component):
                 return "Error: VEILFacetCache not available"
 
             facet_cache = veil_producer.get_facet_cache()  # NEW: Get VEILFacetCache
-            
+
             self._extract_current_focus_info(options) # NEW: Extract current focus at HUD level
 
             # Get VEILFacetCompressionEngine
@@ -316,17 +318,66 @@ class FacetAwareHUDComponent(Component):
             # NEW: Process facets into turn-based messages
             turn_based_messages = await self._process_facets_into_turns(processed_facets, options, tools)
 
-            # Check for multimodal content if focus element provided
+            # Check for multimodal content and integrate it
             focus_element_id = self._current_focus.get('focus_element_id') if self._current_focus else None
-            if focus_element_id and self._has_multimodal_content(processed_facets, focus_element_id):
-                return {
-                    "messages": turn_based_messages,
-                    "multimodal_content": {
-                        "has_attachments": True,
-                        "attachment_count": self._count_multimodal_content(processed_facets, focus_element_id),
-                        "supported_types": ["image", "document"]
-                    }
-                }
+            if self._has_multimodal_content(facet_cache, focus_element_id):  # Use facet_cache instead of processed_facets
+                # Process each user message individually to extract its specific attachments
+                attachment_pattern = r'\[Attachment: [^\]]+\]'
+                import re
+
+                # Process ALL user messages that contain attachments
+                for message in turn_based_messages:
+                    if isinstance(message, dict) and message.get('role') == 'user':
+                        content = message.get('content', '')
+                        if isinstance(content, str) and re.search(attachment_pattern, content):
+                            # Extract attachment IDs from this specific message
+                            attachment_ids = []
+                            for match in re.finditer(r'\[Attachment: [^\]]+ - ID: ([^\]]+)\]', content):
+                                attachment_ids.append(match.group(1))
+
+                            if attachment_ids:
+                                # Create a filtered facet cache containing only facets with these attachment IDs
+                                message_specific_facets = []
+                                for facet in facet_cache.get_facets_by_type(VEILFacetType.EVENT):
+                                    attachment_metadata = facet.get_property("attachment_metadata", [])
+                                    if attachment_metadata:
+                                        for att_meta in attachment_metadata:
+                                            if att_meta.get("attachment_id") in attachment_ids:
+                                                message_specific_facets.append(facet)
+                                                break
+
+                                if message_specific_facets:
+                                    # Create a temporary facet cache for this message's attachments
+                                    from elements.elements.components.veil.facet_cache import VEILFacetCache
+                                    temp_cache = VEILFacetCache()
+                                    for facet in message_specific_facets:
+                                        temp_cache.add_facet(facet)
+
+                                    # Extract multimodal content for this specific message
+                                    multimodal_result = await self._detect_and_extract_multimodal_content(
+                                        "",  # Empty since we're just extracting attachments
+                                        {'facet_cache': temp_cache},
+                                        focus_element_id
+                                    )
+
+                                    if isinstance(multimodal_result, dict) and multimodal_result.get('attachments'):
+                                        # Create multimodal content list format
+                                        multimodal_content = []
+
+                                        # Add text content (without attachment metadata lines)
+                                        text_content = re.sub(attachment_pattern, '', content).strip()
+                                        if text_content:
+                                            multimodal_content.append({
+                                                "type": "text",
+                                                "text": text_content
+                                            })
+
+                                        # Add the attachments for this message
+                                        multimodal_content.extend(multimodal_result['attachments'])
+
+                                        # Update message content
+                                        message['content'] = multimodal_content
+                                        logger.debug(f"[HUD] Converted message to multimodal format with {len(multimodal_content)} content items for attachment IDs: {attachment_ids}")
 
             return turn_based_messages
 
@@ -1871,6 +1922,17 @@ class FacetAwareHUDComponent(Component):
                     else:
                         message_content += " [SEND FAILED]"
 
+                # Add attachment information if present
+                attachment_metadata = facet.get_property("attachment_metadata", [])
+                if attachment_metadata:
+                    for att in attachment_metadata:
+                        if isinstance(att, dict):
+                            filename = att.get('filename', 'unknown')
+                            content_type = att.get('content_type', 'unknown')
+                            size = att.get('size', 0)
+                            att_id = att.get('attachment_id', 'unknown')
+                            message_content += f"\n[Attachment: {filename} ({content_type} - {size} bytes) - ID: {att_id}]"
+
                 if self._focus_required(facet.facet_id):
                     return f"{focus_content}\n\n{msg_tag}{message_content}</msg>"
 
@@ -2173,16 +2235,89 @@ class FacetAwareHUDComponent(Component):
     async def _detect_and_extract_multimodal_content(self,
                                                    text_context: str,
                                                    options: Dict[str, Any],
-                                                   focus_element_id: str) -> Union[str, Dict[str, Any]]:
+                                                   focus_element_id: Optional[str]) -> Union[str, Dict[str, Any]]:
         """
         Check for and extract multimodal content from facets.
 
         This maintains compatibility with existing multimodal handling.
         """
         try:
-            # For now, return text-only (multimodal support can be added later)
-            # This maintains interface compatibility
-            return text_context
+            # Check if we have multimodal content
+            facet_cache = options.get('facet_cache')
+            if not facet_cache:
+                return text_context
+
+            if not self._has_multimodal_content(facet_cache, focus_element_id):
+                return text_context
+
+            # Extract attachment data from facets and message data
+            attachments = []
+
+            # First, get the MessageListComponent to access message data directly
+            message_list_components = []
+
+            # Access mounted elements through the ContainerComponent
+            container_component = None
+            for component in self.owner.get_components().values():
+                if hasattr(component, 'COMPONENT_TYPE') and component.COMPONENT_TYPE == 'ContainerComponent':
+                    container_component = component
+                    break
+
+            if container_component:
+                mounted_elements = container_component.get_mounted_elements()
+                for element in mounted_elements.values():
+                    for component in element.get_components().values():
+                        if hasattr(component, 'COMPONENT_TYPE') and component.COMPONENT_TYPE == 'MessageListComponent':
+                            message_list_components.append(component)
+
+            # Also extract from EventFacets (regular messages with attachment metadata)
+            for facet in facet_cache.get_facets_by_type(VEILFacetType.EVENT):
+                attachment_metadata = facet.properties.get('attachment_metadata', [])
+
+                for att_meta in attachment_metadata:
+                    if isinstance(att_meta, dict):
+                        attachment_id = att_meta.get('attachment_id')
+                        content_type = att_meta.get('content_type', 'unknown')
+                        filename = att_meta.get('filename', 'unknown')
+                        content = att_meta.get('content')
+
+                        if content and content_type.startswith('image/'):
+                            # Create proper multimodal attachment for LLM processing
+                            attachment_info = {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": content_type,
+                                    "data": content
+                                }
+                            }
+                            logger.debug(f"[HUD] Added multimodal image {attachment_id} ({filename}) to context")
+                            attachments.append(attachment_info)
+                        elif content:
+                            # Handle other content types as text for now
+                            attachment_info = {
+                                "type": "text",
+                                "text": f"[Attachment: {filename} ({content_type} - {att_meta.get('size', 0)} bytes)]\nContent: {str(content)[:500]}{'...' if len(str(content)) > 500 else ''}"
+                            }
+                            logger.debug(f"[HUD] Added content attachment {attachment_id} ({filename}) to context")
+                            attachments.append(attachment_info)
+                        else:
+                            # Fallback to metadata-only for attachments without content
+                            attachment_info = {
+                                "type": "text",
+                                "text": f"[Attachment: {filename} ({content_type} - {att_meta.get('size', 0)} bytes) - ID: {attachment_id}]"
+                            }
+                            logger.debug(f"[HUD] Added metadata-only attachment {attachment_id} ({filename}) to context")
+                            attachments.append(attachment_info)
+
+            if attachments:
+                logger.info(f"[HUD] Extracted {len(attachments)} attachments for multimodal content")
+                return {
+                    "text": text_context,
+                    "attachments": attachments
+                }
+            else:
+                return text_context
 
         except Exception as e:
             logger.error(f"Error in multimodal detection: {e}", exc_info=True)
@@ -2196,6 +2331,87 @@ class FacetAwareHUDComponent(Component):
             Dictionary with rendering statistics
         """
         return self._rendering_stats.copy()
+
+    def cache_llm_context(self, messages: List[Any], context_metadata: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Cache the actual context being sent to LLM for inspector debugging.
+
+        Args:
+            messages: The LLMMessage objects being sent to the LLM
+            context_metadata: Optional metadata about the context generation
+
+        Returns:
+            Cache key for retrieval
+        """
+        import time
+        cache_key = f"llm_context_{self.owner.id}_{int(time.time())}"
+
+        # Convert messages to serializable format for caching
+        serialized_messages = []
+        for msg in messages:
+            try:
+                # Handle both LLMMessage objects and dict messages
+                if hasattr(msg, 'to_dict'):
+                    serialized_messages.append(msg.to_dict())
+                elif hasattr(msg, 'role'):
+                    # Handle simple message objects
+                    msg_dict = {
+                        'role': msg.role,
+                        'content': getattr(msg, 'content', str(msg))
+                    }
+                    if hasattr(msg, 'is_multimodal') and msg.is_multimodal():
+                        msg_dict['is_multimodal'] = True
+                        if hasattr(msg, 'get_attachment_count'):
+                            msg_dict['attachment_count'] = msg.get_attachment_count()
+                    serialized_messages.append(msg_dict)
+                elif isinstance(msg, dict):
+                    serialized_messages.append(msg)
+                else:
+                    # Fallback for other formats
+                    serialized_messages.append({'role': 'unknown', 'content': str(msg)})
+            except Exception as e:
+                logger.warning(f"Error serializing message for cache: {e}")
+                serialized_messages.append({'role': 'error', 'content': f'Serialization error: {str(e)}'})
+
+        cache_data = {
+            'messages': serialized_messages,
+            'timestamp': time.time(),
+            'space_id': self.owner.id if self.owner else 'unknown',
+            'context_metadata': context_metadata or {}
+        }
+
+        self._llm_context_cache.put(cache_key, cache_data)
+        logger.debug(f"Cached LLM context with key: {cache_key}, {len(serialized_messages)} messages")
+        return cache_key
+
+    def get_cached_llm_context(self, cache_key: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve cached LLM context for inspector debugging.
+
+        Args:
+            cache_key: Specific cache key, or None to get most recent
+
+        Returns:
+            Cached context data or None if not found
+        """
+        if cache_key:
+            return self._llm_context_cache.get(cache_key)
+
+        # If no specific key, find most recent entry for this space
+        space_id = self.owner.id if self.owner else 'unknown'
+        most_recent_key = None
+        most_recent_time = 0
+
+        for key, entry in self._llm_context_cache._cache.items():
+            if f"llm_context_{space_id}" in key:
+                if entry.data.get('timestamp', 0) > most_recent_time:
+                    most_recent_time = entry.data.get('timestamp', 0)
+                    most_recent_key = key
+
+        if most_recent_key:
+            return self._llm_context_cache.get(most_recent_key)
+
+        return None
 
     # --- MISSING HELPER METHODS IMPLEMENTATION ---
 
@@ -2236,34 +2452,78 @@ class FacetAwareHUDComponent(Component):
             "status_message_history": []
         }
 
-    def _has_multimodal_content(self, facet_cache: VEILFacetCache, focus_element_id: str) -> bool:
+    def _has_multimodal_content(self, facet_cache: VEILFacetCache, focus_element_id: Optional[str]) -> bool:
         """
         Check if facets contain multimodal content.
 
         Args:
             facet_cache: VEILFacetCache to check
-            focus_element_id: Element ID to focus on
+            focus_element_id: Optional element ID to focus on
 
         Returns:
             True if multimodal content is present
         """
-        # For now, return False as multimodal support will be added later
-        # This can be enhanced to scan facets for attachment content
-        return False
+        try:
+            # Scan EventFacets for attachment_metadata
+            from elements.elements.components.veil.veil_facet import VEILFacetType
+            for facet in facet_cache.get_facets_by_type(VEILFacetType.EVENT):
+                # Look for attachment_metadata in facet properties
+                attachment_metadata = facet.properties.get('attachment_metadata', [])
+                if attachment_metadata and len(attachment_metadata) > 0:
+                    logger.debug(f"[HUD] Found {len(attachment_metadata)} attachments in facet {facet.facet_id}")
+                    return True
 
-    def _count_multimodal_content(self, facet_cache: VEILFacetCache, focus_element_id: str) -> int:
+
+            # Also check StatusFacets for any attachment information
+            for facet in facet_cache.get_facets_by_type(VEILFacetType.STATUS):
+                # Check current_state for attachment information
+                current_state = facet.properties.get('current_state', {})
+                if isinstance(current_state, dict):
+                    attachment_metadata = current_state.get('attachment_metadata', [])
+                    if attachment_metadata and len(attachment_metadata) > 0:
+                        logger.debug(f"[HUD] Found {len(attachment_metadata)} attachments in status facet {facet.facet_id}")
+                        return True
+
+            return False
+
+        except Exception as e:
+            logger.error(f"[HUD] Error checking for multimodal content: {e}", exc_info=True)
+            return False
+
+    def _count_multimodal_content(self, facet_cache: VEILFacetCache, focus_element_id: Optional[str]) -> int:
         """
         Count multimodal attachments in facets.
 
         Args:
             facet_cache: VEILFacetCache to check
-            focus_element_id: Element ID to focus on
+            focus_element_id: Optional element ID to focus on
 
         Returns:
             Number of multimodal attachments
         """
-        # For now, return 0 as multimodal support will be added later
-        return 0
+        try:
+            total_attachments = 0
+
+            # Count attachments in EventFacets
+            for facet in facet_cache.get_facets_by_type(VEILFacetType.EVENT):
+                attachment_metadata = facet.properties.get('attachment_metadata', [])
+                if attachment_metadata and isinstance(attachment_metadata, list):
+                    total_attachments += len(attachment_metadata)
+
+            # Count attachments in StatusFacets
+            for facet in facet_cache.get_facets_by_type(VEILFacetType.STATUS):
+                current_state = facet.properties.get('current_state', {})
+                if isinstance(current_state, dict):
+                    attachment_metadata = current_state.get('attachment_metadata', [])
+                    if attachment_metadata and isinstance(attachment_metadata, list):
+                        total_attachments += len(attachment_metadata)
+
+            logger.debug(f"[HUD] Counted {total_attachments} total attachments")
+            return total_attachments
+
+        except Exception as e:
+            logger.error(f"[HUD] Error counting multimodal content: {e}", exc_info=True)
+            return 0
 
     def _update_system_state(self, system_state: Dict[str, Any], status_facet: VEILFacet, options: Dict[str, Any]) -> None:
         """
@@ -2416,18 +2676,22 @@ class FacetAwareHUDComponent(Component):
         """
         return """TOOL CALL FORMAT: Use XML format for all tool calls. Do NOT use JSON format.
 
+IMPORTANT: All tool calls must have proper closing tags.
+
 To call tools, use this ultra-concise XML format to send messages:
 
 <msg source="element_name">message</msg>
 
 and this format to use any other tool:
-<tool_name param1="value1" param2="value2" source="element_name">
+<tool_name param1="value1" param2="value2" source="element_name"></tool_name>
 
 Examples:
 <msg source="discord_chat">Hello, world!</msg>
 
-<execute_command command="ls -la" source="Terminal">
+<execute_command command="ls -la" source="Terminal"></execute_command>
 <msg source="zulip_chat">Command executed!</msg>
+
+<get_attachment attachment_id="12345" source="DM_user"></get_attachment>
 
 Use the actual tool name as the XML element name. You can make multiple tool calls in one response. The source parameter specifies which conversation or element to use - choose from the sources listed for each tool type."""
 
@@ -2648,7 +2912,7 @@ Use the actual tool name as the XML element name. You can make multiple tool cal
             if current_focus_id != explicit_focus:
                 # This is a focus change - record it
                 self.record_focus_change(focus_context)
-            
+
             self._current_focus = {
                 "focus_element_id": explicit_focus,
                 "focus_source": "explicit_override",

@@ -379,9 +379,10 @@ class MessageActionHandler(Component):
                               attachment_id: str,
                               conversation_id: Optional[str] = None,
                               message_external_id: Optional[str] = None,
-                              calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]: # Added Optional to calling_context
+                              calling_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Tool to request the content of a specific attachment from the adapter.
+        Enhanced with robust error handling to prevent irregularities.
 
         Args:
             attachment_id: The unique ID of the attachment to fetch (required).
@@ -390,40 +391,93 @@ class MessageActionHandler(Component):
             calling_context: Context from the loop component calling the tool.
 
         Returns:
-            Result of the action dispatch (e.g., confirmation or error).
+            Result of the action dispatch with enhanced error information.
         """
+        # Enhanced input validation
         calling_context = calling_context or {}
-        if not attachment_id: # Should be caught by schema validation by LLM call
-            return { "success": False, "error": "attachment_id is required."}
 
-        context_adapter_id, context_conv_id_from_context = self._get_message_context(use_external_conversation_id=conversation_id) # Renamed vars
+        if not attachment_id or not isinstance(attachment_id, str) or not attachment_id.strip():
+            logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] Invalid attachment_id: {attachment_id}")
+            return {"success": False, "error": "attachment_id is required and must be a non-empty string."}
 
-        if not context_adapter_id: # Check if adapter_id was successfully retrieved
-            return { "success": False, "error": f"Failed to determine adapter context for attachment {attachment_id}" }
+        # Sanitize attachment_id to prevent injection issues
+        attachment_id = attachment_id.strip()
+        if len(attachment_id) > 100:  # Reasonable limit
+            logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] attachment_id too long: {len(attachment_id)} characters")
+            return {"success": False, "error": "attachment_id is too long (max 100 characters)."}
 
-        adapter_id = context_adapter_id # Assign to original variable name
-        # If conversation_id was passed to tool, it's used. Otherwise, context_result['conversation_id'] is used.
+        # Enhanced context resolution with better error handling
+        try:
+            context_adapter_id, context_conv_id_from_context = self._get_message_context(use_external_conversation_id=conversation_id)
+        except Exception as e:
+            logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] Error getting message context: {e}", exc_info=True)
+            return {"success": False, "error": f"Failed to determine message context: {str(e)}"}
+
+        if not context_adapter_id:
+            logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] No adapter_id resolved for attachment {attachment_id}")
+            return {"success": False, "error": f"Failed to determine adapter context for attachment {attachment_id}. Check element configuration."}
+
+        adapter_id = context_adapter_id
         actual_conversation_id = conversation_id if conversation_id else context_conv_id_from_context
 
-        if not adapter_id or not actual_conversation_id:
-            return { "success": False, "error": f"Could not determine adapter_id ({adapter_id}) or conversation_id ({actual_conversation_id}) for getting attachment."}
+        # Enhanced validation of resolved context
+        if not adapter_id or not isinstance(adapter_id, str):
+            logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] Invalid adapter_id: {adapter_id}")
+            return {"success": False, "error": "Invalid adapter_id resolved from context."}
 
-        # Generate internal request ID for tracking like msg does
-        internal_request_id = f"attach_req_{self.owner.id if self.owner else 'unknown'}_{uuid.uuid4().hex[:12]}"
+        if not actual_conversation_id or not isinstance(actual_conversation_id, str):
+            logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] Invalid conversation_id: {actual_conversation_id}")
+            return {"success": False, "error": "Invalid conversation_id resolved from context."}
+
+        # Generate internal request ID with better uniqueness
+        try:
+            owner_id = self.owner.id if self.owner and hasattr(self.owner, 'id') else 'unknown'
+            internal_request_id = f"attach_req_{owner_id}_{uuid.uuid4().hex[:12]}"
+        except Exception as e:
+            logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] Error generating request ID: {e}")
+            internal_request_id = f"attach_req_fallback_{uuid.uuid4().hex[:8]}"
 
         logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] Preparing get_attachment action for adapter '{adapter_id}', conv '{actual_conversation_id}', attachment '{attachment_id}'.")
 
-        payload = {
-            "internal_request_id": internal_request_id,
-            "adapter_id": adapter_id,
-            "conversation_id": actual_conversation_id,
-            "attachment_id": attachment_id,
-            "message_external_id": message_external_id,
-            "requesting_element_id": self.owner.id if self.owner else None,
-            "calling_loop_id": calling_context.get('loop_component_id') # From AgentLoop
-        }
+        # Enhanced payload with validation
+        try:
+            payload = {
+                "internal_request_id": internal_request_id,
+                "adapter_id": str(adapter_id),  # Ensure string
+                "conversation_id": str(actual_conversation_id),  # Ensure string
+                "attachment_id": str(attachment_id),  # Ensure string
+                "message_external_id": str(message_external_id) if message_external_id else None,
+                "requesting_element_id": self.owner.id if self.owner else None,
+                "calling_loop_id": calling_context.get('loop_component_id') if isinstance(calling_context, dict) else None,
+                "timestamp": time.time()  # Add timestamp for tracking
+            }
 
-        return await self._dispatch_action("get_attachment_content", payload) # "get_attachment_content" is ActivityClient action
+            # Validate payload doesn't have None values where strings are expected
+            required_string_fields = ["internal_request_id", "adapter_id", "conversation_id", "attachment_id"]
+            for field in required_string_fields:
+                if not payload.get(field) or not isinstance(payload[field], str):
+                    logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] Invalid {field} in payload: {payload.get(field)}")
+                    return {"success": False, "error": f"Invalid {field} for attachment request."}
+
+        except Exception as e:
+            logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] Error creating attachment payload: {e}", exc_info=True)
+            return {"success": False, "error": f"Error preparing attachment request: {str(e)}"}
+
+        # Enhanced dispatch with better error context
+        try:
+            result = await self._dispatch_action("fetch_attachment", payload)
+
+            # Add success logging
+            if result.get("success"):
+                logger.info(f"[{self.owner.id if self.owner else 'Unknown'}] Successfully initiated attachment fetch for {attachment_id}")
+            else:
+                logger.warning(f"[{self.owner.id if self.owner else 'Unknown'}] Attachment fetch dispatch failed for {attachment_id}: {result.get('error', 'Unknown error')}")
+
+            return result
+
+        except Exception as e:
+            logger.error(f"[{self.owner.id if self.owner else 'Unknown'}] Unexpected error dispatching get_attachment_content: {e}", exc_info=True)
+            return {"success": False, "error": f"Unexpected error during attachment request: {str(e)}"}
 
     async def _dispatch_action(self, action_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Helper to dispatch an action via the outgoing_action_callback."""

@@ -1592,6 +1592,7 @@ class MessageListComponent(Component):
         # This confirmation just means the adapter successfully processed our request
         return True
 
+
     def _handle_message_action_failed(self, failure_content: Dict[str, Any]) -> bool:
         """
         Handles failure of message action (delete, edit, reaction).

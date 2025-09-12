@@ -132,7 +132,7 @@ def load_settings() -> HostSettings:
     # Try to manually load .env file first
     try:
         from dotenv import load_dotenv
-        env_loaded = load_dotenv('.env', override=True)
+        env_loaded = load_dotenv('.env', override=False)
         logger.info(f"Manual .env loading result: {env_loaded}")
     except Exception as e:
         logger.warning(f"Failed to manually load .env file: {e}")

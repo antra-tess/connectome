@@ -528,7 +528,7 @@ class InspectorServer:
             content_type = metadata.get("content_type", "text/plain")
             
             # For JSON format, return as JSON response
-            if metadata.get("format") == "json_messages":
+            if metadata.get("format") in ["json_messages", "agent_context"]:
                 return self._json_response(content)
             
             # For text/markdown formats, return as plain text response
