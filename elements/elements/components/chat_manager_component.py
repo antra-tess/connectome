@@ -216,10 +216,10 @@ class ChatManagerComponent(Component):
         # Post-refactor: ChatManager does not route message/update/reaction/action events
         if connectome_event_type in [
             "message_received", "historical_message_received", "agent_message_confirmed",
-            "connectome_message_updated", "connectome_message_deleted",
-            "connectome_reaction_added", "connectome_reaction_removed",
+            "message_updated", "message_deleted",
+            "reaction_added", "reaction_removed",
             "attachment_content_available",
-            "connectome_action_success", "connectome_action_failure"
+            "action_success", "action_failure"
         ]:
             return False
 

@@ -47,8 +47,8 @@ STRUCTURAL_EVENTS = {
 # Phase 2: Content events (data and conversations)
 CONTENT_EVENTS = {
     'message_received', 'historical_message_received', 'agent_message_confirmed',
-    'connectome_message_deleted', 'connectome_message_updated',
-    'connectome_reaction_added', 'connectome_reaction_removed',
+    'message_deleted', 'message_updated',
+    'reaction_added', 'reaction_removed',
     'attachment_content_available', 'connectome_message_send_confirmed',
     'connectome_message_send_failed', 'agent_response_generated'
 }
@@ -416,13 +416,12 @@ class Space(BaseElement):
         and potentially mounted child elements.
         """
         event_type = event_payload.get("event_type")
-        target_element_id = event_payload.get("target_element_id")
 
         # NEW: Check if this is a replay mode to prevent double-recording
         is_replay_mode = timeline_context.get('replay_mode', False)
         replay_phase = timeline_context.get('replay_phase', 'unknown')
 
-        logger.debug(f"[{self.id}] Receiving event: Type='{event_type}', Target='{target_element_id}', Timeline='{timeline_context.get('timeline_id')}', Replay={is_replay_mode}, Phase={replay_phase}")
+        logger.debug(f"[{self.id}] Receiving event: Type='{event_type}', Timeline='{timeline_context.get('timeline_id')}', Replay={is_replay_mode}, Phase={replay_phase}")
 
         # 1. Add event to the timeline via TimelineComponent (unless in replay mode)
         new_event_id = None
@@ -540,35 +539,6 @@ class Space(BaseElement):
         except Exception as e:
             logger.debug(f"[{self.id}] Heartbeat routing error, falling back to immediate processing: {e}")
             self.process_event_for_components(full_event_node, timeline_context)
-
-        # --- NEW: Handle action_request_for_remote ---
-        if event_type == "action_request_for_remote":
-            action_name_check = event_payload.get("action_name")
-
-            logger.info(f"[{self.id}] Processing event type 'action_request_for_remote' (Event ID: {new_event_id})")
-            target_id_for_action = event_payload.get("remote_target_element_id")
-            action_name_from_payload = event_payload.get("action_name")
-            parameters_from_payload = event_payload.get("action_parameters", {})
-
-            if target_id_for_action and action_name_from_payload:
-                remote_action_calling_context = {
-                    "source_agent_id": event_payload.get("source_agent_id"),
-                    "source_agent_name": event_payload.get("source_agent_name"),
-                    "source_uplink_id": event_payload.get("source_uplink_id"),
-                    "original_event_id": new_event_id
-                }
-                logger.info(f"[{self.id}] Executing remote action on element '{target_id_for_action}', action: '{action_name_from_payload}', context: {remote_action_calling_context}")
-                asyncio.create_task(
-                    self.execute_action_on_element(
-                        element_id=target_id_for_action,
-                        action_name=action_name_from_payload,
-                        parameters=parameters_from_payload,
-                        calling_context=remote_action_calling_context
-                    )
-                )
-            else:
-                logger.error(f"[{self.id}] 'action_request_for_remote' event (ID: {new_event_id}) missing remote_target_element_id or action_name. Payload: {event_payload}")
-            return
 
     # New method: process event by broadcasting to own components and all mounted elements
     def process_event_for_components(self, event_payload: Dict[str, Any], timeline_context: Dict[str, Any]) -> None:
